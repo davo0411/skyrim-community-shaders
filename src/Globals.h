@@ -8,6 +8,7 @@ struct GrassLighting;
 struct LightLimitFix;
 struct LODBlending;
 struct InverseSquareLighting;
+class Raytracing;
 struct ScreenSpaceGI;
 struct ScreenSpaceShadows;
 struct Skylighting;
@@ -18,6 +19,7 @@ struct TerrainShadows;
 struct VolumetricLighting;
 struct WaterEffects;
 struct WetnessEffects;
+struct GlobalIllumination;
 
 class ParticleLights;
 
@@ -52,8 +54,6 @@ namespace globals
 		extern GrassCollision* grassCollision;
 		extern GrassLighting* grassLighting;
 		extern LightLimitFix* lightLimitFix;
-		extern LODBlending* lodBlending;
-		extern InverseSquareLighting* inverseSquareLighting;
 		extern ScreenSpaceGI* screenSpaceGI;
 		extern ScreenSpaceShadows* screenSpaceShadows;
 		extern Skylighting* skylighting;
@@ -64,6 +64,7 @@ namespace globals
 		extern VolumetricLighting* volumetricLighting;
 		extern WaterEffects* waterEffects;
 		extern WetnessEffects* wetnessEffects;
+		extern GlobalIllumination* globalIllumination;
 
 		namespace llf
 		{

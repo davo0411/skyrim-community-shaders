@@ -16,10 +16,21 @@ option(AUTO_PLUGIN_DEPLOYMENT "Copy the build output and addons to env:Community
 option(ZIP_TO_DIST "Zip the base mod and addons to their own 7z file in dist." ON)
 option(AIO_ZIP_TO_DIST "Zip the base mod and addons to a AIO 7z file in dist." ON)
 option(TRACY_SUPPORT "Enable support for tracy profiler" OFF)
+option(KICKSTART_RT "Enable support for KickstartRT ray tracing" ON)
+
+# Define the path to KickstartRT directory
+set(KICKSTART_RT_DIR "${CMAKE_SOURCE_DIR}/package/SKSE/Plugins/KickstartRT")
+
 message("\tAuto plugin deployment: ${AUTO_PLUGIN_DEPLOYMENT}")
 message("\tZip to dist: ${ZIP_TO_DIST}")
 message("\tAIO Zip to dist: ${AIO_ZIP_TO_DIST}")
 message("\tTracy profiler: ${TRACY_SUPPORT}")
+message("\tKickstartRT: ${KICKSTART_RT}")
+
+# Define AIO_DIR early so it's available for all sections
+if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
+	set(AIO_DIR "${CMAKE_CURRENT_BINARY_DIR}/aio")
+endif()
 
 # #######################################################################################################################
 # # Add CMake features
@@ -50,6 +61,8 @@ target_compile_definitions(
 	${PROJECT_NAME}
 	PRIVATE
 	"$<$<BOOL:${TRACY_SUPPORT}>:TRACY_SUPPORT>"
+	"ENABLE_KICKSTART_RT"
+	"KICKSTART_RT_DLL_PATH=\"Data/SKSE/Plugins/KickstartRT\""
 )
 
 target_include_directories(
@@ -79,6 +92,8 @@ target_link_libraries(
 	Streamline
 	d3d12.lib
 )
+
+
 
 # https://gitlab.kitware.com/cmake/cmake/-/issues/24922#note_1371990
 if(MSVC_VERSION GREATER_EQUAL 1936 AND MSVC_IDE) # 17.6+
@@ -154,8 +169,8 @@ file(GLOB FEATURE_PATHS LIST_DIRECTORIES true ${CMAKE_SOURCE_DIR}/features/*)
 string(TIMESTAMP UTC_NOW "%Y-%m-%dT%H-%MZ" UTC)
 
 if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
-	set(AIO_DIR "${CMAKE_CURRENT_BINARY_DIR}/aio")
 	message("Copying package folder with dll/pdb with all features to ${AIO_DIR}")
+	
 	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E remove_directory "${AIO_DIR}"
 		COMMAND ${CMAKE_COMMAND} -E make_directory "${AIO_DIR}/SKSE/Plugins"
@@ -165,6 +180,20 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
 		COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_PDB_FILE:${PROJECT_NAME}> "${AIO_DIR}/SKSE/Plugins/"
 		COMMAND ${CMAKE_COMMAND} -E remove "${AIO_DIR}/CORE"
 	)
+
+	# If KickstartRT is enabled, make sure to copy those DLLs to the AIO directory
+	if(KICKSTART_RT)
+		add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory "${AIO_DIR}/SKSE/Plugins/KickstartRT"
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${KICKSTART_RT_DIR}/KickstartRT_Interop_D3D11.dll"
+			"${AIO_DIR}/SKSE/Plugins/KickstartRT/KickstartRT_Interop_D3D11.dll"
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${KICKSTART_RT_DIR}/KickstartRT_Interop_D3D11.pdb"
+			"${AIO_DIR}/SKSE/Plugins/KickstartRT/KickstartRT_Interop_D3D11.pdb"
+			COMMENT "KickstartRT_Interop_D3D11.dll -> AIO"
+		)
+	endif()
 
 	add_custom_command(
 		OUTPUT copy_shaders.stamp
@@ -266,3 +295,41 @@ if(AIO_ZIP_TO_DIST)
 		WORKING_DIRECTORY ${AIO_DIR}
 	)
 endif()
+
+# Copy KickstartRT DLLs and PDBs to output directory
+if(KICKSTART_RT)
+    add_custom_command(
+        TARGET "${PROJECT_NAME}"
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/KickstartRT"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${KICKSTART_RT_DIR}/KickstartRT_Interop_D3D11.dll"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/KickstartRT/KickstartRT_Interop_D3D11.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${KICKSTART_RT_DIR}/KickstartRT_Interop_D3D11.pdb"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/KickstartRT/KickstartRT_Interop_D3D11.pdb"
+        COMMENT "KickstartRT_Interop_D3D11.dll -> Release"
+    )
+
+    # Add the wrapper file to the project sources
+    target_sources(
+        "${PROJECT_NAME}"
+        PRIVATE
+        "src/KickstartRTWrapper.cpp"
+    )
+
+    # Ensure we directly link against the KickstartRT library
+    target_link_libraries(
+        "${PROJECT_NAME}"
+        PRIVATE
+        "${KICKSTART_RT_DIR}/KickstartRT_Interop_D3D11.lib"
+    )
+endif()
+
+# Ensure destination directories exist
+add_custom_command(
+    TARGET "${PROJECT_NAME}"
+    PRE_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/KickstartRT"
+)

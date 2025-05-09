@@ -9,6 +9,7 @@
 #include "Features/InverseSquareLighting.h"
 #include "Features/LODBlending.h"
 #include "Features/LightLimitFix.h"
+#include "Features/GlobalIllumination.h"
 #include "Features/ScreenSpaceGI.h"
 #include "Features/ScreenSpaceShadows.h"
 #include "Features/Skylighting.h"
@@ -19,7 +20,7 @@
 #include "Features/VolumetricLighting.h"
 #include "Features/WaterEffects.h"
 #include "Features/WetnessEffects.h"
-
+#include "Features/GlobalIllumination.h"
 #include "State.h"
 
 void Feature::Load(json& o_json)
@@ -139,7 +140,8 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		globals::features::terrainHelper,
 		globals::features::volumetricLighting,
 		globals::features::lodBlending,
-		globals::features::inverseSquareLighting
+		globals::features::inverseSquareLighting,
+		globals::features::globalIllumination
 	};
 
 	static std::vector<Feature*> featuresVR(features);

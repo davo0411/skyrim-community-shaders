@@ -10,6 +10,7 @@
 #include "State.h"
 #include "Streamline.h"
 #include "Upscaling.h"
+#include "Raytracing.h"
 
 #include "Features/CloudShadows.h"
 #include "Features/DynamicCubemaps.h"
@@ -29,6 +30,7 @@
 #include "Features/VolumetricLighting.h"
 #include "Features/WaterEffects.h"
 #include "Features/WetnessEffects.h"
+#include "Features/GlobalIllumination.h"
 
 #include "Features/LightLimitFix/ParticleLights.h"
 
@@ -53,6 +55,7 @@ namespace globals
 		LightLimitFix* lightLimitFix = nullptr;
 		LODBlending* lodBlending = nullptr;
 		InverseSquareLighting* inverseSquareLighting = nullptr;
+		Raytracing* raytracing = nullptr;
 		ScreenSpaceGI* screenSpaceGI = nullptr;
 		ScreenSpaceShadows* screenSpaceShadows = nullptr;
 		Skylighting* skylighting = nullptr;
@@ -63,6 +66,7 @@ namespace globals
 		VolumetricLighting* volumetricLighting = nullptr;
 		WaterEffects* waterEffects = nullptr;
 		WetnessEffects* wetnessEffects = nullptr;
+		GlobalIllumination* globalIllumination = nullptr;
 
 		namespace llf
 		{
@@ -128,8 +132,6 @@ namespace globals
 		features::grassCollision = GrassCollision::GetSingleton();
 		features::grassLighting = GrassLighting::GetSingleton();
 		features::lightLimitFix = LightLimitFix::GetSingleton();
-		features::lodBlending = LODBlending::GetSingleton();
-		features::inverseSquareLighting = InverseSquareLighting::GetSingleton();
 		features::screenSpaceGI = ScreenSpaceGI::GetSingleton();
 		features::screenSpaceShadows = ScreenSpaceShadows::GetSingleton();
 		features::skylighting = Skylighting::GetSingleton();
@@ -140,6 +142,7 @@ namespace globals
 		features::volumetricLighting = VolumetricLighting::GetSingleton();
 		features::waterEffects = WaterEffects::GetSingleton();
 		features::wetnessEffects = WetnessEffects::GetSingleton();
+		features::globalIllumination = GlobalIllumination::GetSingleton();
 
 		features::llf::particleLights = ParticleLights::GetSingleton();
 	}
