@@ -490,8 +490,8 @@ float CalculateDepthMultFromUV(float2 uv, float depth, uint eyeIndex = 0)
  */
 float GetFilteredTerrainDepth(float2 screenPosition, uint eyeIndex)
 {
-	// Aggressive dilation pattern: larger radius with more samples
-	// Use MAX filter to push depth values outward, capturing background terrain
+	// VERY aggressive dilation pattern: very large radius to ignore underwater rocks/terrain
+	// Use MAX filter to push depth values far outward, capturing only distant background
 	const float2 offsets[25] = {
 		// Inner ring (radius 1)
 		float2(-1, -1), float2(0, -1), float2(1, -1),
@@ -505,8 +505,8 @@ float GetFilteredTerrainDepth(float2 screenPosition, uint eyeIndex)
 		float2(-3, 0), float2(3, 0), float2(0, -3), float2(0, 3)
 	};
 	
-	// Larger radius for more aggressive filtering (adjustable)
-	const float radius = 4.0;
+	// MUCH larger radius to completely blur out underwater rocks/details
+	const float radius = 16.0;  // 4x increase from 4.0
 	
 	float maxDepth = 0.0;
 	
@@ -581,19 +581,24 @@ float GetShorelineDepth(float3 cameraRelativeWorldPos, float3 terrainWorldPos, u
  */
 float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time)
 {
-	float shoreInfluence = 1.0 - smoothstep(0.0, 400.0, waterDepth);
+	// Add large depth bias to completely ignore shallow water with visible terrain details
+	// This pushes the effect well back from the immediate shoreline
+	const float depthBias = 150.0;  // Only activate when water is at least 150 units deep
+	float adjustedDepth = max(0.0, waterDepth - depthBias);
+	
+	// Smoother falloff to hide any remaining artifacts
+	float shoreInfluence = 1.0 - smoothstep(0.0, 500.0, adjustedDepth);
 	
 	if (shoreInfluence < 0.01)
 		return baseNormal;
 	
-	// Use depth directly as distance parameter for concentric waves
-	// This creates natural circular wave patterns around shoreline
-	float wavePhase = waterDepth * 0.03;  // Convert depth to wave phase
+	// Use adjusted depth for wave phase so waves start further from shore
+	float wavePhase = adjustedDepth * 0.03;
 	
-	// Multiple wave trains with different speeds
-	float wave1 = sin(wavePhase - time * 1.2) * 0.5;
-	float wave2 = sin(wavePhase * 1.8 + time * 1.8) * 0.3;
-	float wave3 = sin(wavePhase * 3.2 - time * 2.5) * 0.2;
+	// Multiple wave trains with MUCH slower speeds
+	float wave1 = sin(wavePhase - time * 0.15) * 0.5;
+	float wave2 = sin(wavePhase * 1.8 + time * 0.25) * 0.3;
+	float wave3 = sin(wavePhase * 3.2 - time * 0.35) * 0.2;
 	
 	float waveHeight = (wave1 + wave2 + wave3);
 	
@@ -609,6 +614,45 @@ float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorl
 	// Stronger blend near shore
 	float blendFactor = pow(shoreInfluence, 0.4) * 0.5;
 	return normalize(lerp(baseNormal, waveNormal, blendFactor));
+}
+
+/**
+ * Calculate UV offset for diffuse texture based on shoreline waves
+ * Applies same wave pattern to refraction/diffuse sampling
+ * @param waterDepth Vertical water depth in world units
+ * @param waterWorldPos Water surface absolute world position
+ * @param terrainWorldPos Terrain absolute world position
+ * @param time Time value for animation
+ * @return float2 UV offset to apply to refraction sampling
+ */
+float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time)
+{
+	// Same large depth bias as wave normals - completely ignore very shallow water
+	const float depthBias = 150.0;
+	float adjustedDepth = max(0.0, waterDepth - depthBias);
+	
+	// Smoother falloff matching wave normals
+	float shoreInfluence = 1.0 - smoothstep(0.0, 500.0, adjustedDepth);
+	
+	if (shoreInfluence < 0.01)
+		return float2(0, 0);
+	
+	// Same wave calculation as normals using adjusted depth
+	float wavePhase = adjustedDepth * 0.03;
+	
+	float wave1 = sin(wavePhase - time * 0.15) * 0.5;
+	float wave2 = sin(wavePhase * 1.8 + time * 0.25) * 0.3;
+	float wave3 = sin(wavePhase * 3.2 - time * 0.35) * 0.2;
+	
+	float waveHeight = (wave1 + wave2 + wave3);
+	
+	float2 toShoreDir = normalize(terrainWorldPos.xy - waterWorldPos.xy);
+	
+	// UV offset in screen space - much stronger for visibility
+	float waveStrength = waveHeight * shoreInfluence;
+	float offsetScale = 0.015;  // Increased from 0.002 for dramatic effect
+	
+	return toShoreDir * waveStrength * offsetScale * pow(shoreInfluence, 0.4);
 }
 
 #			if defined(FLOWMAP)
@@ -772,7 +816,7 @@ struct WaterNormalData
 	float4 rippleInfo;  // xyz = scaled ripple normal (normalized normal * intensity), w = splash effect intensity
 };
 
-WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float2 screenUV, float2 screenPosition, uint eyeIndex)
+WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float2 screenUV, float2 screenPosition, uint eyeIndex, float2 shorelineUVOffset)
 {
 	WaterNormalData result;
 	result.rippleInfo = float4(0, 0, 0, 0);
@@ -810,9 +854,9 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			endif
 
 #			if defined(WATER_PARALLAX)
-	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy + parallaxOffset.xy * normalScalesRcp.x, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
+	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy + parallaxOffset.xy * normalScalesRcp.x + shorelineUVOffset * normalScalesRcp.x, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
 #			else
-	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
+	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy + shorelineUVOffset * normalScalesRcp.x, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
 #			endif
 
 #			if defined(FLOWMAP) && !defined(BLEND_NORMALS)
@@ -840,11 +884,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			elif !defined(LOD)
 
 #				if defined(WATER_PARALLAX)
-	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw + parallaxOffset.xy * normalScalesRcp.y, SharedData::MipBias).xyz * 2.0 - 1.0;
-	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy + parallaxOffset.xy * normalScalesRcp.z, SharedData::MipBias).xyz * 2.0 - 1.0;
+	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw + parallaxOffset.xy * normalScalesRcp.y + shorelineUVOffset * normalScalesRcp.y, SharedData::MipBias).xyz * 2.0 - 1.0;
+	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy + parallaxOffset.xy * normalScalesRcp.z + shorelineUVOffset * normalScalesRcp.z, SharedData::MipBias).xyz * 2.0 - 1.0;
 #				else
-	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw, SharedData::MipBias).xyz * 2.0 - 1.0;
-	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy, SharedData::MipBias).xyz * 2.0 - 1.0;
+	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw + shorelineUVOffset * normalScalesRcp.y, SharedData::MipBias).xyz * 2.0 - 1.0;
+	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy + shorelineUVOffset * normalScalesRcp.z, SharedData::MipBias).xyz * 2.0 - 1.0;
 #				endif
 
 	float3 blendedNormal = normalize(float3(0, 0, 1) + NormalsAmplitude.x * normals1 +
@@ -1100,12 +1144,16 @@ struct DiffuseOutput
 	float refractionMul;
 };
 
-DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDirection, inout float4 distanceMul, float refractionsDepthFactor, float fresnel, uint eyeIndex, float3 viewPosition, float noise, float depth)
+DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDirection, inout float4 distanceMul, float refractionsDepthFactor, float fresnel, uint eyeIndex, float3 viewPosition, float noise, float depth, float2 shorelineUVOffset)
 {
 #			if defined(REFRACTIONS)
 	float4 refractionNormal = mul(transpose(TextureProj[eyeIndex]), float4((VarAmounts.w * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
 
 	float2 refractionUvRaw = float2(refractionNormal.x, refractionNormal.w - refractionNormal.y) / refractionNormal.ww;
+	
+	// Apply shoreline wave offset to refraction UV
+	refractionUvRaw += shorelineUVOffset;
+	
 	refractionUvRaw = Stereo::ConvertToStereoUV(refractionUvRaw, eyeIndex);  // need to convert here for VR due to refractionNormal values
 
 #				if defined(VR)
@@ -1281,7 +1329,14 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 viewPosition = mul(FrameBuffer::CameraView[eyeIndex], float4(input.WPosition.xyz, 1)).xyz;
 	float2 screenUV = FrameBuffer::ViewToUV(viewPosition, true, eyeIndex);
 
-	WaterNormalData waterData = GetWaterNormal(input, distanceBlendFactor, depthControl.z, viewDirection, screenUV, screenPosition, eyeIndex);
+	// Calculate shoreline UV offset for ALL water texture sampling (normals, diffuse, everything)
+	float3 terrainWorldPosForShore = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
+	float waterDepthForShore = GetShorelineDepth(input.WPosition.xyz, terrainWorldPosForShore, eyeIndex);
+	float3 absoluteWaterPosForShore = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 absoluteTerrainPosForShore = terrainWorldPosForShore + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float2 shorelineUVOffset = GetShorelineUVOffset(waterDepthForShore, absoluteWaterPosForShore, absoluteTerrainPosForShore, SharedData::wetnessEffectsSettings.Time);
+
+	WaterNormalData waterData = GetWaterNormal(input, distanceBlendFactor, depthControl.z, viewDirection, screenUV, screenPosition, eyeIndex, shorelineUVOffset);
 	float3 normal = waterData.normal;
 
 	float fresnel = GetFresnelValue(normal, viewDirection);
@@ -1315,8 +1370,9 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float screenNoise = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
 
+	// Use the same shoreline UV offset calculated earlier for consistency
 	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, depthControl.y, eyeIndex);
-	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth);
+	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth, shorelineUVOffset);
 
 	float3 diffuseColor = lerp(diffuseOutput.refractionColor, diffuseOutput.refractionDiffuseColor, diffuseOutput.refractionMul);
 
