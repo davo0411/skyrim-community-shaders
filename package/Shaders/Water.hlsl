@@ -547,27 +547,27 @@ float3 GetTerrainWorldPosition(float2 screenUV, float2 screenPosition, uint eyeI
 }
 
 /**
- * Calculate camera-independent shoreline influence and generate natural wave normals
- * Uses vertical water depth from SharedData water height grid (same system as wetness effects)
- * @param cameraRelativeWorldPos Water surface position in camera-relative world space
- * @param terrainWorldPos Terrain position in camera-relative world space (from depth buffer reconstruction)
+ * Calculate depth buffer gradient magnitude for edge detection
+ * Detects sharp depth discontinuities caused by grass, rocks, and other small objects
+ * @param screenPosition Screen position in pixels
  * @param eyeIndex Eye index for stereo rendering
- * @return float Influence strength 0-1 (how close to shore)
+ * @return float Gradient magnitude (0 = smooth terrain, higher = edges/discontinuities)
  */
-float GetShorelineDepth(float3 cameraRelativeWorldPos, float3 terrainWorldPos, uint eyeIndex)
+float GetDepthGradient(float2 screenPosition, uint eyeIndex)
 {
-	// Get water surface height from SharedData grid (camera-independent, world-space)
-	float4 waterData = SharedData::GetWaterData(cameraRelativeWorldPos);
-	float waterHeight = waterData.w;
+	float centerDepth = DepthTex.Load(float3(screenPosition, 0)).x;
 	
-	// Calculate absolute world positions for both water surface and terrain
-	float3 absoluteWaterPos = cameraRelativeWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
-	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	// Sample neighboring depths in a cross pattern
+	float depthLeft = DepthTex.Load(float3(screenPosition + float2(-2, 0), 0)).x;
+	float depthRight = DepthTex.Load(float3(screenPosition + float2(2, 0), 0)).x;
+	float depthUp = DepthTex.Load(float3(screenPosition + float2(0, -2), 0)).x;
+	float depthDown = DepthTex.Load(float3(screenPosition + float2(0, 2), 0)).x;
 	
-	// Calculate PURE vertical depth using world Z coordinates (completely camera-independent)
-	float verticalWaterDepth = abs(absoluteWaterPos.z - absoluteTerrainPos.z);
+	// Calculate gradient magnitude using central differences
+	float gradX = abs(depthRight - depthLeft) * 0.5;
+	float gradY = abs(depthDown - depthUp) * 0.5;
 	
-	return verticalWaterDepth;
+	return sqrt(gradX * gradX + gradY * gradY);
 }
 
 /**
@@ -581,18 +581,17 @@ float GetShorelineDepth(float3 cameraRelativeWorldPos, float3 terrainWorldPos, u
  */
 float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time)
 {
-	// Add large depth bias to completely ignore shallow water with visible terrain details
-	// This pushes the effect well back from the immediate shoreline
-	const float depthBias = 150.0;  // Only activate when water is at least 150 units deep
+	// Large depth bias - only activate near shore
+	const float depthBias = 150.0;
 	float adjustedDepth = max(0.0, waterDepth - depthBias);
 	
-	// Smoother falloff to hide any remaining artifacts
+	// Smooth falloff based on depth
 	float shoreInfluence = 1.0 - smoothstep(0.0, 500.0, adjustedDepth);
 	
 	if (shoreInfluence < 0.01)
 		return baseNormal;
 	
-	// Use adjusted depth for wave phase so waves start further from shore
+	// Use adjusted depth for wave phase
 	float wavePhase = adjustedDepth * 0.03;
 	
 	// Multiple wave trains with MUCH slower speeds
@@ -602,10 +601,10 @@ float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorl
 	
 	float waveHeight = (wave1 + wave2 + wave3);
 	
-	// Calculate gradient direction (perpendicular to wave crests)
+	// Calculate gradient direction toward shore
 	float2 toShoreDir = normalize(terrainWorldPos.xy - waterWorldPos.xy);
 	
-	// Apply wave distortion along shore direction
+	// Apply wave distortion
 	float waveStrength = waveHeight * shoreInfluence;
 	float2 normalOffset = toShoreDir * waveStrength * 0.5;
 	
@@ -623,16 +622,20 @@ float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorl
  * @param waterWorldPos Water surface absolute world position
  * @param terrainWorldPos Terrain absolute world position
  * @param time Time value for animation
+ * @param edgeFade Edge fade factor (0 at grass/rock edges, 1 in smooth areas)
  * @return float2 UV offset to apply to refraction sampling
  */
-float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time)
+float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time, float edgeFade)
 {
-	// Same large depth bias as wave normals - completely ignore very shallow water
+	// Same large distance bias as wave normals
 	const float depthBias = 150.0;
 	float adjustedDepth = max(0.0, waterDepth - depthBias);
 	
-	// Smoother falloff matching wave normals
+	// Smooth falloff matching wave normals
 	float shoreInfluence = 1.0 - smoothstep(0.0, 500.0, adjustedDepth);
+	
+	// Apply edge fade to prevent sampling grass colors
+	shoreInfluence *= edgeFade;
 	
 	if (shoreInfluence < 0.01)
 		return float2(0, 0);
@@ -646,11 +649,12 @@ float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terra
 	
 	float waveHeight = (wave1 + wave2 + wave3);
 	
+	// Calculate direction toward shore
 	float2 toShoreDir = normalize(terrainWorldPos.xy - waterWorldPos.xy);
 	
-	// UV offset in screen space - much stronger for visibility
+	// UV offset in screen space
 	float waveStrength = waveHeight * shoreInfluence;
-	float offsetScale = 0.015;  // Increased from 0.002 for dramatic effect
+	float offsetScale = 0.015;
 	
 	return toShoreDir * waveStrength * offsetScale * pow(shoreInfluence, 0.4);
 }
@@ -809,6 +813,17 @@ FlowmapData GetFlowmapDataWorldSpace(FlowmapData textureSpaceData)
 #				include "WetnessEffects/WetnessEffects.hlsli"
 #			endif
 
+// Helper function to get screen depth for water rendering
+float GetScreenDepthWater(float2 screenPosition, uint a_useVR = 0)
+{
+	float depth = DepthTex.Load(float3(screenPosition, 0)).x;
+#			if defined(VR)  // VR appears to use hard coded values
+	return depth * 1.01 + -0.01;
+#			else
+	return (CameraDataWater.w / (-depth * CameraDataWater.z + CameraDataWater.x));
+#			endif
+}
+
 // Structure to return both normal and ripple/splash color information
 struct WaterNormalData
 {
@@ -864,20 +879,36 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	// FLOWMAP NORMALS DISABLED: Using only base normals (flow system still active for ripples/splashes)
 	float3 baseNormal = normalize(normals1 + float3(0, 0, 1));
 	
-	// Apply shoreline waves
-	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	// Apply shoreline waves using simple depth calculation
+	float depth = GetScreenDepthWater(screenPosition);
+	float2 depthOffset = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
+	float depthMul = length(float3((depthOffset * 2 - 1) * depth / ProjData.xy, depth));
+	float3 depthAdjustedViewDirection = -viewDirection * depthMul;
+	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
+	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
+	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
+	float waterDepth = localDistanceMul * 1000.0;
+	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
 	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float3 finalNormal = ApplyShorelineWaves(baseNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #				else
 	// FLOWMAP NORMALS ENABLED: Blending flow-based normals with base normals
 	float3 finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), flowmapNormal, distanceFactor));
 	
-	// Apply shoreline waves to flowmap normals
-	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	// Apply shoreline waves using simple depth calculation
+	float depth = GetScreenDepthWater(screenPosition);
+	float2 depthOffset = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
+	float depthMul = length(float3((depthOffset * 2 - 1) * depth / ProjData.xy, depth));
+	float3 depthAdjustedViewDirection = -viewDirection * depthMul;
+	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
+	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
+	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
+	float waterDepth = localDistanceMul * 1000.0;
+	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
 	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #				endif
@@ -901,9 +932,17 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				endif
 	
 	// Apply shoreline waves to blended normals
-	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float depth = GetScreenDepthWater(screenPosition);
+	float2 depthOffset = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
+	float depthMul = length(float3((depthOffset * 2 - 1) * depth / ProjData.xy, depth));
+	float3 depthAdjustedViewDirection = -viewDirection * depthMul;
+	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
+	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
+	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
+	float waterDepth = localDistanceMul * 1000.0;
+	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
 	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 
@@ -913,7 +952,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 		(1 - normalMul.y) * (normalMul.x * flowmapNormal1.z + (1 - normalMul.x) * flowmapNormal0.z);
 	finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), normalize(lerp(finalNormal, flowmapNormal, normalBlendFactor)), distanceFactor));
 	
-	// Apply shoreline waves AFTER flowmap blend
+	// Reapply shoreline waves after flowmap blend
 	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #				endif
 #			else
@@ -921,9 +960,17 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	float3 finalNormal = normalize(float3(0, 0, 1) + NormalsAmplitude.xxx * normals1);
 	
 	// Apply shoreline waves to LOD water
-	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float depth = GetScreenDepthWater(screenPosition);
+	float2 depthOffset = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
+	float depthMul = length(float3((depthOffset * 2 - 1) * depth / ProjData.xy, depth));
+	float3 depthAdjustedViewDirection = -viewDirection * depthMul;
+	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
+	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
+	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
+	float waterDepth = localDistanceMul * 1000.0;
+	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
 	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #			endif
@@ -1102,16 +1149,6 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 		return finalReflectionColor;
 	}
 	return ReflectionColor.xyz * VarAmounts.y;
-}
-
-float GetScreenDepthWater(float2 screenPosition, uint a_useVR = 0)
-{
-	float depth = DepthTex.Load(float3(screenPosition, 0)).x;
-#			if defined(VR)  // VR appears to use hard coded values
-	return depth * 1.01 + -0.01;
-#			else
-	return (CameraDataWater.w / (-depth * CameraDataWater.z + CameraDataWater.x));
-#			endif
 }
 
 float3 GetLdotN(float3 normal)
@@ -1329,12 +1366,17 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 viewPosition = mul(FrameBuffer::CameraView[eyeIndex], float4(input.WPosition.xyz, 1)).xyz;
 	float2 screenUV = FrameBuffer::ViewToUV(viewPosition, true, eyeIndex);
 
-	// Calculate shoreline UV offset for ALL water texture sampling (normals, diffuse, everything)
+	// Use vanilla distance calculation for shoreline waves - simple and artifact-free!
+	// distanceMul is 0 at shore, increases with depth (already computed by vanilla)
+	float shorelineDepth = distanceMul.x * 1000.0;  // Scale to reasonable depth range
+	
+	// For wave direction, still need terrain position
 	float3 terrainWorldPosForShore = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float waterDepthForShore = GetShorelineDepth(input.WPosition.xyz, terrainWorldPosForShore, eyeIndex);
 	float3 absoluteWaterPosForShore = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float3 absoluteTerrainPosForShore = terrainWorldPosForShore + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
-	float2 shorelineUVOffset = GetShorelineUVOffset(waterDepthForShore, absoluteWaterPosForShore, absoluteTerrainPosForShore, SharedData::wetnessEffectsSettings.Time);
+	
+	// Calculate UV offset - no edge fade needed with distanceMul!
+	float2 shorelineUVOffset = GetShorelineUVOffset(shorelineDepth, absoluteWaterPosForShore, absoluteTerrainPosForShore, SharedData::wetnessEffectsSettings.Time, 1.0);
 
 	WaterNormalData waterData = GetWaterNormal(input, distanceBlendFactor, depthControl.z, viewDirection, screenUV, screenPosition, eyeIndex, shorelineUVOffset);
 	float3 normal = waterData.normal;
