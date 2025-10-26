@@ -581,28 +581,37 @@ float GetDepthGradient(float2 screenPosition, uint eyeIndex)
  */
 float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time)
 {
-	// Large depth bias - only activate near shore
-	const float depthBias = 150.0;
-	float adjustedDepth = max(0.0, waterDepth - depthBias);
+	// Calculate ACTUAL distance from shore in world space (camera-independent!)
+	float distanceFromShore = length(waterWorldPos.xy - terrainWorldPos.xy);
 	
-	// Smooth falloff based on depth
-	float shoreInfluence = 1.0 - smoothstep(0.0, 500.0, adjustedDepth);
+	// Soft falloff over larger distance to eliminate hard edge
+	float shoreInfluence = 1.0 - smoothstep(100.0, 800.0, distanceFromShore);
 	
 	if (shoreInfluence < 0.01)
 		return baseNormal;
 	
-	// Use adjusted depth for wave phase
-	float wavePhase = adjustedDepth * 0.03;
+	// Use WORLD SPACE distance for wave phase (not depth-based!)
+	float wavePhase = distanceFromShore * 0.015;  // Smaller multiplier for world-space distance
 	
-	// Multiple wave trains with MUCH slower speeds
+	// Multiple wave trains with slower speeds
 	float wave1 = sin(wavePhase - time * 0.15) * 0.5;
 	float wave2 = sin(wavePhase * 1.8 + time * 0.25) * 0.3;
 	float wave3 = sin(wavePhase * 3.2 - time * 0.35) * 0.2;
 	
 	float waveHeight = (wave1 + wave2 + wave3);
 	
-	// Calculate gradient direction toward shore
+	// Calculate gradient direction toward shore - SMOOTH IT to reduce angular artifacts
 	float2 toShoreDir = normalize(terrainWorldPos.xy - waterWorldPos.xy);
+	
+	// Add radial smoothing component to break up angular patterns
+	// Use water position modulo to create circular smoothing pattern
+	float2 radialOffset = normalize(frac(waterWorldPos.xy * 0.001) - 0.5);
+	toShoreDir = normalize(lerp(toShoreDir, radialOffset, 0.3));
+	
+	// Additional temporal smoothing using multiple frequency offsets
+	float2 smoothDir1 = normalize(toShoreDir + float2(sin(time * 0.1), cos(time * 0.1)) * 0.2);
+	float2 smoothDir2 = normalize(toShoreDir + float2(cos(time * 0.15), sin(time * 0.15)) * 0.15);
+	toShoreDir = normalize(toShoreDir + smoothDir1 + smoothDir2);
 	
 	// Apply wave distortion
 	float waveStrength = waveHeight * shoreInfluence;
@@ -627,12 +636,11 @@ float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorl
  */
 float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time, float edgeFade)
 {
-	// Same large distance bias as wave normals
-	const float depthBias = 150.0;
-	float adjustedDepth = max(0.0, waterDepth - depthBias);
+	// Calculate ACTUAL distance from shore in world space (camera-independent!)
+	float distanceFromShore = length(waterWorldPos.xy - terrainWorldPos.xy);
 	
-	// Smooth falloff matching wave normals
-	float shoreInfluence = 1.0 - smoothstep(0.0, 500.0, adjustedDepth);
+	// Soft falloff over larger distance to eliminate hard edge
+	float shoreInfluence = 1.0 - smoothstep(100.0, 800.0, distanceFromShore);
 	
 	// Apply edge fade to prevent sampling grass colors
 	shoreInfluence *= edgeFade;
@@ -640,8 +648,8 @@ float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terra
 	if (shoreInfluence < 0.01)
 		return float2(0, 0);
 	
-	// Same wave calculation as normals using adjusted depth
-	float wavePhase = adjustedDepth * 0.03;
+	// Use WORLD SPACE distance for wave phase (not depth-based!)
+	float wavePhase = distanceFromShore * 0.015;
 	
 	float wave1 = sin(wavePhase - time * 0.15) * 0.5;
 	float wave2 = sin(wavePhase * 1.8 + time * 0.25) * 0.3;
@@ -649,8 +657,17 @@ float2 GetShorelineUVOffset(float waterDepth, float3 waterWorldPos, float3 terra
 	
 	float waveHeight = (wave1 + wave2 + wave3);
 	
-	// Calculate direction toward shore
+	// Calculate direction toward shore - SMOOTH IT to match ApplyShorelineWaves
 	float2 toShoreDir = normalize(terrainWorldPos.xy - waterWorldPos.xy);
+	
+	// Add radial smoothing component to break up angular patterns
+	float2 radialOffset = normalize(frac(waterWorldPos.xy * 0.001) - 0.5);
+	toShoreDir = normalize(lerp(toShoreDir, radialOffset, 0.3));
+	
+	// Additional temporal smoothing using multiple frequency offsets
+	float2 smoothDir1 = normalize(toShoreDir + float2(sin(time * 0.1), cos(time * 0.1)) * 0.2);
+	float2 smoothDir2 = normalize(toShoreDir + float2(cos(time * 0.15), sin(time * 0.15)) * 0.15);
+	toShoreDir = normalize(toShoreDir + smoothDir1 + smoothDir2);
 	
 	// UV offset in screen space
 	float waveStrength = waveHeight * shoreInfluence;
@@ -887,7 +904,12 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
 	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
 	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
-	float waterDepth = localDistanceMul * 1000.0;
+	
+	// Push waves further out and smooth angular artifacts
+	// Use pow > 1 to expand near values (push away from shore) and smoothstep for smooth transitions
+	float remappedDepth = pow(localDistanceMul, 10.0);  // Expand near shore values to push waves further out
+	remappedDepth = smoothstep(0.0, 1.0, remappedDepth);  // Smooth transitions
+	float waterDepth = remappedDepth * 1000.0;
 	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
@@ -905,7 +927,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
 	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
 	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
-	float waterDepth = localDistanceMul * 1000.0;
+	
+	// Push waves further out and smooth angular artifacts
+	float remappedDepth = pow(localDistanceMul, 10.0);
+	remappedDepth = smoothstep(0.0, 1.0, remappedDepth);
+	float waterDepth = remappedDepth * 1000.0;
 	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
@@ -939,7 +965,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
 	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
 	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
-	float waterDepth = localDistanceMul * 1000.0;
+	
+	// Push waves further out and smooth angular artifacts
+	float remappedDepth = pow(localDistanceMul, 10.0);
+	remappedDepth = smoothstep(0.0, 1.0, remappedDepth);
+	float waterDepth = remappedDepth * 1000.0;
 	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
@@ -967,7 +997,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[eyeIndex].xyz);
 	float planeMul = (1 - ReflectPlane[eyeIndex].w / viewSurfaceAngle);
 	float localDistanceMul = saturate(planeMul * length(depthAdjustedViewDirection) / FogParam.z);
-	float waterDepth = localDistanceMul * 1000.0;
+	
+	// Push waves further out and smooth angular artifacts
+	float remappedDepth = pow(localDistanceMul, 10.0);
+	remappedDepth = smoothstep(0.0, 1.0, remappedDepth);
+	float waterDepth = remappedDepth * 1000.0;
 	
 	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
@@ -1368,7 +1402,10 @@ PS_OUTPUT main(PS_INPUT input)
 
 	// Use vanilla distance calculation for shoreline waves - simple and artifact-free!
 	// distanceMul is 0 at shore, increases with depth (already computed by vanilla)
-	float shorelineDepth = distanceMul.x * 1000.0;  // Scale to reasonable depth range
+	// Push waves further out and smooth the depth transitions
+	float remappedShoreDepth = pow(distanceMul.x, 10.0);  // Expand near values to push waves away
+	remappedShoreDepth = smoothstep(0.0, 1.0, remappedShoreDepth);  // Smooth transitions
+	float shorelineDepth = remappedShoreDepth * 1000.0;
 	
 	// For wave direction, still need terrain position
 	float3 terrainWorldPosForShore = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
