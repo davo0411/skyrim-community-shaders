@@ -24,18 +24,6 @@ struct UnifiedWater : OverlayFeature
 
 	struct Settings
 	{
-		bool EnableMeshSubdivision = true;
-		bool ShowSubdivisionVisualizer = false;
-
-		float WaveIntensity = 0.3f;
-		float WaveAmplitude = 1.0f;
-		float WaveSpeed = 1.0f;
-		float WaveSteepness = 1.0f;
-
-		float FoamIntensity = 1.0f;
-		float FoamShoreStrength = 1.0f;
-		float FoamCrestStrength = 1.0f;
-		float FoamTurbulenceStrength = 1.0f;
 		bool UseOptimisedMeshes = true;
 	};
 
