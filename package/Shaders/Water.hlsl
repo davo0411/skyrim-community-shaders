@@ -78,6 +78,7 @@ PS_OUTPUT main(PS_INPUT input)
 #	include "Common/Permutation.hlsli"
 #	include "Common/Random.hlsli"
 #	include "Common/Color.hlsli"
+#	include "GerstnerWaves.hlsli"
 
 #	define WATER
 
@@ -481,34 +482,79 @@ float CalculateDepthMultFromUV(float2 uv, float depth, uint eyeIndex = 0)
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)
 
 /**
- * Reconstructs terrain world position from depth buffer and screen UV
+ * Samples and filters depth buffer to find background terrain, ignoring small objects like seagrass
+ * Uses an aggressive MAX filter (morphological dilation) to select background terrain
+ * @param screenPosition Center screen position in pixels
+ * @param eyeIndex Eye index for stereo rendering
+ * @return float Filtered depth value representing terrain (not small objects)
+ */
+float GetFilteredTerrainDepth(float2 screenPosition, uint eyeIndex)
+{
+	// Aggressive dilation pattern: larger radius with more samples
+	// Use MAX filter to push depth values outward, capturing background terrain
+	const float2 offsets[25] = {
+		// Inner ring (radius 1)
+		float2(-1, -1), float2(0, -1), float2(1, -1),
+		float2(-1,  0), float2(0,  0), float2(1,  0),
+		float2(-1,  1), float2(0,  1), float2(1,  1),
+		// Middle ring (radius 2)
+		float2(-2, -2), float2(-1, -2), float2(0, -2), float2(1, -2), float2(2, -2),
+		float2(-2,  0), float2(2,  0),
+		float2(-2,  2), float2(-1,  2), float2(0,  2), float2(1,  2), float2(2,  2),
+		// Outer samples (radius ~3)
+		float2(-3, 0), float2(3, 0), float2(0, -3), float2(0, 3)
+	};
+	
+	// Larger radius for more aggressive filtering (adjustable)
+	const float radius = 4.0;
+	
+	float maxDepth = 0.0;
+	
+	[unroll]
+	for (int i = 0; i < 25; i++)
+	{
+		float2 samplePos = screenPosition + offsets[i] * radius;
+		float sampleDepth = DepthTex.Load(float3(samplePos, 0)).x;
+		// MAX filter: always select the farthest depth (terrain behind objects)
+		maxDepth = max(maxDepth, sampleDepth);
+	}
+	
+	return maxDepth;
+}
+
+/**
+ * Reconstructs terrain world position from filtered depth buffer and screen UV
+ * Uses filtered depth to ignore small objects like seagrass and focus on actual terrain
  * @param screenUV Screen-space UV coordinates (stereo-corrected for VR)
  * @param screenPosition Screen position in pixels
  * @param eyeIndex Eye index for stereo rendering
- * @return float3 Terrain position in camera-relative world space
+ * @return float3 Terrain position in camera-relative world space (filtered for background)
  */
 float3 GetTerrainWorldPosition(float2 screenUV, float2 screenPosition, uint eyeIndex)
 {
+	// Get filtered depth that represents terrain, not small objects
+	float filteredDepth = GetFilteredTerrainDepth(screenPosition, eyeIndex);
+	
 #			if defined(VR)
 	float2 screenUVNoStereo = Stereo::ConvertFromStereoUV(screenUV, eyeIndex, 1);
 	float4 terrainWorldPos = mul(FrameBuffer::CameraViewProjInverse[eyeIndex], 
-		float4((screenUVNoStereo * 2 - 1), DepthTex.Load(float3(screenPosition, 0)).x, 1));
+		float4((screenUVNoStereo * 2 - 1), filteredDepth, 1));
 #			else
 	float4 terrainWorldPos = mul(FrameBuffer::CameraViewProjInverse[eyeIndex], 
-		float4((screenUV * 2 - 1) * float2(1, -1), DepthTex.Load(float3(screenPosition, 0)).x, 1));
+		float4((screenUV * 2 - 1) * float2(1, -1), filteredDepth, 1));
 #			endif
 	return terrainWorldPos.xyz / terrainWorldPos.w;
 }
 
 /**
- * Calculate camera-independent shoreline influence to bend water normals toward shore
+ * Calculate camera-independent shoreline influence and generate natural wave normals
  * Uses vertical water depth from SharedData water height grid (same system as wetness effects)
  * @param cameraRelativeWorldPos Water surface position in camera-relative world space
  * @param terrainWorldPos Terrain position in camera-relative world space (from depth buffer reconstruction)
  * @param eyeIndex Eye index for stereo rendering
- * @return float3 (XY=direction toward shore, Z=influence strength 0-1)
+ * @return float Influence strength 0-1 (how close to shore)
  */
-float3 GetShorelineInfluence(float3 cameraRelativeWorldPos, float3 terrainWorldPos, uint eyeIndex)
+float GetShorelineDepth(float3 cameraRelativeWorldPos, float3 terrainWorldPos, uint eyeIndex)
 {
 	// Get water surface height from SharedData grid (camera-independent, world-space)
 	float4 waterData = SharedData::GetWaterData(cameraRelativeWorldPos);
@@ -519,24 +565,50 @@ float3 GetShorelineInfluence(float3 cameraRelativeWorldPos, float3 terrainWorldP
 	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	
 	// Calculate PURE vertical depth using world Z coordinates (completely camera-independent)
-	// This matches the wetness effects system in Lighting.hlsl
 	float verticalWaterDepth = abs(absoluteWaterPos.z - absoluteTerrainPos.z);
 	
-	// Calculate influence based on shallow water depth (in world units)
-	float shoreInfluence = 1.0 - smoothstep(0.0, 200.0, verticalWaterDepth);
-	shoreInfluence = pow(shoreInfluence, 0.7);
+	return verticalWaterDepth;
+}
+
+/**
+ * Apply vanilla-style shoreline waves using distance-based concentric ripples
+ * @param baseNormal Existing water normal to blend with
+ * @param waterDepth Vertical water depth in world units
+ * @param waterWorldPos Water surface absolute world position
+ * @param terrainWorldPos Terrain absolute world position
+ * @param time Time value for animation
+ * @return float3 Blended normal with shoreline waves
+ */
+float3 ApplyShorelineWaves(float3 baseNormal, float waterDepth, float3 waterWorldPos, float3 terrainWorldPos, float time)
+{
+	float shoreInfluence = 1.0 - smoothstep(0.0, 400.0, waterDepth);
 	
-	// Turbulent, chaotic flow in shallow water using absolute world position
-	float turbulence = sin(absoluteWaterPos.x * 0.02 + absoluteWaterPos.y * 0.025) * 1.0 +
-	                   sin(absoluteWaterPos.x * 0.05 - absoluteWaterPos.y * 0.04) * 0.8 +
-	                   sin(absoluteWaterPos.y * 0.035 + absoluteWaterPos.x * 0.015) * 0.6 +
-	                   sin(absoluteWaterPos.x * 0.08) * 0.5 +
-	                   sin(absoluteWaterPos.y * 0.06) * 0.4;
+	if (shoreInfluence < 0.01)
+		return baseNormal;
 	
-	float angle = turbulence * 6.28318;
-	float2 turbulentDir = float2(cos(angle), sin(angle));
+	// Use depth directly as distance parameter for concentric waves
+	// This creates natural circular wave patterns around shoreline
+	float wavePhase = waterDepth * 0.03;  // Convert depth to wave phase
 	
-	return float3(turbulentDir * shoreInfluence, shoreInfluence);
+	// Multiple wave trains with different speeds
+	float wave1 = sin(wavePhase - time * 1.2) * 0.5;
+	float wave2 = sin(wavePhase * 1.8 + time * 1.8) * 0.3;
+	float wave3 = sin(wavePhase * 3.2 - time * 2.5) * 0.2;
+	
+	float waveHeight = (wave1 + wave2 + wave3);
+	
+	// Calculate gradient direction (perpendicular to wave crests)
+	float2 toShoreDir = normalize(terrainWorldPos.xy - waterWorldPos.xy);
+	
+	// Apply wave distortion along shore direction
+	float waveStrength = waveHeight * shoreInfluence;
+	float2 normalOffset = toShoreDir * waveStrength * 0.5;
+	
+	float3 waveNormal = normalize(float3(normalOffset, 1.0));
+	
+	// Stronger blend near shore
+	float blendFactor = pow(shoreInfluence, 0.4) * 0.5;
+	return normalize(lerp(baseNormal, waveNormal, blendFactor));
 }
 
 #			if defined(FLOWMAP)
@@ -628,15 +700,6 @@ float3 GetFlowmapNormal(PS_INPUT input, float2 uvShift, float multiplier, float 
 {
 	FlowmapData flowData = GetFlowmapDataUV(input, uvShift);
 	
-	// Apply shoreline turbulence to flow vector for visible wave distortion
-	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float3 shoreInfluence = GetShorelineInfluence(input.WPosition.xyz, terrainWorldPos, eyeIndex);
-	if (shoreInfluence.z > 0.05) {
-		float2 turbulentDir = shoreInfluence.xy;
-		float blendFactor = pow(shoreInfluence.z, 0.5) * 0.6;
-		flowData.flowVector = lerp(flowData.flowVector, turbulentDir * length(flowData.flowVector) * 2.0, blendFactor);
-	}
-	
 	float2 uv = offset + (flowData.flowVector - float2(multiplier * ((0.001 * ReflectionColor.w) * flowData.color.w), 0));
 	return float3(FlowMapNormalsTex.SampleBias(FlowMapNormalsSampler, uv, SharedData::MipBias).xy, flowData.color.z);
 }
@@ -663,16 +726,6 @@ FlowmapData GetFlowmapDataWorldSpace(PS_INPUT input, float2 uvShift, float2 scre
 	FlowmapData data = GetFlowmapDataTextureSpace(input, uvShift);
 	float2 flowDirection = -(data.color.xy * 2 - 1);
 	data.flowVector = data.flowVector * flowDirection;
-	
-	// Turbulent flow blending in shallow water
-	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float3 shoreInfluence = GetShorelineInfluence(input.WPosition.xyz, terrainWorldPos, eyeIndex);
-	if (shoreInfluence.z > 0.01) {
-		float2 turbulentDirection = shoreInfluence.xy;
-		float flowMagnitude = length(data.flowVector);
-		float blendFactor = pow(shoreInfluence.z, 0.7) * 0.5;
-		data.flowVector = lerp(data.flowVector, turbulentDirection * flowMagnitude * 1.5, blendFactor);
-	}
 	
 	return data;
 }
@@ -765,10 +818,24 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			if defined(FLOWMAP) && !defined(BLEND_NORMALS)
 #				ifdef DISABLE_FLOWMAP_NORMALS
 	// FLOWMAP NORMALS DISABLED: Using only base normals (flow system still active for ripples/splashes)
-	float3 finalNormal = normalize(normals1 + float3(0, 0, 1));
+	float3 baseNormal = normalize(normals1 + float3(0, 0, 1));
+	
+	// Apply shoreline waves
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
+	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 finalNormal = ApplyShorelineWaves(baseNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #				else
 	// FLOWMAP NORMALS ENABLED: Blending flow-based normals with base normals
 	float3 finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), flowmapNormal, distanceFactor));
+	
+	// Apply shoreline waves to flowmap normals
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
+	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #				endif
 #			elif !defined(LOD)
 
@@ -782,21 +849,39 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 
 	float3 blendedNormal = normalize(float3(0, 0, 1) + NormalsAmplitude.x * normals1 +
 									 NormalsAmplitude.y * normals2 + NormalsAmplitude.z * normals3);
+	
 #				if defined(UNDERWATER)
 	float3 finalNormal = blendedNormal;
 #				else
 	float3 finalNormal = normalize(lerp(float3(0, 0, 1), blendedNormal, normalsDepthFactor));
 #				endif
+	
+	// Apply shoreline waves to blended normals
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
+	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 
 #				if defined(FLOWMAP)
 	float normalBlendFactor =
 		normalMul.y * ((1 - normalMul.x) * flowmapNormal3.z + normalMul.x * flowmapNormal2.z) +
 		(1 - normalMul.y) * (normalMul.x * flowmapNormal1.z + (1 - normalMul.x) * flowmapNormal0.z);
 	finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), normalize(lerp(finalNormal, flowmapNormal, normalBlendFactor)), distanceFactor));
+	
+	// Apply shoreline waves AFTER flowmap blend
+	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #				endif
 #			else
-	float3 finalNormal =
-		normalize(float3(0, 0, 1) + NormalsAmplitude.xxx * normals1);
+	// LOD path: simple water normals
+	float3 finalNormal = normalize(float3(0, 0, 1) + NormalsAmplitude.xxx * normals1);
+	
+	// Apply shoreline waves to LOD water
+	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
+	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float3 absoluteWaterPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	float3 absoluteTerrainPos = terrainWorldPos + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+	finalNormal = ApplyShorelineWaves(finalNormal, waterDepth, absoluteWaterPos, absoluteTerrainPos, SharedData::wetnessEffectsSettings.Time);
 #			endif
 
 #			if defined(WADING)
@@ -1367,11 +1452,11 @@ PS_OUTPUT main(PS_INPUT input)
 	// Uncomment define to see shoreline bending effect as colored overlay
 	#ifdef DEBUG_SHORELINE_INFLUENCE
 	float3 terrainWorldPos = GetTerrainWorldPosition(screenUV, screenPosition, eyeIndex);
-	float3 shoreInfluence = GetShorelineInfluence(input.WPosition.xyz, terrainWorldPos, eyeIndex);
-	float influenceStrength = shoreInfluence.z;
+	float waterDepth = GetShorelineDepth(input.WPosition.xyz, terrainWorldPos, eyeIndex);
+	float influenceStrength = 1.0 - smoothstep(0.0, 300.0, waterDepth);
 	
 	// Show depth value as grayscale scaled to 0-10000 range
-	float depthVis = saturate(1.0 - abs(depth) / 10000.0);
+	float depthVis = saturate(1.0 - waterDepth / 300.0);
 	
 	// ALWAYS show a color overlay to see what's happening
 	float3 debugColor;
