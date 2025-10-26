@@ -1,6 +1,5 @@
 ﻿#pragma once
 #include <BS_thread_pool.hpp>
-#include "RE/T/TESFile.h"
 
 class WaterCache
 {
@@ -19,14 +18,6 @@ public:
 		int32_t y{};
 		uint32_t size{};
 		float waterHeight{};
-		
-		// Shoreline-aware wave system - 9 sample points per cell (3x3 grid)
-		// Layout: [0-2] = south row (SW, S, SE)
-		//         [3-5] = middle row (W, Center, E)  
-		//         [6-8] = north row (NW, N, NE)
-		float shoreNormalX[9]{};      // X component of normalized vector pointing from water to land
-		float shoreNormalY[9]{};      // Y component of normalized vector pointing from water to land
-		float distanceToShore[9]{};   // Distance in cells to nearest shoreline (0 = at shore, large = open water)
 	};
 
 	struct BuildProgressSnapshot
@@ -39,20 +30,19 @@ public:
 		int64_t elapsedMs{};
 	};
 
-	struct Heights
-	{
-		float land = FLT_MAX;
-		float water = FLT_MAX;
-	};
+	bool SetCurrentWorldSpace(const RE::TESWorldSpace* worldSpace);
+	std::vector<Instruction>* GetInstructions(const RE::TESWorldSpace* worldSpace, uint32_t lodLevel, uint32_t x, uint32_t y);
 
-	struct CellData
-	{
-		Heights heights{};
-		RE::FormID formID{};
-		RE::TESWaterForm* form = nullptr;
-		bool hasValidHeights = false;
-	};
+	static void GenerateTamrielPrecache();
+	bool LoadOrGenerateCaches();
+	bool RegenerateCaches();
+	bool GenerateCaches();
 
+	bool IsBuildRunning() const { return async.running.load(); }
+	bool HasBuildFailed() const { return async.failed.load(); }
+	BuildProgressSnapshot GetBuildProgressSnapshot() const { return buildProgress.Snapshot(); }
+
+private:
 	struct WorldSpaceHeader
 	{
 		struct MinMax
@@ -70,36 +60,19 @@ public:
 		int32_t dataCount{};
 	};
 
-	// Per WorldSpace DiskCache that contains a list of instructions for water placement for all LOD levels in series
-	struct DiskCache
+	struct Heights
 	{
-		WorldSpaceHeader header;
-		std::vector<Instruction> instructions;
-		// High-resolution shoreline field data (per-cell)
-		std::vector<float> shorelineDistance;
-		std::vector<float> shorelineNormalX;
-		std::vector<float> shorelineNormalY;
-		std::vector<float> shorelineMask;
+		float land = FLT_MAX;
+		float water = FLT_MAX;
 	};
 
-	bool SetCurrentWorldSpace(const RE::TESWorldSpace* worldSpace);
-	std::vector<Instruction>* GetInstructions(const RE::TESWorldSpace* worldSpace, uint32_t lodLevel, uint32_t x, uint32_t y);
-	std::shared_ptr<DiskCache> GetDiskCache(const RE::TESWorldSpace* worldSpace);
+	struct CellData
+	{
+		Heights heights{};
+		RE::FormID formID{};
+		RE::TESWaterForm* form = nullptr;
+	};
 
-	static void GenerateTamrielPrecache();
-	bool LoadOrGenerateCaches();
-	bool RegenerateCaches();
-	bool GenerateCaches();
-
-	bool IsBuildRunning() const { return async.running.load(); }
-	bool HasBuildFailed() const { return async.failed.load(); }
-	BuildProgressSnapshot GetBuildProgressSnapshot() const { return buildProgress.Snapshot(); }
-	
-	// Public for use by ShorelineMap generation
-	static void BuildShorelineField(const std::vector<CellData>& cellData, int32_t width, int32_t height,
-		std::vector<float>& outDistance, std::vector<float>& outNormalX, std::vector<float>& outNormalY, std::vector<float>& outMask);
-
-private:
 	// Precache contains height data generated with sheson's extended Tamriel data set
 	struct PreCache
 	{
@@ -108,11 +81,18 @@ private:
 		std::vector<Heights> heights;
 	};
 
+	// Per WorldSpace DiskCache that contains a list of instructions for water placement for all LOD levels in series
+	struct DiskCache
+	{
+		WorldSpaceHeader header;
+		std::vector<Instruction> instructions;
+	};
+
 	// Per WorldSpace RuntimeCache that is the disk cache processed into a runtime optimised format with fast lookups
 	struct RuntimeCache
 	{
 		WorldSpaceHeader header;
-		// LODLevel -> LODChunk -> Instructions (5 levels: LOD1, LOD4, LOD8, LOD16, LOD32)
+		// LODLevel -> LODChunk -> Instructions
 		std::vector<std::vector<std::vector<Instruction>>> instructions;
 
 		std::vector<Instruction>* GetInstructions(int32_t lodLevel, int32_t x, int32_t y);
@@ -180,37 +160,20 @@ private:
 	AsyncBuild async;
 
 	using CacheMap = std::unordered_map<std::string, std::shared_ptr<RuntimeCache>>;
-	using DiskCacheMap = std::unordered_map<std::string, std::shared_ptr<DiskCache>>;
 
 	std::atomic<std::shared_ptr<const CacheMap>> cacheMap{ std::make_shared<CacheMap>() };
-	std::atomic<std::shared_ptr<const DiskCacheMap>> diskCacheMap{ std::make_shared<DiskCacheMap>() };
 	
 	std::shared_ptr<RuntimeCache> currentCache;
-	std::shared_ptr<DiskCache> currentDiskCache;
 	std::string currentWorldSpace;
-	std::string lastMissingCacheWorldSpace;
 
 	bool LoadCaches();
 
 	static void BuildPreCache(RE::TESWorldSpace* worldSpace, PreCache& cache);
 	static bool BuildDiskCache(RE::TESWorldSpace* worldSpace, DiskCache& diskCache);
-	static void GenerateInstructions(int32_t lodLevel, DiskCache& diskCache, const std::vector<CellData>& cellData,
-		const std::vector<float>& shorelineDistance,
-		const std::vector<float>& shorelineNormalX,
-		const std::vector<float>& shorelineNormalY,
-		const std::vector<float>& shorelineMask,
-		int32_t& instructionCount);
+	static void GenerateInstructions(int32_t lodLevel, DiskCache& diskCache, const std::vector<CellData>& cellData, int32_t& instructionCount);
 	static bool TryBuildRuntimeCache(const DiskCache& diskCache, RuntimeCache& cache);
 	static std::vector<RE::TESWorldSpace*> GetValidWorldSpaces();
 	static void GetLODCoords(int32_t lodLevel, int32_t x, int32_t y, int32_t& outX, int32_t& outY);
-	
-	static void ComputeShorelineData(int32_t width, int32_t height,
-		const std::vector<float>& distanceField,
-		const std::vector<float>& normalXField,
-		const std::vector<float>& normalYField,
-		const std::vector<float>& waterMask,
-		float centerCellX, float centerCellY, uint32_t tileSize,
-		float outNormalX[9], float outNormalY[9], float outDistance[9]);
 
 	static bool TryGetCellData(RE::TESWorldSpace* worldSpace, RE::TESFileArray* files, int32_t x, int32_t y, RE::FormID& outFormID, float& outWaterHeight, float& outLandHeight, bool resolveFormID);
 	static void ReadWaterData(RE::TESFile* file, float& waterHeight, RE::FormID& formID);

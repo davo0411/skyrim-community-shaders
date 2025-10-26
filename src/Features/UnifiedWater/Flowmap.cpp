@@ -219,9 +219,6 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 				}
 
 				DirectX::ScratchImage conv;
-				// Debug: log incoming DDS metadata
-				logger::debug("[Unified Water] [Flowmap] Flow tile {},{} - source format={}, mips={}", x, y, static_cast<uint32_t>(meta.format), static_cast<uint32_t>(meta.mipLevels));
-
 				if (DirectX::IsCompressed(meta.format)) {
 					hr = DirectX::Decompress(src.GetImages(), src.GetImageCount(), src.GetMetadata(), DXGI_FORMAT_B8G8R8A8_UNORM, conv);
 					if (FAILED(hr)) {
@@ -238,21 +235,8 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 					conv = std::move(src);
 				}
 
-				// Ensure we have the expected mip chain when requested
-				DirectX::ScratchImage finalImg;
-				const auto convMips = static_cast<size_t>(conv.GetMetadata().mipLevels);
-				if (useMips && convMips < 6) {
-					// Try to generate mipmaps to reach 6 levels
-					if (FAILED(DirectX::GenerateMipMaps(*conv.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 6, finalImg, false))) {
-						logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} failed to generate mipmaps (have={}, need=6)", x, y, convMips);
-						continue;
-					}
-				} else {
-					finalImg = std::move(conv);
-				}
-
 				winrt::com_ptr<ID3D11Resource> res;
-				hr = DirectX::CreateTexture(dvc, finalImg.GetImages(), finalImg.GetImageCount(), finalImg.GetMetadata(), res.put());
+				hr = DirectX::CreateTexture(dvc, conv.GetImages(), conv.GetImageCount(), conv.GetMetadata(), res.put());
 				if (FAILED(hr) || !res) {
 					logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} creation failed", x, y);
 					continue;
