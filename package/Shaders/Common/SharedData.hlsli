@@ -171,7 +171,24 @@ namespace SharedData
 	{
 		uint enableTilingFix;
 		uint enableLODTerrainTilingFix;
-		float2 pad0;
+		uint enableBombing;
+		uint debugDraw;
+		uint bombSpriteCount;
+		uint randomSeed;
+		float density;
+		float cellSize;
+		float radiusMin;
+		float radiusMax;
+		float fadeStart;
+		float fadeEnd;
+		float intensity;
+		float colorMatchStrength;
+		float normalBlend;
+		float biomeAffinity;
+		float debugFadeStart;
+		float debugFadeEnd;
+		float pad0;
+		float pad1;
 	};
 
 	struct IBLSettings

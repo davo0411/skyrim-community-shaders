@@ -1807,6 +1807,28 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		blendedNormalAlpha += landNormalAlpha6 * weight;
 	}
 
+	#	if defined(TERRAIN_VARIATION)
+		if (SharedData::terrainVariationSettings.enableBombing)
+		{
+			float3 absoluteWorldPos = input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+			float3 flatWorldNormal = cross(ddx(absoluteWorldPos), ddy(absoluteWorldPos));
+			float normalLen = max(length(flatWorldNormal), 1e-4);
+			flatWorldNormal /= normalLen;
+			float snowCoverage = 0.0;
+	#		if defined(SNOW) && !defined(TRUE_PBR)
+			snowCoverage = saturate(landSnowMask);
+	#		endif
+			float viewDistanceLinear = length(viewPosition);
+			float3 viewDirWS = normalize(FrameBuffer::CameraPosAdjust[eyeIndex].xyz - absoluteWorldPos);
+#			if defined(TRUE_PBR)
+			ApplyTerrainBombing(absoluteWorldPos, blendedRGB, flatWorldNormal, viewDirWS, snowCoverage, viewDistanceLinear, blendedRGB, blendedNormalRGB, blendedRMAOS);
+#			else
+			float4 tempRMA = 0;
+			ApplyTerrainBombing(absoluteWorldPos, blendedRGB, flatWorldNormal, viewDirWS, snowCoverage, viewDistanceLinear, blendedRGB, blendedNormalRGB, tempRMA);
+#			endif
+		}
+	#	endif
+
 	float4 rawBaseColor = float4(blendedRGB, blendedAlpha);
 	baseColor = float4(Color::Diffuse(blendedRGB), blendedAlpha);
 	normal = float4(blendedNormalRGB, blendedNormalAlpha);
