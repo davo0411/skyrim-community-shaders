@@ -141,6 +141,10 @@ namespace ContactShadows
 		// Calculate step size with minimum to prevent floating-point precision issues
 		float stepSize = max(0.02, (maxTraceDist - startOffset) / float(settings.MaxSteps));
 		
+		// Track shadow accumulation for soft shadows
+		float shadowAccum = 1.0;
+		bool foundOcclusion = false;
+		
 		[loop]
 		for (uint step = 1; step <= settings.MaxSteps; step++)
 		{
@@ -184,19 +188,49 @@ namespace ContactShadows
 			float rayDepth = sampleNDC.z;
 			
 			// Check if scene geometry is closer (in front of ray)
-			// If sceneDepth < rayDepth, there's an occluder between light and surface
 			float depthDiff = rayDepth - sceneDepth;
 			
 			// Check for occlusion
 			if (depthDiff > 0.0 && depthDiff < settings.Thickness)
 			{
-				// Found occluder between light and surface - return shadow
-				return 0.0;
+				foundOcclusion = true;
+				
+				// Calculate shadow intensity based on depth difference
+				// depthDiff = 0 means exactly at the occluder (full shadow)
+				// depthDiff = Thickness means at the edge (no shadow)
+				float depthFade = saturate(depthDiff / settings.Thickness);
+				
+				// Apply exponential falloff for more dramatic softness effect
+				// Power curve: lower power = softer, higher power = harder
+				// Softness 0.0 = power 4.0 (hard/sharp)
+				// Softness 1.0 = power 0.1 (soft/gradual)
+				float falloffPower = lerp(4.0, 0.1, settings.Softness);
+				float occlusionStrength = pow(depthFade, falloffPower);
+				
+				// Additional distance-based softening along the ray
+				// Objects farther from surface cast softer shadows
+				float marchFade = saturate(marchDist / maxTraceDist);
+				float distanceSoftening = lerp(1.0, marchFade, settings.Softness * 0.5);
+				
+				// Combine depth and distance softening
+				float shadowValue = occlusionStrength * distanceSoftening;
+				
+				// For hard shadows (softness near 0), snap to binary
+				if (settings.Softness < 0.01)
+					shadowValue = 0.0;
+				
+				// Accumulate darkest shadow
+				shadowAccum = min(shadowAccum, shadowValue);
+				
+				// Early exit only for hard shadows with full occlusion
+				if (settings.Softness < 0.01 && shadowAccum < 0.01)
+					return 0.0;
 			}
 		}
 		
-		// No occlusion found - fully lit
-		return 1.0;
+		// Return accumulated shadow value
+		// 1.0 = fully lit, 0.0 = fully shadowed
+		return foundOcclusion ? shadowAccum : 1.0;
 	}
 }
 
