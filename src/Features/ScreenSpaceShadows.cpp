@@ -24,8 +24,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	MaxDistance,
 	Thickness,
 	DistanceFade,
-	Softness,
-	DebugVisualize)
+	Softness)
 
 void ScreenSpaceShadows::DrawSettings()
 {
@@ -69,15 +68,6 @@ void ScreenSpaceShadows::DrawSettings()
 		}
 		
 		if (contactSettings.Enabled) {
-			ImGui::Checkbox("Debug Visualize", (bool*)&contactSettings.DebugVisualize);
-			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text(
-					"Shows contact shadow results in color:\n"
-					"Green = fully lit (no shadow)\n"
-					"Red = fully shadowed\n"
-					"Use this to verify shadows are working.");
-			}
-			
 			ImGui::SliderInt("Max Steps", (int*)&contactSettings.MaxSteps, 4, 32);
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text(

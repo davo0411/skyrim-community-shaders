@@ -202,8 +202,7 @@ namespace SharedData
 		float Thickness;
 		float DistanceFade;
 		float Softness;
-		uint DebugVisualize;
-		float pad0;
+		uint pad0[2];
 	};
 
 	cbuffer FeatureData : register(b6)

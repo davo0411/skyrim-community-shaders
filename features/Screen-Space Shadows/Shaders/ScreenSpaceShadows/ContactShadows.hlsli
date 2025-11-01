@@ -148,8 +148,9 @@ namespace ContactShadows
 			float marchDist = startOffset + stepSize * float(step);
 			float3 sampleWorldPos = worldPosition + worldRayDir * marchDist;
 			
-			// Transform sample position to clip space
-			float4 sampleClipPos = mul(FrameBuffer::CameraViewProj[eyeIndex], float4(sampleWorldPos, 1.0));
+			// Transform sample position to clip space using UNJITTERED projection
+			// This prevents TAA jitter from causing flickering shadows
+			float4 sampleClipPos = mul(FrameBuffer::CameraViewProjUnjittered[eyeIndex], float4(sampleWorldPos, 1.0));
 			
 			// Check if behind camera
 			if (sampleClipPos.w <= 0.0)
@@ -165,7 +166,11 @@ namespace ContactShadows
 			if (any(sampleUV < 0.0) || any(sampleUV > 1.0))
 				break;
 			
-			// Sample depth buffer
+			// Adjust UV for dynamic resolution (DLSS/FSR/etc)
+			// This ensures shadows work correctly at display resolution, not render resolution
+			sampleUV = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(sampleUV);
+			
+			// Sample depth buffer at adjusted coordinates
 			float sceneDepth = depthTexture.SampleLevel(samplerState, sampleUV, 0).x;
 			
 			// Get ray depth in [0,1] range
@@ -174,48 +179,22 @@ namespace ContactShadows
 			// Depth comparison: rayDepth > sceneDepth means ray is behind geometry (occluded)
 			float depthDiff = rayDepth - sceneDepth;
 			
-			// Debug visualization
-			if (settings.DebugVisualize) {
-				if (depthDiff > 0.0 && depthDiff < settings.Thickness) {
-					return 0.0;  // Show hits as black
-				}
-			}
-			
 			// Check for occlusion
 			if (depthDiff > 0.0 && depthDiff < settings.Thickness)
 			{
-				// Fade based on distance from surface
-				float distanceFade = 1.0 - (marchDist / maxTraceDist);
+				// Only accept occlusions after marching a minimum distance
+				// This prevents self-shadowing on weapons/character
+				// marchDist is already world-space distance from start
+				if (marchDist < 5.0)  // Ignore hits in first 50cm
+					continue;
 				
-				// Calculate shadow strength
-				float shadowStrength = 1.0 - saturate(depthDiff / settings.Thickness);
-				shadowStrength = pow(shadowStrength, 1.0 / max(settings.Softness, 0.001));
-				
-				// Apply fading
-				shadowStrength *= distanceFade;
-				
-				// Accumulate shadow (reduced intensity)
-				shadowTerm = min(shadowTerm, 1.0 - shadowStrength * 0.5);
-				
-				hitCount++;
-				
-				// Early exit after multiple hits
-				if (hitCount >= 2 || shadowTerm < 0.3)
-					break;
+				// Found valid occlusion - return full shadow
+				return 0.0;
 			}
 		}
 		
-		if (settings.DebugVisualize) {
-			return 1.0;  // Show no-hits as normal
-		}
-		
-		// Apply distance fade
-		if (settings.DistanceFade > 0.0) {
-			float fadeFactor = saturate(lightDistance / settings.DistanceFade);
-			shadowTerm = lerp(shadowTerm, 1.0, fadeFactor);
-		}
-		
-		return shadowTerm;
+		// No occlusion found - fully lit
+		return 1.0;
 	}
 }
 

@@ -47,8 +47,7 @@ public:
 		float Thickness = 0.1f;
 		float DistanceFade = 20.0f;
 		float Softness = 1.0f;
-		uint DebugVisualize = 0;
-		float pad0;
+		uint pad0[2];
 	};
 
 	ContactShadowSettings contactSettings;
