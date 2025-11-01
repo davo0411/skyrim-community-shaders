@@ -17,14 +17,107 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	BilinearThreshold,
 	ShadowContrast)
 
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	ScreenSpaceShadows::ContactShadowSettings,
+	Enabled,
+	MaxSteps,
+	MaxDistance,
+	Thickness,
+	DistanceFade,
+	Softness,
+	DebugVisualize)
+
 void ScreenSpaceShadows::DrawSettings()
 {
-	if (ImGui::TreeNodeEx("General", ImGuiTreeNodeFlags_DefaultOpen)) {
+	if (ImGui::TreeNodeEx("Directional Light Shadows (Sun)", ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::Checkbox("Enable", (bool*)&bendSettings.Enable);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("Enable screen-space shadows for directional light (sun/moon).");
+		}
+		
 		ImGui::SliderInt("Sample Count Multiplier", (int*)&bendSettings.SampleCount, 1, 4);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("Higher values provide better quality but reduce performance.");
+		}
+		
 		ImGui::SliderFloat("Surface Thickness", &bendSettings.SurfaceThickness, 0.005f, 0.05f);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("Thickness of surfaces for shadow casting. Lower = thinner shadows.");
+		}
+		
 		ImGui::SliderFloat("Bilinear Threshold", &bendSettings.BilinearThreshold, 0.02f, 1.0f);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("Threshold for edge detection. Higher values = fewer edges detected.");
+		}
+		
 		ImGui::SliderFloat("Shadow Contrast", &bendSettings.ShadowContrast, 0.0f, 4.0f);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("Contrast boost for shadow transitions. Higher = sharper shadows.");
+		}
+
+		ImGui::Spacing();
+		ImGui::Spacing();
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx("Contact Shadows (Local Lights)", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Checkbox("Enable Contact Shadows", (bool*)&contactSettings.Enabled);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text(
+				"Enable cheap contact shadows for all local lights (torches, candles, etc.).\n"
+				"These add close-range occlusion detail for point and spot lights.");
+		}
+		
+		if (contactSettings.Enabled) {
+			ImGui::Checkbox("Debug Visualize", (bool*)&contactSettings.DebugVisualize);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text(
+					"Shows contact shadow results in color:\n"
+					"Green = fully lit (no shadow)\n"
+					"Red = fully shadowed\n"
+					"Use this to verify shadows are working.");
+			}
+			
+			ImGui::SliderInt("Max Steps", (int*)&contactSettings.MaxSteps, 4, 32);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text(
+					"Number of depth samples per light. Higher = better quality, lower performance.\n"
+					"Recommended: 8-16 for balanced quality/performance.");
+			}
+			
+			ImGui::SliderFloat("Max Distance", &contactSettings.MaxDistance, 1.0f, 20.0f, "%.1f");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text(
+					"Maximum world distance to trace for shadows (in game units).\n"
+					"Contact shadows are most effective at short range.\n"
+					"Lower values = better performance. Start with 5-10 for testing.");
+			}
+			
+			ImGui::SliderFloat("Thickness", &contactSettings.Thickness, 0.01f, 0.5f, "%.3f");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text(
+					"Depth threshold for occlusion detection.\n"
+					"Lower = thinner shadows, less false positives.\n"
+					"Higher = thicker shadows, may cause artifacts.\n"
+					"Start with 0.1 for testing, then refine.");
+			}
+			
+			ImGui::SliderFloat("Distance Fade", &contactSettings.DistanceFade, 0.0f, 50.0f, "%.1f");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text(
+					"Distance at which contact shadows fade out.\n"
+					"0 = no fade (always active within range).\n"
+					"Higher values = gradual fade for distant lights.");
+			}
+			
+			ImGui::SliderFloat("Softness", &contactSettings.Softness, 0.0f, 1.0f, "%.2f");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text(
+					"Shadow transition softness.\n"
+					"0 = hard cutoff, 1 = soft gradient.\n"
+					"Hard shadows perform slightly better.");
+			}
+		}
 
 		ImGui::Spacing();
 		ImGui::Spacing();
@@ -254,17 +347,22 @@ void ScreenSpaceShadows::Prepass()
 
 void ScreenSpaceShadows::LoadSettings(json& o_json)
 {
-	bendSettings = o_json;
+	if (o_json.contains("BendSettings"))
+		bendSettings = o_json["BendSettings"];
+	if (o_json.contains("ContactSettings"))
+		contactSettings = o_json["ContactSettings"];
 }
 
 void ScreenSpaceShadows::SaveSettings(json& o_json)
 {
-	o_json = bendSettings;
+	o_json["BendSettings"] = bendSettings;
+	o_json["ContactSettings"] = contactSettings;
 }
 
 void ScreenSpaceShadows::RestoreDefaultSettings()
 {
 	bendSettings = {};
+	contactSettings = {};
 }
 
 bool ScreenSpaceShadows::HasShaderDefine(RE::BSShader::Type)

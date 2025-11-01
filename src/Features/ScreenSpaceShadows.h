@@ -39,6 +39,20 @@ public:
 
 	BendSettings bendSettings;
 
+	struct ContactShadowSettings
+	{
+		uint Enabled = 1;
+		uint MaxSteps = 8;
+		float MaxDistance = 5.0f;
+		float Thickness = 0.1f;
+		float DistanceFade = 20.0f;
+		float Softness = 1.0f;
+		uint DebugVisualize = 0;
+		float pad0;
+	};
+
+	ContactShadowSettings contactSettings;
+
 	struct alignas(16) RaymarchCB
 	{
 		// Runtime data returned from BuildDispatchList():

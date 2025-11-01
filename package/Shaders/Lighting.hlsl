@@ -916,6 +916,7 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 
 #	if defined(SCREEN_SPACE_SHADOWS)
 #		include "ScreenSpaceShadows/ScreenSpaceShadows.hlsli"
+#		include "ScreenSpaceShadows/ContactShadows.hlsli"
 #	endif
 
 #	if defined(LIGHT_LIMIT_FIX)
@@ -2472,6 +2473,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			}
 		}
 
+#			if defined(SCREEN_SPACE_SHADOWS)
+		// Apply contact shadows for local lights (non-LLF path)
+		if (SharedData::contactShadowSettings.Enabled && lightShadow != 0.0) {
+			float contactShadow = ContactShadows::CalculateContactShadowFast(
+				SharedData::DepthTexture,
+				LinearSampler,
+				input.WorldPosition.xyz,
+				PointLightPosition[eyeIndex * numLights + lightIndex].xyz,
+				lightDist,
+				SharedData::contactShadowSettings,
+				eyeIndex);
+			lightShadow *= contactShadow;
+		}
+#			endif
+
 		float3 normalizedLightDirection = normalize(lightDirection);
 
 #			if defined(TRUE_PBR)
@@ -2578,6 +2594,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 				lightShadow *= shadowComponent;
 			}
 		}
+
+#			if defined(SCREEN_SPACE_SHADOWS)
+		// Apply contact shadows for local lights
+		if (SharedData::contactShadowSettings.Enabled && shadowComponent != 0.0) {
+			float contactShadow = ContactShadows::CalculateContactShadowFast(
+				SharedData::DepthTexture,
+				LinearSampler,
+				input.WorldPosition.xyz,
+				light.positionWS[eyeIndex].xyz,
+				lightDist,
+				SharedData::contactShadowSettings,
+				eyeIndex);
+			lightShadow *= contactShadow;
+		}
+#			endif
 
 		float3 normalizedLightDirection = normalize(lightDirection);
 		float lightAngle = dot(worldNormal.xyz, normalizedLightDirection.xyz);

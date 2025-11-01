@@ -194,6 +194,18 @@ namespace SharedData
 		float Strength;      // [0, 1.0] The inverse blend weight of the effect
 	};
 
+	struct ContactShadowSettings
+	{
+		uint Enabled;
+		uint MaxSteps;
+		float MaxDistance;
+		float Thickness;
+		float DistanceFade;
+		float Softness;
+		uint DebugVisualize;
+		float pad0;
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -209,6 +221,7 @@ namespace SharedData
 		TerrainVariationSettings terrainVariationSettings;
 		IBLSettings iblSettings;
 		ExtendedTranslucencySettings extendedTranslucencySettings;
+		ContactShadowSettings contactShadowSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);
