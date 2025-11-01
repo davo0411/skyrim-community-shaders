@@ -23,7 +23,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	MaxSteps,
 	MaxDistance,
 	Thickness,
-	DistanceFade,
 	Softness)
 
 void ScreenSpaceShadows::DrawSettings()
@@ -90,14 +89,6 @@ void ScreenSpaceShadows::DrawSettings()
 					"Lower = thinner shadows, less false positives.\n"
 					"Higher = thicker shadows, may cause artifacts.\n"
 					"Start with 0.1 for testing, then refine.");
-			}
-			
-			ImGui::SliderFloat("Distance Fade", &contactSettings.DistanceFade, 0.0f, 50.0f, "%.1f");
-			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text(
-					"Distance at which contact shadows fade out.\n"
-					"0 = no fade (always active within range).\n"
-					"Higher values = gradual fade for distant lights.");
 			}
 			
 			ImGui::SliderFloat("Softness", &contactSettings.Softness, 0.0f, 1.0f, "%.2f");

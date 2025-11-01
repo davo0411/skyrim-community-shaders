@@ -11,19 +11,7 @@
 
 namespace ContactShadows
 {
-	// Sample depth buffer at screen position
-	float SampleDepth(Texture2D<float4> depthTexture, SamplerState samplerState, float2 uv, uint eyeIndex)
-	{
-#if defined(VR)
-		// VR: adjust UV for eye side
-		if (eyeIndex == 1) {
-			uv.x = uv.x * 0.5 + 0.5;
-		} else {
-			uv.x = uv.x * 0.5;
-		}
-#endif
-		return depthTexture.SampleLevel(samplerState, uv, 0).x;
-	}
+	static const float SHADOW_THICKNESS = 0.1;
 
 	// Calculate contact shadow for a point light
 	// Returns shadow term [0 = shadowed, 1 = lit]
@@ -34,97 +22,21 @@ namespace ContactShadows
 		float3 lightPosition,
 		float lightDistance,
 		SharedData::ContactShadowSettings settings,
-		uint eyeIndex)
+		uint eyeIndex,
+		float shadowMapValue = 1.0,
+		float2 screenPosition = float2(0, 0),
+		float3 surfaceNormal = float3(0, 0, 1))
 	{
 		if (!settings.Enabled)
 			return 1.0;
 
-		// Early out if light is too far
-		float maxTraceDist = min(settings.MaxDistance, lightDistance);
-		if (maxTraceDist < 0.01)
+		// Fix first-person lights - skip contact shadows when looking at player model
+		if (!FrameBuffer::FrameParams.y)
 			return 1.0;
 
-		// Transform positions to view space
-		float3 viewPos = FrameBuffer::WorldToView(worldPosition, true, eyeIndex);
-		float3 lightViewPos = FrameBuffer::WorldToView(lightPosition, true, eyeIndex);
-		
-		// Direction from surface to light in view space
-		float3 viewLightDir = lightViewPos - viewPos;
-		float viewLightDist = length(viewLightDir);
-		viewLightDir = normalize(viewLightDir);
-
-		// Calculate step size based on distance and max steps
-		float stepSize = maxTraceDist / float(settings.MaxSteps);
-		
-		// Start slightly offset from surface to avoid self-occlusion
-		float3 currentViewPos = viewPos + viewLightDir * stepSize * 0.5;
-		
-		float shadow = 1.0;
-		
-		[unroll]
-		for (uint step = 0; step < settings.MaxSteps; step++)
-		{
-			// Check if we've reached the light
-			float distanceToLight = length(lightViewPos - currentViewPos);
-			if (distanceToLight < stepSize)
-				break;
-			
-			// Project to screen space
-			float2 uv = FrameBuffer::ViewToUV(currentViewPos, true, eyeIndex);
-			
-			// Check bounds
-			if (FrameBuffer::IsOutsideFrame(uv, true))
-				break;
-			
-			// Sample depth at this screen position
-			float sampledDepth = SampleDepth(depthTexture, samplerState, uv, eyeIndex);
-			
-			// Convert ray position to depth
-			float4 clipPos = mul(FrameBuffer::CameraProj[eyeIndex], float4(currentViewPos, 1.0));
-			float rayDepth = clipPos.z / clipPos.w;
-			
-			// In standard depth: 0=near, 1=far
-			// If ray depth > sampled depth, ray is further away (behind geometry)
-			float depthDiff = sampledDepth - rayDepth;
-			
-			// If ray is behind geometry (sampledDepth < rayDepth) and within thickness
-			if (depthDiff < 0 && abs(depthDiff) < settings.Thickness)
-			{
-				// Apply softness for smoother transitions
-				float occlusionStrength = saturate(abs(depthDiff) / settings.Thickness);
-				shadow = lerp(shadow, 0.0, occlusionStrength * settings.Softness);
-				
-				// For hard shadows, exit early
-				if (settings.Softness >= 1.0)
-					break;
-			}
-			
-			// March forward
-			currentViewPos += viewLightDir * stepSize;
-		}
-		
-		// Apply distance fade
-		if (settings.DistanceFade > 0.0)
-		{
-			float fadeFactor = saturate(lightDistance / settings.DistanceFade);
-			shadow = lerp(shadow, 1.0, fadeFactor);
-		}
-		
-		return shadow;
-	}
-
-	// Optimized version with early termination
-	float CalculateContactShadowFast(
-		Texture2D<float4> depthTexture,
-		SamplerState samplerState,
-		float3 worldPosition,
-		float3 lightPosition,
-		float lightDistance,
-		SharedData::ContactShadowSettings settings,
-		uint eyeIndex)
-	{
-		if (!settings.Enabled)
-			return 1.0;
+		// Skip if already fully shadowed by shadow map
+		if (shadowMapValue < 0.01)
+			return 0.0;
 
 		// Early out if light is too far
 		float maxTraceDist = min(settings.MaxDistance, lightDistance);
@@ -132,7 +44,6 @@ namespace ContactShadows
 			return 1.0;
 
 		// Ray direction from surface TOWARD light
-		// We check for occluders between the surface and the light
 		float3 worldRayDir = normalize(lightPosition - worldPosition);
 		
 		// Start raymarching slightly offset from surface
@@ -177,8 +88,10 @@ namespace ContactShadows
 			// Adjust UV for dynamic resolution
 			sampleUV = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(sampleUV);
 			
-			// Sample depth buffer
-			float sceneDepth = depthTexture.SampleLevel(samplerState, sampleUV, 0).x;
+			// Sample depth buffer at half-resolution for performance
+			// Use mip level 1 (half-res) for distant samples
+			float mipLevel = (lightDistance > settings.MaxDistance * 0.3) ? 1.0 : 0.0;
+			float sceneDepth = depthTexture.SampleLevel(samplerState, sampleUV, mipLevel).x;
 			
 			// Skip stencil/sky
 			if (sceneDepth == 0.0 || sceneDepth == 1.0)
@@ -191,40 +104,45 @@ namespace ContactShadows
 			float depthDiff = rayDepth - sceneDepth;
 			
 			// Check for occlusion
-			if (depthDiff > 0.0 && depthDiff < settings.Thickness)
+			if (depthDiff > 0.0 && depthDiff < SHADOW_THICKNESS)
 			{
+				// Edge detection: Check neighboring depths to detect geometry boundaries
+				// Sample a small cross pattern around the occlusion point
+				float2 texelSize = 1.0 / float2(1920.0, 1080.0); // Approximate screen resolution
+				float depthRight = depthTexture.SampleLevel(samplerState, sampleUV + float2(texelSize.x * 2.0, 0), mipLevel).x;
+				float depthLeft = depthTexture.SampleLevel(samplerState, sampleUV + float2(-texelSize.x * 2.0, 0), mipLevel).x;
+				float depthUp = depthTexture.SampleLevel(samplerState, sampleUV + float2(0, -texelSize.y * 2.0), mipLevel).x;
+				float depthDown = depthTexture.SampleLevel(samplerState, sampleUV + float2(0, texelSize.y * 2.0), mipLevel).x;
+				
+				// Calculate max depth variation in neighborhood
+				float maxDepthVariation = max(
+					max(abs(sceneDepth - depthRight), abs(sceneDepth - depthLeft)),
+					max(abs(sceneDepth - depthUp), abs(sceneDepth - depthDown))
+				);
+				
+				// If there's a significant depth discontinuity, this is likely a geometry edge
+				// Skip shadowing at edges to prevent cross-geometry artifacts
+				float edgeThreshold = 0.002; // 0.2% depth variation threshold
+				if (maxDepthVariation > edgeThreshold)
+					continue;
+				
 				foundOcclusion = true;
 				
-				// Calculate shadow intensity based on depth difference
-				// depthDiff = 0 means exactly at the occluder (full shadow)
-				// depthDiff = Thickness means at the edge (no shadow)
-				float depthFade = saturate(depthDiff / settings.Thickness);
+				// Calculate normalized depth difference (0 = at occluder, 1 = at edge)
+				float normalizedDepth = saturate(depthDiff / SHADOW_THICKNESS);
 				
-				// Apply exponential falloff for more dramatic softness effect
-				// Power curve: lower power = softer, higher power = harder
-				// Softness 0.0 = power 4.0 (hard/sharp)
-				// Softness 1.0 = power 0.1 (soft/gradual)
-				float falloffPower = lerp(4.0, 0.1, settings.Softness);
-				float occlusionStrength = pow(depthFade, falloffPower);
+				// Apply contrast boost for softness control
+				// Higher contrast = sharper shadows, lower = softer
+				// Softness 0.0 = contrast 8.0 (very sharp)
+				// Softness 1.0 = contrast 1.0 (very soft)
+				float contrast = lerp(8.0, 1.0, settings.Softness);
 				
-				// Additional distance-based softening along the ray
-				// Objects farther from surface cast softer shadows
-				float marchFade = saturate(marchDist / maxTraceDist);
-				float distanceSoftening = lerp(1.0, marchFade, settings.Softness * 0.5);
+				// Apply contrast formula (same as screen-space shadows)
+				// This creates a remapped shadow value with adjustable falloff
+				float shadowValue = saturate(normalizedDepth * contrast + (1.0 - contrast));
 				
-				// Combine depth and distance softening
-				float shadowValue = occlusionStrength * distanceSoftening;
-				
-				// For hard shadows (softness near 0), snap to binary
-				if (settings.Softness < 0.01)
-					shadowValue = 0.0;
-				
-				// Accumulate darkest shadow
+				// Accumulate darkest shadow (invert so 0 = shadow, 1 = light)
 				shadowAccum = min(shadowAccum, shadowValue);
-				
-				// Early exit only for hard shadows with full occlusion
-				if (settings.Softness < 0.01 && shadowAccum < 0.01)
-					return 0.0;
 			}
 		}
 		

@@ -43,11 +43,10 @@ public:
 	{
 		uint Enabled = 1;
 		uint MaxSteps = 8;
-		float MaxDistance = 5.0f;
+		float MaxDistance = 6.0f;
 		float Thickness = 0.1f;
-		float DistanceFade = 20.0f;
-		float Softness = 1.0f;
-		uint pad0[2];
+		float Softness = 0.95f;
+		uint pad0[3];
 	};
 
 	ContactShadowSettings contactSettings;

@@ -2476,7 +2476,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			if defined(SCREEN_SPACE_SHADOWS)
 		// Apply contact shadows for local lights (non-LLF path)
 		if (SharedData::contactShadowSettings.Enabled && lightShadow != 0.0) {
-			float contactShadow = ContactShadows::CalculateContactShadowFast(
+			float contactShadow = ContactShadows::CalculateContactShadow(
 				SharedData::DepthTexture,
 				LinearSampler,
 				input.WorldPosition.xyz,
@@ -2598,7 +2598,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			if defined(SCREEN_SPACE_SHADOWS)
 		// Apply contact shadows for local lights
 		if (SharedData::contactShadowSettings.Enabled && shadowComponent != 0.0) {
-			float contactShadow = ContactShadows::CalculateContactShadowFast(
+			float contactShadow = ContactShadows::CalculateContactShadow(
 				SharedData::DepthTexture,
 				LinearSampler,
 				input.WorldPosition.xyz,
