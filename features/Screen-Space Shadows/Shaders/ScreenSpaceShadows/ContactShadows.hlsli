@@ -179,16 +179,10 @@ namespace ContactShadows
 			// Depth comparison: rayDepth > sceneDepth means ray is behind geometry (occluded)
 			float depthDiff = rayDepth - sceneDepth;
 			
-			// Check for occlusion
+			// Check for occlusion - simple and clean like debug mode
 			if (depthDiff > 0.0 && depthDiff < settings.Thickness)
 			{
-				// Only accept occlusions after marching a minimum distance
-				// This prevents self-shadowing on weapons/character
-				// marchDist is already world-space distance from start
-				if (marchDist < 5.0)  // Ignore hits in first 50cm
-					continue;
-				
-				// Found valid occlusion - return full shadow
+				// Found occlusion
 				return 0.0;
 			}
 		}
