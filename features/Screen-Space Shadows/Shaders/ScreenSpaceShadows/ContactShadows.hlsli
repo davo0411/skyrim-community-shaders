@@ -131,25 +131,29 @@ namespace ContactShadows
 		if (maxTraceDist < 0.01)
 			return 1.0;
 
-		// World space ray direction toward light
+		// Ray direction from surface TOWARD light
+		// We check for occluders between the surface and the light
 		float3 worldRayDir = normalize(lightPosition - worldPosition);
 		
-		// Start raymarching slightly offset from surface to avoid self-intersection
-		float startOffset = 0.1;  // 10cm offset
-		float stepSize = (maxTraceDist - startOffset) / float(settings.MaxSteps);
+		// Start raymarching slightly offset from surface
+		float startOffset = 0.05;  // 5cm offset
 		
-		float shadowTerm = 1.0;
-		int hitCount = 0;
+		// Calculate step size with minimum to prevent floating-point precision issues
+		float stepSize = max(0.02, (maxTraceDist - startOffset) / float(settings.MaxSteps));
 		
 		[loop]
 		for (uint step = 1; step <= settings.MaxSteps; step++)
 		{
-			// March in world space, starting from offset position
+			// March from surface toward light
 			float marchDist = startOffset + stepSize * float(step);
+			
+			// Stop if we've reached the light
+			if (marchDist >= lightDistance)
+				break;
+			
 			float3 sampleWorldPos = worldPosition + worldRayDir * marchDist;
 			
 			// Transform sample position to clip space using UNJITTERED projection
-			// This prevents TAA jitter from causing flickering shadows
 			float4 sampleClipPos = mul(FrameBuffer::CameraViewProjUnjittered[eyeIndex], float4(sampleWorldPos, 1.0));
 			
 			// Check if behind camera
@@ -166,23 +170,27 @@ namespace ContactShadows
 			if (any(sampleUV < 0.0) || any(sampleUV > 1.0))
 				break;
 			
-			// Adjust UV for dynamic resolution (DLSS/FSR/etc)
-			// This ensures shadows work correctly at display resolution, not render resolution
+			// Adjust UV for dynamic resolution
 			sampleUV = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(sampleUV);
 			
-			// Sample depth buffer at adjusted coordinates
+			// Sample depth buffer
 			float sceneDepth = depthTexture.SampleLevel(samplerState, sampleUV, 0).x;
 			
-			// Get ray depth in [0,1] range
+			// Skip stencil/sky
+			if (sceneDepth == 0.0 || sceneDepth == 1.0)
+				continue;
+			
+			// Get ray depth
 			float rayDepth = sampleNDC.z;
 			
-			// Depth comparison: rayDepth > sceneDepth means ray is behind geometry (occluded)
+			// Check if scene geometry is closer (in front of ray)
+			// If sceneDepth < rayDepth, there's an occluder between light and surface
 			float depthDiff = rayDepth - sceneDepth;
 			
-			// Check for occlusion - simple and clean like debug mode
+			// Check for occlusion
 			if (depthDiff > 0.0 && depthDiff < settings.Thickness)
 			{
-				// Found occlusion
+				// Found occluder between light and surface - return shadow
 				return 0.0;
 			}
 		}
