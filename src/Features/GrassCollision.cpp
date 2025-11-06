@@ -2,6 +2,7 @@
 
 #include "State.h"
 #include "Utils/ActorUtils.h"
+#include "../Utils/UI.h"
 
 static const uint MAX_BOUNDING_BOXES = 64;
 static const uint MAX_COLLISIONS_PER_BOUNDING_BOX = 64;
@@ -187,7 +188,7 @@ void GrassCollision::Update()
 
 		perFrameData.ValidMargin = { (int)cellIDDiff.x, (int)cellIDDiff.y };
 
-		perFrameData.TimeDelta = *globals::game::deltaTime * !globals::game::ui->GameIsPaused();
+		perFrameData.TimeDelta = *globals::game::deltaTime * !Util::IsGamePausedOrMenuOpen();
 
 		perFrameData.CameraHeightDelta = prevEyePosNI.z - eyePosNI.z;
 

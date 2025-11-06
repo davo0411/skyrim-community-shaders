@@ -7,6 +7,7 @@
 #include "../../Hooks.h"
 #include "../../State.h"
 #include "../../Util.h"
+#include "../../Utils/UI.h"
 #include "../Upscaling.h"
 #include "DX12SwapChain.h"
 
@@ -409,7 +410,7 @@ float2 Streamline::GetInputResolutionScale(uint32_t outputWidth, uint32_t output
 	float scaleX;
 	float scaleY;
 
-	if (globals::game::ui->GameIsPaused()) {
+	if (Util::IsGamePausedOrMenuOpen()) {
 		// Calculate scale as ratio of minimum render resolution to output resolution
 		scaleX = (float)optimalSettings.renderWidthMin / (float)outputWidth;
 		scaleY = (float)optimalSettings.renderHeightMin / (float)outputHeight;

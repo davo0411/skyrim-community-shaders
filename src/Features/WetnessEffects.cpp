@@ -1,6 +1,7 @@
 #include "WetnessEffects.h"
 #include "Menu.h"
 #include "WeatherPicker.h"
+#include "../Utils/UI.h"
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	WetnessEffects::Settings,
@@ -770,7 +771,7 @@ WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
 	}
 
 	static size_t rainTimer = 0;  // size_t for precision
-	if (!globals::game::ui->GameIsPaused())
+	if (!Util::IsGamePausedOrMenuOpen())
 		rainTimer += (size_t)(RE::GetSecondsSinceLastFrame() * 1000);  // BSTimer::delta is always 0 for some reason
 	data.Time = rainTimer / 1000.f;
 

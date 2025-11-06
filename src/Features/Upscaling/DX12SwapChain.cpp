@@ -6,6 +6,7 @@
 #include "../Upscaling.h"
 #include "FidelityFX.h"
 #include "Streamline.h"
+#include "../../Utils/UI.h"
 
 void DX12SwapChain::CreateD3D12Device(IDXGIAdapter* a_adapter)
 {
@@ -147,7 +148,7 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 		}
 	}
 
-	globals::features::upscaling.fidelityFX.Present(upscaling.settings.frameGenerationMode && !globals::game::ui->GameIsPaused());
+	globals::features::upscaling.fidelityFX.Present(upscaling.settings.frameGenerationMode && !Util::IsGamePausedOrMenuOpen());
 
 	DX::ThrowIfFailed(commandLists[frameIndex]->Close());
 
@@ -392,7 +393,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChainProxy::GetLastPresentCount(_Out_ UINT* pL
 
 void DX12SwapChain::SetUIBuffer()
 {
-	if (!globals::game::ui->GameIsPaused()) {
+	if (!Util::IsGamePausedOrMenuOpen()) {
 		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 		data.RTV = uiBufferWrapped->rtv;
 		d3d11Context->OMSetRenderTargets(1, &data.RTV, nullptr);

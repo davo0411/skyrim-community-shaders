@@ -48,6 +48,21 @@ namespace Util
 	// Text rendering constants
 	constexpr float DefaultHeaderTextScale = 1.5f;  // Larger scale for header text to improve readability
 
+	inline bool IsGamePausedOrMenuOpen()
+	{
+		auto ui = RE::UI::GetSingleton();
+		if (!ui)
+			return false;
+		if (ui->GameIsPaused())
+			return true;
+		return ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME) ||
+		       ui->IsMenuOpen(RE::ContainerMenu::MENU_NAME) ||
+		       ui->IsMenuOpen(RE::MagicMenu::MENU_NAME) ||
+		       ui->IsMenuOpen(RE::BarterMenu::MENU_NAME) ||
+		       ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME) ||
+		       ui->IsMenuOpen("Book Menu");
+	}
+
 	/**
 	 * Usage:
 	 * if (auto _tt = Util::HoverTooltipWrapper()){

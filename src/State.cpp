@@ -16,6 +16,7 @@
 #include "ShaderCache.h"
 #include "TruePBR.h"
 #include "Utils/FileSystem.h"
+#include "Utils/UI.h"
 
 void State::Draw()
 {
@@ -119,7 +120,7 @@ void State::Reset()
 	for (auto* feature : Feature::GetFeatureList())
 		if (feature->loaded)
 			feature->Reset();
-	if (!globals::game::ui->GameIsPaused())
+	if (!Util::IsGamePausedOrMenuOpen())
 		timer += RE::GetSecondsSinceLastFrame();
 	lastModifiedPixelDescriptor = 0;
 	lastModifiedVertexDescriptor = 0;

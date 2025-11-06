@@ -7,6 +7,7 @@
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/Streamline.h"
 #include "VR.h"
+#include "../Utils/UI.h"
 #include <Windows.h>
 #include <algorithm>
 #include <directx/d3dx12.h>
@@ -1007,7 +1008,7 @@ void Upscaling::FrameLimiter()
 		if (settings.frameLimitMode) {
 			// Fall back to the original timing method
 			// Use integer arithmetic for more precise timing
-			int64_t targetFrameTimeNS = int64_t(1000000000.0 / (refreshRate * (settings.frameGenerationMode && !globals::game::ui->GameIsPaused() ? 0.5 : 1.0)));
+			int64_t targetFrameTimeNS = int64_t(1000000000.0 / (refreshRate * (settings.frameGenerationMode && !Util::IsGamePausedOrMenuOpen() ? 0.5 : 1.0)));
 			int64_t targetFrameTicks = (targetFrameTimeNS * qpf.QuadPart) / 1000000000LL;
 
 			static LARGE_INTEGER lastFrame = {};
