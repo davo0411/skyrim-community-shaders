@@ -86,7 +86,7 @@ namespace WaterEffects
 
 		return parallaxOffsetTS.xy * parallaxAmount;
 	}
-	
+
 #if defined(FLOWMAP)
 	float GetFlowmapHeight(PS_INPUT input, float2 uvShift, float multiplier, float offset, float mipLevel)
 	{
@@ -206,6 +206,63 @@ namespace WaterEffects
 	float2 GetFlowmapParallaxOffset(PS_INPUT input, float2 flowmapDimensions, float3 viewDirection, float3 normalScalesRcp)
 	{
 		return GetFlowmapParallaxUVOffset(input, viewDirection, normalScalesRcp);
+	}
+#endif
+
+	// Water parallax shadowing using ExtendedMaterials approach
+	// This ensures shadows properly match the height displacement
+	
+	float GetWaterParallaxShadow(PS_INPUT input, float3 sunDirTS, float3 normalScalesRcp, float3 mipLevels, float2 parallaxOffset)
+	{
+		if (sunDirTS.z <= 0.05)
+			return 1.0;
+		
+		// Use normals for much more detail than height maps
+		// Sample with parallax offset so shadows move with animated waves
+		float2 rayOffset = sunDirTS.xy * 0.02;
+		float2 baseUV = input.TexCoord1.xy + parallaxOffset * normalScalesRcp.x;
+		
+		// Sample normals along sun direction with animation
+		float3 n0 = Normals01Tex.SampleLevel(Normals01Sampler, baseUV, mipLevels.x).xyz * 2.0 - 1.0;
+		float3 n1 = Normals01Tex.SampleLevel(Normals01Sampler, baseUV + rayOffset * normalScalesRcp.x, mipLevels.x).xyz * 2.0 - 1.0;
+		
+		// Calculate how much the surface slopes away from sun
+		float slope0 = saturate(dot(normalize(n0), sunDirTS));
+		float slope1 = saturate(dot(normalize(n1), sunDirTS));
+		
+		// If forward slope is higher, we're in shadow
+		float shadowAmount = saturate((slope1 - slope0) * 8.0);
+		return 1.0 - shadowAmount * 0.7;
+	}
+	
+	float GetWaveCrestShading(float height, float3 normal, float3 sunDir)
+	{
+		// Enhance wave crests (high points) and darken troughs (low points)
+		float heightShading = (height - 0.5) * 1.0;
+		float normalShading = (saturate(dot(normal, sunDir)) - 0.5) * 0.6;
+		return 1.0 + heightShading + normalShading;
+	}
+
+#if defined(FLOWMAP)
+	float GetFlowmapParallaxShadow(PS_INPUT input, float2 flowmapDimensions, float3 sunDirTS, float2 normalMul, float2 uvShift, float2 flowmapParallaxOffset, float3 normalScalesRcp)
+	{
+		if (sunDirTS.z <= 0.05)
+			return 1.0;
+			
+		// Use base normals with parallax offset for animated shadows
+		float2 rayOffset = sunDirTS.xy * 0.02;
+		float2 baseUV = input.TexCoord1.xy + flowmapParallaxOffset * normalScalesRcp.x;
+		
+		// Sample normals along sun direction with animation
+		float3 n0 = Normals01Tex.SampleLevel(Normals01Sampler, baseUV, 0).xyz * 2.0 - 1.0;
+		float3 n1 = Normals01Tex.SampleLevel(Normals01Sampler, baseUV + rayOffset * normalScalesRcp.x, 0).xyz * 2.0 - 1.0;
+		
+		// Calculate shadow from normal slope difference
+		float slope0 = saturate(dot(normalize(n0), sunDirTS));
+		float slope1 = saturate(dot(normalize(n1), sunDirTS));
+		
+		float shadowAmount = saturate((slope1 - slope0) * 8.0);
+		return 1.0 - shadowAmount * 0.7;
 	}
 #endif
 }

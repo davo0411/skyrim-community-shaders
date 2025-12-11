@@ -1121,6 +1121,33 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal = waterData.normal;
 
 	float fresnel = GetFresnelValue(normal, viewDirection);
+	
+	// Parallax self-shadowing using animated normals
+	float parallaxShadow = 1.0;
+#			if defined(WATER_PARALLAX) && !defined(LOD)
+	float screenNoise = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
+	float3 normalScalesRcp = rcp(input.NormalsScale.xyz);
+	float3 mipLevels = float3(0, 0, 0);
+	float3 sunDirTS = float3(SunDir.xy, SunDir.z);
+	
+#				if defined(FLOWMAP)
+	// Compute flowmap parallax offset for animated shadows
+	float2 flowmapDimensions;
+#					if defined(UNIFIED_WATER)
+	flowmapDimensions = input.TexCoord4.xy;
+#					else
+	flowmapDimensions = input.TexCoord4.xx;
+#					endif
+	float2 uvShift = 1 / (128 * flowmapDimensions);
+	float2 normalMul = 0.5 + -(-0.5 + abs(frac(input.TexCoord2.zw * (64 * flowmapDimensions)) * 2 - 1));
+	float2 flowmapParallaxOffset = WaterEffects::GetFlowmapParallaxOffset(input, flowmapDimensions, viewDirection, normalScalesRcp);
+	parallaxShadow = WaterEffects::GetFlowmapParallaxShadow(input, flowmapDimensions, sunDirTS, normalMul, uvShift, flowmapParallaxOffset, normalScalesRcp);
+#				else
+	// Calculate parallax offset for standard water
+	float2 parallaxOffset = WaterEffects::GetParallaxOffset(input, normalScalesRcp);
+	parallaxShadow = WaterEffects::GetWaterParallaxShadow(input, sunDirTS, normalScalesRcp, mipLevels, parallaxOffset);
+#				endif
+#			endif
 
 #			if defined(SPECULAR) && (NUM_SPECULAR_LIGHTS != 0)
 	float3 finalColor = 0.0.xxx;
@@ -1149,12 +1176,37 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float shadow = 1;
 
+#			if !defined(WATER_PARALLAX) || defined(LOD)
 	float screenNoise = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
+#			endif
 
 	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, depthControl.y, eyeIndex);
+	
+	// Apply parallax shadow to specular
+#			if defined(WATER_PARALLAX) && !defined(LOD)
+	specularColor *= parallaxShadow;
+#			endif
+	
 	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth);
 
 	float3 diffuseColor = lerp(diffuseOutput.refractionColor, diffuseOutput.refractionDiffuseColor, diffuseOutput.refractionMul);
+	
+	// Apply parallax shadow to diffuse as well
+#			if defined(WATER_PARALLAX) && !defined(LOD)
+	diffuseColor *= parallaxShadow;
+#			endif
+
+	// Apply subtle wave crest shading for parallaxed water (reuse already declared variables)
+#			if defined(WATER_PARALLAX) && !defined(LOD) && !defined(UNDERWATER)
+	float waveHeight = 0.5;
+#				if defined(FLOWMAP)
+	waveHeight = 1.0 - WaterEffects::GetFlowmapBlendedHeight(input, normalMul, uvShift, 0);
+#				else
+	waveHeight = WaterEffects::GetHeight(input, 0, normalScalesRcp, mipLevels);
+#				endif
+	float waveCrestShading = WaterEffects::GetWaveCrestShading(waveHeight, normal, SunDir.xyz);
+	diffuseColor *= waveCrestShading;
+#			endif
 
 	depthControl = DepthControl * (distanceMul - 1) + 1;
 
@@ -1213,6 +1265,7 @@ PS_OUTPUT main(PS_INPUT input)
 
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior) && any(sunColor > 0.0)) {
 		sunColor *= ShadowSampling::GetWaterShadow(screenNoise, input.WPosition.xyz, eyeIndex);
+		sunColor *= parallaxShadow;
 	}
 
 #					if defined(VC)
