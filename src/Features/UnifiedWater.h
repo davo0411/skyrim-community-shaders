@@ -1,14 +1,8 @@
-﻿#pragma once
+#pragma once
 #include "OverlayFeature.h"
 #include "UnifiedWater/Flowmap.h"
 #include "UnifiedWater/WaterCache.h"
-#include "UnifiedWater/WaterSettings.h"
-#include "UnifiedWater/WaterTessellation.h"
-#include "UnifiedWater/WaterWaves.h"
-#include "UnifiedWater/WaterRipples.h"
 #include <cstdint>
-#include <limits>
-#include <unordered_map>
 
 // Ensure BGS terrain classes are available
 #include "RE/B/BGSTerrainBlock.h"
@@ -24,208 +18,23 @@ struct UnifiedWater : OverlayFeature
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return {
-			"Enhanced water rendering system with improved wave simulation and foam generation.",
-			{ "Optimized water meshes for better performance",
-				"Gerstner wave simulation for realistic water movement",
-				"Advanced depth-based foam generation",
+			"Unified water cell management system with flowmap support.",
+			{
+				"Unified water cells across worldspaces",
 				"Enhanced flowmap support for dynamic water flow",
-				"Seamless integration with existing water effects" }
+				"Optimized water mesh management",
+			}
 		};
 	}
 	virtual inline bool HasShaderDefine(RE::BSShader::Type) override { return true; }
 
-	// Re-export types for backwards compatibility and JSON serialization
-	using GeneralSettings = UnifiedWaterSettings::GeneralSettings;
-	using TessellationSettings = UnifiedWaterTessellation::TessellationSettings;
-	using WaveSettings = UnifiedWaterWaves::WaveSettings;
-	using LightingSettings = UnifiedWaterSettings::LightingSettings;
-	using FogSettings = UnifiedWaterSettings::FogSettings;
-	using DepthSettings = UnifiedWaterSettings::DepthSettings;
-	using RippleSettings = UnifiedWaterRipples::RippleSettings;
-	using FoamSettings = UnifiedWaterSettings::FoamSettings;
-	using Settings = UnifiedWaterSettings::Settings;
-
-#pragma warning(push)
-#pragma warning(disable: 4324)
-	struct alignas(16) PerFrame
+	struct Settings
 	{
-		float WaveIntensity;
-		float WaveAmplitude;
-		float WaveSpeed;
-		float WaveSteepness;
-		float GameTimeHours;
-		float RealTimeSeconds;
-		float TimeScale;
-		float CellWorldSize;
-		float PrevGameTimeHours;
-		float PrevRealTimeSeconds;
-		float PrevTimeScale;
-		
-		// Water Lighting Overrides
-		float EnableLightingOverrides;
-		float FresnelBias;
-		float FresnelPower;
-		float ReflectionStrength;
-		float RefractionStrength;
-		float WaterTransparency;
-		float AbsorptionDensity;
-		float ScatteringCoeff;
-		float SpecularIntensity;
-		
-		// Sun Specular Overrides
-		float SunSpecularPower;
-		float SunSpecularMagnitude;
-		float SunSparklePower;
-		float SunSparkleMagnitude;
-		float SpecularRadius;
-		float SpecularBrightness;
-		
-		// Fog Overrides
-		float AboveWaterFogDistNear;
-		float AboveWaterFogDistFar;
-		float AboveWaterFogAmount;
-		float UnderwaterFogDistNear;
-		float UnderwaterFogDistFar;
-		float UnderwaterFogAmount;
-		
-		// Depth Properties
-		float DepthReflections;
-		float DepthRefractions;
-		float DepthNormals;
-		float DepthSpecularLighting;
-		
-		// Debug visualizer
-		float WireframeEnabled;
-		float PerFramePad0;
-		float PerFramePad1;
-		float PerFramePad2;
-		
-		// Wave 1 (Primary) - Large swells
-		float Wave1Amplitude;
-		float Wave1Wavelength;
-		float Wave1Steepness;
-		float Wave1AngleOffset;
-		
-		// Wave 2 (Secondary) - Medium waves
-		float Wave2Amplitude;
-		float Wave2Wavelength;
-		float Wave2Steepness;
-		float Wave2AngleOffset;
-		
-		// Wave 3 (Detail) - Small waves
-		float Wave3Amplitude;
-		float Wave3Wavelength;
-		float Wave3Steepness;
-		float Wave3AngleOffset;
-		
-		// Wave 4 (Fine Ripple 1) - Sub-meter detail
-		float Wave4Amplitude;
-		float Wave4Wavelength;
-		float Wave4Steepness;
-		float Wave4AngleOffset;
-		
-		// Wave 5 (Fine Ripple 2) - Micro ripples
-		float Wave5Amplitude;
-		float Wave5Wavelength;
-		float Wave5Steepness;
-		float Wave5AngleOffset;
-		
-		// Wave 6 (Fine Ripple 3) - Tiny surface detail
-		float Wave6Amplitude;
-		float Wave6Wavelength;
-		float Wave6Steepness;
-		float Wave6AngleOffset;
-		
-		// Tessellation control
-		float TessellationEnabled;
-		float WaveFadeStart;      // Distance where waves start fading
-		float WaveFadeEnd;        // Distance where waves fully fade
-		float TessPadding3;
-		
-		// Player ripples data
-		float PlayerPosX;
-		float PlayerPosY;
-		float PlayerPosZ;
-		float PlayerSpeed;
-		float PlayerInWater;
-		float PlayerVelocityX;  // Actual velocity for wake direction
-		float PlayerVelocityY;
-		float PlayerWaterDepth;  // Depth below water surface
-		float RippleStrength;
-		float RippleRadius;
-		float RippleWaveSpeed;
-		float RippleWaveFreq1;
-		float RippleWaveFreq2;
-		float RippleWaveFreq3;
-		float RippleNormalStrength;
-		
-		// Foam System
-		float FoamEnabled;
-		float FoamIntensity;
-		float FoamIntensityFlowmap;
-		float FoamThreshold;
-		float FoamSharpness;
-		float FoamLargeWaveSlopeRequirement;
-		float FoamSmallWaveSlopeMultiplier;
-		float FoamSmallWaveBaseOffset;
-		float FoamSmallWaveHeightRange;
-		float FoamPad0;
-		float FoamPad1;
-		float FoamPad2;
-		
-		// Depth-based wave control
-		float ShallowWaveDepthMin;
-		float ShallowWaveDepthMax;
-		float ShoreWaveDepthThreshold;
-		float ShoreWaveStrength;
-		
-		// Terrain heightmap parameters (for vertex shader depth estimation)
-		float TerrainHeightmapEnabled;
-		float TerrainScaleX;
-		float TerrainScaleY;
-		float TerrainOffsetX;
-		float TerrainOffsetY;
-		float TerrainZRangeMin;
-		float TerrainZRangeMax;
-		float TerrainPad0;
-	};
-
-	// Re-export types from modules for backwards compatibility
-	using ActorRippleData = UnifiedWaterRipples::ActorRippleData;
-	using ActorRippleBuffer = UnifiedWaterRipples::ActorRippleBuffer;
-	using TessellationParams = UnifiedWaterTessellation::TessellationParams;
-#pragma warning(pop)
-
-	struct alignas(16) PerTile
-	{
-		float PrevData[4];  // x/y = prev normal, z = prev distance, w = prev segments per axis
-		float TileData[4];  // x/y = tile cell coords, z = LOD level, w = tile span (cells)
+		bool UseOptimisedMeshes = true;
 	};
 
 	Settings settings;
-	ConstantBuffer* perFrame = nullptr;
-	ConstantBuffer* perTile = nullptr;
-	ConstantBuffer* actorRippleBuffer = nullptr;
 
-	float lastGameTimeHours = 0.0f;
-	float lastRealTimeSeconds = 0.0f;
-	float lastTimeScale = 1.0f;
-	float currentGameTimeHours = 0.0f;
-	float currentRealTimeSeconds = 0.0f;
-	float currentTimeScale = 1.0f;
-	std::uint32_t lastTimingFrameIndex = std::numeric_limits<std::uint32_t>::max();
-	bool hasLastTimingSample = false;
-
-	struct PrevTileData
-	{
-		float normalX = 0.0f;
-		float normalY = 0.0f;
-		float distance = 10000.0f;
-		float segmentsPerAxis = 32.0f;
-	};
-
-	std::unordered_map<std::uint64_t, PrevTileData> prevTileData;
-	
 	virtual void SetupResources() override;
 	virtual void Reset() override;
 
@@ -277,18 +86,6 @@ struct UnifiedWater : OverlayFeature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	struct BSWaterShader_SetupGeometry
-	{
-		static void thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass);
-		static inline REL::Relocation<decltype(thunk)> func;
-	};
-
-	struct BSWaterShader_RestoreGeometry
-	{
-		static void thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass, uint32_t renderFlags);
-		static inline REL::Relocation<decltype(thunk)> func;
-	};
-
 	struct TESWaterSystem_UpdateDisplacementMeshPosition
 	{
 		static void thunk(RE::TESWaterSystem* waterSystem);
@@ -310,6 +107,12 @@ struct UnifiedWater : OverlayFeature
 	virtual bool SupportsVR() override { return true; }
 
 	virtual void PostPostLoad() override;
+
+	// Public accessors for PBRWater to use
+	Flowmap* GetFlowmap() const { return flowmap; }
+	WaterCache* GetWaterCache() const { return waterCache; }
+	RE::BSTriShape* GetWaterMesh() const { return waterMesh.get(); }
+	RE::BSTriShape* GetOptimisedWaterMesh() const { return optimisedWaterMesh.get(); }
 
 private:
 	RE::NiPointer<RE::BSTriShape> waterMesh;
