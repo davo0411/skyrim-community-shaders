@@ -24,6 +24,7 @@ namespace SIE
 		constexpr const char* ComputeShaderProfile = "cs_5_0";
 		constexpr const char* HullShaderProfile = "hs_5_0";
 		constexpr const char* DomainShaderProfile = "ds_5_0";
+		constexpr const char* GeometryShaderProfile = "gs_5_0";
 
 		static std::wstring GetShaderPath(const std::string_view& name)
 		{
@@ -43,8 +44,11 @@ namespace SIE
 				return HullShaderProfile;
 			case ShaderClass::Domain:
 				return DomainShaderProfile;
+			case ShaderClass::Geometry:
+				return GeometryShaderProfile;
+			default:
+				return nullptr;
 			}
-			return nullptr;
 		}
 
 		uint32_t GetTechnique(uint32_t descriptor)
@@ -1230,8 +1234,164 @@ namespace SIE
 				return std::format(L"Data/ShaderCache/{}/{:X}.vso", std::wstring(name.begin(), name.end()), descriptor);
 			case ShaderClass::Compute:
 				return std::format(L"Data/ShaderCache/{}/{:X}.cso", std::wstring(name.begin(), name.end()), descriptor);
+			case ShaderClass::Hull:
+				return std::format(L"Data/ShaderCache/{}/{:X}.hso", std::wstring(name.begin(), name.end()), descriptor);
+			case ShaderClass::Domain:
+				return std::format(L"Data/ShaderCache/{}/{:X}.dso", std::wstring(name.begin(), name.end()), descriptor);
+			case ShaderClass::Geometry:
+				return std::format(L"Data/ShaderCache/{}/{:X}.gso", std::wstring(name.begin(), name.end()), descriptor);
+			default:
+				return {};
 			}
-			return {};
+		}
+
+		std::wstring GetCustomShaderDiskPath(const std::string_view& featureName, const std::string_view& shaderName, ShaderClass shaderClass)
+		{
+			const wchar_t* ext = L"";
+			switch (shaderClass) {
+			case ShaderClass::Hull:
+				ext = L"hso";
+				break;
+			case ShaderClass::Domain:
+				ext = L"dso";
+				break;
+			case ShaderClass::Geometry:
+				ext = L"gso";
+				break;
+			default:
+				return {};
+			}
+			return std::format(L"Data/ShaderCache/{}/{}.{}", std::wstring(featureName.begin(), featureName.end()), std::wstring(shaderName.begin(), shaderName.end()), ext);
+		}
+
+		ID3D11DeviceChild* CompileAndCacheCustomShader(
+			const std::wstring& sourcePath,
+			const std::vector<std::pair<const char*, const char*>>& defines,
+			ShaderClass shaderClass,
+			const std::string_view& featureName,
+			const std::string_view& shaderName)
+		{
+			// Only Hull, Domain, Geometry shaders supported
+			if (shaderClass != ShaderClass::Hull && shaderClass != ShaderClass::Domain && shaderClass != ShaderClass::Geometry) {
+				logger::error("[{}] CompileAndCacheCustomShader only supports Hull/Domain/Geometry shaders", featureName);
+				return nullptr;
+			}
+
+			auto& cache = ShaderCache::Instance();
+			bool useDiskCache = cache.IsDiskCache();
+			auto diskPath = GetCustomShaderDiskPath(featureName, shaderName, shaderClass);
+			auto device = globals::d3d::device;
+			ID3DBlob* shaderBlob = nullptr;
+			bool loadedFromCache = false;
+
+			// Try to load from disk cache first
+			if (useDiskCache && !diskPath.empty() && std::filesystem::exists(diskPath)) {
+				bool cacheValid = true;
+				if (std::filesystem::exists(sourcePath)) {
+					auto sourceTime = std::filesystem::last_write_time(sourcePath);
+					auto cacheTime = std::filesystem::last_write_time(diskPath);
+					if (sourceTime > cacheTime) {
+						logger::debug("[{}] Cache outdated for {}, recompiling", featureName, shaderName);
+						cacheValid = false;
+					}
+				}
+
+				if (cacheValid && SUCCEEDED(D3DReadFileToBlob(diskPath.c_str(), &shaderBlob))) {
+					logger::debug("[{}] Loaded {} from disk cache", featureName, shaderName);
+					loadedFromCache = true;
+				}
+			}
+
+			// Compile if not loaded from cache
+			if (!loadedFromCache) {
+				std::vector<D3D_SHADER_MACRO> macros;
+				for (const auto& [key, value] : defines) {
+					if (key && _stricmp(key, "") != 0)
+						macros.push_back({ key, value });
+				}
+
+				if (REL::Module::IsVR())
+					macros.push_back({ "VR", nullptr });
+				if (globals::state->IsDeveloperMode()) {
+					macros.push_back({ "D3DCOMPILE_SKIP_OPTIMIZATION", nullptr });
+					macros.push_back({ "D3DCOMPILE_DEBUG", nullptr });
+				}
+				auto shaderDefines = globals::state->GetDefines();
+				if (shaderDefines && !shaderDefines->empty()) {
+					for (const auto& [first, second] : *shaderDefines)
+						macros.push_back({ first.c_str(), second.c_str() });
+				}
+				macros.push_back({ "WINPC", nullptr });
+				macros.push_back({ "DX11", nullptr });
+				macros.push_back({ nullptr, nullptr });
+
+				uint32_t flags = !globals::state->IsDeveloperMode() ? (D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3) : D3DCOMPILE_DEBUG;
+
+				CustomInclude include;
+				ID3DBlob* shaderErrors = nullptr;
+
+				if (!std::filesystem::exists(sourcePath)) {
+					logger::error("[{}] Shader source not found: {}", featureName, Util::WStringToString(sourcePath));
+					return nullptr;
+				}
+
+				if (FAILED(D3DCompileFromFile(sourcePath.c_str(), macros.data(), &include, "main", GetShaderProfile(shaderClass), flags, 0, &shaderBlob, &shaderErrors))) {
+					logger::error("[{}] Failed to compile {}: {}", featureName, shaderName,
+						shaderErrors ? static_cast<char*>(shaderErrors->GetBufferPointer()) : "Unknown error");
+					if (shaderErrors)
+						shaderErrors->Release();
+					return nullptr;
+				}
+				if (shaderErrors)
+					shaderErrors->Release();
+
+				logger::debug("[{}] Compiled {} successfully", featureName, shaderName);
+
+				// Save to disk cache
+				if (useDiskCache && shaderBlob && !diskPath.empty()) {
+					auto parentPath = std::filesystem::path(diskPath).parent_path();
+					if (!std::filesystem::exists(parentPath)) {
+						try {
+							std::filesystem::create_directories(parentPath);
+						} catch (const std::filesystem::filesystem_error&) {
+						}
+					}
+					D3DWriteBlobToFile(shaderBlob, diskPath.c_str(), true);
+				}
+			}
+
+			// Create shader from blob
+			ID3D11DeviceChild* shader = nullptr;
+			if (shaderBlob) {
+				switch (shaderClass) {
+				case ShaderClass::Hull:
+					{
+						ID3D11HullShader* hs = nullptr;
+						device->CreateHullShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &hs);
+						shader = hs;
+					}
+					break;
+				case ShaderClass::Domain:
+					{
+						ID3D11DomainShader* ds = nullptr;
+						device->CreateDomainShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &ds);
+						shader = ds;
+					}
+					break;
+				case ShaderClass::Geometry:
+					{
+						ID3D11GeometryShader* gs = nullptr;
+						device->CreateGeometryShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &gs);
+						shader = gs;
+					}
+					break;
+				default:
+					break;
+				}
+				shaderBlob->Release();
+			}
+
+			return shader;
 		}
 
 		static std::string GetShaderString(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor, bool hashkey)
@@ -1306,6 +1466,8 @@ namespace SIE
 				defines[lastIndex++] = { "HSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Domain) {
 				defines[lastIndex++] = { "DSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Geometry) {
+				defines[lastIndex++] = { "GSHADER", nullptr };
 			}
 			if (globals::state->IsDeveloperMode()) {
 				defines[lastIndex++] = { "D3DCOMPILE_SKIP_OPTIMIZATION", nullptr };

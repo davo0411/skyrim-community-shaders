@@ -13,6 +13,12 @@ namespace Util
 
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program = "main");
 
+	// Compile shader with disk caching support
+	// Returns the compiled shader and optionally outputs the shader blob for further processing
+	// cachePath: Path where the compiled shader blob will be cached (e.g., "Data/ShaderCache/Water/Hull.hso")
+	// If cachePath is empty, no disk caching is performed
+	ID3D11DeviceChild* CompileShaderWithCache(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const std::wstring& cachePath = L"", ID3DBlob** outBlob = nullptr, const char* Program = "main");
+
 	// Texture manipulation utilities
 	void ApplyHighlightTintToTexture(ID3D11Texture2D* texture, bool isHighlighted, const std::array<float, 4>& highlightColor = { 1.0f, 0.5f, 0.0f, 0.3f });
 	HRESULT CreateOverlayTextureAndRTV(ID3D11Device* device, int width, int height, ID3D11Texture2D** outTex, ID3D11RenderTargetView** outRTV);

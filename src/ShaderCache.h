@@ -202,8 +202,21 @@ namespace SIE
 		Compute,
 		Hull,
 		Domain,
+		Geometry,
 		Total,
 	};
+
+	// Custom shader utilities for Hull/Domain/Geometry shaders (not supported by BSShader system)
+	namespace SShaderCache
+	{
+		std::wstring GetCustomShaderDiskPath(const std::string_view& featureName, const std::string_view& shaderName, ShaderClass shaderClass);
+		ID3D11DeviceChild* CompileAndCacheCustomShader(
+			const std::wstring& sourcePath,
+			const std::vector<std::pair<const char*, const char*>>& defines,
+			ShaderClass shaderClass,
+			const std::string_view& featureName,
+			const std::string_view& shaderName);
+	}
 
 	class ShaderCompilationTask
 	{
