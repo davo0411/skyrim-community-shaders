@@ -497,14 +497,25 @@ void Upscaling::CreateUpscalingTextureResources(UpscaleMethod a_upscalemethod)
 			motionVectorCopyTexture->CreateUAV(uavDesc);
 		}
 
-		if (!nisSharpenerTexture) {
-			texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-			srvDesc.Format = texDesc.Format;
-			uavDesc.Format = texDesc.Format;
+		// RCAS sharpener texture - matches kMAIN format for HDR sharpening
+		if (!sharpenerTexture) {
+			main.texture->GetDesc(&texDesc);
+			main.SRV->GetDesc(&srvDesc);
 
-			nisSharpenerTexture = new Texture2D(texDesc);
-			nisSharpenerTexture->CreateSRV(srvDesc);
-			nisSharpenerTexture->CreateUAV(uavDesc);
+			texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+
+			srvDesc.Format = texDesc.Format;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MostDetailedMip = 0;
+			srvDesc.Texture2D.MipLevels = 1;
+
+			uavDesc.Format = texDesc.Format;
+			uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			uavDesc.Texture2D.MipSlice = 0;
+
+			sharpenerTexture = new Texture2D(texDesc);
+			sharpenerTexture->CreateSRV(srvDesc);
+			sharpenerTexture->CreateUAV(uavDesc);
 		}
 	}
 }
@@ -545,13 +556,13 @@ void Upscaling::DestroyUpscalingTextureResources(UpscaleMethod a_upscalemethod)
 			delete motionVectorCopyTexture;
 			motionVectorCopyTexture = nullptr;
 		}
-		if (nisSharpenerTexture) {
-			nisSharpenerTexture->srv = nullptr;
-			nisSharpenerTexture->uav = nullptr;
-			nisSharpenerTexture->resource = nullptr;
+		if (sharpenerTexture) {
+			sharpenerTexture->srv = nullptr;
+			sharpenerTexture->uav = nullptr;
+			sharpenerTexture->resource = nullptr;
 
-			delete nisSharpenerTexture;
-			nisSharpenerTexture = nullptr;
+			delete sharpenerTexture;
+			sharpenerTexture = nullptr;
 		}
 	}
 }
@@ -569,15 +580,17 @@ void Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		logger::debug("[Upscaling] Resource change detected - Upscale: {} ({}) -> {} ({}), FrameGen: {} -> {} (d3d12Active={})",
 			static_cast<int>(previousUpscaleMode), magic_enum::enum_name(previousUpscaleMode), static_cast<int>(a_upscalemethod), magic_enum::enum_name(a_upscalemethod), previousFrameGenMode, frameGenModeCurrent, d3d12SwapChainActive);
 
-		// Destroy previous upscaling method resources (this will intelligently clean up based on what's still needed)
+		// Destroy previous upscaling method resources (only if they were actually active)
 		if (upscaleModeChanged) {
 			DestroyUpscalingTextureResources(a_upscalemethod);
 
-			if (previousUpscaleMode == UpscaleMethod::kDLSS)
-				streamline.DestroyDLSSResources();
-			else if (previousUpscaleMode == UpscaleMethod::kFSR)
-				fidelityFX.DestroyFSRResources();
-
+			// Only destroy SDK resources if the previous method was actually performing upscaling
+			if (previousUpscalingWasActive) {
+				if (previousUpscaleMode == UpscaleMethod::kDLSS)
+					streamline.DestroyDLSSResources();
+				else if (previousUpscaleMode == UpscaleMethod::kFSR)
+					fidelityFX.DestroyFSRResources();
+			}
 			if (a_upscalemethod == UpscaleMethod::kFSR)
 				fidelityFX.CreateFSRResources();
 		}
@@ -587,8 +600,10 @@ void Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			CreateUpscalingTextureResources(a_upscalemethod);
 		}
 
+		// Update tracking for next call
 		previousUpscaleMode = a_upscalemethod;
 		previousFrameGenMode = (settings.frameGenerationMode && d3d12SwapChainActive);
+		previousUpscalingWasActive = IsUpscalingActive();
 	}
 }
 
@@ -873,6 +888,8 @@ void Upscaling::SetupResources()
 
 	CheckResources(GetUpscaleMethod());
 
+	rcas.Initialize();
+
 	if (d3d12SwapChainActive)
 		dx12SwapChain.CreateSharedResources();
 
@@ -1065,12 +1082,10 @@ double Upscaling::GetRefreshRate(HWND a_window)
 						// there may be the possibility that display may be duplicated and windows may be one of them in such scenario
 						// there may be two callback because source is same target will be different
 						// as window is on both the display so either selecting either one is ok
-						if (wcscmp(info.szDevice, sourceName.viewGdiDeviceName) == 0) {
-							// get the refresh rate
-							UINT numerator = p.targetInfo.refreshRate.Numerator;
-							UINT denominator = p.targetInfo.refreshRate.Denominator;
-							return (double)numerator / (double)denominator;
-						}
+						// get the refresh rate
+						UINT numerator = p.targetInfo.refreshRate.Numerator;
+						UINT denominator = p.targetInfo.refreshRate.Denominator;
+						return (double)numerator / (double)denominator;
 					}
 				}
 			}
@@ -1089,7 +1104,7 @@ bool Upscaling::IsUpscalingActive()
 {
 	auto method = GetUpscaleMethod();
 
-	// Only consider vendor upscalers (FSR/XeSS/DLSS) as "active" when the
+	// Only consider vendor upscalers (FSR/DLSS) as "active" when the
 	// selected method actually produces a downscale. If the renderer is
 	// currently running at 1:1 (no downscale) then depth-buffer culling and
 	// other VR-sensitive behavior can remain enabled.
@@ -1405,32 +1420,35 @@ void Upscaling::UpscaleDepth()
 	}
 }
 
-void Upscaling::ApplyNISSharpening()
+void Upscaling::ApplySharpening()
 {
-	if (!streamline.featureNIS || settings.sharpnessDLSS <= 0.0f) {
+	if (settings.sharpnessDLSS <= 0.0f)
 		return;
-	}
+
+	if (!sharpenerTexture)
+		return;
+
+	float currentSharpness = (-2.0f * settings.sharpnessDLSS) + 2.0f;
+	currentSharpness = exp2(-currentSharpness);
 
 	auto context = globals::d3d::context;
+	auto renderer = globals::game::renderer;
+	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
-	ID3D11RenderTargetView* renderTarget = nullptr;
-	context->OMGetRenderTargets(1, &renderTarget, nullptr);
+	ID3D11Resource* mainResource = nullptr;
+	main.SRV->GetResource(&mainResource);
 
-	winrt::com_ptr<ID3D11Resource> mainResource;
-	renderTarget->GetResource(mainResource.put());
+	if (!mainResource)
+		return;
 
-	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
+	context->OMSetRenderTargets(0, nullptr, nullptr);
 
-	context->CopyResource(nisSharpenerTexture->resource.get(), mainResource.get());
+	rcas.ApplySharpen(main.SRV, sharpenerTexture->uav.get(), currentSharpness);
+	context->CopyResource(mainResource, sharpenerTexture->resource.get());
 
-	streamline.ApplyNISSharpening(nisSharpenerTexture->resource.get(), settings.sharpnessDLSS);
+	mainResource->Release();
 
-	context->CopyResource(mainResource.get(), nisSharpenerTexture->resource.get());
-
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
-
-	if (renderTarget)
-		renderTarget->Release();
+	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
 void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
@@ -1457,6 +1475,9 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	if (upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA)
 		upscaling.PerformUpscaling();
 
+	if (upscaleMethod == UpscaleMethod::kDLSS)
+		upscaling.ApplySharpening();
+
 	auto imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
 	GET_INSTANCE_MEMBER(BSImagespaceShaderISTemporalAA, imageSpaceManager);
 
@@ -1464,10 +1485,6 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	func(a_this, a3, a_target, a_4, a_5);
 
-	if (upscaleMethod == UpscaleMethod::kDLSS)
-		upscaling.ApplyNISSharpening();
-
-	// Disable TAA in some menus
 	BSImagespaceShaderISTemporalAA->taaEnabled = false;
 }
 

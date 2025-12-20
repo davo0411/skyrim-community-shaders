@@ -554,8 +554,13 @@ float3 GetLightingColor(float3 msPosition, float3 worldPosition, float4 screenPo
 		float3 ambientColor = max(0, mul(SharedData::DirectionalAmbient, float4(0, 0, 1, 1)));
 
 #		if defined(IBL)
-		if (SharedData::iblSettings.EnableDiffuseIBL) {
-			ambientColor += ImageBasedLighting::GetIBLColor(float3(0, 0, -1)) * SharedData::enbSettings.IBLMultiplicativeAmount;
+		if (SharedData::iblSettings.EnableDiffuseIBL && !SharedData::enbSettings.EnableImageBasedLighting) {
+#			if defined(SKYLIGHTING)
+			float3 iblColor = Color::Saturation(ImageBasedLighting::GetIBLColor(float3(0, 0, -1), 1.0), SharedData::iblSettings.IBLSaturation) * SharedData::iblSettings.DiffuseIBLScale;
+#			else
+			float3 iblColor = Color::Saturation(ImageBasedLighting::GetIBLColor(float3(0, 0, -1)), SharedData::iblSettings.IBLSaturation) * SharedData::iblSettings.DiffuseIBLScale;
+#			endif
+			ambientColor += Color::LinearToGamma(iblColor);
 		}
 #		endif
 

@@ -642,7 +642,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float3 sss = dirLightColor * saturate(-dirLightAngle);
 
 	if (complex)
-		lightsSpecularColor += GrassLighting::GetLightSpecularInput(DirLightDirection, viewDirection, normal, dirLightColor, SharedData::grassLightingSettings.Glossiness);
+		lightsSpecularColor += GrassLighting::GetLightSpecularInput(SharedData::DirLightDirection.xyz, viewDirection, normal, dirLightColor, SharedData::grassLightingSettings.Glossiness);
 #			endif
 
 #			if defined(LIGHT_LIMIT_FIX)
@@ -747,10 +747,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #				endif  // SKYLIGHTING
 
 #				if defined(IBL)
-	if (SharedData::iblSettings.EnableDiffuseIBL) {
-		float3 iblColor = ImageBasedLighting::GetIBLColor(-normal);
-		directionalAmbientColor += iblColor * SharedData::enbSettings.IBLMultiplicativeAmount;
-		directionalAmbientColorAdditive += iblColor * SharedData::enbSettings.IBLAdditiveAmount;
+	if (SharedData::iblSettings.EnableDiffuseIBL && !SharedData::enbSettings.EnableImageBasedLighting) {
+#					if defined(SKYLIGHTING)
+		float3 iblColor = Color::Saturation(ImageBasedLighting::GetIBLColor(-normal, skylightingDiffuse), SharedData::iblSettings.IBLSaturation) * SharedData::iblSettings.DiffuseIBLScale;
+#					else
+		float3 iblColor = Color::Saturation(ImageBasedLighting::GetIBLColor(-normal), SharedData::iblSettings.IBLSaturation) * SharedData::iblSettings.DiffuseIBLScale;
+#					endif
+		directionalAmbientColor += Color::LinearToGamma(iblColor);
 	}
 #				endif
 
@@ -936,10 +939,13 @@ PS_OUTPUT main(PS_INPUT input)
 #			endif  // SKYLIGHTING
 
 #			if defined(IBL)
-	if (SharedData::iblSettings.EnableDiffuseIBL) {
-		float3 iblColor = ImageBasedLighting::GetIBLColor(-normal);
-		directionalAmbientColor += iblColor * SharedData::enbSettings.IBLMultiplicativeAmount;
-		directionalAmbientColorAdditive += iblColor * SharedData::enbSettings.IBLAdditiveAmount;
+	if (SharedData::iblSettings.EnableDiffuseIBL && !SharedData::enbSettings.EnableImageBasedLighting) {
+#				if defined(SKYLIGHTING)
+		float3 iblColor = Color::Saturation(ImageBasedLighting::GetIBLColor(-normal, skylightingDiffuse), SharedData::iblSettings.IBLSaturation) * SharedData::iblSettings.DiffuseIBLScale;
+#				else
+		float3 iblColor = Color::Saturation(ImageBasedLighting::GetIBLColor(-normal), SharedData::iblSettings.IBLSaturation) * SharedData::iblSettings.DiffuseIBLScale;
+#				endif
+		directionalAmbientColor += Color::LinearToGamma(iblColor);
 	}
 #			endif
 

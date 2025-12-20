@@ -1,5 +1,6 @@
 ﻿#include "VR.h"
 #include "Menu.h"
+#include "Menu/Fonts.h"
 #include "RE/B/BSOpenVR.h"
 #include "RE/N/NiPoint3.h"
 #include "RE/P/PlayerCharacter.h"
@@ -22,6 +23,14 @@
 #pragma comment(lib, "version.lib")
 
 using AttachMode = VR::Settings::OverlayAttachMode;
+
+namespace
+{
+	bool BeginTabItemWithFont(const char* label, Menu::FontRole role, ImGuiTabItemFlags flags = ImGuiTabItemFlags_None)
+	{
+		return MenuFonts::BeginTabItemWithFont(label, role, flags);
+	}
+}
 
 constexpr int kOverlayWidth = 1920;
 constexpr int kOverlayHeight = 1080;
@@ -122,7 +131,7 @@ void VR::PostPostLoad()
 void VR::DataLoaded()
 {
 	// Initialize occlusion culling based on settings, but force-disable if an external
-	// upscaler is active (FSR/XeSS/DLSS) since upscalers may modify the depth buffer.
+	// upscaler is active (FSR/DLSS) since upscalers may modify the depth buffer.
 	bool desired = settings.EnableDepthBufferCullingExterior;
 	UpdateDepthBufferCulling(desired);
 
@@ -218,7 +227,7 @@ void VR::DrawSettings()
 		return;
 	if (ImGui::BeginTabBar("##VRTabs", ImGuiTabBarFlags_None)) {
 		// General Settings Tab
-		if (ImGui::BeginTabItem("General")) {
+		if (BeginTabItemWithFont("General", Menu::FontRole::Subheading)) {
 			if (ImGui::BeginChild("##VRGeneralFrame", { 0, 0 }, true)) {
 				DrawGeneralVRSettings();
 				DrawControllerInputInstructions();
@@ -232,7 +241,7 @@ void VR::DrawSettings()
 
 		// Key Bindings Tab
 		if (openVRInfo.isCompatible) {
-			if (ImGui::BeginTabItem("Bindings")) {
+			if (BeginTabItemWithFont("Bindings", Menu::FontRole::Subheading)) {
 				if (ImGui::BeginChild("##VRBindingsFrame", { 0, 0 }, true)) {
 					DrawKeyBindings();
 				}
@@ -241,7 +250,7 @@ void VR::DrawSettings()
 			}
 		}
 		// Debug Tab (existing debug functionality)
-		if (ImGui::BeginTabItem("Debug")) {
+		if (BeginTabItemWithFont("Debug", Menu::FontRole::Subheading)) {
 			if (ImGui::BeginChild("##VRDebugFrame", { 0, 0 }, true)) {
 				DrawDebugSection();
 			}
@@ -581,7 +590,7 @@ namespace
 			// If an upscaler is active that rewrites or repurposes the depth buffer,
 			// depth-buffer-culling must be disabled to avoid incorrect occlusion tests
 			// (which are especially problematic in VR). Query the Upscaling feature
-			// to see whether we're running FSR, XeSS or DLSS.
+			// to see whether we're running FSR or DLSS.
 			// Determine if an external upscaler is active by reading the numeric
 			// setting value directly. Avoid referencing Upscaling types here to
 			// prevent header/type collisions in this translation unit.
@@ -594,7 +603,7 @@ namespace
 			ImGui::Checkbox("Enable Depth Buffer Culling in Exteriors", &settings.EnableDepthBufferCullingExterior);
 			if (upscalingActive) {
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Disabled while an external upscaler is active (FSR/XeSS/DLSS) because upscalers may modify depth.\nThis prevents incorrect occlusion in VR.");
+					ImGui::Text("Disabled while an external upscaler is active (FSR/DLSS) because upscalers may modify depth.\nThis prevents incorrect occlusion in VR.");
 				}
 				ImGui::EndDisabled();
 			} else {
@@ -609,7 +618,7 @@ namespace
 			ImGui::Checkbox("Enable Depth Buffer Culling in Interiors", &settings.EnableDepthBufferCullingInterior);
 			if (upscalingActive) {
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Disabled while an external upscaler is active (FSR/XeSS/DLSS) because upscalers may modify depth.\nThis prevents incorrect occlusion in VR.");
+					ImGui::Text("Disabled while an external upscaler is active (FSR/DLSS) because upscalers may modify depth.\nThis prevents incorrect occlusion in VR.");
 				}
 				ImGui::EndDisabled();
 			} else {

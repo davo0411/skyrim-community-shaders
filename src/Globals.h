@@ -33,6 +33,7 @@ struct ENBPostProcessing;
 class State;
 class Deferred;
 struct TruePBR;
+class RenderDoc;
 class Menu;
 
 namespace SIE
@@ -80,6 +81,7 @@ namespace globals
 		extern ExtendedTranslucency extendedTranslucency;
 		extern Upscaling upscaling;
 		extern ENBPostProcessing enbPostProcessing;
+		extern RenderDoc renderDoc;
 
 		namespace llf
 		{
