@@ -543,6 +543,9 @@ namespace SIE
 			}
 			if (descriptor & static_cast<uint32_t>(TreeAnim)) {
 				defines[lastIndex++] = { "TREE_ANIM", nullptr };
+				if (!REL::Module::IsVR()) {
+					defines[lastIndex++] = { "TREE_INSTANCING", nullptr };  // GPU instancing for trees (disabled in VR)
+				}
 			}
 			if (descriptor & static_cast<uint32_t>(LodObject)) {
 				defines[lastIndex++] = { "LOD_OBJECT", nullptr };

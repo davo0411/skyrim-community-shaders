@@ -50,9 +50,9 @@ struct VS_INPUT
 #if defined(EYE)
 	float EyeParameter : TEXCOORD2;
 #endif  // EYE
-#if defined(VR)
+#if defined(VR) || defined(TREE_INSTANCING)
 	uint InstanceID : SV_INSTANCEID;
-#endif  // VR
+#endif  // VR || TREE_INSTANCING
 };
 
 struct VS_OUTPUT
@@ -163,6 +163,33 @@ cbuffer VS_PerFrame : register(b12)
 #	endif      // VR
 };
 
+// GPU Instancing support for trees
+#	if defined(TREE_INSTANCING)
+struct TreeInstanceData
+{
+	float4 WorldRow0;      // World matrix row 0 (rotation*scale, translate.x in w)
+	float4 WorldRow1;      // World matrix row 1 (rotation*scale, translate.y in w)
+	float4 WorldRow2;      // World matrix row 2 (rotation*scale, translate.z in w)
+	float4 PrevWorldRow0;  // Previous world row 0
+	float4 PrevWorldRow1;  // Previous world row 1
+	float4 PrevWorldRow2;  // Previous world row 2
+};
+
+StructuredBuffer<TreeInstanceData> TreeInstances : register(t21);
+
+float3x4 GetInstanceWorld(uint instanceID)
+{
+	TreeInstanceData data = TreeInstances[instanceID];
+	return float3x4(data.WorldRow0, data.WorldRow1, data.WorldRow2);
+}
+
+float3x4 GetInstancePreviousWorld(uint instanceID)
+{
+	TreeInstanceData data = TreeInstances[instanceID];
+	return float3x4(data.PrevWorldRow0, data.PrevWorldRow1, data.PrevWorldRow2);
+}
+#	endif  // TREE_INSTANCING
+
 #	if defined(TREE_ANIM)
 float2 GetTreeShiftVector(float4 position, float4 color)
 {
@@ -211,7 +238,17 @@ VS_OUTPUT main(VS_INPUT input)
 	precise float4 worldPosition = float4(mul(inputPosition, transpose(worldMatrix)), 1);
 
 	float4 viewPos = mul(ViewProj[eyeIndex], worldPosition);
-#	else   // !SKINNED
+#	elif defined(TREE_INSTANCING)
+	// GPU instancing for trees - get world matrix from StructuredBuffer
+	float3x4 instanceWorld = GetInstanceWorld(input.InstanceID);
+	float3x4 instancePrevWorld = GetInstancePreviousWorld(input.InstanceID);
+
+	precise float4 previousWorldPosition = float4(mul(instancePrevWorld, inputPosition), 1);
+	precise float4 worldPosition = float4(mul(instanceWorld, inputPosition), 1);
+	precise float4x4 world4x4 = float4x4(instanceWorld[0], instanceWorld[1], instanceWorld[2], float4(0, 0, 0, 1));
+	precise float4x4 modelView = mul(ViewProj[eyeIndex], world4x4);
+	float4 viewPos = mul(modelView, inputPosition);
+#	else   // !SKINNED && !TREE_INSTANCING
 	precise float4 previousWorldPosition = float4(mul(PreviousWorld[eyeIndex], inputPosition), 1);
 	precise float4 worldPosition = float4(mul(World[eyeIndex], inputPosition), 1);
 	precise float4x4 world4x4 = float4x4(World[eyeIndex][0], World[eyeIndex][1], World[eyeIndex][2], float4(0, 0, 0, 1));
@@ -259,6 +296,19 @@ VS_OUTPUT main(VS_INPUT input)
 	vsout.TBN0.xyz = worldTbnTr[0];
 	vsout.TBN1.xyz = worldTbnTr[1];
 	vsout.TBN2.xyz = worldTbnTr[2];
+#		elif defined(TREE_INSTANCING)
+	// Use instance world matrix for TBN
+	vsout.TBN0.xyz = mul(tbn, instanceWorld[0].xyz);
+	vsout.TBN1.xyz = mul(tbn, instanceWorld[1].xyz);
+	vsout.TBN2.xyz = mul(tbn, instanceWorld[2].xyz);
+	float3x3 tempTbnTr = transpose(float3x3(vsout.TBN0.xyz, vsout.TBN1.xyz, vsout.TBN2.xyz));
+	tempTbnTr[0] = normalize(tempTbnTr[0]);
+	tempTbnTr[1] = normalize(tempTbnTr[1]);
+	tempTbnTr[2] = normalize(tempTbnTr[2]);
+	tempTbnTr = transpose(tempTbnTr);
+	vsout.TBN0.xyz = tempTbnTr[0];
+	vsout.TBN1.xyz = tempTbnTr[1];
+	vsout.TBN2.xyz = tempTbnTr[2];
 #		else
 	vsout.TBN0.xyz = mul(tbn, World[eyeIndex][0].xyz);
 	vsout.TBN1.xyz = mul(tbn, World[eyeIndex][1].xyz);
