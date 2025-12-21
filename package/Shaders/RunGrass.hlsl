@@ -21,13 +21,15 @@ struct VS_INPUT
 	float2 TexCoord : TEXCOORD0;
 	float4 Normal : NORMAL0;
 	float4 Color : COLOR0;
+#if !defined(GRASS_INSTANCING)
 	float4 InstanceData1 : TEXCOORD4;
 	float4 InstanceData2 : TEXCOORD5;
 	float4 InstanceData3 : TEXCOORD6;
 	float4 InstanceData4 : TEXCOORD7;
-#ifdef VR
+#endif
+#if defined(VR) || defined(GRASS_INSTANCING)
 	uint InstanceID : SV_INSTANCEID;
-#endif  // VR
+#endif
 };
 
 #ifdef GRASS_LIGHTING
@@ -130,6 +132,46 @@ cbuffer PerGeometry : register(
 #		include "GrassCollision\\GrassCollision.hlsli"
 #	endif  // GRASS_COLLISION
 
+// GPU Instancing support - instance data from StructuredBuffer instead of vertex attributes
+#	ifdef GRASS_INSTANCING
+struct GrassInstanceData
+{
+	float4 Data1;  // xyz = world position, w = wind multiplier
+	float4 Data2;  // xyz = rotation col 0, w = rotation col 2.y
+	float4 Data3;  // xyz = rotation col 1, w = rotation col 2.z
+	float4 Data4;  // x = rotation col 2.x, y = scale, zw = unused
+};
+
+StructuredBuffer<GrassInstanceData> GrassInstances : register(t20);
+#	endif  // GRASS_INSTANCING
+
+// Helper to get instance data - works for both instanced and non-instanced paths
+struct InstanceInput
+{
+	float4 Data1;
+	float4 Data2;
+	float4 Data3;
+	float4 Data4;
+};
+
+InstanceInput GetInstanceData(VS_INPUT input)
+{
+	InstanceInput inst;
+#	ifdef GRASS_INSTANCING
+	GrassInstanceData data = GrassInstances[input.InstanceID];
+	inst.Data1 = data.Data1;
+	inst.Data2 = data.Data2;
+	inst.Data3 = data.Data3;
+	inst.Data4 = data.Data4;
+#	else
+	inst.Data1 = input.InstanceData1;
+	inst.Data2 = input.InstanceData2;
+	inst.Data3 = input.InstanceData3;
+	inst.Data4 = input.InstanceData4;
+#	endif
+	return inst;
+}
+
 cbuffer cb7 : register(b7)
 {
 	float4 cb7[1];
@@ -141,9 +183,9 @@ cbuffer cb8 : register(b8)
 }
 
 // Calculate wind displacement for a grass vertex
-float3 CalculateWindDisplacement(VS_INPUT input, float windTimer)
+float3 CalculateWindDisplacement(VS_INPUT input, InstanceInput inst, float windTimer)
 {
-	float windAngle = 0.4 * ((input.InstanceData1.x + input.InstanceData1.y) * -0.0078125 + windTimer);
+	float windAngle = 0.4 * ((inst.Data1.x + inst.Data1.y) * -0.0078125 + windTimer);
 	float windAngleSin, windAngleCos;
 	sincos(windAngle, windAngleSin, windAngleCos);
 
@@ -157,26 +199,26 @@ float3 CalculateWindDisplacement(VS_INPUT input, float windTimer)
 }
 
 #ifdef GRASS_LIGHTING
-float4 GetMSPosition(VS_INPUT input, float3x3 world3x3)
+float4 GetMSPosition(VS_INPUT input, InstanceInput inst, float3x3 world3x3)
 #else
-float4 GetMSPosition(VS_INPUT input)
+float4 GetMSPosition(VS_INPUT input, InstanceInput inst)
 #endif
 {
-	float3 inputPosition = input.Position.xyz * (input.InstanceData4.yyy * ScaleMask.xyz + float3(1, 1, 1));
+	float3 inputPosition = input.Position.xyz * (inst.Data4.yyy * ScaleMask.xyz + float3(1, 1, 1));
 
 #ifdef GRASS_LIGHTING
 	float3 transformedPosition = mul(world3x3, inputPosition);
 	float4 msPosition;
-	msPosition.xyz = input.InstanceData1.xyz + transformedPosition;
+	msPosition.xyz = inst.Data1.xyz + transformedPosition;
 #else
 	float3 instancePosition;
 	instancePosition.z = dot(
-		float3(input.InstanceData4.x, input.InstanceData2.w, input.InstanceData3.w), inputPosition);
-	instancePosition.x = dot(input.InstanceData2.xyz, inputPosition);
-	instancePosition.y = dot(input.InstanceData3.xyz, inputPosition);
+		float3(inst.Data4.x, inst.Data2.w, inst.Data3.w), inputPosition);
+	instancePosition.x = dot(inst.Data2.xyz, inputPosition);
+	instancePosition.y = dot(inst.Data3.xyz, inputPosition);
 
 	float4 msPosition;
-	msPosition.xyz = input.InstanceData1.xyz + instancePosition;
+	msPosition.xyz = inst.Data1.xyz + instancePosition;
 #endif
 	msPosition.w = 1;
 
@@ -188,17 +230,20 @@ VS_OUTPUT main(VS_INPUT input)
 {
 	VS_OUTPUT vsout;
 
+	// Get instance data - from StructuredBuffer (instanced) or vertex attributes (legacy)
+	InstanceInput inst = GetInstanceData(input);
+
 	uint eyeIndex = Stereo::GetEyeIndexVS(
-#		if defined(VR)
+#		if defined(VR) || defined(GRASS_INSTANCING)
 		input.InstanceID
-#		endif  // VR
+#		endif
 	);
-	float3x3 world3x3 = float3x3(input.InstanceData2.xyz, input.InstanceData3.xyz, float3(input.InstanceData4.x, input.InstanceData2.w, input.InstanceData3.w));
+	float3x3 world3x3 = float3x3(inst.Data2.xyz, inst.Data3.xyz, float3(inst.Data4.x, inst.Data2.w, inst.Data3.w));
 
-	float4 msPosition = GetMSPosition(input, world3x3);
+	float4 msPosition = GetMSPosition(input, inst, world3x3);
 
-	float3 windDisplacement = CalculateWindDisplacement(input, WindTimer);
-	float3 previousWindDisplacement = CalculateWindDisplacement(input, PreviousWindTimer);
+	float3 windDisplacement = CalculateWindDisplacement(input, inst, WindTimer);
+	float3 previousWindDisplacement = CalculateWindDisplacement(input, inst, PreviousWindTimer);
 
 #		ifdef GRASS_COLLISION
 	float3 displacement, previousDisplacement;
@@ -228,7 +273,7 @@ VS_OUTPUT main(VS_INPUT input)
 	// Note: input.Color.w is used for wind speed
 	vsout.VertexColor.xyz = input.Color.xyz;
 	vsout.VertexColor.w = distanceFade * perInstanceFade;
-	vsout.VertexMult = input.InstanceData1.w;
+	vsout.VertexMult = inst.Data1.w;
 
 	vsout.TexCoord.xy = input.TexCoord.xy;
 	vsout.TexCoord.z = FogNearColor.w;
@@ -236,7 +281,7 @@ VS_OUTPUT main(VS_INPUT input)
 	vsout.ViewSpacePosition = mul(WorldView[eyeIndex], msPosition).xyz;
 	vsout.WorldPosition = mul(World[eyeIndex], msPosition);
 
-	float4 previousMsPosition = GetMSPosition(input, world3x3);
+	float4 previousMsPosition = GetMSPosition(input, inst, world3x3);
 
 #		ifdef GRASS_COLLISION
 	previousMsPosition.xyz += previousDisplacement;
@@ -263,16 +308,19 @@ VS_OUTPUT main(VS_INPUT input)
 {
 	VS_OUTPUT vsout;
 
+	// Get instance data - from StructuredBuffer (instanced) or vertex attributes (legacy)
+	InstanceInput inst = GetInstanceData(input);
+
 	uint eyeIndex = Stereo::GetEyeIndexVS(
-#		if defined(VR)
+#		if defined(VR) || defined(GRASS_INSTANCING)
 		input.InstanceID
-#		endif  // VR
+#		endif
 	);
 
-	float4 msPosition = GetMSPosition(input);
+	float4 msPosition = GetMSPosition(input, inst);
 
-	float3 windDisplacement = CalculateWindDisplacement(input, WindTimer);
-	float3 previousWindDisplacement = CalculateWindDisplacement(input, PreviousWindTimer);
+	float3 windDisplacement = CalculateWindDisplacement(input, inst, WindTimer);
+	float3 previousWindDisplacement = CalculateWindDisplacement(input, inst, PreviousWindTimer);
 
 #		ifdef GRASS_COLLISION
 	float3 displacement, previousDisplacement;
@@ -291,9 +339,9 @@ VS_OUTPUT main(VS_INPUT input)
 	vsout.Depth = projSpacePosition.zw;
 #		endif  // RENDER_DEPTH
 
-	float3 instanceNormal = float3(input.InstanceData2.z, input.InstanceData3.zw);
+	float3 instanceNormal = float3(inst.Data2.z, inst.Data3.zw);
 	float dirLightAngle = dot(DirLightDirection.xyz, instanceNormal);
-	float3 diffuseMultiplier = input.InstanceData1.www * input.Color.xyz;
+	float3 diffuseMultiplier = inst.Data1.www * input.Color.xyz;
 
 	float perInstanceFade = dot(cb8[(asuint(cb7[0].x) >> 2)].xyzw, Math::IdentityMatrix[(asint(cb7[0].x) & 3)].xyzw);
 
@@ -305,18 +353,18 @@ VS_OUTPUT main(VS_INPUT input)
 
 	vsout.VertexColor.xyz = input.Color.xyz;
 	vsout.VertexColor.w = distanceFade * perInstanceFade;
-	vsout.VertexMult = input.InstanceData1.w;
+	vsout.VertexMult = inst.Data1.w;
 
 	vsout.TexCoord.xy = input.TexCoord.xy;
 	vsout.TexCoord.z = FogNearColor.w;
 
-	vsout.AmbientColor.xyz = input.InstanceData1.www * (AmbientColor.xyz * input.Color.xyz);
+	vsout.AmbientColor.xyz = inst.Data1.www * (AmbientColor.xyz * input.Color.xyz);
 	vsout.AmbientColor.w = ShadowClampValue;
 
 	vsout.ViewSpacePosition = mul(WorldView[eyeIndex], msPosition).xyz;
 	vsout.WorldPosition = mul(World[eyeIndex], msPosition);
 
-	float4 previousMsPosition = GetMSPosition(input);
+	float4 previousMsPosition = GetMSPosition(input, inst);
 #		if defined(VR)
 	Stereo::VR_OUTPUT VRout = Stereo::GetVRVSOutput(projSpacePosition, eyeIndex);
 	vsout.HPosition = VRout.VRPosition;

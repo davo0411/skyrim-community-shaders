@@ -5,6 +5,7 @@
 #include "Features/DynamicCubemaps.h"
 #include "Features/ExtendedMaterials.h"
 #include "Features/ExtendedTranslucency.h"
+#include "Features/GrassInstancing.h"
 #include "Features/GrassCollision.h"
 #include "Features/GrassLighting.h"
 #include "Features/HairSpecular.h"
@@ -50,6 +51,7 @@ namespace globals
 		CloudShadows cloudShadows{};
 		DynamicCubemaps dynamicCubemaps{};
 		ExtendedMaterials extendedMaterials{};
+		GrassInstancing grassInstancing{};
 		GrassCollision grassCollision{};
 		GrassLighting grassLighting{};
 		IBL ibl{};

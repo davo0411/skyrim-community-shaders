@@ -223,6 +223,9 @@ namespace SIE
 				defines[lastIndex++] = { "DO_ALPHA_TEST", nullptr };
 			}
 
+			// GPU instancing support - always enable so shader reads from StructuredBuffer
+			defines[lastIndex++] = { "GRASS_INSTANCING", nullptr };
+
 			for (auto* feature : Feature::GetFeatureList()) {
 				if (feature->loaded && feature->HasShaderDefine(RE::BSShader::Type::Grass)) {
 					defines[lastIndex++] = { feature->GetShaderDefineName().data(), nullptr };
