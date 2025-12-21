@@ -7,6 +7,9 @@
 #include <unordered_map>
 #include <chrono>
 #include <RE/N/NiSmartPointer.h>
+#include <RE/S/ShadowSceneNode.h>
+#include <RE/B/BSTArray.h>
+#include <RE/B/BSCullingProcess.h>
 
 struct HiZOcclusion : OverlayFeature
 {
@@ -27,10 +30,23 @@ struct HiZOcclusion : OverlayFeature
     // Unbind all compute stage resources used by Hi-Z passes
     void UnbindD3DResources();
     virtual void EarlyPrepass() override;
-    void Prepass();
+    virtual void Prepass() override;
+    void MainFunc();
     void Reset();
 
+    [[nodiscard]] bool IsGeometryOccluded(RE::BSGeometry* geometry) const;
+    void MarkGeometryOccluded(RE::BSGeometry* geometry);
+    void MarkGeometryVisible(RE::BSGeometry* geometry);
+    void ClearOcclusionState();
+
     bool wasEnabled = false;
+    uint32_t unCulledFrame = 0;
+    uint32_t reCulledFrame = 0;
+    std::vector<RE::BSGeometry*> geoToReCull;
+
+    std::unordered_set<RE::BSGeometry*> occludedGeometry;
+
+    std::atomic<uint32_t> shadowPassDepth{ 0 };
 
     void CreateDebugBuffer();
     void ReleaseDebugBuffer();

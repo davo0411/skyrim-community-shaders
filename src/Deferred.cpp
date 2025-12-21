@@ -13,6 +13,7 @@
 #include "Features/SubsurfaceScattering.h"
 #include "Features/TerrainBlending.h"
 #include "Features/Upscaling.h"
+#include "Features/HiZOcclusion.h"
 
 #include "Hooks.h"
 
@@ -58,6 +59,7 @@ void SetupRenderTarget(RE::RENDER_TARGET target, D3D11_TEXTURE2D_DESC texDesc, D
 
 void Deferred::SetupResources()
 {
+	logger::info("[{}] SetupResources start", globals::state->frameCount);
 	auto renderer = globals::game::renderer;
 
 	{
@@ -178,10 +180,13 @@ void Deferred::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 	}
+
+	logger::info("[{}] SetupResources end", globals::state->frameCount);
 }
 
 void Deferred::CopyShadowData()
 {
+	logger::info("[{}] CopyShadowData start", globals::state->frameCount);
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowData");
 
@@ -222,6 +227,8 @@ void Deferred::CopyShadowData()
 		if (shadowView)
 			shadowView->Release();
 	}
+
+	logger::info("[{}] CopyShadowData end", globals::state->frameCount);
 }
 
 void Deferred::ReflectionsPrepasses()
@@ -375,6 +382,7 @@ void Deferred::StartDeferred()
 
 void Deferred::DeferredPasses()
 {
+	logger::info("[{}] DeferredPasses start", globals::state->frameCount);
 	globals::features::upscaling.CheckFrameConstants();
 
 	ZoneScoped;
@@ -488,6 +496,8 @@ void Deferred::DeferredPasses()
 
 	if (dynamicCubemaps.loaded)
 		dynamicCubemaps.PostDeferred();
+
+	logger::info("[{}] DeferredPasses end", globals::state->frameCount);
 }
 
 void Deferred::EndDeferred()
@@ -675,30 +685,38 @@ ID3D11ComputeShader* Deferred::GetComputeMainCompositeInterior()
 	return mainCompositeInteriorCS;
 }
 
-void Deferred::Hooks::Main_RenderShadowMaps::thunk()
+void Deferred::Hooks::RenderWorldShadowMaps::thunk()
 {
+	logger::info("[{}] RenderWorldShadowMaps start", globals::state->frameCount);
+	globals::state->renderingShadowmaps = true;
 	func();
+	globals::state->renderingShadowmaps = false;
 	globals::deferred->EarlyPrepasses();
+	logger::info("[{}] RenderWorldShadowMaps end", globals::state->frameCount);
 };
 
 void Deferred::Hooks::Main_RenderWorld::thunk(bool a1)
 {
+	logger::info("[{}] Main_RenderWorld start", globals::state->frameCount);
 	auto* const state = globals::state;
 	state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
 	state->inWorld = true;
 	func(a1);
 	state->inWorld = false;
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
+	logger::info("[{}] Main_RenderWorld end", globals::state->frameCount);
 };
 
 void Deferred::Hooks::Main_RenderWorld_Start::thunk(RE::BSBatchRenderer* This, uint32_t StartRange, uint32_t EndRanges, uint32_t RenderFlags, int GeometryGroup)
 {
+	logger::info("[{}] Main_RenderWorld_Start start", globals::state->frameCount);
 	if (globals::shaderCache->IsEnabled() && globals::state->inWorld) {
 		// Here is where the first opaque objects start rendering
 		globals::deferred->StartDeferred();
 	}
 
 	func(This, StartRange, EndRanges, RenderFlags, GeometryGroup);  // RenderBatches
+	logger::info("[{}] Main_RenderWorld_Start end", globals::state->frameCount);
 };
 
 void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumulator* This, uint32_t RenderFlags)
@@ -743,14 +761,17 @@ void Deferred::Hooks::BSCubeMapCamera_RenderCubemap::thunk(RE::NiAVObject* camer
 
 void Deferred::Hooks::Main_RenderFirstPersonView::thunk(bool a1, bool a2)
 {
+	logger::info("[{}] Main_RenderFirstPersonView start", globals::state->frameCount);
 	auto* const state = globals::state;
 	state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
 	func(a1, a2);
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
+	logger::info("[{}] Main_RenderFirstPersonView end", globals::state->frameCount);
 }
 
 void Deferred::Hooks::Renderer_ResetState::thunk(void* This)
 {
+	logger::info("[{}] Renderer_ResetState start", globals::state->frameCount);
 	func(This);
 
 	auto* const state = globals::state;
@@ -762,4 +783,5 @@ void Deferred::Hooks::Renderer_ResetState::thunk(void* This)
 
 	auto* singleton = globals::truePBR;
 	singleton->SetupFrame();
+	logger::info("[{}] Renderer_ResetState end", globals::state->frameCount);
 }

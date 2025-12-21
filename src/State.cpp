@@ -15,6 +15,7 @@
 #include "SettingsOverrideManager.h"
 #include "ShaderCache.h"
 #include "TruePBR.h"
+#include "Features/HiZOcclusion.h"
 
 void State::Draw()
 {

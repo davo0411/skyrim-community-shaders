@@ -106,8 +106,9 @@ void DrawBounds(uint geometryIndex, float3 centerVS, float radius) {
     uint baseW, baseH, mipCount;
     HiZBuffer.GetDimensions(0, baseW, baseH, mipCount);
 
-    // Center point UV
-    float2 centerUV = FrameBuffer::ViewToUV(centerVS);
+    // Center point UV - manual ViewToUV using constant buffer matrices
+    float4 centerClipForUV = mul(cameraProjMat, float4(centerVS, 1));
+    float2 centerUV = (centerClipForUV.xy / centerClipForUV.w) * float2(0.5f, -0.5f) + 0.5f;
     int2 centerPix = int2(centerUV * float2(baseW, baseH));
     
     // Calculate distance-based thickness
@@ -191,8 +192,8 @@ float GetMipLevel(float3 centerVS, float radius) {
     if (depth < 0.01) return 0.0;
     
     // Get projection scale from first element of projection matrix
-    // CameraProj[0][0][0] = horizontal FOV scale = 1/tan(fovX/2)
-    float projScaleX = FrameBuffer::CameraProj[0][0][0];
+    // cameraProjMat[0][0] = horizontal FOV scale = 1/tan(fovX/2)
+    float projScaleX = cameraProjMat[0][0];
     
     // Screen-space radius in NDC: (radius / depth) * projectionScale  
     float screenRadiusNDC = (radius / depth) * projScaleX;
@@ -274,12 +275,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         mipLevel = GetMipLevel(centerVS, radius);
     }
 
-    bool centerOnScreen = false;
-    float2 centerUV = FrameBuffer::ViewToUV(centerVS);
-    if (!FrameBuffer::IsOutsideFrame(centerUV)) {
-        centerOnScreen = true;
-    }
-
     float conservativeBias = HiZSettings.y;
 
     static const float3 offsets[26] = {
@@ -294,21 +289,25 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3( 1,  1, -1), float3( 1,  1,  0), float3( 1,  1,  1)
     };
 
-    static const int maxTestPoints = 27;
+    static const int maxTestPoints = 128;
     float3 validPointsVS[maxTestPoints];
     float2 validPointsUV[maxTestPoints];
     float validPointsDepth[maxTestPoints];
     int validPointCount = 0;
+    int totalValidPoints = 0;
 
-    if (centerOnScreen) {
+    if (centerVS.z > 0.0) {
+        // Manual ViewToUV using constant buffer matrices
+        float4 centerClip = mul(FrameBuffer::CameraProj[0], float4(centerVS, 1));
+        float2 centerUV = (centerClip.xy / centerClip.w) * float2(0.5f, -0.5f) + 0.5f;
         validPointsVS[validPointCount] = centerVS;
         validPointsUV[validPointCount] = centerUV;
-        float4 centerClip = mul(FrameBuffer::CameraProj[0], float4(centerVS, 1));
         validPointsDepth[validPointCount] = centerClip.z / centerClip.w;
         validPointCount++;
+        totalValidPoints++;
     }
 
-    // Find out which points are on screen.
+    // Find valid points using radius
     for (int i = 0; i < 26; ++i) {
         float3 dir3 = offsets[i];
         float lenSq = dot(dir3, dir3);
@@ -322,33 +321,20 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         float4 pointClip = mul(FrameBuffer::CameraProj[0], float4(pointVS, 1));
         float pointDepth = pointClip.z / pointClip.w;
-        if (pointDepth < 0.0 || pointDepth > 1.0) {
-            continue;
-        }
 
+        // Manual ViewToUV using constant buffer matrices
         float2 pointUV = FrameBuffer::ViewToUV(pointVS);
-        if (FrameBuffer::IsOutsideFrame(pointUV)) {
-            continue;
-        }
 
         if (validPointCount < maxTestPoints) {
             validPointsVS[validPointCount] = pointVS;
             validPointsUV[validPointCount] = pointUV;
             validPointsDepth[validPointCount] = pointDepth;
-            validPointCount++;
+            validPointCount++;  
+            totalValidPoints++;
         }
     }
 
-    // No points on screen = cull: frustum
-    if (validPointCount == 0) {
-        VisibilityResults[geometryIndex] = 1;
-        if (overlaySettings.x != 0 && geometryIndex < (uint)overlaySettings.y) {
-            DrawBounds(geometryIndex, centerVS, radius);
-        }
-        return;
-    }
-
-    // Test the valid points against Hi-Z depth.
+    // Test visibility for any valid points.
     for (int i = 0; i < validPointCount; ++i) {
         float3 pointVS = validPointsVS[i];
         float2 pointUV = validPointsUV[i];
@@ -360,6 +346,101 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
             ReportVisibleGeometry(geometryIndex, centerVS, radius);
             return;
         }
+    }
+
+    validPointCount = 0;
+
+    // Check for valid points using radius / 2
+    for (int i = 0; i < 26; ++i) {
+        float3 dir3 = offsets[i];
+        float lenSq = dot(dir3, dir3);
+        float3 unitDir = dir3 * rsqrt(max(lenSq, 1e-12));
+
+        float3 pointVS = centerVS + unitDir * radius * 0.5;
+
+        if (pointVS.z <= 0.0) {
+            continue;
+        }
+
+        float4 pointClip = mul(FrameBuffer::CameraProj[0], float4(pointVS, 1));
+        float pointDepth = pointClip.z / pointClip.w;
+
+        // Manual ViewToUV using constant buffer matrices
+        float2 pointUV = FrameBuffer::ViewToUV(pointVS);
+
+        if (validPointCount < maxTestPoints) {
+            validPointsVS[validPointCount] = pointVS;
+            validPointsUV[validPointCount] = pointUV;
+            validPointsDepth[validPointCount] = pointDepth;
+            validPointCount++;
+            totalValidPoints++;
+        }
+    }
+
+    // Test visibility for any valid points.
+    for (int i = 0; i < validPointCount; ++i) {
+        float3 pointVS = validPointsVS[i];
+        float2 pointUV = validPointsUV[i];
+        float pointDepth = validPointsDepth[i];
+
+        float hiZDepth = HiZBuffer.SampleLevel(HiZSampler, pointUV, mipLevel).r;
+        if (pointDepth <= hiZDepth + conservativeBias) {
+            VisibilityResults[geometryIndex] = -3;
+            ReportVisibleGeometry(geometryIndex, centerVS, radius);
+            return;
+        }
+    }
+
+    validPointCount = 0;
+
+    // Check for valid points using radius * 1.5
+    for (int i = 0; i < 26; ++i) {
+        float3 dir3 = offsets[i];
+        float lenSq = dot(dir3, dir3);
+        float3 unitDir = dir3 * rsqrt(max(lenSq, 1e-12));
+
+        float3 pointVS = centerVS + unitDir * radius * 1.5;
+
+        if (pointVS.z <= 0.0) {
+            continue;
+        }
+
+        float4 pointClip = mul(FrameBuffer::CameraProj[0], float4(pointVS, 1));
+        float pointDepth = pointClip.z / pointClip.w;
+
+        // Manual ViewToUV using constant buffer matrices
+        float2 pointUV = FrameBuffer::ViewToUV(pointVS);
+
+        if (validPointCount < maxTestPoints) {
+            validPointsVS[validPointCount] = pointVS;
+            validPointsUV[validPointCount] = pointUV;
+            validPointsDepth[validPointCount] = pointDepth;
+            validPointCount++;
+            totalValidPoints++;
+        }
+    }
+
+    // Test visibility for any valid points.
+    for (int i = 0; i < validPointCount; ++i) {
+        float3 pointVS = validPointsVS[i];
+        float2 pointUV = validPointsUV[i];
+        float pointDepth = validPointsDepth[i];
+
+        float hiZDepth = HiZBuffer.SampleLevel(HiZSampler, pointUV, mipLevel).r;
+        if (pointDepth <= hiZDepth + conservativeBias) {
+            VisibilityResults[geometryIndex] = -3;
+            ReportVisibleGeometry(geometryIndex, centerVS, radius);
+            return;
+        }
+    }
+
+    // No points on screen = cull: frustum
+    if (totalValidPoints == 0) {
+        VisibilityResults[geometryIndex] = 1;
+        if (overlaySettings.x != 0 && geometryIndex < (uint)overlaySettings.y) {
+            DrawBounds(geometryIndex, centerVS, radius);
+        }
+        return;
     }
 
     // If we get to this point, this object has not been deemed visible, and thus shall be culled.

@@ -1,5 +1,6 @@
 #include "HiZOcclusion.h"
 #include <cmath>
+#include <cstdint>
 #include "Globals.h"
 #include "State.h"
 #include "Util.h"
@@ -12,6 +13,9 @@
 #include <DirectXMath.h>
 #include <RE/N/NiBound.h>
 #include "Features/Upscaling.h"
+#include <REL/Relocation.h>
+#include <REL/Module.h>
+#include <RE/RTTI.h>
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     HiZOcclusion::Settings,
@@ -386,48 +390,6 @@ void HiZOcclusion::ClearShaderCache()
     if (hiZTestCS) { hiZTestCS->Release(); hiZTestCS = nullptr; }
 }
 
-void HiZOcclusion::Reset()
-{
-    if (!settings.enableHiZCulling) {
-        if (wasEnabled) {
-            // Uncull all hidden geometries
-            if (!unCullNextFrame.empty()) {
-                for (auto* geometry : unCullNextFrame) {
-                    if (geometry) {
-                        geometry->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
-                    }
-                }
-                unCullNextFrame.clear();
-            }
-            // Empty pending geometry list
-            if (!pendingGeometry.empty()) {
-                pendingGeometry.clear();
-            }
-            // Release and clear all resources
-            ReleaseBoundsOverlayResources();
-            ReleaseDebugBuffer();
-            UnbindD3DResources();
-            // Reset stats
-            stats.frameIndex = 0;
-            stats.totalTested = 0;
-            stats.geometryListSize = 0;
-            stats.visTestPassed = 0;
-            stats.visInsideBounds = 0;
-            stats.visInvalidRadius = 0;
-            stats.defaultValue = 0;
-            stats.culledFrustum = 0;
-            stats.culledNoEarlyOut = 0;
-            stats.resourceSetupDurationMS = 0.0f;
-            stats.recreateDurationMS = 0.0f;
-            wasEnabled = false;
-        }
-    } else {
-        if (!wasEnabled) {
-            wasEnabled = true;
-        }
-    }
-}
-
 void HiZOcclusion::EarlyPrepass()
 {
     if (settings.debugMode) {
@@ -438,7 +400,7 @@ void HiZOcclusion::EarlyPrepass()
 
 void HiZOcclusion::Prepass()
 {
-    logger::info("Frame {} - HiZOcclusion::Prepass", globals::state->frameCount);
+    logger::info("[{}] HiZOcclusion::Prepass start", globals::state->frameCount);
     if (!settings.enableHiZCulling) {
         return;
     }
@@ -477,7 +439,7 @@ void HiZOcclusion::Prepass()
     status = "Building Hi-Z pyramid";
 
     if (!InitHiZResources()) {
-        logger::error("HiZOcclusion::EarlyPrepass - failed to initialize Hi-Z resources");
+        logger::error("HiZOcclusion::Prepass - failed to initialize Hi-Z resources");
         status = "failed to initialize Hi-Z resources";
         return;
     }
@@ -485,7 +447,7 @@ void HiZOcclusion::Prepass()
     // Setup GPU culling resources if not already done
     if (!geometryBoundsBuffer || !hiZTestParamsBuffer || !hiZSampler || !visibilityResultsBuffer) {
         if (!SetupGPUCullingResources()) {
-            logger::error("HiZOcclusion::EarlyPrepass - failed to setup GPU culling resources");
+            logger::error("HiZOcclusion::Prepass - failed to setup GPU culling resources");
             status = "failed to setup GPU culling resources";
             return;
         }
@@ -495,17 +457,6 @@ void HiZOcclusion::Prepass()
     if (pendingGeometry.capacity() < 16384) {
         pendingGeometry.reserve(16384);
         geometryBounds.reserve(16384);
-    }
-
-    if (!unCullNextFrame.empty()) {
-        // Re-add previously hidden geometry for continuous testing
-        for (auto* geo : unCullNextFrame) {
-            if (geo && pendingGeometrySet.find(geo) == pendingGeometrySet.end()) {
-                //geo->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
-                pendingGeometry.push_back(geo);
-                pendingGeometrySet.insert(geo);
-            }
-        }
     }
 
     if (readbackState.numPendingReads > 0 || !pendingGeometry.empty()) {
@@ -526,7 +477,16 @@ void HiZOcclusion::Prepass()
     UnbindD3DResources();
 
     status = "HiZ Tests executed";
+    logger::info("[{}] HiZOcclusion::Prepass end", globals::state->frameCount);
 };
+
+void HiZOcclusion::Reset()
+{
+    logger::info("[{}] HiZOcclusion::Reset", globals::state->frameCount);
+    if (!occludedGeometry.empty()) {
+        occludedGeometry.clear();
+    }
+}
 
 bool HiZOcclusion::InitHiZResources()
 {
@@ -1336,7 +1296,11 @@ void HiZOcclusion::DispatchComputeShader()
 
 void HiZOcclusion::ProcessVisibilityResults(uint32_t bufferIndex) {
 
-    unCullNextFrame.clear();
+    logger::info("[{}] HiZOcclusion::ProcessVisibilityResults", globals::state->frameCount);
+    
+    // Clear previous occlusion state before processing new results
+    // This ensures we only cull based on the most recent valid readback
+    ClearOcclusionState();
 
     // Read from the correct triple-buffered staging buffer
     const HiZOcclusion::OcclusionResult* visibilityData = static_cast<const HiZOcclusion::OcclusionResult*>(readbackState.mappedData[bufferIndex].pData);
@@ -1354,17 +1318,17 @@ void HiZOcclusion::ProcessVisibilityResults(uint32_t bufferIndex) {
 
         switch (testResults.result) {
             case -3: {// Not culled: Test passed
-                geo->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
+                MarkGeometryVisible(geo);
                 stats.visTestPassed++;
                 break;
             }
             case -2: { // Not culled: Inside bounds
-                geo->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
+                MarkGeometryVisible(geo);
                 stats.visInsideBounds++;
                 break;
             }
             case -1: { // Not culled: Invalid Radius
-                geo->GetFlags().reset(RE::NiAVObject::Flag::kHidden);
+                MarkGeometryVisible(geo);
                 stats.visInvalidRadius++;
                 break;
             }
@@ -1374,14 +1338,12 @@ void HiZOcclusion::ProcessVisibilityResults(uint32_t bufferIndex) {
             }
             case 1: { // Culled: Frustum
                 stats.culledFrustum++;
-                geo->GetFlags().set(RE::NiAVObject::Flag::kHidden);
-                unCullNextFrame.push_back(geo);
+                MarkGeometryOccluded(geo);
                 break;
             }
             case 2: { // Culled: No early out
                 stats.culledNoEarlyOut++;
-                geo->GetFlags().set(RE::NiAVObject::Flag::kHidden);
-                unCullNextFrame.push_back(geo);
+                MarkGeometryOccluded(geo);
                 break;
             }
             default: {
@@ -1389,4 +1351,36 @@ void HiZOcclusion::ProcessVisibilityResults(uint32_t bufferIndex) {
             }
         }
     }
+}
+
+bool HiZOcclusion::IsGeometryOccluded(RE::BSGeometry* geometry) const
+{
+    if (!geometry) {
+        return false;
+    }
+
+    return occludedGeometry.find(geometry) != occludedGeometry.end();
+}
+
+void HiZOcclusion::MarkGeometryOccluded(RE::BSGeometry* geometry)
+{
+    if (!geometry) {
+        return;
+    }
+
+    occludedGeometry.insert(geometry);
+}
+
+void HiZOcclusion::MarkGeometryVisible(RE::BSGeometry* geometry)
+{
+    if (!geometry) {
+        return;
+    }
+
+    occludedGeometry.erase(geometry);
+}
+
+void HiZOcclusion::ClearOcclusionState()
+{
+    occludedGeometry.clear();
 }

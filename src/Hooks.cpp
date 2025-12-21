@@ -21,6 +21,7 @@
 #include <RE/N/NiAVObject.h>
 #include <RE/N/NiBound.h>
 #include <RE/S/ShaderAccumulator.h>
+#include <RE/M/Main.h>
 
 #include "Features/HiZOcclusion.h"
 
@@ -255,6 +256,7 @@ struct IDXGISwapChain_Present
 {
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
+		logger::info("[{}] IDXGISwapChain_Present start", globals::state->frameCount);
 		auto state = globals::state;
 		auto menu = globals::menu;
 		state->Reset();
@@ -263,6 +265,8 @@ struct IDXGISwapChain_Present
 		HRESULT retval = func(This, SyncInterval, Flags);
 
 		TracyD3D11Collect(state->tracyCtx);
+
+		logger::info("[{}] IDXGISwapChain_Present end", globals::state->frameCount);
 
 		return retval;
 	}
@@ -715,6 +719,59 @@ namespace Hooks
 	{
 		static void thunk(RE::BSRenderPass* pass, uint32_t technique, bool alphaTest, uint32_t renderFlags)
 		{
+			static auto callsThisFrame = 0;
+			static uint32_t activeFrame = 0;
+			static uint32_t occludedCallsThisFrame = 0;
+			if (globals::state->frameCount != activeFrame) {
+				callsThisFrame = 0;
+				activeFrame = globals::state->frameCount;
+				occludedCallsThisFrame = 0;
+			}
+			callsThisFrame++;
+			// Log every 100 calls
+			if (callsThisFrame % 100 == 0) {
+				logger::info("[{}] BSBatchRenderer_RenderPassImmediately {} calls", globals::state->frameCount, callsThisFrame);
+			}
+			// Collect valid geometry for next frame's testing
+			if (!globals::state->renderingShadowmaps && !globals::state->renderingDepthPrepass && globals::features::hiZOcclusion.settings.enableHiZCulling && pass->geometry && pass->geometry->worldBound.radius > 0.0f) {
+				// Fast O(1) check
+				if (globals::features::hiZOcclusion.pendingGeometrySet.insert(pass->geometry).second) {
+					// Was inserted (not duplicate), add to vector too
+					globals::features::hiZOcclusion.pendingGeometry.push_back(pass->geometry);
+				}
+			}
+
+			if (globals::features::hiZOcclusion.loaded && pass->shader && pass->shader->shaderType != RE::BSShader::Type::Utility && pass->geometry && globals::features::hiZOcclusion.IsGeometryOccluded(pass->geometry)) {
+				occludedCallsThisFrame++;
+				// Log every 100 occluded calls
+				if (occludedCallsThisFrame % 100 == 0 || occludedCallsThisFrame == 1) {
+					logger::debug("[{}] BSBatchRenderer_RenderPassImmediately {} calls, {} occluded", globals::state->frameCount, callsThisFrame, occludedCallsThisFrame);
+				}
+				return;
+			}
+			
+			func(pass, technique, alphaTest, renderFlags);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct BSBatchRenderer_RenderPassImmediately2
+	{
+		static void thunk(RE::BSRenderPass* pass, uint32_t technique, bool alphaTest, uint32_t renderFlags)
+		{
+			static auto callsThisFrame = 0;
+			static uint32_t activeFrame = 0;
+			static uint32_t occludedCallsThisFrame = 0;
+			if (globals::state->frameCount != activeFrame) {
+				callsThisFrame = 0;
+				activeFrame = globals::state->frameCount;
+				occludedCallsThisFrame = 0;
+			}
+			callsThisFrame++;
+			// Log every 100 calls
+			if (callsThisFrame % 100 == 0) {
+				logger::info("[{}] BSBatchRenderer_RenderPassImmediately2 {} calls", globals::state->frameCount, callsThisFrame);
+			}
 			// Collect valid geometry for next frame's testing
 			if (globals::features::hiZOcclusion.settings.enableHiZCulling && pass->geometry && pass->geometry->worldBound.radius > 0.0f) {
 				// Fast O(1) check
@@ -723,8 +780,106 @@ namespace Hooks
 					globals::features::hiZOcclusion.pendingGeometry.push_back(pass->geometry);
 				}
 			}
+
+			if (globals::features::hiZOcclusion.loaded && globals::features::hiZOcclusion.IsGeometryOccluded(pass->geometry)) {
+				occludedCallsThisFrame++;
+				// Log every 100 occluded calls
+				if (occludedCallsThisFrame % 100 == 0 || occludedCallsThisFrame == 1) {
+					logger::debug("[{}] BSBatchRenderer_RenderPassImmediately2 {} calls, {} occluded", globals::state->frameCount, callsThisFrame, occludedCallsThisFrame);
+				}
+				return;
+			}
 			
 			func(pass, technique, alphaTest, renderFlags);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct Main_Draw_1406444B0
+	{
+		static void thunk(RE::Main* mainInst, uint32_t eventOrViewId, bool flag)
+		{
+			static auto callsThisFrame = 0;
+			static uint32_t activeFrame = 0;
+			if (globals::state->frameCount != activeFrame) {
+				callsThisFrame = 0;
+				activeFrame = globals::state->frameCount;
+			}
+			callsThisFrame++;
+			logger::debug("[{}] Main_Draw_1406444B0 {} calls", globals::state->frameCount, callsThisFrame);
+			func(mainInst, eventOrViewId, flag);
+			logger::debug("[{}] Main_Draw_1406444B0 {} calls", globals::state->frameCount, callsThisFrame);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct Main_RenderWorld__sub_1414A08B0
+	{
+		static void thunk(RE::ShadowSceneNode** shadowNodes, RE::BSTArray<RE::BSCullingProcess*>* cullingProcesses)
+		{
+			static auto callsThisFrame = 0;
+			static uint32_t activeFrame = 0;
+			if (globals::state->frameCount != activeFrame) {
+				callsThisFrame = 0;
+				activeFrame = globals::state->frameCount;
+			}
+			callsThisFrame++;
+			logger::debug("[{}] Main_RenderWorld__sub_1414A08B0 {} calls", globals::state->frameCount, callsThisFrame);
+			func(shadowNodes, cullingProcesses);
+			logger::debug("[{}] Main_RenderWorld__sub_1414A08B0 {} calls", globals::state->frameCount, callsThisFrame);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct BSGeometryListCullingProcess__sub_1414A2170
+	{
+		static void thunk(RE::BSCullingProcess* cullingProcesses)
+		{
+			static auto callsThisFrame = 0;
+			static uint32_t activeFrame = 0;
+			if (globals::state->frameCount != activeFrame) {
+				callsThisFrame = 0;
+				activeFrame = globals::state->frameCount;
+			}
+			callsThisFrame++;
+			logger::debug("[{}] BSGeometryListCullingProcess__sub_1414A2170 {} calls", globals::state->frameCount, callsThisFrame);
+			func(cullingProcesses);
+			logger::debug("[{}] BSGeometryListCullingProcess__sub_1414A2170 {} calls", globals::state->frameCount, callsThisFrame);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct RenderWorldDepthPrepass
+	{
+		static void thunk(char a1, bool a2)
+		{
+			logger::info("[{}] RenderWorldDepthPrepass start", globals::state->frameCount);
+			globals::state->renderingDepthPrepass = true;
+			func(a1, a2);
+			globals::state->renderingDepthPrepass = false;
+			logger::info("[{}] RenderWorldDepthPrepass end", globals::state->frameCount);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct Main_RenderWorld_sub_1414CD600
+	{
+		static void thunk(unsigned __int8 a1, int a2, int a3, int a4)
+		{
+			logger::info("[{}] Main_RenderWorld_sub_1414CD600 start", globals::state->frameCount);
+			func(a1, a2, a3, a4);
+			logger::info("[{}] Main_RenderWorld_sub_1414CD600 end", globals::state->frameCount);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct Main_RenderWorld_sub_1414CE1C0
+	{
+		static void thunk()
+		{
+			logger::info("[{}] Main_RenderWorld_sub_1414CE1C0 start", globals::state->frameCount);
+			func();
+			logger::info("[{}] Main_RenderWorld_sub_1414CE1C0 end", globals::state->frameCount);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -964,7 +1119,28 @@ namespace Hooks
 		logger::info("Hooking BSBatchRenderer::RenderPassImmediately for Hi-Z culling");
 		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately>(REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
 
+		// BSBatchRenderer_RenderPassImmediately2 = 106604 + 0x12C
+		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately2>(REL::RelocationID(0, 106604).address() + REL::Relocate(0, 0x12C));
+
 		stl::write_thunk_call<BSLightingShader_SetupGeometry_GeometrySetupConstantPointLights>(REL::RelocationID(100565, 107300).address() + REL::Relocate(0x523, 0xB0E, 0x5FE));
+
+		// 36558 + 11D Main__Draw_1406444B0
+		stl::write_thunk_call<Main_Draw_1406444B0>(REL::RelocationID(0, 36558).address() + REL::Relocate(0, 0x11D));
+	
+		// 107142+2F5: call sub_1414A08B0(gShadowSceneNodeArray_142033060, *cullingProcessArray) 
+		stl::write_thunk_call<Main_RenderWorld__sub_1414A08B0>(REL::RelocationID(0, 107142).address() + REL::Relocate(0, 0x2F5));
+	
+		// 36559 + 194 BSGeometryListCullingProcess__sub_1414A2170
+		stl::write_thunk_call<BSGeometryListCullingProcess__sub_1414A2170>(REL::RelocationID(0, 36559).address() + REL::Relocate(0, 0x194));
+	
+		// 1406444B0 + 0x395 = sub_1414CCB30
+		stl::write_thunk_call<RenderWorldDepthPrepass>(REL::RelocationID(0, 36559).address() + REL::Relocate(0, 0x395));
+
+		// 1406444B0 + 0x39C = sub_1414CD600
+		stl::write_thunk_call<Main_RenderWorld_sub_1414CD600>(REL::RelocationID(0, 36559).address() + REL::Relocate(0, 0x39C));
+
+		// 1406444B0 + 0x3A1 = sub_1414CE1C0
+		stl::write_thunk_call<Main_RenderWorld_sub_1414CE1C0>(REL::RelocationID(0, 36559).address() + REL::Relocate(0, 0x3A1));
 	}
 
 	void InstallEarlyHooks()

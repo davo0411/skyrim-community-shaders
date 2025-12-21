@@ -69,7 +69,7 @@ public:
 
 	struct Hooks
 	{
-		struct Main_RenderShadowMaps
+		struct RenderWorldShadowMaps
 		{
 			static void thunk();
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -114,9 +114,11 @@ public:
 		static void Install()
 		{
 			stl::write_vfunc<0x35, BSCubeMapCamera_RenderCubemap>(RE::VTABLE_BSCubeMapCamera[0]);
-
-			stl::write_thunk_call<Main_RenderShadowMaps>(REL::RelocationID(35560, 36559).address() + REL::Relocate(0x2EC, 0x2EC, 0x248));
-
+			
+			// 1406444B0 + 0x2EC
+			stl::write_thunk_call<RenderWorldShadowMaps>(REL::RelocationID(35560, 36559).address() + REL::Relocate(0x2EC, 0x2EC, 0x248));
+			
+			// 1406444B0 + 0x841
 			stl::write_thunk_call<Main_RenderWorld>(REL::RelocationID(35560, 36559).address() + REL::Relocate(0x831, 0x841, 0x791));
 			stl::write_thunk_call<Main_RenderWorld_Start>(REL::RelocationID(99938, 106583).address() + REL::Relocate(0x8E, 0x84));
 			stl::write_thunk_call<Main_RenderWorld_BlendedDecals>(REL::RelocationID(99938, 106583).address() + REL::Relocate(0x319, 0x308, 0x321));
