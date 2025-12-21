@@ -142,15 +142,35 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			shaderFound = false;
 		} else {
 			state->settingCustomShader = true;
-			globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), NULL, NULL);
+			
+			// State Change Coalescing for vertex shader
+			auto* d3dVS = reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader);
+			state->totalVSCalls++;
+			if (state->stateCoalescingEnabled && d3dVS == state->lastSetVS) {
+				state->coalescedVSCalls++;
+			} else {
+				globals::d3d::context->VSSetShader(d3dVS, NULL, NULL);
+				state->lastSetVS = d3dVS;
+			}
 			*globals::game::currentVertexShader = vertexShader;
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
+			
 			if (skipPixelShader) {
 				pixelShader = nullptr;
 			}
 			*globals::game::currentPixelShader = pixelShader;
-			if (pixelShader)
-				globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), NULL, NULL);
+			
+			// State Change Coalescing for pixel shader
+			if (pixelShader) {
+				auto* d3dPS = reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader);
+				state->totalPSCalls++;
+				if (state->stateCoalescingEnabled && d3dPS == state->lastSetPS) {
+					state->coalescedPSCalls++;
+				} else {
+					globals::d3d::context->PSSetShader(d3dPS, NULL, NULL);
+					state->lastSetPS = d3dPS;
+				}
+			}
 			state->settingCustomShader = false;
 			shaderFound = true;
 		}
@@ -559,7 +579,15 @@ namespace Hooks
 						if (state->enabledClasses[type - 1]) {
 							RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
 							if (vertexShader) {
-								globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), NULL, NULL);
+								auto* d3dShader = reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader);
+								state->totalVSCalls++;
+								// State Change Coalescing: skip if same shader already bound
+								if (state->stateCoalescingEnabled && d3dShader == state->lastSetVS) {
+									state->coalescedVSCalls++;
+								} else {
+									globals::d3d::context->VSSetShader(d3dShader, NULL, NULL);
+									state->lastSetVS = d3dShader;
+								}
 								*globals::game::currentVertexShader = a_vertexShader;
 								globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
 								return;
@@ -572,7 +600,15 @@ namespace Hooks
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
 
 			*globals::game::currentVertexShader = a_vertexShader;
-			globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader), NULL, NULL);
+			auto* d3dShader = reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader);
+			state->totalVSCalls++;
+			// State Change Coalescing: skip if same shader already bound
+			if (state->stateCoalescingEnabled && d3dShader == state->lastSetVS) {
+				state->coalescedVSCalls++;
+			} else {
+				globals::d3d::context->VSSetShader(d3dShader, NULL, NULL);
+				state->lastSetVS = d3dShader;
+			}
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -592,7 +628,15 @@ namespace Hooks
 						if (state->enabledClasses[type - 1]) {
 							RE::BSGraphics::PixelShader* pixelShader = shaderCache->GetPixelShader(*currentShader, state->modifiedPixelDescriptor);
 							if (pixelShader) {
-								globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), NULL, NULL);
+								auto* d3dShader = reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader);
+								state->totalPSCalls++;
+								// State Change Coalescing: skip if same shader already bound
+								if (state->stateCoalescingEnabled && d3dShader == state->lastSetPS) {
+									state->coalescedPSCalls++;
+								} else {
+									globals::d3d::context->PSSetShader(d3dShader, NULL, NULL);
+									state->lastSetPS = d3dShader;
+								}
 								*globals::game::currentPixelShader = a_pixelShader;
 								return;
 							}
@@ -603,8 +647,17 @@ namespace Hooks
 
 			*globals::game::currentPixelShader = a_pixelShader;
 
-			if (a_pixelShader)
-				globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader), NULL, NULL);
+			if (a_pixelShader) {
+				auto* d3dShader = reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader);
+				state->totalPSCalls++;
+				// State Change Coalescing: skip if same shader already bound
+				if (state->stateCoalescingEnabled && d3dShader == state->lastSetPS) {
+					state->coalescedPSCalls++;
+				} else {
+					globals::d3d::context->PSSetShader(d3dShader, NULL, NULL);
+					state->lastSetPS = d3dShader;
+				}
+			}
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};

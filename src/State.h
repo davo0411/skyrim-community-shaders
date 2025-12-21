@@ -46,6 +46,22 @@ public:
 	RE::BSShader* currentShader = nullptr;
 	std::string adapterDescription = "";
 
+	// State Change Coalescing - track last set D3D11 shaders to skip redundant API calls
+	ID3D11VertexShader* lastSetVS = nullptr;
+	ID3D11PixelShader* lastSetPS = nullptr;
+	bool stateCoalescingEnabled = true;
+
+	// Statistics for coalesced state changes (per frame)
+	uint32_t coalescedVSCalls = 0;
+	uint32_t coalescedPSCalls = 0;
+	uint32_t totalVSCalls = 0;
+	uint32_t totalPSCalls = 0;
+	// Smoothed statistics for display
+	float smoothCoalescedVSCalls = 0.0f;
+	float smoothCoalescedPSCalls = 0.0f;
+	float smoothTotalVSCalls = 0.0f;
+	float smoothTotalPSCalls = 0.0f;
+
 	uint32_t currentVertexDescriptor = 0;
 	uint32_t currentPixelDescriptor = 0;
 	spdlog::level::level_enum logLevel = spdlog::level::info;

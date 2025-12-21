@@ -1302,6 +1302,32 @@ void PerformanceOverlay::DrawDrawCallsTable(const std::vector<DrawCallRow>& main
 	auto& overlay = globals::features::performanceOverlay;
 	auto* menu = Menu::GetSingleton();
 	const auto& theme = menu->GetTheme();
+	auto* state = globals::state;
+
+	// State Change Coalescing statistics
+	if (state->stateCoalescingEnabled) {
+		float vsTotal = state->smoothTotalVSCalls;
+		float psTotal = state->smoothTotalPSCalls;
+		float vsCoalesced = state->smoothCoalescedVSCalls;
+		float psCoalesced = state->smoothCoalescedPSCalls;
+		float vsSavings = (vsTotal > 0.0f) ? (vsCoalesced / vsTotal * 100.0f) : 0.0f;
+		float psSavings = (psTotal > 0.0f) ? (psCoalesced / psTotal * 100.0f) : 0.0f;
+		
+		ImGui::TextColored(theme.StatusPalette.GoodStatus, "State Coalescing:");
+		ImGui::SameLine();
+		ImGui::Text("VS %.0f%% | PS %.0f%% saved", vsSavings, psSavings);
+		if (ImGui::IsItemHovered()) {
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("State Change Coalescing reduces redundant D3D11 API calls");
+				ImGui::Separator();
+				ImGui::Text("Vertex Shaders: %.0f/%.0f calls skipped (%.1f%%)", vsCoalesced, vsTotal, vsSavings);
+				ImGui::Text("Pixel Shaders: %.0f/%.0f calls skipped (%.1f%%)", psCoalesced, psTotal, psSavings);
+				ImGui::Separator();
+				ImGui::TextColored(theme.StatusPalette.HelpText, "Higher percentages = more CPU time saved");
+			}
+		}
+		ImGui::Spacing();
+	}
 
 	// Capture test data and handle clear button
 	overlay.CaptureTestData();

@@ -128,6 +128,19 @@ void State::Reset()
 	std::memset(&permutationDataPrevious, 0xFF, sizeof(PermutationCB));
 	frameCount++;
 
+	// State Change Coalescing: update smoothed statistics and reset per-frame counters
+	smoothCoalescedVSCalls = smoothCoalescedVSCalls * 0.95f + static_cast<float>(coalescedVSCalls) * 0.05f;
+	smoothCoalescedPSCalls = smoothCoalescedPSCalls * 0.95f + static_cast<float>(coalescedPSCalls) * 0.05f;
+	smoothTotalVSCalls = smoothTotalVSCalls * 0.95f + static_cast<float>(totalVSCalls) * 0.05f;
+	smoothTotalPSCalls = smoothTotalPSCalls * 0.95f + static_cast<float>(totalPSCalls) * 0.05f;
+	coalescedVSCalls = 0;
+	coalescedPSCalls = 0;
+	totalVSCalls = 0;
+	totalPSCalls = 0;
+	// Reset tracked shaders each frame to ensure correct state after render target switches
+	lastSetVS = nullptr;
+	lastSetPS = nullptr;
+
 	if (auto* imageSpaceManager = RE::ImageSpaceManager::GetSingleton()) {
 		GET_INSTANCE_MEMBER(BSImagespaceShaderApplyReflections, imageSpaceManager);
 
