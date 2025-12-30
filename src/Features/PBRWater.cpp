@@ -312,7 +312,11 @@ void PBRWater::UpdatePerFrameData(PerFrame& data, float waterSurfaceHeight)
 	data.TerrainOffsetY = terrainData.Offset.y;
 	data.TerrainZRangeMin = terrainData.ZRange.x;
 	data.TerrainZRangeMax = terrainData.ZRange.y;
+	data.TerrainRawZMin = terrainData.RawHeightmapZRange.x;
+	data.TerrainRawZMax = terrainData.RawHeightmapZRange.y;
 	data.TerrainPad0 = 0.0f;
+	data.TerrainPad1 = 0.0f;
+	data.TerrainPad2 = 0.0f;
 	
 	// Timing
 	float gameTimeHours = 0.0f;
@@ -498,13 +502,14 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	// Call original SetupGeometry
 	func(waterShader, pass);
 
-	// Bind terrain heightmap texture to VS/DS
-	ID3D11ShaderResourceView* terrainHeightSRV[1] = { nullptr };
-	context->PSGetShaderResources(60, 1, terrainHeightSRV);
-	if (terrainHeightSRV[0]) {
-		context->VSSetShaderResources(60, 1, terrainHeightSRV);
-		context->DSSetShaderResources(60, 1, terrainHeightSRV);
-		terrainHeightSRV[0]->Release();
+	// Bind terrain elevation heightmap (t61) to VS/DS for water depth estimation
+	// This uses the raw heightmap data, not the shadow-processed data (t60)
+	ID3D11ShaderResourceView* terrainElevationSRV[1] = { nullptr };
+	context->PSGetShaderResources(61, 1, terrainElevationSRV);
+	if (terrainElevationSRV[0]) {
+		context->VSSetShaderResources(61, 1, terrainElevationSRV);
+		context->DSSetShaderResources(61, 1, terrainElevationSRV);
+		terrainElevationSRV[0]->Release();
 	}
 	
 	ID3D11SamplerState* terrainSampler[1] = { nullptr };

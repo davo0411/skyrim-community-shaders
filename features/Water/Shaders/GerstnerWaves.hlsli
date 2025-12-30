@@ -196,9 +196,13 @@ cbuffer UnifiedWaterPerFrame : register(b7)
 	float TerrainScaleY : packoffset(c25.y);            // Heightmap UV scale Y
 	float TerrainOffsetX : packoffset(c25.z);           // Heightmap UV offset X
 	float TerrainOffsetY : packoffset(c25.w);           // Heightmap UV offset Y
-	float TerrainZRangeMin : packoffset(c26.x);         // Terrain Z range minimum
-	float TerrainZRangeMax : packoffset(c26.y);         // Terrain Z range maximum
-	float TerrainPad0 : packoffset(c26.z);
+	float TerrainZRangeMin : packoffset(c26.x);         // Terrain Z range minimum (shadow system)
+	float TerrainZRangeMax : packoffset(c26.y);         // Terrain Z range maximum (shadow system)
+	float TerrainRawZMin : packoffset(c26.z);           // Raw heightmap pos0.z for water depth
+	float TerrainRawZMax : packoffset(c26.w);           // Raw heightmap pos1.z for water depth
+	float TerrainPad0 : packoffset(c27.x);
+	float TerrainPad1 : packoffset(c27.y);
+	float TerrainPad2 : packoffset(c27.z);
 }
 
 cbuffer UnifiedWaterPerTile : register(b8)

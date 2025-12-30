@@ -190,6 +190,7 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 		data.Scale = float3(1.f, 1.f, 1.f) / invScale;
 		data.Offset = -cachedHeightmap->pos0 * float2{ data.Scale.x, data.Scale.y };
 		data.ZRange = cachedHeightmap->zRange;
+		data.RawHeightmapZRange = { cachedHeightmap->pos0.z, cachedHeightmap->pos1.z };
 	}
 
 	return data;
@@ -415,12 +416,18 @@ void TerrainShadows::UpdateShadow()
 
 void TerrainShadows::ReflectionsPrepass()
 {
-	if (texShadowHeight) {
-		auto context = globals::d3d::context;
+	auto context = globals::d3d::context;
 
+	if (texShadowHeight) {
 		std::array<ID3D11ShaderResourceView*, 1> srvs = { texShadowHeight->srv.get() };
 		context->PSSetShaderResources(60, (uint)srvs.size(), srvs.data());
 		context->CSSetShaderResources(60, (uint)srvs.size(), srvs.data());
+	}
+
+	// Bind raw heightmap to t61 for water depth estimation (separate from shadow data)
+	if (texHeightMap) {
+		std::array<ID3D11ShaderResourceView*, 1> srvs = { texHeightMap->srv.get() };
+		context->PSSetShaderResources(61, (uint)srvs.size(), srvs.data());
 	}
 }
 
@@ -442,5 +449,13 @@ void TerrainShadows::EarlyPrepass()
 		std::array<ID3D11ShaderResourceView*, 1> srvs = { texShadowHeight->srv.get() };
 		context->PSSetShaderResources(60, (uint)srvs.size(), srvs.data());
 		context->CSSetShaderResources(60, (uint)srvs.size(), srvs.data());
+	}
+
+	// Bind raw heightmap to t61 for water depth estimation (separate from shadow data)
+	if (texHeightMap) {
+		auto context = globals::d3d::context;
+
+		std::array<ID3D11ShaderResourceView*, 1> srvs = { texHeightMap->srv.get() };
+		context->PSSetShaderResources(61, (uint)srvs.size(), srvs.data());
 	}
 }

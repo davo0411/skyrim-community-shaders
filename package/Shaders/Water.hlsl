@@ -283,12 +283,13 @@ VS_OUTPUT main(VS_INPUT input)
 		// This gives us the actual water surface position before wave displacement
 		float3 absoluteWorldPos = worldPosBase.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 		// Pass terrain parameters from PerFrame buffer
+		// Use TerrainRawZMin/Max for raw heightmap sampling (not shadow-processed ZRange)
 		estimatedDepth = EstimateWaterDepthFromTerrain(
 			absoluteWorldPos,
 			float2(TerrainScaleX, TerrainScaleY),
 			float2(TerrainOffsetX, TerrainOffsetY),
-			TerrainZRangeMin,
-			TerrainZRangeMax,
+			TerrainRawZMin,
+			TerrainRawZMax,
 			depthDebug
 		);
 		

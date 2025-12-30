@@ -6,13 +6,13 @@
 // ============================================================================
 //
 // This system estimates water depth by sampling the terrain heightmap
-// in the vertex shader using the Terrain Shadows heightmap data.
+// in the vertex shader using the raw terrain elevation data.
 // This enables depth-aware wave modulation in worldspace.
 //
 // Key principles:
-// 1. Use Terrain Shadows heightmap texture (t60) with terrain elevation data
+// 1. Use raw terrain heightmap texture (t61) - NOT the shadow-processed data (t60)
 // 2. Sample heightmap at water surface XY world position
-// 3. Get terrain Z from normalized heightmap value
+// 3. Get terrain Z from normalized heightmap value using RawHeightmapZRange
 // 4. Calculate water depth = water surface Z - terrain Z
 // 5. Modulate wave amplitude based on depth
 //
@@ -21,14 +21,13 @@
 // - Works for off-screen water vertices
 // - No projection/inverse projection needed
 // - More stable and predictable results
+// - Independent of shadow calculation (no contamination)
 
-// Terrain heightmap from Terrain Shadows feature (slot 60)
-// Format: DXGI_FORMAT_R16G16_FLOAT - RG channels contain shadow height range
-// .x (red) = upper height (shadow receiver - terrain + shadow projection)
-// .y (green) = lower height (shadow caster - actual terrain surface)
-// We use .y channel for water depth as it represents the true terrain elevation
+// Raw terrain heightmap texture (slot 61) - separate from shadow data (slot 60)
+// Format: Single-channel float with normalized elevation [0,1]
+// This is the pure terrain elevation data, NOT processed with shadow information
 #if defined(VSHADER) || defined(DSHADER)
-Texture2D<float2> TerrainHeightTexture : register(t60);
+Texture2D<float> TerrainElevationTexture : register(t61);
 
 // Sampler for terrain heightmap - using linear filtering for smooth interpolation
 SamplerState TerrainHeightSampler : register(s12);
@@ -53,29 +52,27 @@ float2 GetTerrainHeightmapUV(float2 worldXY, float2 scaleXY, float2 offsetXY)
 
 /**
  * Converts normalized heightmap Z value to world Z coordinate
- * Matches TerrainShadows GetTerrainZ() implementation
- * NOTE: Removed -1024 offset to match water coordinate system
+ * Uses the raw heightmap Z range (pos0.z to pos1.z)
  * @param normZ Normalized Z value from heightmap [0,1]
- * @param zRangeMin Minimum Z from PerFrame buffer
- * @param zRangeMax Maximum Z from PerFrame buffer
+ * @param rawZMin Raw heightmap minimum Z (pos0.z)
+ * @param rawZMax Raw heightmap maximum Z (pos1.z)
  * @return World Z coordinate in game units
  */
-float GetTerrainWorldZ(float normZ, float zRangeMin, float zRangeMax)
+float GetTerrainWorldZ(float normZ, float rawZMin, float rawZMax)
 {
-	// Testing without -1024 offset - water and terrain may be in same coord system
-	return lerp(zRangeMin, zRangeMax, normZ);
+	return lerp(rawZMin, rawZMax, normZ);
 }
 
 /**
- * Samples terrain height at a world XY position
+ * Samples terrain height at a world XY position using raw elevation texture
  * @param worldXY World position XY coordinates
  * @param scaleXY Terrain heightmap scale
  * @param offsetXY Terrain heightmap offset
- * @param zRangeMin Minimum Z value
- * @param zRangeMax Maximum Z value
+ * @param rawZMin Raw heightmap minimum Z (pos0.z)
+ * @param rawZMax Raw heightmap maximum Z (pos1.z)
  * @return Terrain world Z coordinate, or very large negative value if unavailable
  */
-float SampleTerrainHeight(float2 worldXY, float2 scaleXY, float2 offsetXY, float zRangeMin, float zRangeMax)
+float SampleTerrainHeight(float2 worldXY, float2 scaleXY, float2 offsetXY, float rawZMin, float rawZMax)
 {
 #if defined(VSHADER) || defined(DSHADER)
 	// Get heightmap UV coordinates
@@ -87,22 +84,18 @@ float SampleTerrainHeight(float2 worldXY, float2 scaleXY, float2 offsetXY, float
 		return -1e6f;  // Outside heightmap coverage
 	}
 	
-	// Sample heightmap - .rg format contains shadow height range
-	// TerrainShadows uses: .x = upper height (terrain + shadow), .y = lower height (actual terrain)
-	// We want the ACTUAL terrain surface for water depth, not the shadow receiver height
-	float2 heightmapSample = TerrainHeightTexture.SampleLevel(TerrainHeightSampler, heightmapUV, 0);
+	// Sample raw terrain elevation texture (t61) - single channel normalized height
+	// This is pure terrain elevation, NOT contaminated with shadow data
+	float normalizedHeight = TerrainElevationTexture.SampleLevel(TerrainHeightSampler, heightmapUV, 0);
 	
-	// DEBUG: If both channels zero, texture not bound
-	if (abs(heightmapSample.r) < 0.0001f && abs(heightmapSample.g) < 0.0001f) {
-		return -2e6f;  // Both channels zero - texture not bound or all black
+	// DEBUG: If sample is zero, texture may not be bound
+	if (abs(normalizedHeight) < 0.0001f) {
+		// Could be valid (sea level terrain) or unbound texture
+		// Allow it through - sea level is a valid height
 	}
 	
-	// Use .y channel - this is the actual terrain height (shadow caster)
-	// NOT .x which is the shadow receiver height (terrain + shadow projection)
-	float normalizedHeight = heightmapSample.y;
-	
-	// Convert normalized height to world Z
-	float terrainWorldZ = GetTerrainWorldZ(normalizedHeight, zRangeMin, zRangeMax);
+	// Convert normalized height [0,1] to world Z using raw heightmap range
+	float terrainWorldZ = GetTerrainWorldZ(normalizedHeight, rawZMin, rawZMax);
 	
 	return terrainWorldZ;
 #else
@@ -128,13 +121,13 @@ struct DepthEstimationDebug
  * @param waterWorldPos Absolute world XYZ position of water surface
  * @param scaleXY Terrain heightmap scale
  * @param offsetXY Terrain heightmap offset  
- * @param zRangeMin Minimum Z value
- * @param zRangeMax Maximum Z value
+ * @param rawZMin Raw heightmap minimum Z (TerrainRawZMin from PerFrame)
+ * @param rawZMax Raw heightmap maximum Z (TerrainRawZMax from PerFrame)
  * @param debugOut Debug information output (optional)
  * @return Estimated water depth in game units (positive = water above terrain)
  *         Returns large value (1e5) if depth cannot be determined
  */
-float EstimateWaterDepthFromTerrain(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float zRangeMin, float zRangeMax, out DepthEstimationDebug debugOut)
+float EstimateWaterDepthFromTerrain(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float rawZMin, float rawZMax, out DepthEstimationDebug debugOut)
 {
 	debugOut.depth = 1e5f;
 	debugOut.debugCode = 0.0f;
@@ -145,8 +138,8 @@ float EstimateWaterDepthFromTerrain(float3 waterWorldPos, float2 scaleXY, float2
 	// Pixel shader doesn't need depth estimation
 	return 1e5f;
 #else
-	// Sample terrain height at water XY position
-	float terrainZ = SampleTerrainHeight(waterWorldPos.xy, scaleXY, offsetXY, zRangeMin, zRangeMax);
+	// Sample terrain height at water XY position using raw elevation texture
+	float terrainZ = SampleTerrainHeight(waterWorldPos.xy, scaleXY, offsetXY, rawZMin, rawZMax);
 	debugOut.terrainZ = terrainZ;
 	
 	// Check if sample was valid
@@ -174,10 +167,10 @@ float EstimateWaterDepthFromTerrain(float3 waterWorldPos, float2 scaleXY, float2
 /**
  * Simplified version without debug output for production use
  */
-float EstimateWaterDepthFromTerrain(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float zRangeMin, float zRangeMax)
+float EstimateWaterDepthFromTerrain(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float rawZMin, float rawZMax)
 {
 	DepthEstimationDebug debugOut;
-	return EstimateWaterDepthFromTerrain(waterWorldPos, scaleXY, offsetXY, zRangeMin, zRangeMax, debugOut);
+	return EstimateWaterDepthFromTerrain(waterWorldPos, scaleXY, offsetXY, rawZMin, rawZMax, debugOut);
 }
 /**
  * Visualizes depth estimation debug information as a color
@@ -224,15 +217,15 @@ float3 VisualizeDepthEstimation(DepthEstimationDebug debugInfo)
  * @param waterWorldPos Absolute world position of water surface
  * @param scaleXY Terrain heightmap scale
  * @param offsetXY Terrain heightmap offset
- * @param zRangeMin Minimum Z value
- * @param zRangeMax Maximum Z value
+ * @param rawZMin Raw heightmap minimum Z
+ * @param rawZMax Raw heightmap maximum Z
  * @param sampleRadius Radius in world units to sample (default 64 units)
  * @return Averaged water depth estimate
  */
-float EstimateWaterDepthFiltered(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float zRangeMin, float zRangeMax, float sampleRadius = 64.0f)
+float EstimateWaterDepthFiltered(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float rawZMin, float rawZMax, float sampleRadius = 64.0f)
 {
 	// just center sample for now
-	float centerDepth = EstimateWaterDepthFromTerrain(waterWorldPos, scaleXY, offsetXY, zRangeMin, zRangeMax);
+	float centerDepth = EstimateWaterDepthFromTerrain(waterWorldPos, scaleXY, offsetXY, rawZMin, rawZMax);
 	
 	// Can add more samples here later if needed (davo reminder)
 		// float3 offset1 = waterWorldPos + float3(sampleRadius, 0, 0);

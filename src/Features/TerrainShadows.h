@@ -64,6 +64,8 @@ public:
 		float3 Scale;
 		float2 ZRange;
 		float2 Offset;
+		float2 RawHeightmapZRange;  // pos0.z to pos1.z - Z range of raw heightmap data
+		float2 Pad0;
 	};
 
 	PerFrame GetCommonBufferData();

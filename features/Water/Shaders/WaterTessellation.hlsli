@@ -418,12 +418,13 @@ VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const Out
 	// Use interpWPosition (camera-relative) + CameraPosAdjust for all XYZ
 	float3 absoluteWorldPos = interpWPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	DepthEstimationDebug depthDebug;
+	// Use TerrainRawZMin/Max for raw heightmap sampling (not shadow-processed ZRange)
 	float estimatedDepthDS = EstimateWaterDepthFromTerrain(
 		absoluteWorldPos,                                 // Absolute world position
 		float2(TerrainScaleX, TerrainScaleY),            // Heightmap UV scale
 		float2(TerrainOffsetX, TerrainOffsetY),          // Heightmap UV offset
-		TerrainZRangeMin,                                 // Z range min
-		TerrainZRangeMax,                                 // Z range max
+		TerrainRawZMin,                                   // Raw heightmap Z min
+		TerrainRawZMax,                                   // Raw heightmap Z max
 		depthDebug);                                      // Debug output
 	
 	WaveSample waveSample = CalculateWaterDisplacement(

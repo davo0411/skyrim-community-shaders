@@ -182,7 +182,11 @@ struct PBRWater : public Feature
 		float TerrainOffsetY;
 		float TerrainZRangeMin;
 		float TerrainZRangeMax;
+		float TerrainRawZMin;        // Raw heightmap pos0.z for water depth
+		float TerrainRawZMax;        // Raw heightmap pos1.z for water depth
 		float TerrainPad0;
+		float TerrainPad1;
+		float TerrainPad2;
 	};
 
 	using ActorRippleData = UnifiedWaterRipples::ActorRippleData;
