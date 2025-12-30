@@ -456,7 +456,6 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettingsTab(Feature* fea
 		}
 
 		if (!isDisabled && isLoaded) {
-			// Position button in screen coordinates so it stays fixed in viewport when scrolling
 			// Position buttons in screen coordinates so they stay fixed in viewport when scrolling
 			ImVec2 windowPos = ImGui::GetWindowPos();
 			ImVec2 windowSize = ImGui::GetWindowSize();
