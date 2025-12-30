@@ -1,6 +1,7 @@
 #include "SettingsOverrideManager.h"
 
 #include "FeatureIssues.h"
+#include "Globals.h"
 #include "Util.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <iomanip>
 #include <regex>
 #include <sstream>
+#include <unordered_set>
 
 using namespace SKSE;
 
@@ -448,7 +450,7 @@ size_t SettingsOverrideManager::ApplyNewOverrides(json& baseSettings, json& appl
 				// First time seeing this override
 				shouldApply = true;
 			} else {
-				// Check if the override file has changed
+				// Check if the override file has changed or CS version changed
 				auto& tracking = appliedOverrides[trackingKey];
 				if (!tracking.is_object()) {
 					// Invalid tracking data, reapply
@@ -456,10 +458,18 @@ size_t SettingsOverrideManager::ApplyNewOverrides(json& baseSettings, json& appl
 					logger::info("Invalid tracking data for {}, reapplying", override.modName);
 				} else {
 					std::string currentHash = tracking.value("hash", "");
+					std::string trackedVersion = tracking.value("csVersion", "");
+					std::string currentVersion = Plugin::VERSION.string();
+					
 					if (currentHash != override.fileHash) {
 						// Override file has changed, reapply
 						shouldApply = true;
 						logger::info("Override file {} has changed, reapplying", override.modName);
+					} else if (trackedVersion != currentVersion) {
+						// CS version changed, reapply to ensure new settings keys are populated
+						shouldApply = true;
+						logger::info("CS version changed from {} to {} for global override, reapplying",
+							trackedVersion.empty() ? "unknown" : trackedVersion, currentVersion);
 					}
 				}
 			}
@@ -478,12 +488,14 @@ size_t SettingsOverrideManager::ApplyNewOverrides(json& baseSettings, json& appl
 					MergeJson(baseSettings, override.overrideData);
 					appliedCount++;
 
-					// Update tracking
+					// Update tracking with CS version for future version change detection
 					appliedOverrides[trackingKey] = {
 						{ "hash", override.fileHash },
-						{ "firstApplied", currentTime },
+						{ "firstApplied", appliedOverrides.contains(trackingKey) ?
+							appliedOverrides[trackingKey].value("firstApplied", currentTime) : currentTime },
 						{ "lastApplied", currentTime },
-						{ "version", override.version }
+						{ "version", override.version },
+						{ "csVersion", Plugin::VERSION.string() }
 					};
 
 					logger::info("Applied global override from {}", override.modName);
@@ -555,7 +567,7 @@ size_t SettingsOverrideManager::ApplyNewFeatureOverrides(const std::string& feat
 					// First time seeing this override
 					shouldApply = true;
 				} else {
-					// Check if the override file has changed
+					// Check if the override file has changed or CS version changed
 					auto& tracking = appliedOverrides[trackingKey];
 					if (!tracking.is_object()) {
 						// Invalid tracking data, reapply
@@ -563,10 +575,18 @@ size_t SettingsOverrideManager::ApplyNewFeatureOverrides(const std::string& feat
 						logger::info("Invalid tracking data for {} on {}, reapplying", override.modName, featureName);
 					} else {
 						std::string currentHash = tracking.value("hash", "");
+						std::string trackedVersion = tracking.value("csVersion", "");
+						std::string currentVersion = Plugin::VERSION.string();
+						
 						if (currentHash != override.fileHash) {
 							// Override file has changed, reapply
 							shouldApply = true;
 							logger::info("Override file {} for {} has changed, reapplying", override.modName, featureName);
+						} else if (trackedVersion != currentVersion) {
+							// CS version changed, reapply to ensure new settings keys are populated
+							shouldApply = true;
+							logger::info("CS version changed from {} to {} for {}, reapplying override", 
+								trackedVersion.empty() ? "unknown" : trackedVersion, currentVersion, featureName);
 						}
 					}
 				}
@@ -585,12 +605,14 @@ size_t SettingsOverrideManager::ApplyNewFeatureOverrides(const std::string& feat
 						MergeJson(featureJson, override.overrideData);
 						appliedCount++;
 
-						// Update tracking
+						// Update tracking with CS version for future version change detection
 						appliedOverrides[trackingKey] = {
 							{ "hash", override.fileHash },
-							{ "firstApplied", currentTime },
+							{ "firstApplied", appliedOverrides.contains(trackingKey) ? 
+								appliedOverrides[trackingKey].value("firstApplied", currentTime) : currentTime },
 							{ "lastApplied", currentTime },
-							{ "version", override.version }
+							{ "version", override.version },
+							{ "csVersion", Plugin::VERSION.string() }
 						};
 
 						logger::info("Applied override from {} to {}", override.modName, featureName);
@@ -1166,4 +1188,352 @@ void SettingsOverrideManager::ReportOverrideFailure(const std::string& modName, 
 		fullErrorMessage,
 		FeatureIssues::FeatureIssueInfo::IssueType::OVERRIDE_FAILED,
 		fileInfo);
+}
+
+// =====================================================================
+// New Override Management API Implementation
+// =====================================================================
+
+std::string SettingsOverrideManager::GetTrackingKey(const std::string& modName, const std::string& featureName) const
+{
+	return modName + "_" + (featureName.empty() ? "Global" : featureName);
+}
+
+SettingsOverrideManager::FeatureOverrideStatus SettingsOverrideManager::GetFeatureOverrideStatus(const std::string& featureName) const
+{
+	FeatureOverrideStatus status;
+	status.featureName = featureName;
+	status.status = OverrideStatus::None;
+	status.hasUserModifications = false;
+	status.lastApplied = 0;
+
+	// Check if feature has a broken override
+	auto brokenIt = brokenOverrides.find(featureName);
+	if (brokenIt != brokenOverrides.end()) {
+		status.status = OverrideStatus::Broken;
+		status.description = brokenIt->second;
+		return status;
+	}
+
+	// Check if feature has available overrides
+	auto it = featureOverrideMap.find(featureName);
+	if (it == featureOverrideMap.end() || it->second.empty()) {
+		return status;
+	}
+
+	// Get the first override for this feature
+	const auto& override = overrides[it->second[0]];
+	status.modName = override.modName;
+	status.description = override.description;
+
+	// Check tracking data
+	if (trackingCacheDirty) {
+		cachedAppliedOverrides = LoadAppliedOverridesTracking();
+		trackingCacheDirty = false;
+	}
+
+	std::string trackingKey = GetTrackingKey(override.modName, featureName);
+	if (cachedAppliedOverrides.contains(trackingKey)) {
+		const auto& tracking = cachedAppliedOverrides[trackingKey];
+		if (tracking.is_object()) {
+			std::string trackedHash = tracking.value("hash", "");
+			status.lastApplied = tracking.value("lastApplied", 0);
+			
+			if (trackedHash == override.fileHash) {
+				status.status = OverrideStatus::Active;
+			} else {
+				status.status = OverrideStatus::Outdated;
+			}
+		}
+	} else {
+		status.status = OverrideStatus::Available;
+	}
+
+	return status;
+}
+
+std::vector<SettingsOverrideManager::FeatureOverrideStatus> SettingsOverrideManager::GetAllFeatureOverrideStatuses() const
+{
+	std::vector<FeatureOverrideStatus> statuses;
+	
+	// Collect all unique feature names
+	std::unordered_set<std::string> featureNames;
+	for (const auto& [name, _] : featureOverrideMap) {
+		featureNames.insert(name);
+	}
+	for (const auto& [name, _] : brokenOverrides) {
+		featureNames.insert(name);
+	}
+
+	// Get status for each feature
+	for (const auto& name : featureNames) {
+		statuses.push_back(GetFeatureOverrideStatus(name));
+	}
+
+	// Sort by feature name
+	std::sort(statuses.begin(), statuses.end(),
+		[](const FeatureOverrideStatus& a, const FeatureOverrideStatus& b) {
+			return a.featureName < b.featureName;
+		});
+
+	return statuses;
+}
+
+bool SettingsOverrideManager::BreakOverride(const std::string& featureName)
+{
+	json appliedOverrides = LoadAppliedOverridesTracking();
+	
+	bool found = false;
+	auto it = appliedOverrides.begin();
+	while (it != appliedOverrides.end()) {
+		const std::string& key = it.key();
+		// Check if this tracking entry is for the specified feature
+		if (key.find("_" + featureName) != std::string::npos || 
+			key.rfind(featureName) == key.length() - featureName.length()) {
+			it = appliedOverrides.erase(it);
+			found = true;
+		} else {
+			++it;
+		}
+	}
+
+	if (found) {
+		SaveAppliedOverridesTracking(appliedOverrides);
+		trackingCacheDirty = true;
+		logger::info("Broke override tracking for feature: {}", featureName);
+	}
+
+	return found;
+}
+
+size_t SettingsOverrideManager::BreakAllOverrides()
+{
+	json appliedOverrides = LoadAppliedOverridesTracking();
+	size_t count = appliedOverrides.size();
+	
+	if (count > 0) {
+		appliedOverrides = json::object();
+		SaveAppliedOverridesTracking(appliedOverrides);
+		trackingCacheDirty = true;
+		logger::info("Broke override tracking for {} features", count);
+	}
+
+	return count;
+}
+
+bool SettingsOverrideManager::ForceApplyOverride(const std::string& featureName, json& featureJson)
+{
+	if (!enabled || !discovered) {
+		return false;
+	}
+
+	auto it = featureOverrideMap.find(featureName);
+	if (it == featureOverrideMap.end() || it->second.empty()) {
+		return false;
+	}
+
+	const auto& override = overrides[it->second[0]];
+	if (!override.enabled) {
+		return false;
+	}
+
+	try {
+		MergeJson(featureJson, override.overrideData);
+		
+		// Update tracking
+		json appliedOverrides = LoadAppliedOverridesTracking();
+		std::string trackingKey = GetTrackingKey(override.modName, featureName);
+		auto currentTime = std::time(nullptr);
+		
+		appliedOverrides[trackingKey] = {
+			{ "hash", override.fileHash },
+			{ "firstApplied", appliedOverrides.contains(trackingKey) ? 
+				appliedOverrides[trackingKey].value("firstApplied", currentTime) : currentTime },
+			{ "lastApplied", currentTime },
+			{ "version", override.version },
+			{ "csVersion", Plugin::VERSION.string() }
+		};
+		
+		SaveAppliedOverridesTracking(appliedOverrides);
+		trackingCacheDirty = true;
+		
+		// Clear broken status if present
+		brokenOverrides.erase(featureName);
+		
+		logger::info("Force applied override from {} to {}", override.modName, featureName);
+		return true;
+	} catch (const std::exception& e) {
+		logger::warn("Failed to force apply override to {}: {}", featureName, e.what());
+		brokenOverrides[featureName] = e.what();
+		return false;
+	}
+}
+
+size_t SettingsOverrideManager::ForceApplyAllOverrides()
+{
+	// Note: This is typically called from UI and requires feature cooperation
+	// The actual application happens through Feature::ReapplyOverrideSettings()
+	return featureOverrideMap.size();
+}
+
+bool SettingsOverrideManager::ExportFeatureOverride(const std::string& featureName, const json& featureJson,
+	const std::string& modName, const std::string& description)
+{
+	try {
+		auto overridesDir = GetOverridesDirectory();
+		std::filesystem::create_directories(overridesDir);
+
+		std::string filename = modName + "_" + featureName + ".json";
+		auto filePath = overridesDir / filename;
+
+		json exportData = featureJson;
+		
+		// Add metadata
+		exportData["_metadata"] = {
+			{ "modName", modName },
+			{ "description", description.empty() ? 
+				"Exported settings for " + featureName : description },
+			{ "version", "1.0" },
+			{ "enabled", true },
+			{ "exportedAt", std::time(nullptr) }
+		};
+
+		std::ofstream file(filePath);
+		if (!file.is_open()) {
+			logger::warn("Failed to create override export file: {}", filePath.string());
+			return false;
+		}
+
+		file << exportData.dump(2);
+		file.close();
+
+		logger::info("Exported override for {} to {}", featureName, filePath.string());
+		
+		// Refresh to pick up the new file
+		RefreshOverrides();
+		
+		return true;
+	} catch (const std::exception& e) {
+		logger::warn("Failed to export override for {}: {}", featureName, e.what());
+		return false;
+	}
+}
+
+size_t SettingsOverrideManager::ExportAllModifiedSettings(const std::string& modName)
+{
+	// Note: This requires Feature cooperation to get current settings
+	// Implementation would iterate features and call ExportFeatureOverride for each
+	// For now, return 0 as the actual export is done from the UI layer
+	return 0;
+}
+
+bool SettingsOverrideManager::HasUserModifications(const std::string& featureName, const json& currentSettings) const
+{
+	auto diffs = GetSettingsDiff(featureName, currentSettings);
+	return !diffs.empty();
+}
+
+std::vector<std::tuple<std::string, std::string, std::string>> SettingsOverrideManager::GetSettingsDiff(
+	const std::string& featureName, const json& currentSettings) const
+{
+	std::vector<std::tuple<std::string, std::string, std::string>> diffs;
+
+	auto it = featureOverrideMap.find(featureName);
+	if (it == featureOverrideMap.end() || it->second.empty()) {
+		return diffs;
+	}
+
+	const auto& override = overrides[it->second[0]];
+	ComputeJsonDiff(currentSettings, override.overrideData, "", diffs);
+
+	return diffs;
+}
+
+void SettingsOverrideManager::ComputeJsonDiff(const json& current, const json& original, const std::string& path,
+	std::vector<std::tuple<std::string, std::string, std::string>>& diffs) const
+{
+	if (current.is_object() && original.is_object()) {
+		for (const auto& [key, origValue] : original.items()) {
+			std::string newPath = path.empty() ? key : path + "." + key;
+			
+			if (!current.contains(key)) {
+				diffs.emplace_back(newPath, "(missing)", origValue.dump());
+			} else {
+				ComputeJsonDiff(current[key], origValue, newPath, diffs);
+			}
+		}
+	} else {
+		// Compare leaf values
+		if (current != original) {
+			diffs.emplace_back(path, current.dump(), original.dump());
+		}
+	}
+}
+
+std::unordered_set<std::string> SettingsOverrideManager::GetFeaturesWithOverrides() const
+{
+	std::unordered_set<std::string> features;
+	for (const auto& [name, _] : featureOverrideMap) {
+		if (!name.empty()) {
+			features.insert(name);
+		}
+	}
+	return features;
+}
+
+void SettingsOverrideManager::MarkOverrideBroken(const std::string& featureName, const std::string& errorMessage)
+{
+	brokenOverrides[featureName] = errorMessage;
+}
+
+ImVec4 SettingsOverrideManager::GetStatusColor(OverrideStatus status)
+{
+	auto& theme = globals::menu->GetTheme();
+	switch (status) {
+	case OverrideStatus::Active:
+		return theme.StatusPalette.SuccessColor;
+	case OverrideStatus::Available:
+		return theme.StatusPalette.InfoColor;
+	case OverrideStatus::Outdated:
+		return theme.StatusPalette.Warning;
+	case OverrideStatus::Broken:
+		return theme.StatusPalette.Error;
+	case OverrideStatus::None:
+	default:
+		return theme.StatusPalette.Disable;
+	}
+}
+
+const char* SettingsOverrideManager::GetStatusIcon(OverrideStatus status)
+{
+	switch (status) {
+	case OverrideStatus::Active:
+		return "[OK]";
+	case OverrideStatus::Available:
+		return "[+]";
+	case OverrideStatus::Outdated:
+		return "[!]";
+	case OverrideStatus::Broken:
+		return "[X]";
+	case OverrideStatus::None:
+	default:
+		return "[-]";
+	}
+}
+
+const char* SettingsOverrideManager::GetStatusText(OverrideStatus status)
+{
+	switch (status) {
+	case OverrideStatus::Active:
+		return "Active - Override is applied and tracked";
+	case OverrideStatus::Available:
+		return "Available - Override file exists, not yet applied";
+	case OverrideStatus::Outdated:
+		return "Outdated - Override file has changed since last apply";
+	case OverrideStatus::Broken:
+		return "Broken - Override file failed to load";
+	case OverrideStatus::None:
+	default:
+		return "None - No override available";
+	}
 }

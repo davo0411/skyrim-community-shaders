@@ -112,6 +112,16 @@ namespace FeatureIssues
 	FeatureFileInfo GetFeatureFileInfo(const std::string& featureName);
 
 	/**
+	 * Find a feature by its short name
+	 *
+	 * Uses a cached hash map for O(1) lookup performance.
+	 *
+	 * \param shortName The feature's short name identifier
+	 * \return Pointer to the feature, or nullptr if not found
+	 */
+	Feature* FindFeature(const std::string& shortName);
+
+	/**
 	 * Add a feature issue to the tracking system
 	 *
 	 * \param shortName Short name of the feature

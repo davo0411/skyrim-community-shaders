@@ -29,6 +29,7 @@ private:
 		SettingsState& state,
 		const std::function<const char*(uint32_t)>& keyIdToString);
 	static void RenderInterfaceTab();
+	static void RenderOverwritesTab();
 
 	// Interface sub-tabs
 	static void RenderThemesTab();

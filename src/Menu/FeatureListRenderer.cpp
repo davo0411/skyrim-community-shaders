@@ -457,6 +457,7 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettingsTab(Feature* fea
 
 		if (!isDisabled && isLoaded) {
 			// Position button in screen coordinates so it stays fixed in viewport when scrolling
+			// Position buttons in screen coordinates so they stay fixed in viewport when scrolling
 			ImVec2 windowPos = ImGui::GetWindowPos();
 			ImVec2 windowSize = ImGui::GetWindowSize();
 			float scrollbarWidth = ImGui::GetScrollMaxY() > 0 ? ImGui::GetStyle().ScrollbarSize : 0.0f;
@@ -465,18 +466,54 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettingsTab(Feature* fea
 			ImVec2 iconSize = ImVec2(iconDimension, iconDimension);
 
 			float padding = 10.0f;
-			ImVec2 buttonPos = ImVec2(
-				windowPos.x + windowSize.x - iconSize.x - padding - scrollbarWidth,
-				windowPos.y + windowSize.y - iconSize.y - padding);
-			ImGui::SetCursorScreenPos(buttonPos);
-			auto& theme = globals::menu->GetTheme().Palette;
-			ImVec4 iconColor = theme.Text;
-			iconColor.w *= 0.7f;
+			float buttonSpacing = 4.0f;
+
+			// Check for overrides
+			auto overrideManager = SettingsOverrideManager::GetSingleton();
+			bool hasOverrides = overrideManager && overrideManager->HasFeatureOverrides(feat->GetShortName());
+
+			// Calculate total width for all buttons
+			float applyButtonWidth = hasOverrides ? ImGui::CalcTextSize("Apply").x + 12.0f : 0;
+			float exportButtonWidth = ImGui::CalcTextSize("Export").x + 12.0f;
+			float totalWidth = iconSize.x;
+			if (hasOverrides)
+				totalWidth += applyButtonWidth + buttonSpacing;
+			totalWidth += exportButtonWidth + buttonSpacing;
+
+			float startX = windowPos.x + windowSize.x - totalWidth - padding - scrollbarWidth;
+			float buttonY = windowPos.y + windowSize.y - iconSize.y - padding;
 
 			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.3f));
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.5f));
 
+			// Apply Override button
+			if (hasOverrides) {
+				ImGui::SetCursorScreenPos(ImVec2(startX, buttonY));
+				if (ImGui::Button("Apply", ImVec2(applyButtonWidth, iconSize.y))) {
+					feat->ReapplyOverrideSettings();
+					globals::state->Save(State::ConfigMode::USER);
+				}
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Apply override settings from mod preset");
+				}
+				startX += applyButtonWidth + buttonSpacing;
+			}
+
+			// Export button
+			ImGui::SetCursorScreenPos(ImVec2(startX, buttonY));
+			if (ImGui::Button("Export", ImVec2(exportButtonWidth, iconSize.y))) {
+				json settings;
+				feat->SaveSettings(settings);
+				overrideManager->ExportFeatureOverride(feat->GetShortName(), settings);
+			}
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("Export current settings as override file");
+			}
+			startX += exportButtonWidth + buttonSpacing;
+
+			// Reset button (existing functionality)
+			ImGui::SetCursorScreenPos(ImVec2(startX, buttonY));
 			auto& menu = *globals::menu;
 			if (menu.uiIcons.featureSettingRevert.texture) {
 				if (ImGui::ImageButton("##RestoreDefaults", menu.uiIcons.featureSettingRevert.texture, iconSize)) {
@@ -487,12 +524,11 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettingsTab(Feature* fea
 					feat->RestoreDefaultSettings();
 				}
 			}
-
-			ImGui::PopStyleColor(3);
-
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("Restore default settings for this feature");
 			}
+
+			ImGui::PopStyleColor(3);
 		}
 	}
 	ImGui::EndChild();

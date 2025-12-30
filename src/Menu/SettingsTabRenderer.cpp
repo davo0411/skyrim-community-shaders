@@ -15,6 +15,7 @@
 #include "Globals.h"
 #include "IconLoader.h"
 #include "Menu.h"
+#include "OverwritesTabRenderer.h"
 #include "ShaderCache.h"
 #include "ThemeManager.h"
 #include "Util.h"
@@ -186,6 +187,7 @@ void SettingsTabRenderer::RenderGeneralSettings(
 		RenderShadersTab();
 		RenderKeybindingsTab(state, keyIdToString);
 		RenderInterfaceTab();
+		RenderOverwritesTab();
 		ImGui::EndTabBar();
 	}
 }
@@ -319,6 +321,14 @@ void SettingsTabRenderer::RenderInterfaceTab()
 			RenderColorsTab();
 			ImGui::EndTabBar();
 		}
+		ImGui::EndTabItem();
+	}
+}
+
+void SettingsTabRenderer::RenderOverwritesTab()
+{
+	if (BeginTabItemWithFont("Overwrites", Menu::FontRole::Heading)) {
+		OverwritesTabRenderer::RenderOverwritesTab();
 		ImGui::EndTabItem();
 	}
 }

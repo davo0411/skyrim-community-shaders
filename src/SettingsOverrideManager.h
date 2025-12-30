@@ -2,41 +2,98 @@
 
 #include <ctime>
 #include <filesystem>
+#include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using json = nlohmann::json;
 
 /**
+ * @class SettingsOverrideManager
  * @brief Manages layered JSON override system for Community Shaders features
  *
- * This class handles discovery and application of feature setting overrides
- * from external mod files without requiring changes to existing feature code.
+ * This singleton class handles discovery, application, and management of feature
+ * setting overrides from external mod files. It provides a non-destructive way
+ * for mod authors to ship preset configurations that users can choose to apply.
  *
- * Override files follow the format: {ModName}_{FeatureShortName}.json
- * or {ModName}_Global.json for global overrides affecting multiple features.
+ * @section override_files Override File Format
+ * Override files follow the naming convention:
+ * - Feature-specific: `{ModName}_{FeatureShortName}.json`
+ * - Global: `{ModName}_Global.json`
+ *
+ * @section override_states Override States
+ * Each feature can be in one of these override states:
+ * - **None**: No override file exists for this feature
+ * - **Available**: Override file exists but hasn't been applied yet
+ * - **Active**: Override is currently applied to settings
+ * - **Broken**: Override file exists but failed to load/parse
+ * - **Outdated**: Override was applied but the file has changed since
+ *
+ * @section user_workflow User Workflow
+ * Users can:
+ * 1. View all available overrides in the Overwrites tab
+ * 2. Apply overrides to import preset settings
+ * 3. Break overrides to stop tracking (keeps current settings)
+ * 4. Export their current settings as new override files
+ *
+ * @see Feature for feature registration
+ * @see State::Load for settings loading flow
  */
 class SettingsOverrideManager
 {
 public:
+	/**
+	 * @enum OverrideStatus
+	 * @brief Represents the current state of an override for a feature
+	 */
+	enum class OverrideStatus
+	{
+		None,       ///< No override file exists for this feature
+		Available,  ///< Override file exists but hasn't been applied
+		Active,     ///< Override is currently applied and tracked
+		Broken,     ///< Override file exists but failed to load/parse
+		Outdated    ///< Override file changed since last application
+	};
+
+	/**
+	 * @struct OverrideInfo
+	 * @brief Contains metadata and data for a single override file
+	 */
 	struct OverrideInfo
 	{
-		std::string modName;
-		std::string featureName;  // Empty for global overrides
-		std::string filePath;
-		json overrideData;
-		bool isGlobal = false;
+		std::string modName;       ///< Name of the mod providing this override
+		std::string featureName;   ///< Target feature short name (empty for global)
+		std::string filePath;      ///< Full path to the override file
+		json overrideData;         ///< The actual override values
+		bool isGlobal = false;     ///< True if this affects multiple features
 
 		// Metadata from override file
-		std::string version;
-		std::string description;
-		bool enabled = true;
+		std::string version;       ///< Version string from override metadata
+		std::string description;   ///< Description from override metadata
+		bool enabled = true;       ///< Whether this override is enabled
 
-		// Tracking for first-time application
-		std::string fileHash;          // Hash of override file content for change detection
-		std::time_t firstApplied = 0;  // Timestamp when first applied
+		// Tracking for application state
+		std::string fileHash;          ///< Hash of file content for change detection
+		std::time_t firstApplied = 0;  ///< Timestamp when first applied
+		bool loadFailed = false;       ///< True if loading/parsing failed
+		std::string errorMessage;      ///< Error message if loadFailed is true
+	};
+
+	/**
+	 * @struct FeatureOverrideStatus
+	 * @brief Summary of override state for a single feature
+	 */
+	struct FeatureOverrideStatus
+	{
+		std::string featureName;       ///< Feature short name
+		OverrideStatus status;         ///< Current override status
+		std::string modName;           ///< Mod name if override exists
+		std::string description;       ///< Override description
+		bool hasUserModifications;     ///< True if user changed settings after override
+		std::time_t lastApplied;       ///< When override was last applied
 	};
 
 	static SettingsOverrideManager* GetSingleton()
@@ -164,6 +221,135 @@ public:
 	 */
 	void ReportOverrideFailure(const std::string& modName, const std::string& featureName, const std::string& errorMessage);
 
+	// =====================================================================
+	// New Override Management API
+	// =====================================================================
+
+	/**
+	 * @brief Gets the override status for a specific feature
+	 * @param featureName The short name of the feature
+	 * @return FeatureOverrideStatus containing current state information
+	 */
+	FeatureOverrideStatus GetFeatureOverrideStatus(const std::string& featureName) const;
+
+	/**
+	 * @brief Gets override status for all known features
+	 * @return Vector of FeatureOverrideStatus for all features with overrides
+	 */
+	std::vector<FeatureOverrideStatus> GetAllFeatureOverrideStatuses() const;
+
+	/**
+	 * @brief Breaks (removes) override tracking for a feature
+	 * 
+	 * This removes the override from the applied tracking, allowing user
+	 * modifications to persist without being overwritten on next load.
+	 * The override file itself is not deleted.
+	 * 
+	 * @param featureName The short name of the feature
+	 * @return True if tracking was removed successfully
+	 */
+	bool BreakOverride(const std::string& featureName);
+
+	/**
+	 * @brief Breaks override tracking for all features
+	 * @return Number of overrides broken
+	 */
+	size_t BreakAllOverrides();
+
+	/**
+	 * @brief Forces reapplication of an override for a feature
+	 * 
+	 * This reloads the override file and applies it to the feature's
+	 * current settings, updating the tracking data.
+	 * 
+	 * @param featureName The short name of the feature
+	 * @param featureJson The feature's JSON settings to modify
+	 * @return True if override was applied successfully
+	 */
+	bool ForceApplyOverride(const std::string& featureName, json& featureJson);
+
+	/**
+	 * @brief Forces reapplication of all available overrides
+	 * @return Number of overrides successfully applied
+	 */
+	size_t ForceApplyAllOverrides();
+
+	/**
+	 * @brief Exports feature settings as a new override file
+	 * 
+	 * Creates a new override JSON file from the provided settings.
+	 * 
+	 * @param featureName The short name of the feature
+	 * @param featureJson The feature's current JSON settings
+	 * @param modName Name to use for the override file (defaults to "User")
+	 * @param description Optional description for the override
+	 * @return True if export was successful
+	 */
+	bool ExportFeatureOverride(const std::string& featureName, const json& featureJson, 
+		const std::string& modName = "User", const std::string& description = "");
+
+	/**
+	 * @brief Exports all modified feature settings as override files
+	 * @param modName Name to use for the override files
+	 * @return Number of override files created
+	 */
+	size_t ExportAllModifiedSettings(const std::string& modName = "User");
+
+	/**
+	 * @brief Checks if a feature has been modified from its override values
+	 * @param featureName The short name of the feature
+	 * @param currentSettings The feature's current JSON settings
+	 * @return True if settings differ from the applied override
+	 */
+	bool HasUserModifications(const std::string& featureName, const json& currentSettings) const;
+
+	/**
+	 * @brief Gets the diff between current settings and override values
+	 * @param featureName The short name of the feature
+	 * @param currentSettings The feature's current JSON settings
+	 * @return Vector of {path, currentValue, overrideValue} tuples
+	 */
+	std::vector<std::tuple<std::string, std::string, std::string>> GetSettingsDiff(
+		const std::string& featureName, const json& currentSettings) const;
+
+	/**
+	 * @brief Gets list of all feature names that have override files
+	 * @return Set of feature short names with available overrides
+	 */
+	std::unordered_set<std::string> GetFeaturesWithOverrides() const;
+
+	/**
+	 * @brief Marks an override as broken with an error message
+	 * @param featureName The short name of the feature
+	 * @param errorMessage Description of why the override is broken
+	 */
+	void MarkOverrideBroken(const std::string& featureName, const std::string& errorMessage);
+
+	// =====================================================================
+	// Status Display Helpers (for UI consistency)
+	// =====================================================================
+
+	/**
+	 * @brief Gets a color for the override status (uses theme colors)
+	 * @param status The override status
+	 * @return ImVec4 color for the status
+	 */
+	static ImVec4 GetStatusColor(OverrideStatus status);
+
+	/**
+	 * @brief Gets a short icon/symbol for the override status
+	 * @param status The override status
+	 * @return Status icon string like "[OK]", "[+]", etc.
+	 */
+	static const char* GetStatusIcon(OverrideStatus status);
+
+	/**
+	 * @brief Gets descriptive text for the override status
+	 * @param status The override status
+	 * @return Human-readable status description
+	 */
+	static const char* GetStatusText(OverrideStatus status);
+
 private:
 	SettingsOverrideManager() = default;
 	~SettingsOverrideManager() = default;
@@ -215,8 +401,29 @@ private:
 	 */
 	void MergeJson(json& target, const json& override);
 
+	/**
+	 * @brief Computes JSON diff between two objects
+	 * @param current Current JSON values
+	 * @param original Original/override JSON values
+	 * @param path Current JSON path for nested keys
+	 * @param diffs Output vector for differences
+	 */
+	void ComputeJsonDiff(const json& current, const json& original, const std::string& path,
+		std::vector<std::tuple<std::string, std::string, std::string>>& diffs) const;
+
+	/**
+	 * @brief Gets the tracking key for a feature override
+	 * @param modName The mod name
+	 * @param featureName The feature name
+	 * @return Tracking key string
+	 */
+	std::string GetTrackingKey(const std::string& modName, const std::string& featureName) const;
+
 	std::vector<OverrideInfo> overrides;
 	std::unordered_map<std::string, std::vector<size_t>> featureOverrideMap;  // Maps feature name to override indices
+	std::unordered_map<std::string, std::string> brokenOverrides;             // Maps feature name to error message
+	mutable json cachedAppliedOverrides;                                      // Cached tracking data
+	mutable bool trackingCacheDirty = true;                                   // Whether tracking cache needs reload
 	bool enabled = true;
 	bool discovered = false;
 

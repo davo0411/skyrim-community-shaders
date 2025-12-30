@@ -93,6 +93,11 @@ namespace FeatureIssues
 									 .issueType = FeatureIssueInfo::IssueType::OBSOLETE } }
 	};
 
+	Feature* FindFeature(const std::string& shortName)
+	{
+		return s_featureLookupCache.FindFeature(shortName);
+	}
+
 	const std::vector<FeatureIssueInfo>& GetFeatureIssues()
 	{
 		return s_featureIssues;
