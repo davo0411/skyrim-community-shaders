@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "feature": "TerrainVariation",
+  "description": "Apply terrain variation tiling fix to grass cliff meshes",
+  "rules": [
+    {
+      "name": "Grass Cliffs",
+      "profile": "GrassCliff",
+      "priority": 100,
+      "match": {
+        "editorId": ["LGrassCliff*", "GrassCliff*"],
+        "modelPath": ["meshes/landscape/*grass*cliff*.nif"],
+        "texturePath": ["*grass*cliff*_d.dds", "*grasscliff*_d.dds"]
+      }
+    }
+  ]
+}

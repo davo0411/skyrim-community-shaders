@@ -6,6 +6,9 @@ private:
 	static constexpr std::string_view MOD_ID = "148123";
 
 public:
+	// Bit in ExtraFeatureDescriptor for mesh targeting (avoid State.h modification)
+	static constexpr uint32_t MeshTargetedBit = 1 << 10;
+
 	virtual inline std::string GetName() override { return "Terrain Variation"; }
 	virtual inline std::string GetShortName() override { return "TerrainVariation"; }
 	virtual inline std::string GetFeatureModLink() override { return MakeNexusModURL(MOD_ID); }
@@ -26,7 +29,7 @@ public:
 			{ "Reduces terrain texture tiling",
 				"Adjustable distance-based blending",
 				"Improved terrain visual quality",
-				"Compatible with Extended Materials parallax" }
+				"Mesh-specific targeting via JSON rules" }
 		};
 	}
 
@@ -34,7 +37,8 @@ public:
 	{
 		uint enableTilingFix = true;
 		uint enableLODTerrainTilingFix = true;
-		float pad0[2];
+		uint enableMeshTargeting = true;
+		float pad0[1];
 	} settings;
 
 	virtual void DrawSettings() override;
@@ -45,4 +49,9 @@ public:
 
 	virtual void PostPostLoad() override;
 	void UpdateShaderSettings();
+
+	// Called during BSLightingShader::SetupGeometry to check mesh targeting rules
+	static void BSLightingShader_SetupGeometry(RE::BSRenderPass* pass);
+
+	struct Hooks;
 };

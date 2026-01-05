@@ -1,6 +1,7 @@
 #include "Globals.h"
 
 #include "Deferred.h"
+#include "MeshShaderRuleManager.h"
 #include "Features/CloudShadows.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/ExtendedMaterials.h"
@@ -117,6 +118,7 @@ namespace globals
 	namespace rtti
 	{
 		REL::Relocation<const RE::NiRTTI*> NiIntegerExtraDataRTTI;
+		REL::Relocation<const RE::NiRTTI*> NiStringExtraDataRTTI;
 		REL::Relocation<const RE::NiRTTI*> BSLightingShaderPropertyRTTI;
 		REL::Relocation<const RE::NiRTTI*> BSEffectShaderPropertyRTTI;
 		REL::Relocation<const RE::NiRTTI*> NiParticleSystemRTTI;
@@ -169,6 +171,7 @@ namespace globals
 		{
 			using namespace rtti;
 			NiIntegerExtraDataRTTI = { RE::NiIntegerExtraData::Ni_RTTI };
+			NiStringExtraDataRTTI = { RE::NiStringExtraData::Ni_RTTI };
 			BSLightingShaderPropertyRTTI = { RE::BSLightingShaderProperty::Ni_RTTI };
 			BSEffectShaderPropertyRTTI = { RE::BSEffectShaderProperty::Ni_RTTI };
 			NiParticleSystemRTTI = { RE::NiParticleSystem::Ni_RTTI };
@@ -191,6 +194,9 @@ namespace globals
 
 		bShadowsOnGrass = RE::GetINISetting("bShadowsOnGrass:Display");
 		shadowMaskQuarter = RE::GetINISetting("iShadowMaskQuarter:Display");
+
+		// Initialize mesh shader rule system
+		MeshShaderRuleManager::GetSingleton()->DiscoverRules();
 	}
 
 	/**

@@ -1779,9 +1779,30 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	rawRMAOS = blendedRMAOS;
 #		endif
 #	else  // Non-landscape code
+#		if defined(TERRAIN_VARIATION)
+	// Check if this mesh is targeted for terrain variation via MeshShaderRuleManager
+	bool meshTargetedTV = (Permutation::ExtraFeatureDescriptor & Permutation::ExtraFeatureFlags::TVMeshTargeted) != 0;
+	float4 rawBaseColor;
+	float4 normalColor;
+	[branch] if (meshTargetedTV && SharedData::terrainVariationSettings.enableTilingFix)
+	{
+		// Apply stochastic sampling for targeted meshes
+		float2 tvDx = ddx(diffuseUv);
+		float2 tvDy = ddy(diffuseUv);
+		StochasticOffsets tvOffset = ComputeStochasticOffsets(diffuseUv);
+		rawBaseColor = StochasticEffect(TexColorSampler, SampColorSampler, diffuseUv, tvOffset, tvDx, tvDy);
+		normalColor = StochasticEffect(TexNormalSampler, SampNormalSampler, uv, tvOffset, tvDx, tvDy);
+	}
+	else
+	{
+		rawBaseColor = TexColorSampler.SampleBias(SampColorSampler, diffuseUv, SharedData::MipBias);
+		normalColor = TexNormalSampler.SampleBias(SampNormalSampler, uv, SharedData::MipBias);
+	}
+#		else
 	float4 rawBaseColor = TexColorSampler.SampleBias(SampColorSampler, diffuseUv, SharedData::MipBias);
-	baseColor = float4(Color::Diffuse(rawBaseColor.rgb), rawBaseColor.a);
 	float4 normalColor = TexNormalSampler.SampleBias(SampNormalSampler, uv, SharedData::MipBias);
+#		endif
+	baseColor = float4(Color::Diffuse(rawBaseColor.rgb), rawBaseColor.a);
 	normal = normalColor;
 #		if defined(TRUE_PBR)
 	rawRMAOS = TexRMAOSSampler.SampleBias(SampRMAOSSampler, diffuseUv, SharedData::MipBias) * float4(PBRParams1.x, 1, 1, PBRParams1.z);

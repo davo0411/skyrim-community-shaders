@@ -1,0 +1,182 @@
+{
+  "version": "1.0",
+  "feature": "SubsurfaceScattering",
+  "description": "Default subsurface scattering rules for vanilla and common modded content",
+  "rules": [
+    {
+      "name": "Vanilla Candles - Clutter",
+      "profile": "Candle",
+      "priority": 100,
+      "match": {
+        "editorId": ["Candle*", "CandleHorn*", "DweCandle*"],
+        "texturePath": ["*candle*_d.dds", "*wax*_d.dds"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.85,
+        "subsurfaceColor": [1.0, 0.85, 0.6]
+      }
+    },
+    {
+      "name": "Lantern Candles",
+      "profile": "Candle",
+      "priority": 90,
+      "match": {
+        "editorId": ["*Lantern*Candle*"],
+        "modelPath": ["meshes/clutter/*lantern*candle*.nif"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.8,
+        "subsurfaceColor": [1.0, 0.9, 0.7]
+      }
+    },
+    {
+      "name": "Human Skin - Body",
+      "profile": "Human",
+      "priority": 80,
+      "match": {
+        "texturePath": [
+          "*malebody*_d.dds",
+          "*femalebody*_d.dds",
+          "*malehands*_d.dds",
+          "*femalehands*_d.dds",
+          "*humanhead*_d.dds"
+        ],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.35,
+        "subsurfaceColor": [0.8, 0.23, 0.12]
+      }
+    },
+    {
+      "name": "Human Skin - Generic",
+      "profile": "Human",
+      "priority": 50,
+      "match": {
+        "texturePath": ["*skin*_d.dds", "*body*_d.dds"],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.3,
+        "subsurfaceColor": [0.8, 0.25, 0.15]
+      }
+    },
+    {
+      "name": "Elven Ears",
+      "profile": "Human",
+      "priority": 70,
+      "match": {
+        "texturePath": ["*ears*_d.dds", "*elvenears*_d.dds"],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.5,
+        "subsurfaceColor": [0.85, 0.3, 0.15]
+      }
+    },
+    {
+      "name": "Khajiit Fur",
+      "profile": "Fur",
+      "priority": 60,
+      "match": {
+        "texturePath": ["*khajiit*_d.dds"],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.2,
+        "subsurfaceColor": [0.6, 0.4, 0.3]
+      }
+    },
+    {
+      "name": "Argonian Scales",
+      "profile": "Scales",
+      "priority": 60,
+      "match": {
+        "texturePath": ["*argonian*_d.dds"],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.15,
+        "subsurfaceColor": [0.4, 0.5, 0.35]
+      }
+    },
+    {
+      "name": "Draugr Skin",
+      "profile": "Undead",
+      "priority": 55,
+      "match": {
+        "texturePath": ["*draugr*_d.dds", "*drauger*_d.dds"],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.1,
+        "subsurfaceColor": [0.3, 0.35, 0.4]
+      }
+    },
+    {
+      "name": "Vampire Skin",
+      "profile": "Vampire",
+      "priority": 65,
+      "match": {
+        "texturePath": ["*vampire*_d.dds"],
+        "shaderFlags": ["kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.25,
+        "subsurfaceColor": [0.6, 0.2, 0.25]
+      }
+    },
+    {
+      "name": "Wax Objects",
+      "profile": "Wax",
+      "priority": 40,
+      "match": {
+        "texturePath": ["*wax*_d.dds"],
+        "shaderFlags": ["!kSkinned"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.7,
+        "subsurfaceColor": [1.0, 0.9, 0.75]
+      }
+    },
+    {
+      "name": "Soap",
+      "profile": "Wax",
+      "priority": 35,
+      "match": {
+        "editorId": ["*Soap*"],
+        "texturePath": ["*soap*_d.dds"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.5,
+        "subsurfaceColor": [0.9, 0.85, 0.8]
+      }
+    },
+    {
+      "name": "Food - Cheese",
+      "profile": "Food",
+      "priority": 30,
+      "match": {
+        "editorId": ["*Cheese*"],
+        "texturePath": ["*cheese*_d.dds"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.4,
+        "subsurfaceColor": [1.0, 0.85, 0.4]
+      }
+    },
+    {
+      "name": "Food - Bread",
+      "profile": "Food",
+      "priority": 30,
+      "match": {
+        "editorId": ["*Bread*", "*Sweetroll*"],
+        "texturePath": ["*bread*_d.dds", "*sweetroll*_d.dds"]
+      },
+      "settings": {
+        "subsurfaceOpacity": 0.25,
+        "subsurfaceColor": [0.9, 0.7, 0.4]
+      }
+    }
+  ]
+}

@@ -227,6 +227,7 @@ namespace globals
 	namespace rtti
 	{
 		extern REL::Relocation<const RE::NiRTTI*> NiIntegerExtraDataRTTI;
+		extern REL::Relocation<const RE::NiRTTI*> NiStringExtraDataRTTI;
 		extern REL::Relocation<const RE::NiRTTI*> BSLightingShaderPropertyRTTI;
 		extern REL::Relocation<const RE::NiRTTI*> BSEffectShaderPropertyRTTI;
 		extern REL::Relocation<const RE::NiRTTI*> NiParticleSystemRTTI;
