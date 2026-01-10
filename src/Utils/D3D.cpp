@@ -99,6 +99,7 @@ namespace Util
 
 			std::ifstream file(filePath, std::ios::binary);
 			if (!file.is_open()) {
+				logger::error("Failed to open shader include file: {} (resolved to: {})", pFileName, filePath.string());
 				*ppData = NULL;
 				*pBytes = 0;
 				return E_FAIL;

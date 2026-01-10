@@ -6,6 +6,7 @@
 #include "ShaderCache.h"
 #include "Util.h"
 #include "Globals.h"
+#include "PBRWater.h"
 
 #include <cmath>
 #include <d3d11.h>

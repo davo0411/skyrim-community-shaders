@@ -169,10 +169,10 @@ struct VS_OUTPUT
 };
 
 #if defined(UNIFIED_WATER)
-#	include "UnifiedWater/GerstnerWaves.hlsli"
-#	include "UnifiedWater/WaterActorRipples.hlsli"
-#	include "UnifiedWater/WaterFoam.hlsli"
-#	include "UnifiedWater/WaterDepthEstimation.hlsli"
+#	include "PBRWater/GerstnerWaves.hlsli"
+#	include "PBRWater/WaterActorRipples.hlsli"
+#	include "PBRWater/WaterFoam.hlsli"
+#	include "PBRWater/WaterDepthEstimation.hlsli"
 #endif // UNIFIED_WATER
 
 #	ifdef VSHADER

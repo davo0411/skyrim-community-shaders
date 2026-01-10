@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <nlohmann/json.hpp>
 
 namespace UnifiedWaterWaves
 {
@@ -49,6 +50,43 @@ namespace UnifiedWaterWaves
 		float ShoreWaveDepthThreshold = 300.0f; // Depth range for shore-directed waves (game units, ~4.3m)
 		float ShoreWaveStrength = 1.0f;         // Strength of shore-directed wave influence (0-1)
 	};
+
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+		WaveSettings,
+		WaveIntensity,
+		WaveAmplitude,
+		WaveSpeed,
+		WaveSteepness,
+		WaveFadeStart,
+		WaveFadeEnd,
+		Wave1Amplitude,
+		Wave1Wavelength,
+		Wave1Steepness,
+		Wave1AngleOffset,
+		Wave2Amplitude,
+		Wave2Wavelength,
+		Wave2Steepness,
+		Wave2AngleOffset,
+		Wave3Amplitude,
+		Wave3Wavelength,
+		Wave3Steepness,
+		Wave3AngleOffset,
+		Wave4Amplitude,
+		Wave4Wavelength,
+		Wave4Steepness,
+		Wave4AngleOffset,
+		Wave5Amplitude,
+		Wave5Wavelength,
+		Wave5Steepness,
+		Wave5AngleOffset,
+		Wave6Amplitude,
+		Wave6Wavelength,
+		Wave6Steepness,
+		Wave6AngleOffset,
+		ShallowWaveDepthMin,
+		ShallowWaveDepthMax,
+		ShoreWaveDepthThreshold,
+		ShoreWaveStrength)
 
 	// Draw ImGui settings UI for waves
 	void DrawWaveSettings(WaveSettings& settings);

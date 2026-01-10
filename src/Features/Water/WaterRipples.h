@@ -1,10 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include "RE/N/NiPoint2.h"
 #include "RE/N/NiPoint3.h"
 
-struct ConstantBuffer;
+class ConstantBuffer;
 
 namespace UnifiedWaterRipples
 {
@@ -21,6 +22,17 @@ namespace UnifiedWaterRipples
 		float RippleWaveFreq3 = 0.18f;
 		float RippleNormalStrength = 2.0f;
 	};
+
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+		RippleSettings,
+		EnableActorRipples,
+		RippleStrength,
+		RippleRadius,
+		RippleWaveSpeed,
+		RippleWaveFreq1,
+		RippleWaveFreq2,
+		RippleWaveFreq3,
+		RippleNormalStrength)
 
 	struct alignas(16) ActorRippleData
 	{

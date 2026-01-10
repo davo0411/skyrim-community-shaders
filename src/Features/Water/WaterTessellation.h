@@ -4,8 +4,9 @@
 #include <d3d11.h>
 #include <future>
 #include <winrt/base.h>
+#include <nlohmann/json.hpp>
 
-struct ConstantBuffer;
+class ConstantBuffer;
 
 namespace UnifiedWaterTessellation
 {
@@ -17,6 +18,14 @@ namespace UnifiedWaterTessellation
 		float TessellationMinFactor = 0.1f;
 		float TessellationMaxFactor = 16.0f;
 	};
+
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+		TessellationSettings,
+		EnableTessellation,
+		TessellationMinDistance,
+		TessellationMaxDistance,
+		TessellationMinFactor,
+		TessellationMaxFactor)
 
 	struct alignas(16) TessellationParams
 	{

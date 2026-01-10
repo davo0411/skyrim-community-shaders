@@ -3,6 +3,9 @@
 #include "WaterTessellation.h"
 #include "WaterWaves.h"
 #include "WaterRipples.h"
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 namespace UnifiedWaterSettings
 {
@@ -12,6 +15,12 @@ namespace UnifiedWaterSettings
 		bool ShowWireframe = false;
 		bool WireframeRawMode = false;
 	};
+
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+		GeneralSettings,
+		UseOptimisedMeshes,
+		ShowWireframe,
+		WireframeRawMode)
 
 	struct LightingSettings
 	{
@@ -62,6 +71,18 @@ namespace UnifiedWaterSettings
 		float SmallWaveBaseOffset = 0.2f;
 		float SmallWaveHeightRange = 0.7f;
 	};
+
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+		FoamSettings,
+		EnableFoam,
+		FoamIntensity,
+		FoamIntensityFlowmap,
+		FoamThreshold,
+		FoamSharpness,
+		LargeWaveSlopeRequirement,
+		SmallWaveSlopeMultiplier,
+		SmallWaveBaseOffset,
+		SmallWaveHeightRange)
 
 	// All settings combined
 	struct Settings

@@ -14,80 +14,6 @@
 #include <d3d11.h>
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::GeneralSettings,
-	UseOptimisedMeshes,
-	ShowWireframe,
-	WireframeRawMode)
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::TessellationSettings,
-	EnableTessellation,
-	TessellationMinDistance,
-	TessellationMaxDistance,
-	TessellationMinFactor,
-	TessellationMaxFactor)
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::WaveSettings,
-	WaveIntensity,
-	WaveAmplitude,
-	WaveSpeed,
-	WaveSteepness,
-	WaveFadeStart,
-	WaveFadeEnd,
-	Wave1Amplitude,
-	Wave1Wavelength,
-	Wave1Steepness,
-	Wave1AngleOffset,
-	Wave2Amplitude,
-	Wave2Wavelength,
-	Wave2Steepness,
-	Wave2AngleOffset,
-	Wave3Amplitude,
-	Wave3Wavelength,
-	Wave3Steepness,
-	Wave3AngleOffset,
-	Wave4Amplitude,
-	Wave4Wavelength,
-	Wave4Steepness,
-	Wave4AngleOffset,
-	Wave5Amplitude,
-	Wave5Wavelength,
-	Wave5Steepness,
-	Wave5AngleOffset,
-	Wave6Amplitude,
-	Wave6Wavelength,
-	Wave6Steepness,
-	Wave6AngleOffset,
-	ShallowWaveDepthMin,
-	ShallowWaveDepthMax,
-	ShoreWaveDepthThreshold,
-	ShoreWaveStrength)
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::RippleSettings,
-	EnableActorRipples,
-	RippleStrength,
-	RippleRadius,
-	RippleWaveSpeed,
-	RippleWaveFreq1,
-	RippleWaveFreq2,
-	RippleWaveFreq3,
-	RippleNormalStrength)
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::FoamSettings,
-	EnableFoam,
-	FoamIntensity,
-	FoamIntensityFlowmap,
-	FoamThreshold,
-	FoamSharpness,
-	LargeWaveSlopeRequirement,
-	SmallWaveSlopeMultiplier,
-	SmallWaveBaseOffset,
-	SmallWaveHeightRange)
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PBRWater::Settings,
 	general,
 	tessellation,
@@ -195,7 +121,9 @@ void PBRWater::SetupResources()
 
 void PBRWater::ClearShaderCache()
 {
-	UnifiedWaterTessellation::ClearShaders();
+	UnifiedWaterTessellation::GetHullShader() = nullptr;
+	UnifiedWaterTessellation::GetDomainShader() = nullptr;
+	UnifiedWaterTessellation::GetGeometryShader() = nullptr;
 	UnifiedWaterTessellation::CompileShadersAsync();
 }
 
@@ -534,9 +462,9 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		context->IAGetPrimitiveTopology(&originalTopology);
 		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
 
-		context->HSSetShader(UnifiedWaterTessellation::GetHullShader(), nullptr, 0);
-		context->DSSetShader(UnifiedWaterTessellation::GetDomainShader(), nullptr, 0);
-		context->GSSetShader(UnifiedWaterTessellation::GetGeometryShader(), nullptr, 0);
+		context->HSSetShader(UnifiedWaterTessellation::GetHullShader().get(), nullptr, 0);
+		context->DSSetShader(UnifiedWaterTessellation::GetDomainShader().get(), nullptr, 0);
+		context->GSSetShader(UnifiedWaterTessellation::GetGeometryShader().get(), nullptr, 0);
 
 		// Bind VS constant buffers to DS
 		ID3D11Buffer* vsBuffers[3] = { nullptr, nullptr, nullptr };
@@ -582,7 +510,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 
 		tessellationActiveForPass = true;
 	} else if (geometryShaderOnlyForVisualizer) {
-		context->GSSetShader(UnifiedWaterTessellation::GetGeometryShader(), nullptr, 0);
+		context->GSSetShader(UnifiedWaterTessellation::GetGeometryShader().get(), nullptr, 0);
 		tessellationActiveForPass = true;
 	}
 }

@@ -90,7 +90,7 @@ namespace UnifiedWaterRipples
 
 	void UpdateActorRipples(
 		ActorRippleBuffer& buffer,
-		float waterSurfaceHeight,
+		[[maybe_unused]] float waterSurfaceHeight,
 		bool hasWaterHeight)
 	{
 		buffer.numActors = 0;

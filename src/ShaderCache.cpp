@@ -1264,6 +1264,40 @@ namespace SIE
 			return std::format(L"Data/ShaderCache/{}/{}.{}", std::wstring(featureName.begin(), featureName.end()), std::wstring(shaderName.begin(), shaderName.end()), ext);
 		}
 
+		struct CustomInclude : public ID3DInclude
+		{
+			HRESULT Open([[maybe_unused]] D3D_INCLUDE_TYPE IncludeType, LPCSTR pFileName, [[maybe_unused]] LPCVOID pParentData, LPCVOID* ppData, UINT* pBytes) override
+			{
+				std::filesystem::path filePath = pFileName;
+				filePath = L"Data\\Shaders" / filePath;
+
+				std::ifstream file(filePath, std::ios::binary);
+				if (!file.is_open()) {
+					logger::error("Failed to open shader include file: {} (resolved to: {})", pFileName, filePath.string());
+					*ppData = NULL;
+					*pBytes = 0;
+					return E_FAIL;
+				}
+
+				file.seekg(0, std::ios::end);
+				UINT size = static_cast<UINT>(file.tellg());
+				file.seekg(0, std::ios::beg);
+
+				char* data = new char[size];
+				file.read(data, size);
+				*ppData = data;
+				*pBytes = size;
+				return S_OK;
+			}
+
+			HRESULT Close(LPCVOID pData) override
+			{
+				if (pData)
+					delete[] pData;
+				return S_OK;
+			}
+		};
+
 		ID3D11DeviceChild* CompileAndCacheCustomShader(
 			const std::wstring& sourcePath,
 			const std::vector<std::pair<const char*, const char*>>& defines,

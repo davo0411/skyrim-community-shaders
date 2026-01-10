@@ -65,11 +65,11 @@ struct PBRWater : public Feature
 
 	struct Settings
 	{
-		GeneralSettings general{};
-		TessellationSettings tessellation{};
-		WaveSettings waves{};
-		RippleSettings ripples{};
-		FoamSettings foam{};
+		UnifiedWaterSettings::GeneralSettings general{};
+		UnifiedWaterTessellation::TessellationSettings tessellation{};
+		UnifiedWaterWaves::WaveSettings waves{};
+		UnifiedWaterRipples::RippleSettings ripples{};
+		UnifiedWaterSettings::FoamSettings foam{};
 	};
 
 	////////////////////////////////////////////////// Per-Frame Data
