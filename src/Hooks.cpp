@@ -10,6 +10,7 @@
 #include "TruePBR.h"
 #include "Util.h"
 
+#include "Features/HDR.h"
 #include "Features/InteriorSun.h"
 #include "Features/LightLimitFix.h"
 #include "Features/TerrainHelper.h"
@@ -253,7 +254,20 @@ struct IDXGISwapChain_Present
 		auto state = globals::state;
 		auto menu = globals::menu;
 		state->Reset();
+		
+		auto hdr = HDR::GetSingleton();
+		bool hdrActive = hdr && hdr->hdrDisplayDetected && hdr->settings.enableHDR;
+		
+		// ImGui renders to the same UI texture that vanilla UI uses
+		// (UI redirection started in MenuManagerDrawInterfaceStartHook)
 		menu->DrawOverlay();
+		
+		// End UI redirection after all UI (vanilla + ImGui) has rendered
+		if (hdrActive && hdr->IsRenderingUI())
+			hdr->EndUIRendering();
+
+		if (hdr && hdr->settings.enableHDR)
+			hdr->ApplyHDR();
 
 		HRESULT retval = func(This, SyncInterval, Flags);
 
@@ -487,6 +501,14 @@ namespace Hooks
 		static void thunk(RE::BSGraphics::Renderer* This, RE::RENDER_TARGETS::RENDER_TARGET a_target, RE::BSGraphics::RenderTargetProperties* a_properties)
 		{
 			globals::state->ModifyRenderTarget(a_target, a_properties);
+			auto hdr = HDR::GetSingleton();
+			// Upgrade kMAIN to HDR format if HDR display is detected (hardware capability)
+			// The enableHDR setting controls whether we use the HDR pipeline, but the format
+			// should be set based on what the display supports for maximum quality
+			if (hdr && hdr->hdrDisplayDetected) {
+				a_properties->format = HDR::BSGraphics_HDR_Format;
+				logger::info("HDR: Upgrading kMAIN render target to R16G16B16A16_FLOAT");
+			}
 			func(This, a_target, a_properties);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;

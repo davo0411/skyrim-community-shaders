@@ -96,7 +96,17 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float2 avgValue = AvgTex.Sample(AvgSampler, input.TexCoord.xy).xy;
 
-	// Vanilla tonemapping and post-processing
+	float3 outputColor = 0.0;
+
+#	if defined(HDR_OUTPUT)
+	// HDR pass-through: apply exposure only, skip tonemapping
+	if (avgValue.x != 0 && avgValue.y != 0)
+		inputColor *= avgValue.y / avgValue.x;
+	inputColor = max(0, inputColor);
+	inputColor += bloomColor;
+	outputColor = inputColor;
+#	else
+	// SDR tonemapping and post-processing
 	float3 gameSdrColor = 0.0;
 	float3 ppColor = 0.0;
 	{
@@ -129,6 +139,8 @@ PS_OUTPUT main(PS_INPUT input)
 
 		ppColor = max(0, linearColor);
 	}
+	outputColor = ppColor;
+#	endif
 
 	float3 srgbColor = ppColor;
 
@@ -141,7 +153,18 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 	srgbColor = FrameBuffer::ToSRGBColor(srgbColor);
 
-	psout.Color = float4(srgbColor, 1.0);
+#	if defined(FADE)
+	outputColor = lerp(outputColor, Fade.xyz, Fade.w);
+#	endif
+
+
+#	if defined(HDR_OUTPUT)
+	// HDR mode: output is linear, no gamma correction needed
+	psout.Color = float4(outputColor, 1.0);
+#	else
+	// SDR mode: tonemappers already output gamma space (HejlBurgessDawson has pow(x, 2.2) baked in)
+	psout.Color = float4(outputColor, 1.0);
+#	endif
 
 #	endif
 

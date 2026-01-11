@@ -9,6 +9,7 @@
 #include "Features/GrassCollision.h"
 #include "Features/GrassLighting.h"
 #include "Features/HairSpecular.h"
+#include "Features/HDRDisplay.h"
 #include "Features/IBL.h"
 #include "Features/InteriorSun.h"
 #include "Features/InverseSquareLighting.h"
@@ -231,7 +232,8 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::upscaling,
 		&globals::features::renderDoc,
 		&globals::features::weatherEditor,
-		&globals::features::linearLighting
+		&globals::features::linearLighting,
+		&globals::features::hdrDisplay
 	};
 
 	if (REL::Module::IsVR()) {

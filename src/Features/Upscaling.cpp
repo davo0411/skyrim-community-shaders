@@ -1,6 +1,7 @@
 #include "Upscaling.h"
 
 #include "Deferred.h"
+#include "HDR.h"
 #include "Hooks.h"
 #include "State.h"
 #include "Upscaling/DX12SwapChain.h"
@@ -59,6 +60,13 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 
 	// Use better swap effect to prevent tearing and improve performance
 	pSwapChainDesc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+	// Detect HDR display early and set HDR format if available
+	bool hdrDisplayDetected = HDR::DetectHDRDisplayEarly(pAdapter);
+	if (hdrDisplayDetected) {
+		logger::info("[HDR] HDR display detected - enabling HDR swap chain format");
+		pSwapChainDesc->BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+	}
 
 	bool shouldProxy = !globals::game::isVR;
 	if (shouldProxy)
@@ -887,6 +895,11 @@ void Upscaling::SetupResources()
 		dx12SwapChain.CreateSharedResources();
 
 	copyDepthToSharedBufferPS.attach((ID3D11PixelShader*)Util::CompileShader(L"Data\\Shaders\\Upscaling\\CopyDepthToSharedBufferPS.hlsl", { { "PSHADER", "" } }, "ps_5_0"));
+
+	// Setup HDR resources
+	auto hdr = HDR::GetSingleton();
+	if (hdr)
+		hdr->SetupResources();
 }
 
 void Upscaling::ClearShaderCache()
@@ -1454,6 +1467,12 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 {
 	globals::features::upscaling.PostDisplay();
+	
+	// Begin HDR UI redirection before vanilla UI renders
+	auto hdr = HDR::GetSingleton();
+	if (hdr && hdr->hdrDisplayDetected && hdr->settings.enableHDR)
+		hdr->BeginUIRendering();
+	
 	func(a1);
 }
 
