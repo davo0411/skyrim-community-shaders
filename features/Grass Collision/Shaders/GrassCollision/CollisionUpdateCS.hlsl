@@ -43,7 +43,7 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 
 	GroupMemoryBarrierWithGroupSync();
 
-	const uint TEXTURE_SIZE = 512;
+	const uint TEXTURE_SIZE = 1024;
 	const float WORLD_SIZE = 4096;
 	float2 ZRANGE = float2(2048.0, -2048.0);
 
@@ -81,20 +81,41 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 			for (uint j = boundingBox.IndexStart; j < boundingBox.IndexEnd; j++) {
 				float4 collisionInstance = CollisionInstances[j];
 				float radius = collisionInstance.w;
+				
 				// Check if collision can lower the height
 				if (collisionInstance.z - radius < collision.y){
-					// Get the lowest point of the sphere at this cell position
-					float dist = distance(collisionInstance.xy, cellCentreMS);
-					// Check if we're within the sphere's radius
-					if (dist < radius) {
-						// Get sphere geometry
-						float heightFromCenter = sqrt(radius * radius - dist * dist);
-						float height = collisionInstance.z - heightFromCenter;
-
-						collision.x = min(collision.x, height);
-
-						if (height < collision.y) {
-							collision.y = height;
+					// Multi-sample antialiasing: sample 4 sub-pixel positions
+					float cellSize = WORLD_SIZE / TEXTURE_SIZE;
+					float totalHeight = 0.0;
+					float hitCount = 0.0;
+					
+					// 2x2 supersampling pattern
+					for (int sx = 0; sx < 2; sx++) {
+						for (int sy = 0; sy < 2; sy++) {
+							float2 subPixelOffset = (float2(sx, sy) - 0.5) * 0.5 * cellSize;
+							float2 samplePos = cellCentreMS + subPixelOffset;
+							float dist = distance(collisionInstance.xy, samplePos);
+							
+							// Smooth falloff at sphere edge for antialiasing
+							float edgeSoftness = cellSize * 0.5; // Half a texel
+							float distFactor = 1.0 - smoothstep(radius - edgeSoftness, radius, dist);
+							
+							if (dist < radius) {
+								// Get sphere geometry
+								float heightFromCenter = sqrt(radius * radius - dist * dist);
+								float height = collisionInstance.z - heightFromCenter;
+								
+								totalHeight += height * distFactor;
+								hitCount += distFactor;
+							}
+						}
+					}
+					
+					if (hitCount > 0.0) {
+						float avgHeight = totalHeight / hitCount;
+						collision.x = min(collision.x, avgHeight);
+						if (avgHeight < collision.y) {
+							collision.y = avgHeight;
 						}
 					}
 				}
@@ -104,6 +125,29 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 
 	collision = (collision - ZRANGE.x) / (ZRANGE.y - ZRANGE.x);
 	previousCollision = (previousCollision - ZRANGE.x) / (ZRANGE.y - ZRANGE.x);
+
+	// Apply smoothing filter to reduce pixelation
+	// Sample 3x3 neighborhood for edge smoothing
+	float smoothedHeight = collision.y;
+	float weight = 0.0;
+	
+	for (int dx = -1; dx <= 1; dx++) {
+		for (int dy = -1; dy <= 1; dy++) {
+			uint2 sampleCoord = dispatchThreadId.xy + uint2(dx, dy);
+			if (all(sampleCoord < TEXTURE_SIZE)) {
+				float2 sampleData = Collision[sampleCoord].yw; // Current and previous height
+				float w = 1.0 / (1.0 + abs(dx) + abs(dy)); // Distance weight
+				smoothedHeight += sampleData.x * w;
+				weight += w;
+			}
+		}
+	}
+	smoothedHeight /= (weight + 1.0);
+	
+	// Blend smoothed result with original based on depth change
+	float depthChange = abs(collision.y - previousCollision.y);
+	float smoothBlend = saturate(1.0 - depthChange * 2.0); // Keep sharp edges for fresh impacts
+	collision.y = lerp(collision.y, smoothedHeight, smoothBlend * 0.5);
 
 	Collision[dispatchThreadId.xy] = float4(collision, previousCollision);
 }

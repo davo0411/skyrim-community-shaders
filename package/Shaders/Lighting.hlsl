@@ -886,7 +886,7 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 		float CameraHeightDelta;
 	}
 
-	const static uint TEXTURE_SIZE = 512;
+	const static uint TEXTURE_SIZE = 1024;
 	const static float WORLD_SIZE = 4096;
 	const static float CELL_SIZE = WORLD_SIZE / TEXTURE_SIZE;
 	const static float2 ZRANGE = float2(2048.0, -2048.0);
@@ -898,23 +898,41 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 		float2 uv = positionMSAdjusted / WORLD_SIZE + .5;
 
 		float2 cellVxCoord = uv * TEXTURE_SIZE;
-		int2 cell000 = floor(cellVxCoord - 0.5);
-		float2 bilinearPos = cellVxCoord - 0.5 - cell000;
-
+		float2 cellCenter = floor(cellVxCoord);
+		float2 fracPos = cellVxCoord - cellCenter;
+		
 		float collisionHeight = 0.0;
 		float wsum = 0;
 
-		for (int i = 0; i < 2; i++)
-			for (int j = 0; j < 2; j++)
+		// Sample 5x5 grid for smoother bicubic filtering
+		for (int i = -2; i <= 2; i++)
+			for (int j = -2; j <= 2; j++)
 		{
-			int2 offset = int2(i, j);
-			int2 cellID = cell000 + offset;
+			int2 cellID = int2(cellCenter) + int2(i, j);
 
 			if (any(cellID < 0) || any((uint2)cellID >= TEXTURE_SIZE))
 				continue;
 
-			float2 bilinearWeights = 1 - abs(offset - bilinearPos);
-			float w = bilinearWeights.x * bilinearWeights.y;
+			// Smoother Catmull-Rom cubic kernel
+			float2 d = abs(float2(i, j) - fracPos);
+			float2 w2d;
+			
+			// Catmull-Rom spline for smoother interpolation
+			for (int k = 0; k < 2; k++) {
+				float t = k == 0 ? d.x : d.y;
+				float w;
+				if (t < 1.0)
+					w = 0.5 * (2.0 + t * t * (-5.0 + t * 3.0));
+				else if (t < 2.0)
+					w = 0.5 * (4.0 + t * (-8.0 + t * (5.0 - t)));
+				else
+					w = 0.0;
+				
+				if (k == 0) w2d.x = w;
+				else w2d.y = w;
+			}
+			
+			float w = w2d.x * w2d.y;
 
 			uint2 cellTexID = (cellID + ArrayOrigin.xy) % TEXTURE_SIZE;
 
@@ -946,12 +964,107 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 		if (nearFactor < 0.01)
 			return 0.0;
 
-		float collisionHeight = SampleCollisionHeight(samplePos);
-		
-		// Return depth offset (how much snow is depressed)
-		float depthOffset = samplePos.z - collisionHeight;
-		return saturate(depthOffset / 50.0) * nearFactor;
+	// Add sub-pixel dithering to break up grid artifacts
+	float2 dither = frac(samplePos.xy * 0.7) - 0.5;
+	float3 ditheredPos = samplePos + float3(dither * CELL_SIZE * 0.3, 0);
+
+	// Ultra-quality multi-pass blur for maximum smoothness
+	// Pass 1: Wide 9x9 Gaussian blur
+	float centerHeight = 0.0;
+	float weightSum = 0.0;
+	const float blurRadius1 = CELL_SIZE * 4.0;
+	
+	for (int i = -4; i <= 4; i++) {
+		for (int j = -4; j <= 4; j++) {
+			float dist = length(float2(i, j));
+			if (dist <= 4.5) {
+				float3 offset = float3(i * blurRadius1 * 0.25, j * blurRadius1 * 0.25, 0);
+				// High-quality Gaussian falloff
+				float sigma = 2.0;
+				float weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+				centerHeight += SampleCollisionHeight(ditheredPos + offset) * weight;
+				weightSum += weight;
+			}
+		}
 	}
+	centerHeight /= weightSum;
+	
+	// Pass 2: Tighter 5x5 detail-preserving blur on the result
+	float detailHeight = 0.0;
+	float detailWeightSum = 0.0;
+	const float blurRadius2 = CELL_SIZE * 2.0;
+	
+	for (int i = -2; i <= 2; i++) {
+		for (int j = -2; j <= 2; j++) {
+			float3 offset = float3(i * blurRadius2 * 0.5, j * blurRadius2 * 0.5, 0);
+			float dist = length(float2(i, j));
+			float weight = exp(-dist * dist * 0.5);
+			detailHeight += SampleCollisionHeight(ditheredPos + offset) * weight;
+			detailWeightSum += weight;
+		}
+	}
+	detailHeight /= detailWeightSum;
+	
+	// Blend two passes: wide blur for smoothness + detail blur for definition
+	centerHeight = lerp(centerHeight, detailHeight, 0.3);
+	
+	// High-quality gradient calculation with wider sampling
+	float heightRight = 0.0, heightLeft = 0.0, heightUp = 0.0, heightDown = 0.0;
+	float gradWeight = 0.0;
+	
+	// Sample gradients with 3-tap average for smoothness
+	for (int k = -1; k <= 1; k++) {
+		heightRight += SampleCollisionHeight(samplePos + float3(CELL_SIZE * 3.0, k * CELL_SIZE, 0));
+		heightLeft += SampleCollisionHeight(samplePos + float3(-CELL_SIZE * 3.0, k * CELL_SIZE, 0));
+		heightUp += SampleCollisionHeight(samplePos + float3(k * CELL_SIZE, CELL_SIZE * 3.0, 0));
+		heightDown += SampleCollisionHeight(samplePos + float3(k * CELL_SIZE, -CELL_SIZE * 3.0, 0));
+	}
+	heightRight /= 3.0; heightLeft /= 3.0; heightUp /= 3.0; heightDown /= 3.0;
+	
+	// Calculate gradients
+	float2 gradient = float2(heightRight - heightLeft, heightUp - heightDown) / (4.0 * CELL_SIZE);
+	
+	// Calculate depth offset with EXTREME sensitivity for maximum isolation
+	float depthOffset = samplePos.z - centerHeight;
+	float normalizedDepth = saturate(depthOffset / 15.0); // Maximum sensitivity
+	
+	// Minimal threshold - capture everything
+	const float DEPTH_THRESHOLD = 0.02;
+	float maskedDepth = saturate((normalizedDepth - DEPTH_THRESHOLD) / (1.0 - DEPTH_THRESHOLD));
+	
+	// EXTREME contrast curve - razor sharp boundaries
+	float smoothedDepth = maskedDepth;
+	smoothedDepth = pow(smoothedDepth, 2.5); // Brutally sharp falloff
+	
+	// Nuclear non-linear curve for maximum isolation
+	float shapedDepth = smoothedDepth * smoothedDepth * (3.0 - 2.0 * smoothedDepth);
+	shapedDepth = pow(shapedDepth, 0.4); // Insanely sharp definition
+	
+	// MASSIVE raised ridges around footprints
+	float edgeRidge = maskedDepth * (1.0 - maskedDepth) * 10.0; // Extreme peak
+	float sharpEdge = pow(edgeRidge, 2.0); // Super concentrated ridges
+	
+	// MAXIMUM contrast: crater-deep depressions + mountain ridges
+	float finalHeight = shapedDepth * 6.0; // 6x depression depth
+	finalHeight -= sharpEdge * 3.0; // Massive raised ridges
+	
+	// Multiple outer ridges for layered definition
+	float outerRidge1 = smoothstep(0.2, 0.5, maskedDepth) * (1.0 - smoothstep(0.5, 0.8, maskedDepth));
+	float outerRidge2 = smoothstep(0.5, 0.7, maskedDepth) * (1.0 - smoothstep(0.7, 0.9, maskedDepth));
+	finalHeight -= outerRidge1 * 1.2; // Strong outer ridge
+	finalHeight -= outerRidge2 * 0.8; // Secondary ridge
+	
+	// Add inner depression enhancement for footprint center
+	float centerDepth = pow(1.0 - maskedDepth, 3.0); // Deep center focus
+	finalHeight += centerDepth * 2.0; // Extra center depression
+	
+	// Enhance height with gradient-based detail
+	float slopeIntensity = length(gradient);
+	float detailEnhancement = 1.0 + saturate(slopeIntensity * 5.0) * 0.5;
+	
+	// Return with EXTREME depth multiplier
+	return finalHeight * detailEnhancement * nearFactor;
+}
 
 #	if defined(EMAT)
 #		include "ExtendedMaterials/ExtendedMaterials.hlsli"
