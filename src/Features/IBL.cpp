@@ -4,6 +4,7 @@
 #include "DynamicCubemaps.h"
 #include "Shadercache.h"
 #include "State.h"
+#include "WeatherVariableRegistry.h"
 
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
@@ -47,6 +48,48 @@ void IBL::SaveSettings(json& o_json)
 void IBL::RestoreDefaultSettings()
 {
 	settings = {};
+}
+
+void IBL::RegisterWeatherVariables()
+{
+	auto* registry = WeatherVariables::GlobalWeatherRegistry::GetSingleton()
+		->GetOrCreateFeatureRegistry(GetShortName());
+
+	// Register diffuse IBL scale - controls the overall intensity of diffuse IBL
+	registry->RegisterVariable(std::make_shared<WeatherVariables::FloatVariable>(
+		"DiffuseIBLScale",
+		"Diffuse IBL Scale",
+		"Controls the overall intensity of diffuse IBL lighting",
+		&settings.DiffuseIBLScale,
+		1.0f,
+		0.0f, 10.0f));
+
+	// Register IBL saturation - controls color saturation of IBL
+	registry->RegisterVariable(std::make_shared<WeatherVariables::FloatVariable>(
+		"IBLSaturation",
+		"IBL Saturation",
+		"Controls the color saturation of IBL lighting",
+		&settings.IBLSaturation,
+		1.0f,
+		0.0f, 2.0f));
+
+	// Register DALC amount - controls mixing with Directional Ambient Light Color
+	registry->RegisterVariable(std::make_shared<WeatherVariables::FloatVariable>(
+		"DALCAmount",
+		"DALC Amount",
+		"Amount of DALC (Directional Ambient Light Color) mixing",
+		&settings.DALCAmount,
+		0.33f,
+		0.0f, 1.0f));
+
+	// Register fog amount - controls fog mixing
+	registry->RegisterVariable(std::make_shared<WeatherVariables::FloatVariable>(
+		"FogAmount",
+		"Fog Mix",
+		"Amount of fog mixed into IBL",
+		&settings.FogAmount,
+		0.0f,
+		0.0f, 1.0f));
 }
 
 void IBL::EarlyPrepass()
