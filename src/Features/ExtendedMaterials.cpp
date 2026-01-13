@@ -8,7 +8,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	EnableHeightBlending,
 	EnableShadows,
 	ExtendShadows,
-	EnableParallaxWarpingFix)
+	EnableParallaxWarpingFix,
+	EnableSnowDeformity)
 
 void ExtendedMaterials::DataLoaded()
 {
@@ -79,6 +80,20 @@ void ExtendedMaterials::DrawSettings()
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text(
 				"Extends parallax shadows beyond the range of parallax. Small performance impact.");
+		}
+
+		ImGui::Spacing();
+		ImGui::Spacing();
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx("Snow Deformity", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Checkbox("Enable Snow Deformity", (bool*)&settings.EnableSnowDeformity);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text(
+				"Enables 3D snow deformation using grass collision data. "
+				"Creates realistic footprints and depressions in snow surfaces. "
+				"Requires Grass Collision feature to be enabled.");
 		}
 
 		ImGui::Spacing();
