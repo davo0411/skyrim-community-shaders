@@ -871,6 +871,88 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #		include "Common/PBR.hlsli"
 #	endif
 
+	// Grass Collision resources for snow deformation
+	Texture2D<float4> Collision : register(t112);
+
+	cbuffer GrassCollisionPerFrame : register(b10)
+	{
+		float2 PosOffset;  // cell origin in camera space
+		uint2 ArrayOrigin; // xy: array origin (clipmap wrapping)
+
+		int2 ValidMargin;
+		float TimeDelta;
+		uint BoundingBoxCount;
+
+		float CameraHeightDelta;
+	}
+
+	const static uint TEXTURE_SIZE = 512;
+	const static float WORLD_SIZE = 4096;
+	const static float CELL_SIZE = WORLD_SIZE / TEXTURE_SIZE;
+	const static float2 ZRANGE = float2(2048.0, -2048.0);
+
+	// Helper function to sample collision height at worldspace position
+	float SampleCollisionHeight(float3 worldPosition)
+	{
+		float2 positionMSAdjusted = worldPosition.xy - PosOffset.xy;
+		float2 uv = positionMSAdjusted / WORLD_SIZE + .5;
+
+		float2 cellVxCoord = uv * TEXTURE_SIZE;
+		int2 cell000 = floor(cellVxCoord - 0.5);
+		float2 bilinearPos = cellVxCoord - 0.5 - cell000;
+
+		float collisionHeight = 0.0;
+		float wsum = 0;
+
+		for (int i = 0; i < 2; i++)
+			for (int j = 0; j < 2; j++)
+		{
+			int2 offset = int2(i, j);
+			int2 cellID = cell000 + offset;
+
+			if (any(cellID < 0) || any((uint2)cellID >= TEXTURE_SIZE))
+				continue;
+
+			float2 bilinearWeights = 1 - abs(offset - bilinearPos);
+			float w = bilinearWeights.x * bilinearWeights.y;
+
+			uint2 cellTexID = (cellID + ArrayOrigin.xy) % TEXTURE_SIZE;
+
+			float4 collisionSample = Collision[cellTexID];
+			collisionSample = lerp(ZRANGE.x, ZRANGE.y, collisionSample);
+
+			collisionHeight += collisionSample.x * w;
+			wsum += w;
+		}
+
+		if (wsum > 0.0){
+			collisionHeight /= wsum;
+		} else {
+			collisionHeight = TEXTURE_SIZE;
+		}
+
+		return min(collisionHeight, worldPosition.z + 20);
+	}
+
+	// Sample worldspace collision height offset for snow deformation in parallax tracing
+	float SampleCollisionHeightOffsetForParallax(float3 worldPosition, float2 uvOffset, float3x3 tbn)
+	{
+		// Convert UV offset to worldspace offset
+		const float TERRAIN_WORLD_SCALE = 4096.0;
+		float3 wsOffset = mul(transpose(tbn), float3(uvOffset * TERRAIN_WORLD_SCALE, 0));
+		float3 samplePos = worldPosition + wsOffset;
+		
+		float nearFactor = smoothstep(2048.0, 0.0, length(samplePos));
+		if (nearFactor < 0.01)
+			return 0.0;
+
+		float collisionHeight = SampleCollisionHeight(samplePos);
+		
+		// Return depth offset (how much snow is depressed)
+		float depthOffset = samplePos.z - collisionHeight;
+		return saturate(depthOffset / 50.0) * nearFactor;
+	}
+
 #	if defined(EMAT)
 #		include "ExtendedMaterials/ExtendedMaterials.hlsli"
 #	endif
@@ -937,25 +1019,6 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #	endif
 
 #	include "Common/LightingEval.hlsli"
-
-	Texture2D<float4> Collision : register(t112);
-
-	cbuffer GrassCollisionPerFrame : register(b10)
-	{
-		float2 PosOffset;  // cell origin in camera space
-		uint2 ArrayOrigin; // xy: array origin (clipmap wrapping)
-
-		int2 ValidMargin;
-		float TimeDelta;
-		uint BoundingBoxCount;
-
-		float CameraHeightDelta;
-	}
-
-	const static uint TEXTURE_SIZE = 512;
-	const static float WORLD_SIZE = 4096;
-	const static float CELL_SIZE = WORLD_SIZE / TEXTURE_SIZE;
-	const static float2 ZRANGE = float2(2048.0, -2048.0);
 
 	float ProceduralAnimation(float x, float distanceFromCenter) {
 		float fadeRate = 250;

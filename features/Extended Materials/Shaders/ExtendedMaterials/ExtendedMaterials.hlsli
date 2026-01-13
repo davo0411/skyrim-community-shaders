@@ -76,6 +76,7 @@ namespace ExtendedMaterials
 	}
 
 #if defined(LANDSCAPE)
+
 #	define HEIGHT_POWER 2
 #	define HEIGHT_MULT 8
 
@@ -174,13 +175,15 @@ namespace ExtendedMaterials
 
 		float total;
 		ProcessTerrainHeightWeights(heightBlend, w1, w2, heights, weights, total);
+		
 #		if defined(TERRAIN_VARIATION)
 		// Boost height by 30% when terrain variation is enabled to enhance depth perception
 		[branch] if (SharedData::terrainVariationSettings.enableTilingFix) {
 			total *= 1.3;
 		}
 #		endif
-		return total;	}
+		return total;
+	}
 #	else
 	float GetTerrainHeight(float screenNoise, PS_INPUT input, float2 coords, float mipLevels[6], DisplacementParams params[6], float blendFactor, float4 w1, float2 w2,
 #		if defined(TERRAIN_VARIATION)
@@ -296,6 +299,7 @@ namespace ExtendedMaterials
 
 		float total;
 		ProcessTerrainHeightWeights(heightBlend, w1, w2, heights, weights, total);
+		
 #		if defined(TERRAIN_VARIATION)
 		// Boost height by 30% when terrain variation is enabled to enhance depth perception
 		[branch] if (SharedData::terrainVariationSettings.enableTilingFix) {
@@ -418,6 +422,25 @@ namespace ExtendedMaterials
 				currHeight.w = tex.SampleLevel(texSampler, currentOffset[1].zw, mipLevel)[channel];
 
 				currHeight = AdjustDisplacementNormalized(currHeight, params);
+#endif
+
+				// Add worldspace collision offsets for snow deformation
+#if defined(LANDSCAPE)
+				float4 collisionOffsets;
+				float2 uvOff0 = currentOffset[0].xy - coords;
+				float2 uvOff1 = currentOffset[0].zw - coords;
+				float2 uvOff2 = currentOffset[1].xy - coords;
+				float2 uvOff3 = currentOffset[1].zw - coords;
+				collisionOffsets.x = SampleCollisionHeightOffsetForParallax(input.WorldPosition.xyz, uvOff0, tbn);
+				collisionOffsets.y = SampleCollisionHeightOffsetForParallax(input.WorldPosition.xyz, uvOff1, tbn);
+				collisionOffsets.z = SampleCollisionHeightOffsetForParallax(input.WorldPosition.xyz, uvOff2, tbn);
+				collisionOffsets.w = SampleCollisionHeightOffsetForParallax(input.WorldPosition.xyz, uvOff3, tbn);
+				
+#	if defined(TRUE_PBR)
+				currHeight += collisionOffsets * scalercp * 2.0;
+#	else
+				currHeight += collisionOffsets * 2.0;
+#	endif
 #endif
 
 				bool4 testResult = currHeight >= currentBound;
