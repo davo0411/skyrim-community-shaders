@@ -242,6 +242,13 @@ namespace SharedData
 		uint3 _padding;
 	};
 
+	struct PBRWaterSettings
+	{
+		uint EnableBRDFSpecular;
+		uint EnableWaterScattering;
+		uint2 _padding;
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -259,6 +266,7 @@ namespace SharedData
 		ExtendedTranslucencySettings extendedTranslucencySettings;
 		LinearLightingSettings linearLightingSettings;
 		TerrainBlendingSettings terrainBlendingSettings;
+		PBRWaterSettings pbrWaterSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

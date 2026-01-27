@@ -53,6 +53,10 @@ PS_OUTPUT main(PS_INPUT input)
 
 #	include "Common/SharedData.hlsli"
 
+#if defined(PBR_WATER)
+	# include "PBRWater/WaterBRDF.hlsli"
+#endif
+
 struct VS_INPUT
 {
 #	if defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)
@@ -1099,6 +1103,12 @@ float3 GetSunColor(float3 normal, float3 viewDirection)
 #			else
 	if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior)
 		return 0.0.xxx;
+
+#			if defined(PBR_WATER)
+	if (SharedData::pbrWaterSettings.EnableBRDFSpecular) {
+		return WaterBRDF::GetSunSpecular(normal, viewDirection, SunDir, SunColor.xyz, VarAmounts.x, DeepColor.w);
+	}
+#			endif
 
 	float3 reflectionDirection = reflect(viewDirection, normal);
 	float reflectionMul = exp2(VarAmounts.x * log2(saturate(dot(reflectionDirection, SunDir.xyz))));

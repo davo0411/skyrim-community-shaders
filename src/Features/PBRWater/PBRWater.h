@@ -34,9 +34,10 @@ struct PBRWater : public Feature
 	virtual void SetupResources() override;
 	virtual void ClearShaderCache() override;
 
-	struct Settings
+	struct alignas(16) Settings
 	{
-		bool EnableBRDFSpecular = true;
-		bool EnableWaterScattering = true;
+		uint32_t EnableBRDFSpecular = true;
+		uint32_t EnableWaterScattering = true;
+		uint32_t _pad0[2];
 	} settings;
 };

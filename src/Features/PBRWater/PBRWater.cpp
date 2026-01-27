@@ -25,11 +25,11 @@ void PBRWater::SaveSettings(json& o_json)
 
 void PBRWater::DrawSettings()
 {
-	ImGui::Checkbox("Enable BRDF Specular", &settings.EnableBRDFSpecular);
+	ImGui::Checkbox("Enable BRDF Specular", (bool*)&settings.EnableBRDFSpecular);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Enables physically based BRDF specular reflections on water surfaces");
 
-	ImGui::Checkbox("Enable Water Scattering", &settings.EnableWaterScattering);
+	ImGui::Checkbox("Enable Water Scattering", (bool*)&settings.EnableWaterScattering);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Enables scattering effects in water");
 }
