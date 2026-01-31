@@ -597,25 +597,11 @@ float GetFlowmapMipLevel(float2 flowmapUV)
  */
 
 
-/**
- * Generates flowmap-based normal (no parallax - flowmap normals are not parallax-shifted)
- * Uses mip clamping to preserve detail at distance and prevent over-blurring
- */
 float3 GetFlowmapNormal(PS_INPUT input, float2 uvShift, float multiplier, float offset)
 {
 	FlowmapData flowData = GetFlowmapDataUV(input, uvShift);
 	float2 uv = offset + (flowData.flowVector - float2(multiplier * ((0.001 * ReflectionColor.w) * flowData.color.w), 0));
-
-	float2 dx = ddx(uv);
-	float2 dy = ddy(uv);
-	float mipLevel = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));
-	mipLevel = clamp(mipLevel + SharedData::MipBias, 0, 5);
-
-	float mipScale = exp2(-mipLevel);
-	float2 scaledFlowVector = flowData.flowVector * mipScale;
-	float2 scaledUv = offset + (scaledFlowVector - float2(multiplier * ((0.001 * ReflectionColor.w) * flowData.color.w), 0));
-
-	return float3(FlowMapNormalsTex.SampleLevel(FlowMapNormalsSampler, scaledUv, mipLevel).xy, flowData.color.z);
+	return float3(FlowMapNormalsTex.SampleBias(FlowMapNormalsSampler, uv, SharedData::MipBias).xy, flowData.color.z);
 }
 
 /**
