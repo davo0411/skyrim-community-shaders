@@ -43,7 +43,7 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 
 	GroupMemoryBarrierWithGroupSync();
 
-	const uint TEXTURE_SIZE = 1024;
+	const uint TEXTURE_SIZE = 4096;
 	const float WORLD_SIZE = 4096;
 	float2 ZRANGE = float2(2048.0, -2048.0);
 
@@ -52,7 +52,6 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 	float2 cellCentreMS = cellID + 0.5 - TEXTURE_SIZE / 2;
 	cellCentreMS = cellCentreMS / TEXTURE_SIZE * WORLD_SIZE + PosOffset.xy;
 
-	// Check if the cell is newly added
 	uint2 validMin = (uint2)max(0, ValidMargin.xy);
 	uint2 validMax = TEXTURE_SIZE - 1 + (uint2)min(0, ValidMargin.xy);
 	bool isValid = all(cellID >= validMin) && all(cellID <= validMax);
@@ -60,39 +59,34 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 	float2 collision = max(ZRANGE.x, ZRANGE.y);
 	float2 previousCollision = collision;
 
-	float2 fadeRate = TimeDelta * 100 * float2(0.01, 1.0);
+	float2 fadeRate = TimeDelta * 100 * float2(0.002, 0.2);
 
 	if (isValid) {
 		previousCollision = Collision[dispatchThreadId.xy];
 		previousCollision = lerp(ZRANGE.x, ZRANGE.y, previousCollision);
-
-		// Apply camera height change
 		previousCollision += CameraHeightDelta;
-
-		// Temporal decay
 		collision = previousCollision + fadeRate;
 	}
 
 	for (uint i = 0; i < BoundingBoxCount; i++) {
 		BoundingBoxPacked boundingBox = SharedBoundingBoxes[i];
-		// Test high level collision
 		if (all(cellCentreMS >= boundingBox.MinExtent && cellCentreMS <= boundingBox.MaxExtent)){
-			// Process collision data
 			for (uint j = boundingBox.IndexStart; j < boundingBox.IndexEnd; j++) {
 				float4 collisionInstance = CollisionInstances[j];
-				float radius = collisionInstance.w * 0.3; // Realistic footprint size
+				float baseRadius = collisionInstance.w * 0.5;
 				float centerHeight = collisionInstance.z;
 				
-				// Check if collision can lower the height
-				if (centerHeight - radius < collision.y){
+				if (baseRadius < 8.0)
+					continue;
+				
+				if (centerHeight - baseRadius < collision.y){
 					float dist = distance(collisionInstance.xy, cellCentreMS);
 					
-					// Smooth gaussian-like falloff for natural looking depressions
-					float normalizedDist = dist / radius;
-					if (normalizedDist < 1.5) {
-						// Bell curve shape: deepest at center, smooth falloff to edges
-						float falloff = exp(-normalizedDist * normalizedDist * 2.0);
-						float depth = radius * falloff;
+					if (dist < baseRadius) {
+						float t = dist / baseRadius;
+						float depthFactor = 1.0 - t * t;
+						
+						float depth = baseRadius * 0.4 * depthFactor;
 						float height = centerHeight - depth;
 						
 						collision.x = min(collision.x, height);

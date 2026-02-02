@@ -886,7 +886,7 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 		float CameraHeightDelta;
 	}
 
-	const static uint TEXTURE_SIZE = 1024;
+	const static uint TEXTURE_SIZE = 4096;
 	const static float WORLD_SIZE = 4096;
 	const static float CELL_SIZE = WORLD_SIZE / TEXTURE_SIZE;
 	const static float2 ZRANGE = float2(2048.0, -2048.0);
@@ -898,40 +898,21 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 		float2 uv = positionMSAdjusted / WORLD_SIZE + .5;
 
 		float2 cellVxCoord = uv * TEXTURE_SIZE;
-		float2 cellCenter = floor(cellVxCoord);
-		float2 fracPos = cellVxCoord - cellCenter;
+		int2 cell00 = int2(floor(cellVxCoord - 0.5));
+		float2 f = cellVxCoord - 0.5 - cell00;
 		
 		float collisionHeight = 0.0;
 		float wsum = 0;
 
-		// Sample 5x5 grid for smoother bicubic filtering
-		for (int i = -2; i <= 2; i++)
-			for (int j = -2; j <= 2; j++)
+		for (int i = 0; i < 2; i++)
+			for (int j = 0; j < 2; j++)
 		{
-			int2 cellID = int2(cellCenter) + int2(i, j);
+			int2 cellID = cell00 + int2(i, j);
 
 			if (any(cellID < 0) || any((uint2)cellID >= TEXTURE_SIZE))
 				continue;
 
-			// Smoother Catmull-Rom cubic kernel
-			float2 d = abs(float2(i, j) - fracPos);
-			float2 w2d;
-			
-			// Catmull-Rom spline for smoother interpolation
-			for (int k = 0; k < 2; k++) {
-				float t = k == 0 ? d.x : d.y;
-				float w;
-				if (t < 1.0)
-					w = 0.5 * (2.0 + t * t * (-5.0 + t * 3.0));
-				else if (t < 2.0)
-					w = 0.5 * (4.0 + t * (-8.0 + t * (5.0 - t)));
-				else
-					w = 0.0;
-				
-				if (k == 0) w2d.x = w;
-				else w2d.y = w;
-			}
-			
+			float2 w2d = 1.0 - abs(float2(i, j) - f);
 			float w = w2d.x * w2d.y;
 
 			uint2 cellTexID = (cellID + ArrayOrigin.xy) % TEXTURE_SIZE;
@@ -963,16 +944,13 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 		if (nearFactor < 0.01)
 			return 0.0;
 
-		// Simple bilinear sample - collision texture now has smooth gaussian falloff built-in
 		float collisionHeight = SampleCollisionHeight(samplePos);
 		float depth = samplePos.z - collisionHeight;
 		
-		// Threshold to ignore very shallow impressions
 		float normalizedDepth = saturate(depth / 20.0);
 		if (normalizedDepth < 0.1)
 			return 0.0;
 		
-		// Smooth curve for natural depression shape
 		float shapedDepth = normalizedDepth * normalizedDepth * (3.0 - 2.0 * normalizedDepth);
 		
 		return shapedDepth * 3.0 * nearFactor;
