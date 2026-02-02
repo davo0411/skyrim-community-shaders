@@ -73,10 +73,10 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 		if (all(cellCentreMS >= boundingBox.MinExtent && cellCentreMS <= boundingBox.MaxExtent)){
 			for (uint j = boundingBox.IndexStart; j < boundingBox.IndexEnd; j++) {
 				float4 collisionInstance = CollisionInstances[j];
-				float baseRadius = collisionInstance.w * 0.5;
+				float baseRadius = collisionInstance.w * 0.5 * 1.2;
 				float centerHeight = collisionInstance.z;
 				
-				if (baseRadius < 8.0)
+				if (baseRadius < 9.6)
 					continue;
 				
 				if (centerHeight - baseRadius < collision.y){
@@ -86,7 +86,7 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 						float t = dist / baseRadius;
 						float depthFactor = 1.0 - t * t;
 						
-						float depth = baseRadius * 0.4 * depthFactor;
+						float depth = baseRadius * 0.4 * depthFactor * 0.8;
 						float height = centerHeight - depth;
 						
 						collision.x = min(collision.x, height);

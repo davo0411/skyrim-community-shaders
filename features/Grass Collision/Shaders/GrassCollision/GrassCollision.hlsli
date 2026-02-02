@@ -14,7 +14,7 @@ namespace GrassCollision
 		float CameraHeightDelta;
 	}
 
-	const static uint TEXTURE_SIZE = 512;
+	const static uint TEXTURE_SIZE = 4096;
 	const static float WORLD_SIZE = 4096;
 	const static float CELL_SIZE = WORLD_SIZE / TEXTURE_SIZE;
 	const static float2 ZRANGE = float2(2048.0, -2048.0);
