@@ -42,6 +42,8 @@ namespace SIE
 		constexpr const char* VertexShaderProfile = "vs_5_0";
 		constexpr const char* PixelShaderProfile = "ps_5_0";
 		constexpr const char* ComputeShaderProfile = "cs_5_0";
+		constexpr const char* HullShaderProfile = "hs_5_0";
+		constexpr const char* DomainShaderProfile = "ds_5_0";
 
 		static std::wstring GetShaderPath(const std::string_view& name)
 		{
@@ -57,6 +59,10 @@ namespace SIE
 				return PixelShaderProfile;
 			case ShaderClass::Compute:
 				return ComputeShaderProfile;
+			case ShaderClass::Hull:
+				return HullShaderProfile;
+			case ShaderClass::Domain:
+				return DomainShaderProfile;
 			}
 			return nullptr;
 		}
@@ -1320,6 +1326,10 @@ namespace SIE
 				defines[lastIndex++] = { "PSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Compute) {
 				defines[lastIndex++] = { "CSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Hull) {
+				defines[lastIndex++] = { "HSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Domain) {
+				defines[lastIndex++] = { "DSHADER", nullptr };
 			}
 			if (globals::state->IsDeveloperMode()) {
 				defines[lastIndex++] = { "D3DCOMPILE_SKIP_OPTIMIZATION", nullptr };
