@@ -608,6 +608,14 @@ bool State::IsDeveloperMode()
 
 void State::ModifyRenderTarget(RE::RENDER_TARGETS::RENDER_TARGET a_target, RE::BSGraphics::RenderTargetProperties* a_properties)
 {
+	logger::info("Render Target: {} - Format: {} ({}), Size: {}x{}, UAV: {}", 
+		magic_enum::enum_name(a_target),
+		magic_enum::enum_name(a_properties->format.get()),
+		a_properties->format.underlying(),
+		a_properties->width,
+		a_properties->height,
+		a_properties->supportUnorderedAccess ? "Yes" : "No");
+
 	a_properties->supportUnorderedAccess = true;
 	logger::debug("Adding UAV access to {}", magic_enum::enum_name(a_target));
 }
@@ -645,6 +653,62 @@ void State::SetupResources()
 	featureLevel = globals::d3d::device->GetFeatureLevel();
 
 	tracyCtx = TracyD3D11Context(globals::d3d::device, globals::d3d::context);
+
+	// Log actual D3D11 texture formats for main render pipeline targets
+	logger::info("=== Main Render Pipeline Target Formats (bUse64bitsHDRRenderTarget=1 upgrades to 16-bit FLOAT) ===");
+	
+	// Check kFRAMEBUFFER specifically (used by ISHDR)
+	auto& framebufferRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+	if (framebufferRT.texture) {
+		D3D11_TEXTURE2D_DESC desc{};
+		framebufferRT.texture->GetDesc(&desc);
+		std::string formatStr = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? "R16G16B16A16_FLOAT (HDR 64-bit)" :
+		                        desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ? "R10G10B10A2_UNORM (HDR 32-bit)" :
+		                        desc.Format == DXGI_FORMAT_R11G11B10_FLOAT ? "R11G11B10_FLOAT (HDR 32-bit)" :
+		                        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ? "R8G8B8A8_UNORM (LDR 32-bit)" :
+		                        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ? "B8G8R8A8_UNORM (LDR 32-bit)" :
+		                        std::format("DXGI_FORMAT_{}", static_cast<int>(desc.Format));
+		logger::info("  kFRAMEBUFFER (ISHDR writes here) - {} {}x{}", formatStr, desc.Width, desc.Height);
+	} else {
+		logger::info("  kFRAMEBUFFER (ISHDR writes here) - NOT CREATED (null texture)");
+	}
+	
+	// Focus on main render pipeline targets
+	std::vector<RE::RENDER_TARGETS::RENDER_TARGET> mainTargets = {
+		RE::RENDER_TARGETS::kMAIN,
+		RE::RENDER_TARGETS::kMAIN_COPY,
+		RE::RENDER_TARGETS::kMAIN_ONLY_ALPHA,
+		RE::RENDER_TARGETS::kNORMAL_TAAMASK_SSRMASK,
+		RE::RENDER_TARGETS::kNORMAL_TAAMASK_SSRMASK_SWAP,
+		RE::RENDER_TARGETS::kMOTION_VECTOR,
+		RE::RENDER_TARGETS::kHDR_BLURSWAP,
+		RE::RENDER_TARGETS::kLDR_BLURSWAP,
+		RE::RENDER_TARGETS::kHDR_BLOOM
+	};
+
+	for (auto target : mainTargets) {
+		auto& rt = renderer->GetRuntimeData().renderTargets[target];
+		if (rt.texture) {
+			D3D11_TEXTURE2D_DESC desc{};
+			rt.texture->GetDesc(&desc);
+			
+			// Determine if this is HDR 16-bit float format
+			std::string formatStr = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? "R16G16B16A16_FLOAT (HDR 64-bit)" :
+			                        desc.Format == DXGI_FORMAT_R16G16_FLOAT ? "R16G16_FLOAT (32-bit, 2-channel)" :
+			                        desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ? "R10G10B10A2_UNORM (HDR 32-bit)" :
+			                        desc.Format == DXGI_FORMAT_R11G11B10_FLOAT ? "R11G11B10_FLOAT (HDR 32-bit)" :
+			                        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ? "R8G8B8A8_UNORM (LDR 32-bit)" :
+			                        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ? "B8G8R8A8_UNORM (LDR 32-bit)" :
+			                        std::format("DXGI_FORMAT_{}", static_cast<int>(desc.Format));
+			
+			logger::info("  {} - {} {}x{}", 
+				magic_enum::enum_name(target),
+				formatStr,
+				desc.Width,
+				desc.Height);
+		}
+	}
+	logger::info("========================================================================");
 }
 
 void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
