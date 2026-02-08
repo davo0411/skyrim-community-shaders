@@ -2,16 +2,137 @@
 
 #include "Globals.h"
 #include "State.h"
+#include "ShaderCache.h"
+#include "Util.h"
+#include "RE/C/Calendar.h"
+#include "Features/TerrainShadows.h"
+
+#include <cmath>
+#include <d3d11.h>
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::Settings,
+	PBRWater::GeneralSettings,
+	ShowWireframe,
+	WireframeRawMode)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::TessellationSettings,
+	EnableTessellation,
+	TessellationMinDistance,
+	TessellationMaxDistance,
+	TessellationMinFactor,
+	TessellationMaxFactor)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::WaveSettings,
+	WaveIntensity,
+	WaveAmplitude,
+	WaveSpeed,
+	WaveSteepness,
+	WaveFadeStart,
+	WaveFadeEnd,
+	Wave1Amplitude,
+	Wave1Wavelength,
+	Wave1Steepness,
+	Wave1AngleOffset,
+	Wave2Amplitude,
+	Wave2Wavelength,
+	Wave2Steepness,
+	Wave2AngleOffset,
+	Wave3Amplitude,
+	Wave3Wavelength,
+	Wave3Steepness,
+	Wave3AngleOffset,
+	Wave4Amplitude,
+	Wave4Wavelength,
+	Wave4Steepness,
+	Wave4AngleOffset,
+	Wave5Amplitude,
+	Wave5Wavelength,
+	Wave5Steepness,
+	Wave5AngleOffset,
+	Wave6Amplitude,
+	Wave6Wavelength,
+	Wave6Steepness,
+	Wave6AngleOffset,
+	ShallowWaveDepthMin,
+	ShallowWaveDepthMax,
+	ShoreWaveDepthThreshold,
+	ShoreWaveStrength)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::LightingSettings,
+	EnableLightingOverrides,
+	FresnelBias,
+	FresnelPower,
+	ReflectionStrength,
+	RefractionStrength,
+	WaterTransparency,
+	AbsorptionDensity,
+	ScatteringCoeff,
+	SpecularIntensity,
+	SunSpecularPower,
+	SunSpecularMagnitude,
+	SunSparklePower,
+	SunSparkleMagnitude,
+	SpecularRadius,
+	SpecularBrightness)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::FogSettings,
+	AboveWaterFogDistNear,
+	AboveWaterFogDistFar,
+	AboveWaterFogAmount,
+	UnderwaterFogDistNear,
+	UnderwaterFogDistFar,
+	UnderwaterFogAmount)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::DepthSettings,
+	DepthReflections,
+	DepthRefractions,
+	DepthNormals,
+	DepthSpecularLighting)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::RippleSettings,
+	EnableActorRipples,
+	RippleStrength,
+	RippleRadius,
+	RippleWaveSpeed,
+	RippleWaveFreq1,
+	RippleWaveFreq2,
+	RippleWaveFreq3,
+	RippleNormalStrength)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::FoamSettings,
+	EnableFoam,
+	FoamIntensity,
+	FoamIntensityFlowmap,
+	FoamThreshold,
+	FoamSharpness,
+	LargeWaveSlopeRequirement,
+	SmallWaveSlopeMultiplier,
+	SmallWaveBaseOffset,
+	SmallWaveHeightRange)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::BRDFSettings,
 	EnableBRDFSpecular,
 	EnableWaterScattering)
 
-void PBRWater::RestoreDefaultSettings()
-{
-	settings = {};
-}
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	PBRWater::Settings,
+	general,
+	tessellation,
+	waves,
+	lighting,
+	fog,
+	depth,
+	ripples,
+	foam,
+	brdf)
 
 void PBRWater::LoadSettings(json& o_json)
 {
@@ -23,21 +144,1138 @@ void PBRWater::SaveSettings(json& o_json)
 	o_json = settings;
 }
 
+void PBRWater::RestoreDefaultSettings()
+{
+	settings = {};
+}
+
 void PBRWater::DrawSettings()
 {
-	ImGui::Checkbox("Enable BRDF Specular", (bool*)&settings.EnableBRDFSpecular);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Enables physically based BRDF specular reflections on water surfaces");
+	if (ImGui::BeginTabBar("PBRWaterTabs")) {
+		if (ImGui::BeginTabItem("General")) {
+			ImGui::Checkbox("Enable Tessellation", &settings.tessellation.EnableTessellation);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("Hardware tessellation for dynamic mesh density based on distance.");
+			}
 
-	ImGui::Checkbox("Enable Water Scattering", (bool*)&settings.EnableWaterScattering);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Enables scattering effects in water");
+			// Show tessellation shader compilation status
+			if (tessellationShadersCompiling.load()) {
+				ImGui::SameLine();
+				ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "(Compiling shaders...)");
+			} else if (!AreTessellationShadersReady() && settings.tessellation.EnableTessellation) {
+				ImGui::SameLine();
+				ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "(Shader compilation failed)");
+			}
+
+			if (settings.tessellation.EnableTessellation) {
+				ImGui::Indent();
+				ImGui::SliderFloat("Min Distance", &settings.tessellation.TessellationMinDistance, 64.0f, 1024.0f, "%.0f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Distance (game units) where maximum tessellation is applied.\nCloser water gets more subdivision.");
+				ImGui::SliderFloat("Max Distance", &settings.tessellation.TessellationMaxDistance, 1024.0f, 16384.0f, "%.0f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Distance (game units) where minimum tessellation is applied.\nBeyond this, water triangles are minimized (~2 tris).");
+				ImGui::SliderFloat("Max Factor", &settings.tessellation.TessellationMaxFactor, 4.0f, 64.0f, "%.0f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Tessellation factor for nearby water.\nHigher = more polygons = better wave detail but slower.\n8-16 is usually sufficient.");
+				ImGui::Unindent();
+			}
+
+			ImGui::Spacing();
+
+			ImGui::Checkbox("Enable BRDF Specular", &settings.brdf.EnableBRDFSpecular);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Enables physically based BRDF specular reflections on water surfaces");
+
+			ImGui::Checkbox("Enable Water Scattering", &settings.brdf.EnableWaterScattering);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Enables scattering effects in water");
+
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Waves")) {
+			ImGui::Text("Wave System");
+			ImGui::SliderFloat("Wave Enhancement", &settings.waves.WaveIntensity, 0.0f, 1.0f, "%.2f");
+			ImGui::SliderFloat("Wave Height", &settings.waves.WaveAmplitude, 0.1f, 10.0f, "%.2f");
+			ImGui::SliderFloat("Wave Speed", &settings.waves.WaveSpeed, 0.01f, 1.0f, "%.3f");
+			ImGui::SliderFloat("Wave Steepness", &settings.waves.WaveSteepness, 0.1f, 10.0f, "%.2f");
+
+			ImGui::Spacing();
+			ImGui::Text("Wave Distance Fade");
+			ImGui::SliderFloat("Fade Start", &settings.waves.WaveFadeStart, 1024.0f, 16384.0f, "%.0f");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Distance (game units) where waves start fading.\n4096 = ~58 meters.");
+			ImGui::SliderFloat("Fade End", &settings.waves.WaveFadeEnd, 2048.0f, 32768.0f, "%.0f");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Distance (game units) where waves fully fade out.\n8192 = ~117 meters.\nDistant water becomes flat beyond this.");
+
+			ImGui::Spacing();
+			if (ImGui::TreeNodeEx("Wave 1 (Primary)", ImGuiTreeNodeFlags_None)) {
+				ImGui::SliderFloat("W1 Amplitude (m)", &settings.waves.Wave1Amplitude, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("W1 Wavelength (m)", &settings.waves.Wave1Wavelength, 10.0f, 150.0f, "%.1f");
+				ImGui::SliderFloat("W1 Steepness", &settings.waves.Wave1Steepness, 0.0f, 0.6f, "%.3f");
+				ImGui::SliderFloat("W1 Angle (rad)", &settings.waves.Wave1AngleOffset, -3.14f, 3.14f, "%.2f");
+				ImGui::TreePop();
+			}
+			if (ImGui::TreeNodeEx("Wave 2 (Secondary)", ImGuiTreeNodeFlags_None)) {
+				ImGui::SliderFloat("W2 Amplitude (m)", &settings.waves.Wave2Amplitude, 0.0f, 1.5f, "%.2f");
+				ImGui::SliderFloat("W2 Wavelength (m)", &settings.waves.Wave2Wavelength, 5.0f, 100.0f, "%.1f");
+				ImGui::SliderFloat("W2 Steepness", &settings.waves.Wave2Steepness, 0.0f, 0.5f, "%.3f");
+				ImGui::SliderFloat("W2 Angle (rad)", &settings.waves.Wave2AngleOffset, -3.14f, 3.14f, "%.2f");
+				ImGui::TreePop();
+			}
+			if (ImGui::TreeNodeEx("Wave 3 (Detail)", ImGuiTreeNodeFlags_None)) {
+				ImGui::SliderFloat("W3 Amplitude (m)", &settings.waves.Wave3Amplitude, 0.0f, 0.5f, "%.3f");
+				ImGui::SliderFloat("W3 Wavelength (m)", &settings.waves.Wave3Wavelength, 2.0f, 50.0f, "%.1f");
+				ImGui::SliderFloat("W3 Steepness", &settings.waves.Wave3Steepness, 0.0f, 0.4f, "%.3f");
+				ImGui::SliderFloat("W3 Angle (rad)", &settings.waves.Wave3AngleOffset, -3.14f, 3.14f, "%.2f");
+				ImGui::TreePop();
+			}
+			if (ImGui::TreeNodeEx("Fine Ripples (4-6)", ImGuiTreeNodeFlags_None)) {
+				ImGui::SliderFloat("W4 Amplitude (m)", &settings.waves.Wave4Amplitude, 0.0f, 0.25f, "%.3f");
+				ImGui::SliderFloat("W4 Wavelength (m)", &settings.waves.Wave4Wavelength, 1.0f, 20.0f, "%.1f");
+				ImGui::SliderFloat("W4 Steepness", &settings.waves.Wave4Steepness, 0.0f, 0.35f, "%.3f");
+				ImGui::SliderFloat("W4 Angle (rad)", &settings.waves.Wave4AngleOffset, -3.14f, 3.14f, "%.2f");
+				ImGui::Spacing();
+				ImGui::SliderFloat("W5 Amplitude (m)", &settings.waves.Wave5Amplitude, 0.0f, 0.15f, "%.3f");
+				ImGui::SliderFloat("W5 Wavelength (m)", &settings.waves.Wave5Wavelength, 0.5f, 10.0f, "%.1f");
+				ImGui::SliderFloat("W5 Steepness", &settings.waves.Wave5Steepness, 0.0f, 0.3f, "%.3f");
+				ImGui::SliderFloat("W5 Angle (rad)", &settings.waves.Wave5AngleOffset, -3.14f, 3.14f, "%.2f");
+				ImGui::Spacing();
+				ImGui::SliderFloat("W6 Amplitude (m)", &settings.waves.Wave6Amplitude, 0.0f, 0.08f, "%.3f");
+				ImGui::SliderFloat("W6 Wavelength (m)", &settings.waves.Wave6Wavelength, 0.25f, 6.0f, "%.2f");
+				ImGui::SliderFloat("W6 Steepness", &settings.waves.Wave6Steepness, 0.0f, 0.25f, "%.3f");
+				ImGui::SliderFloat("W6 Angle (rad)", &settings.waves.Wave6AngleOffset, -3.14f, 3.14f, "%.2f");
+				ImGui::TreePop();
+			}
+
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			if (ImGui::TreeNodeEx("Depth-Based Wave Modulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+				ImGui::Text("Shallow Water Effects");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Reduces wave amplitude in shallow water for more realistic shoreline behavior.");
+				}
+
+				ImGui::SliderFloat("Shallow Depth Min", &settings.waves.ShallowWaveDepthMin, 0.0f, 500.0f, "%.0f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Depth (game units) where waves fully disappear.\n~70 units = 1 meter.\nDefault: 50 (~0.7m)");
+				}
+
+				ImGui::SliderFloat("Shallow Depth Max", &settings.waves.ShallowWaveDepthMax, 50.0f, 2000.0f, "%.0f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Depth (game units) where waves reach full amplitude.\nDefault: 500 (~7m)");
+				}
+
+				ImGui::Spacing();
+				ImGui::Text("Shore-Directed Waves");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Creates waves that flow toward the shore in shallow water.");
+				}
+
+				ImGui::SliderFloat("Shore Depth Threshold", &settings.waves.ShoreWaveDepthThreshold, 50.0f, 1000.0f, "%.0f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Depth (game units) below which shore waves activate.\nDefault: 300 (~4.3m)");
+				}
+
+				ImGui::SliderFloat("Shore Wave Strength", &settings.waves.ShoreWaveStrength, 0.0f, 2.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Intensity of shore-directed wave bias.\n0 = disabled, 1 = default, 2 = very strong");
+				}
+
+				ImGui::TreePop();
+			}
+
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Lighting")) {
+			ImGui::Checkbox("Enable Lighting Overrides", &settings.lighting.EnableLightingOverrides);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("Override ESP water lighting values with custom settings.");
+			}
+
+			if (settings.lighting.EnableLightingOverrides) {
+				ImGui::Spacing();
+				ImGui::Text("Fresnel / Reflection");
+				ImGui::SliderFloat("Fresnel Bias (F0)", &settings.lighting.FresnelBias, 0.0f, 0.2f, "%.3f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Base reflectivity. Water IOR 1.33 = ~0.02.");
+				}
+				ImGui::SliderFloat("Fresnel Power", &settings.lighting.FresnelPower, 1.0f, 10.0f, "%.1f");
+				ImGui::SliderFloat("Reflection Strength", &settings.lighting.ReflectionStrength, 0.0f, 2.0f, "%.2f");
+
+				ImGui::Spacing();
+				ImGui::Text("Refraction / Transparency");
+				ImGui::SliderFloat("Refraction Strength", &settings.lighting.RefractionStrength, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("Water Transparency", &settings.lighting.WaterTransparency, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("Absorption Density", &settings.lighting.AbsorptionDensity, 0.0f, 1.0f, "%.3f");
+				ImGui::SliderFloat("Scattering", &settings.lighting.ScatteringCoeff, 0.0f, 0.5f, "%.3f");
+				ImGui::SliderFloat("Specular Intensity", &settings.lighting.SpecularIntensity, 0.0f, 5.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Overall multiplier for all specular effects.");
+				}
+
+				ImGui::Spacing();
+				ImGui::Text("Sun Specular");
+				ImGui::SliderFloat("Sun Specular Power", &settings.lighting.SunSpecularPower, 10.0f, 1000.0f, "%.0f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Sharpness of sun reflection. Higher = tighter highlight.");
+				}
+				ImGui::SliderFloat("Sun Specular Magnitude", &settings.lighting.SunSpecularMagnitude, 0.0f, 5.0f, "%.2f");
+				ImGui::SliderFloat("Sun Sparkle Power", &settings.lighting.SunSparklePower, 1.0f, 200.0f, "%.0f");
+				ImGui::SliderFloat("Sun Sparkle Magnitude", &settings.lighting.SunSparkleMagnitude, 0.0f, 5.0f, "%.2f");
+				ImGui::SliderFloat("Specular Radius", &settings.lighting.SpecularRadius, 1.0f, 512.0f, "%.0f");
+				ImGui::SliderFloat("Specular Brightness", &settings.lighting.SpecularBrightness, 0.0f, 5.0f, "%.2f");
+
+				ImGui::Spacing();
+				ImGui::Text("Depth Control");
+				ImGui::SliderFloat("Depth Reflections", &settings.depth.DepthReflections, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("Depth Refractions", &settings.depth.DepthRefractions, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("Depth Normals", &settings.depth.DepthNormals, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("Depth Specular", &settings.depth.DepthSpecularLighting, 0.0f, 2.0f, "%.2f");
+			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Fog")) {
+			if (!settings.lighting.EnableLightingOverrides) {
+				ImGui::TextDisabled("Enable Lighting Overrides to use fog settings.");
+			} else {
+				ImGui::Text("Above Water Fog");
+				ImGui::SliderFloat("Near Distance", &settings.fog.AboveWaterFogDistNear, 0.0f, 10000.0f, "%.0f");
+				ImGui::SliderFloat("Far Distance", &settings.fog.AboveWaterFogDistFar, 1000.0f, 500000.0f, "%.0f");
+				ImGui::SliderFloat("Fog Amount", &settings.fog.AboveWaterFogAmount, 0.0f, 2.0f, "%.2f");
+
+				ImGui::Spacing();
+				ImGui::Text("Underwater Fog");
+				ImGui::SliderFloat("UW Near Distance", &settings.fog.UnderwaterFogDistNear, 0.0f, 1000.0f, "%.0f");
+				ImGui::SliderFloat("UW Far Distance", &settings.fog.UnderwaterFogDistFar, 100.0f, 20000.0f, "%.0f");
+				ImGui::SliderFloat("UW Fog Amount", &settings.fog.UnderwaterFogAmount, 0.0f, 2.0f, "%.2f");
+			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Wading Ripples")) {
+			ImGui::Checkbox("Enable Actor Ripples", &settings.ripples.EnableActorRipples);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("Creates ripple effects when actors (player and NPCs) wade through water.");
+			}
+
+			if (settings.ripples.EnableActorRipples) {
+				ImGui::Spacing();
+				ImGui::Text("Ripple Appearance");
+				ImGui::SliderFloat("Ripple Strength", &settings.ripples.RippleStrength, 0.0f, 3.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Overall intensity of ripple effects.");
+				}
+				ImGui::SliderFloat("Ripple Radius", &settings.ripples.RippleRadius, 128.0f, 1024.0f, "%.0f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Maximum distance ripples spread from actor.");
+				}
+				ImGui::SliderFloat("Normal Strength", &settings.ripples.RippleNormalStrength, 0.0f, 5.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("How much ripples affect water surface normals.");
+				}
+
+				ImGui::Spacing();
+				ImGui::Text("Wave Animation");
+				ImGui::SliderFloat("Wave Speed", &settings.ripples.RippleWaveSpeed, 1.0f, 10.0f, "%.1f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Speed of ripple wave animation.");
+				}
+
+				ImGui::Spacing();
+				ImGui::Text("Wave Frequencies");
+				ImGui::SliderFloat("Primary Freq", &settings.ripples.RippleWaveFreq1, 0.02f, 0.2f, "%.3f");
+				ImGui::SliderFloat("Secondary Freq", &settings.ripples.RippleWaveFreq2, 0.04f, 0.3f, "%.3f");
+				ImGui::SliderFloat("Tertiary Freq", &settings.ripples.RippleWaveFreq3, 0.06f, 0.4f, "%.3f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Higher values = more ripple rings per unit distance.");
+				}
+			}
+
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Foam")) {
+			ImGui::Checkbox("Enable Foam", &settings.foam.EnableFoam);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("Generates foam on wave crests based on wave height and slope.\nFoam appears on steep, sharp waves.");
+			}
+
+			if (settings.foam.EnableFoam) {
+				ImGui::Spacing();
+				ImGui::Text("General Foam Settings");
+				ImGui::Separator();
+
+				ImGui::SliderFloat("Foam Intensity", &settings.foam.FoamIntensity, 0.0f, 2.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Overall foam strength for non-flowmap water (lakes, ocean).\nAlso shifts height threshold upward (higher = tighter to peak).");
+				}
+
+				ImGui::SliderFloat("Foam Intensity (Flowmap)", &settings.foam.FoamIntensityFlowmap, 0.0f, 2.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Foam strength for flowmap water (rivers).");
+				}
+
+				ImGui::SliderFloat("Height Threshold", &settings.foam.FoamThreshold, 0.0f, 0.9f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Minimum wave height for foam appearance.\nLower values = foam appears lower on waves.");
+				}
+
+				ImGui::SliderFloat("Edge Sharpness", &settings.foam.FoamSharpness, 0.5f, 8.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("How sharply foam edges are defined.\nHigher = more crisp edges.");
+				}
+
+				ImGui::Spacing();
+				ImGui::Text("Large Wave Foam (Waves 1-3)");
+				ImGui::Separator();
+
+				ImGui::SliderFloat("Slope Requirement", &settings.foam.LargeWaveSlopeRequirement, 0.0f, 0.8f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Minimum slope ratio for large waves to generate foam.\nHigher = only steep waves foam (prevents foam on gentle rolling tops).\nLower = more foam on larger waves.");
+				}
+
+				ImGui::Spacing();
+				ImGui::Text("Small Wave Foam (Waves 4-6)");
+				ImGui::Separator();
+
+				ImGui::SliderFloat("Slope Multiplier", &settings.foam.SmallWaveSlopeMultiplier, 1.0f, 5.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("How easily small waves generate foam based on slope.\nHigher = more foam on small waves.");
+				}
+
+				ImGui::SliderFloat("Base Foam Offset", &settings.foam.SmallWaveBaseOffset, 0.0f, 0.5f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Base foam amount for small waves regardless of slope.\nAdds minimum foam to all small wave crests.");
+				}
+
+				ImGui::SliderFloat("Height Range", &settings.foam.SmallWaveHeightRange, 0.5f, 1.0f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Height range requirement for small wave foam.\nLower = foam appears on smaller height variations.");
+				}
+			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Debug")) {
+			ImGui::Checkbox("Show Tri Visualizer", &settings.general.ShowWireframe);
+			if (settings.general.ShowWireframe) {
+				ImGui::SameLine();
+				ImGui::Checkbox("Raw Barycentrics", &settings.general.WireframeRawMode);
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("Shows raw barycentric coordinates as RGB.\nRed/Green/Blue at vertices = GS working.\nGray/Purple everywhere = GS not running.");
+				}
+			}
+
+			if (ImGui::Button("Quick Test - Guardian Stones")) {
+				if (auto ui = RE::UI::GetSingleton(); ui && !ui->menuStack.empty() && RE::PlayerCharacter::GetSingleton()) {
+					RE::Console::ExecuteCommand("player.setav speedmult 1000");
+					RE::Console::ExecuteCommand("tgm");
+					RE::Console::ExecuteCommand("tcl");
+					RE::Console::ExecuteCommand("set timescale to 0");
+					RE::Console::ExecuteCommand("set gamehour to 12");
+					RE::Console::ExecuteCommand("coc guardianstones");
+					RE::Console::ExecuteCommand("fw 81a");
+				}
+			}
+
+			if (ImGui::Button("Quick Test - Solitude Exterior")) {
+				if (auto ui = RE::UI::GetSingleton(); ui && !ui->menuStack.empty() && RE::PlayerCharacter::GetSingleton()) {
+					RE::Console::ExecuteCommand("player.setav speedmult 1000");
+					RE::Console::ExecuteCommand("tgm");
+					RE::Console::ExecuteCommand("tcl");
+					RE::Console::ExecuteCommand("set timescale to 0");
+					RE::Console::ExecuteCommand("set gamehour to 12");
+					RE::Console::ExecuteCommand("coc solitudeexterior01");
+					RE::Console::ExecuteCommand("fw 81a");
+				}
+			}
+			ImGui::EndTabItem();
+		}
+
+		ImGui::EndTabBar();
+	}
 }
 
 void PBRWater::SetupResources()
 {
+	perFrame = new ConstantBuffer(ConstantBufferDesc<PerFrame>());
+	perTile = new ConstantBuffer(ConstantBufferDesc<PerTile>());
+	tessellationParams = new ConstantBuffer(ConstantBufferDesc<TessellationParams>());
+	actorRippleBuffer = new ConstantBuffer(ConstantBufferDesc<ActorRippleBuffer>());
+
+	// Start async tessellation shader compilation
+	CompileTessellationShadersAsync();
+}
+
+void PBRWater::CompileTessellationShadersAsync()
+{
+	// Don't start if already compiling or ready
+	if (tessellationShadersCompiling.load() || tessellationShadersReady.load()) {
+		return;
+	}
+
+	tessellationShadersCompiling.store(true);
+	logger::info("[PBR Water] Starting async tessellation shader compilation");
+
+	// Launch compilation on a separate thread
+	shaderCompileFuture = std::async(std::launch::async, [this]() {
+		// Compile tessellation shaders
+		// Using SPECULAR + FLOWMAP + BLEND_NORMALS as the common water permutation
+		// NUM_SPECULAR_LIGHTS must match what the game's VS uses for correct VS_OUTPUT structure
+		std::vector<std::pair<const char*, const char*>> tessDefines = {
+			{ "HSHADER", "" },
+			{ "UNIFIED_WATER", "" },
+			{ "PBR_WATER", "" },
+			{ "SPECULAR", "" },
+			{ "NUM_SPECULAR_LIGHTS", "0" },
+			{ "FLOWMAP", "" },
+			{ "BLEND_NORMALS", "" },
+			{ "NORMAL_TEXCOORD", "" }
+		};
+
+		bool allSuccess = true;
+
+		if (auto* hullShader = static_cast<ID3D11HullShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", tessDefines, "hs_5_0"))) {
+			waterHullShader.attach(hullShader);
+			logger::debug("[PBR Water] Hull shader compiled successfully");
+		} else {
+			logger::error("[PBR Water] Failed to compile hull shader");
+			allSuccess = false;
+		}
+
+		// Domain shader with same defines but DSHADER instead of HSHADER
+		tessDefines[0] = { "DSHADER", "" };
+
+		if (auto* domainShader = static_cast<ID3D11DomainShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", tessDefines, "ds_5_0"))) {
+			waterDomainShader.attach(domainShader);
+			logger::debug("[PBR Water] Domain shader compiled successfully");
+		} else {
+			logger::error("[PBR Water] Failed to compile domain shader");
+			allSuccess = false;
+		}
+
+		// Geometry shader for proper per-triangle barycentric coordinates (needed for wireframe view)
+		tessDefines[0] = { "GSHADER", "" };
+
+		if (auto* geometryShader = static_cast<ID3D11GeometryShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", tessDefines, "gs_5_0"))) {
+			waterGeometryShader.attach(geometryShader);
+			logger::debug("[PBR Water] Geometry shader compiled successfully");
+		} else {
+			logger::error("[PBR Water] Failed to compile geometry shader");
+			allSuccess = false;
+		}
+
+		tessellationShadersCompiling.store(false);
+		tessellationShadersReady.store(allSuccess);
+
+		if (allSuccess) {
+			logger::info("[PBR Water] Tessellation shaders compiled successfully (async)");
+		} else {
+			logger::warn("[PBR Water] Some tessellation shaders failed to compile");
+		}
+	});
+}
+
+void PBRWater::Reset()
+{
+	hasLastTimingSample = false;
+	lastTimingFrameIndex = std::numeric_limits<std::uint32_t>::max();
+	lastGameTimeHours = 0.0f;
+	lastRealTimeSeconds = 0.0f;
+	lastTimeScale = 1.0f;
+	currentGameTimeHours = 0.0f;
+	currentRealTimeSeconds = 0.0f;
+	currentTimeScale = 1.0f;
+	prevTileData.clear();
 }
 
 void PBRWater::ClearShaderCache()
 {
+	tessellationShadersReady.store(false);
+	waterHullShader = nullptr;
+	waterDomainShader = nullptr;
+	waterGeometryShader = nullptr;
+	CompileTessellationShadersAsync();
+}
+
+void PBRWater::PostPostLoad()
+{
+	// Hook InitializeWater to suppress displacement meshes (PBR handles wave displacement via tessellation)
+	stl::detour_thunk<TESWaterSystem_InitializeWater>(REL::RelocationID(31388, 32179));
+
+	// Hook SetupGeometry and RestoreGeometry for tessellation and PBR constant buffers
+	// These chain with UnifiedWater's hooks: UW::thunk -> PBR::thunk -> original
+	stl::write_vfunc<0x6, BSWaterShader_SetupGeometry>(RE::VTABLE_BSWaterShader[0]);
+	stl::write_vfunc<0x7, BSWaterShader_RestoreGeometry>(RE::VTABLE_BSWaterShader[0]);
+
+	// Hook world space changes and sky cell destruction for PBR state cleanup
+	// These chain with UnifiedWater's hooks on the same addresses
+	stl::detour_thunk<TES_SetWorldSpace>(REL::RelocationID(13170, 13315));
+	stl::detour_thunk<TES_DestroySkyCell>(REL::RelocationID(20029, 20463));
+
+	logger::info("[PBR Water] Installed hooks");
+}
+
+// ---- Hook Implementations ----
+
+void PBRWater::TESWaterSystem_InitializeWater::thunk(RE::TESWaterSystem* waterSystem, RE::BSTriShape* waterTri, RE::TESWaterForm* form, float waterHeight, void* unk4, bool noDisplacement, bool isProcedural)
+{
+	(void)noDisplacement;  // Intentionally unused - we force true below
+	// Force noDisplacement=true to prevent the engine from creating a separate
+	// displacement mesh (WADING geometry) near the player. This eliminates the
+	// double-rendering issue where two water meshes would show Gerstner waves
+	// slightly out of sync. The wading ripple effects are still applied by
+	// sampling DisplacementTex on the regular water geometry using gDisplacementMeshPos.
+	func(waterSystem, waterTri, form, waterHeight, unk4, true, isProcedural);
+}
+
+void PBRWater::TES_SetWorldSpace::thunk(RE::TES* tes, RE::TESWorldSpace* worldSpace, bool isExterior)
+{
+	func(tes, worldSpace, isExterior);
+
+	// Clear PBR Water state on world space change
+	auto& singleton = globals::features::pbrWater;
+	singleton.prevTileData.clear();
+	singleton.hasLastTimingSample = false;
+	singleton.lastTimingFrameIndex = std::numeric_limits<std::uint32_t>::max();
+	singleton.lastGameTimeHours = 0.0f;
+	singleton.lastRealTimeSeconds = 0.0f;
+	singleton.lastTimeScale = 1.0f;
+	singleton.currentGameTimeHours = 0.0f;
+	singleton.currentRealTimeSeconds = 0.0f;
+	singleton.currentTimeScale = 1.0f;
+}
+
+void PBRWater::TES_DestroySkyCell::thunk(RE::TES* tes)
+{
+	func(tes);
+
+	// Clear PBR Water state on sky cell destruction
+	auto& singleton = globals::features::pbrWater;
+	singleton.prevTileData.clear();
+	singleton.hasLastTimingSample = false;
+	singleton.lastTimingFrameIndex = std::numeric_limits<std::uint32_t>::max();
+	singleton.lastGameTimeHours = 0.0f;
+	singleton.lastRealTimeSeconds = 0.0f;
+	singleton.lastTimeScale = 1.0f;
+	singleton.currentGameTimeHours = 0.0f;
+	singleton.currentRealTimeSeconds = 0.0f;
+	singleton.currentTimeScale = 1.0f;
+}
+
+void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass)
+{
+	auto& singleton = globals::features::pbrWater;
+	auto context = globals::d3d::context;
+
+	// Clean up any lingering tessellation state from previous passes BEFORE calling func()
+	// This ensures the original SetupGeometry sees a clean non-tessellated pipeline state
+	if (tessellationActiveForPass) {
+		context->HSSetShader(nullptr, nullptr, 0);
+		context->DSSetShader(nullptr, nullptr, 0);
+		context->GSSetShader(nullptr, nullptr, 0);
+		if (originalTopology != D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) {
+			context->IASetPrimitiveTopology(originalTopology);
+		}
+	}
+
+	tessellationActiveForPass = false;
+	originalTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+
+	// ---- Fill and bind per-frame constant buffer ----
+	if (singleton.perFrame) {
+		PerFrame perFrameData{};
+		perFrameData.WaveIntensity = singleton.settings.waves.WaveIntensity;
+		perFrameData.WaveAmplitude = singleton.settings.waves.WaveAmplitude;
+		perFrameData.WaveSpeed = singleton.settings.waves.WaveSpeed;
+		perFrameData.WaveSteepness = singleton.settings.waves.WaveSteepness;
+
+		// Water lighting override parameters
+		perFrameData.EnableLightingOverrides = singleton.settings.lighting.EnableLightingOverrides ? 1.0f : 0.0f;
+		perFrameData.FresnelBias = singleton.settings.lighting.FresnelBias;
+		perFrameData.FresnelPower = singleton.settings.lighting.FresnelPower;
+		perFrameData.ReflectionStrength = singleton.settings.lighting.ReflectionStrength;
+		perFrameData.RefractionStrength = singleton.settings.lighting.RefractionStrength;
+		perFrameData.WaterTransparency = singleton.settings.lighting.WaterTransparency;
+		perFrameData.AbsorptionDensity = singleton.settings.lighting.AbsorptionDensity;
+		perFrameData.ScatteringCoeff = singleton.settings.lighting.ScatteringCoeff;
+		perFrameData.SpecularIntensity = singleton.settings.lighting.SpecularIntensity;
+
+		// Sun specular overrides
+		perFrameData.SunSpecularPower = singleton.settings.lighting.SunSpecularPower;
+		perFrameData.SunSpecularMagnitude = singleton.settings.lighting.SunSpecularMagnitude;
+		perFrameData.SunSparklePower = singleton.settings.lighting.SunSparklePower;
+		perFrameData.SunSparkleMagnitude = singleton.settings.lighting.SunSparkleMagnitude;
+		perFrameData.SpecularRadius = singleton.settings.lighting.SpecularRadius;
+		perFrameData.SpecularBrightness = singleton.settings.lighting.SpecularBrightness;
+
+		// Fog overrides
+		perFrameData.AboveWaterFogDistNear = singleton.settings.fog.AboveWaterFogDistNear;
+		perFrameData.AboveWaterFogDistFar = singleton.settings.fog.AboveWaterFogDistFar;
+		perFrameData.AboveWaterFogAmount = singleton.settings.fog.AboveWaterFogAmount;
+		perFrameData.UnderwaterFogDistNear = singleton.settings.fog.UnderwaterFogDistNear;
+		perFrameData.UnderwaterFogDistFar = singleton.settings.fog.UnderwaterFogDistFar;
+		perFrameData.UnderwaterFogAmount = singleton.settings.fog.UnderwaterFogAmount;
+
+		// Depth properties
+		perFrameData.DepthReflections = singleton.settings.depth.DepthReflections;
+		perFrameData.DepthRefractions = singleton.settings.depth.DepthRefractions;
+		perFrameData.DepthNormals = singleton.settings.depth.DepthNormals;
+		perFrameData.DepthSpecularLighting = singleton.settings.depth.DepthSpecularLighting;
+
+		// WireframeEnabled: 0=off, 1=wireframe, 2=raw barycentrics debug
+		perFrameData.WireframeEnabled = singleton.settings.general.ShowWireframe ?
+			(singleton.settings.general.WireframeRawMode ? 2.0f : 1.0f) : 0.0f;
+		perFrameData.PerFramePad0 = 0.0f;
+		perFrameData.PerFramePad1 = 0.0f;
+		perFrameData.PerFramePad2 = 0.0f;
+
+		// Wave parameters (Period removed - speed now calculated from wavelength via physics)
+		perFrameData.Wave1Amplitude = singleton.settings.waves.Wave1Amplitude;
+		perFrameData.Wave1Wavelength = singleton.settings.waves.Wave1Wavelength;
+		perFrameData.Wave1Steepness = singleton.settings.waves.Wave1Steepness;
+
+		perFrameData.Wave2Amplitude = singleton.settings.waves.Wave2Amplitude;
+		perFrameData.Wave2Wavelength = singleton.settings.waves.Wave2Wavelength;
+		perFrameData.Wave2Steepness = singleton.settings.waves.Wave2Steepness;
+
+		perFrameData.Wave3Amplitude = singleton.settings.waves.Wave3Amplitude;
+		perFrameData.Wave3Wavelength = singleton.settings.waves.Wave3Wavelength;
+		perFrameData.Wave3Steepness = singleton.settings.waves.Wave3Steepness;
+
+		perFrameData.Wave4Amplitude = singleton.settings.waves.Wave4Amplitude;
+		perFrameData.Wave4Wavelength = singleton.settings.waves.Wave4Wavelength;
+		perFrameData.Wave4Steepness = singleton.settings.waves.Wave4Steepness;
+
+		perFrameData.Wave5Amplitude = singleton.settings.waves.Wave5Amplitude;
+		perFrameData.Wave5Wavelength = singleton.settings.waves.Wave5Wavelength;
+		perFrameData.Wave5Steepness = singleton.settings.waves.Wave5Steepness;
+
+		perFrameData.Wave6Amplitude = singleton.settings.waves.Wave6Amplitude;
+		perFrameData.Wave6Wavelength = singleton.settings.waves.Wave6Wavelength;
+		perFrameData.Wave6Steepness = singleton.settings.waves.Wave6Steepness;
+
+		// Wave angles are already in radians from the UI
+		perFrameData.Wave1AngleOffset = singleton.settings.waves.Wave1AngleOffset;
+		perFrameData.Wave2AngleOffset = singleton.settings.waves.Wave2AngleOffset;
+		perFrameData.Wave3AngleOffset = singleton.settings.waves.Wave3AngleOffset;
+		perFrameData.Wave4AngleOffset = singleton.settings.waves.Wave4AngleOffset;
+		perFrameData.Wave5AngleOffset = singleton.settings.waves.Wave5AngleOffset;
+		perFrameData.Wave6AngleOffset = singleton.settings.waves.Wave6AngleOffset;
+
+		// Set tessellation enabled flag - tells VS to skip wave displacement so DS can handle it
+		bool tessellationEnabled = singleton.settings.tessellation.EnableTessellation &&
+		                           singleton.AreTessellationShadersReady();
+		perFrameData.TessellationEnabled = tessellationEnabled ? 1.0f : 0.0f;
+		perFrameData.WaveFadeStart = singleton.settings.waves.WaveFadeStart;
+		perFrameData.WaveFadeEnd = singleton.settings.waves.WaveFadeEnd;
+
+		// Player ripple data
+		perFrameData.PlayerPosX = 0.0f;
+		perFrameData.PlayerPosY = 0.0f;
+		perFrameData.PlayerPosZ = 0.0f;
+		perFrameData.PlayerSpeed = 0.0f;
+		perFrameData.PlayerInWater = 0.0f;
+		perFrameData.PlayerVelocityX = 0.0f;
+		perFrameData.PlayerVelocityY = 0.0f;
+		perFrameData.PlayerWaterDepth = 0.0f;
+
+		// Ripple settings from UI
+		perFrameData.RippleStrength = singleton.settings.ripples.EnableActorRipples ? singleton.settings.ripples.RippleStrength : 0.0f;
+		perFrameData.RippleRadius = singleton.settings.ripples.RippleRadius;
+		perFrameData.RippleWaveSpeed = singleton.settings.ripples.RippleWaveSpeed;
+		perFrameData.RippleWaveFreq1 = singleton.settings.ripples.RippleWaveFreq1;
+		perFrameData.RippleWaveFreq2 = singleton.settings.ripples.RippleWaveFreq2;
+		perFrameData.RippleWaveFreq3 = singleton.settings.ripples.RippleWaveFreq3;
+		perFrameData.RippleNormalStrength = singleton.settings.ripples.RippleNormalStrength;
+
+		// Foam system
+		perFrameData.FoamEnabled = singleton.settings.foam.EnableFoam ? 1.0f : 0.0f;
+		perFrameData.FoamIntensity = singleton.settings.foam.FoamIntensity;
+		perFrameData.FoamIntensityFlowmap = singleton.settings.foam.FoamIntensityFlowmap;
+		perFrameData.FoamThreshold = singleton.settings.foam.FoamThreshold;
+		perFrameData.FoamSharpness = singleton.settings.foam.FoamSharpness;
+		perFrameData.FoamLargeWaveSlopeRequirement = singleton.settings.foam.LargeWaveSlopeRequirement;
+		perFrameData.FoamSmallWaveSlopeMultiplier = singleton.settings.foam.SmallWaveSlopeMultiplier;
+		perFrameData.FoamSmallWaveBaseOffset = singleton.settings.foam.SmallWaveBaseOffset;
+		perFrameData.FoamSmallWaveHeightRange = singleton.settings.foam.SmallWaveHeightRange;
+
+		// Depth-based wave control settings
+		perFrameData.ShallowWaveDepthMin = singleton.settings.waves.ShallowWaveDepthMin;
+		perFrameData.ShallowWaveDepthMax = singleton.settings.waves.ShallowWaveDepthMax;
+		perFrameData.ShoreWaveDepthThreshold = singleton.settings.waves.ShoreWaveDepthThreshold;
+		perFrameData.ShoreWaveStrength = singleton.settings.waves.ShoreWaveStrength;
+
+		// Get terrain heightmap parameters from Terrain Shadows feature
+		auto& terrainShadows = globals::features::terrainShadows;
+		auto terrainData = terrainShadows.GetCommonBufferData();
+		perFrameData.TerrainHeightmapEnabled = terrainData.EnableTerrainShadow ? 1.0f : 0.0f;
+		perFrameData.TerrainScaleX = terrainData.Scale.x;
+		perFrameData.TerrainScaleY = terrainData.Scale.y;
+		perFrameData.TerrainOffsetX = terrainData.Offset.x;
+		perFrameData.TerrainOffsetY = terrainData.Offset.y;
+		perFrameData.TerrainZRangeMin = terrainData.ZRange.x;
+		perFrameData.TerrainZRangeMax = terrainData.ZRange.y;
+		perFrameData.TerrainPad0 = 0.0f;
+
+		// Get timing data for player velocity calculation
+		float currentRealTime = globals::state ? globals::state->timer : 0.0f;
+
+		float waterSurfaceHeight = 0.0f;
+		bool hasWaterHeight = false;
+
+		if (auto player = RE::PlayerCharacter::GetSingleton()) {
+			auto pos = player->GetPosition();
+			perFrameData.PlayerPosX = pos.x;
+			perFrameData.PlayerPosY = pos.y;
+			perFrameData.PlayerPosZ = pos.z;
+
+			// Get player movement speed from ActorState
+			perFrameData.PlayerSpeed = player->AsActorState()->DoGetMovementSpeed();
+
+			// Calculate actual velocity from position change
+			if (singleton.hasPlayerMovementData && currentRealTime > singleton.lastPlayerUpdateTime) {
+				float deltaTime = currentRealTime - singleton.lastPlayerUpdateTime;
+				if (deltaTime > 0.001f && deltaTime < 1.0f) {
+					singleton.playerVelocity.x = (pos.x - singleton.lastPlayerPos.x) / deltaTime;
+					singleton.playerVelocity.y = (pos.y - singleton.lastPlayerPos.y) / deltaTime;
+				}
+			}
+			singleton.lastPlayerPos = pos;
+			singleton.lastPlayerUpdateTime = currentRealTime;
+			singleton.hasPlayerMovementData = true;
+
+			perFrameData.PlayerVelocityX = singleton.playerVelocity.x;
+			perFrameData.PlayerVelocityY = singleton.playerVelocity.y;
+
+			// Get the relevant water height for the player
+			float playerWaterHeight = player->GetWaterHeight();
+			if (playerWaterHeight > -1000000.0f) {
+				hasWaterHeight = true;
+				waterSurfaceHeight = playerWaterHeight;
+
+				// Calculate depth below water surface (positive = underwater)
+				perFrameData.PlayerWaterDepth = playerWaterHeight - pos.z;
+
+				// Player head height estimate: ~120 units above feet (player Z position)
+				float estimatedHeadHeight = pos.z + 120.0f;
+
+				// Only create ripples if wading (feet wet but head above water)
+				if (pos.z < playerWaterHeight + 64.0f && estimatedHeadHeight > playerWaterHeight) {
+					perFrameData.PlayerInWater = 1.0f;
+				}
+			}
+		}
+
+		// Update actor ripple buffer with all actors near water
+		ActorRippleBuffer actorRippleData{};
+		actorRippleData.numActors = 0;
+
+		if (hasWaterHeight) {
+			RE::NiPoint3 cameraPos;
+			if (auto player = RE::PlayerCharacter::GetSingleton()) {
+				cameraPos = player->GetPosition();
+			}
+
+			if (const auto processLists = RE::ProcessLists::GetSingleton(); processLists) {
+				for (auto& actorHandle : processLists->highActorHandles) {
+					if (actorRippleData.numActors >= MAX_ACTOR_RIPPLES)
+						break;
+
+					auto actorPtr = actorHandle.get();
+					if (!actorPtr || !actorPtr.get() || !actorPtr.get()->Is3DLoaded())
+						continue;
+
+					auto actor = actorPtr.get();
+					auto pos = actor->GetPosition();
+
+					// Skip actors too far from camera
+					float distFromCamera = cameraPos.GetDistance(pos);
+					if (distFromCamera > 4096.0f)
+						continue;
+
+					// Get the actor's relevant water height
+					float actorWaterHeight = actor->GetWaterHeight();
+					if (actorWaterHeight <= -1000000.0f)
+						continue;
+
+					// Check if actor is near water surface
+					float heightAboveWater = pos.z - actorWaterHeight;
+					bool nearWater = (heightAboveWater > -256.0f && heightAboveWater < 128.0f);
+
+					if (!nearWater)
+						continue;
+
+					ActorRippleData& ripple = actorRippleData.actors[actorRippleData.numActors];
+					ripple.PosX = pos.x;
+					ripple.PosY = pos.y;
+
+					float estimatedHeadHeight = pos.z + 100.0f;
+
+					ripple.InWater = (heightAboveWater < 64.0f && estimatedHeadHeight > actorWaterHeight) ? 1.0f : 0.0f;
+					ripple.WaterDepth = actorWaterHeight - pos.z;
+
+					ripple.Speed = actor->AsActorState()->DoGetMovementSpeed();
+
+					float angleZ = actor->GetAngleZ();
+					float speed = ripple.Speed;
+					ripple.VelocityX = sin(angleZ) * speed;
+					ripple.VelocityY = cos(angleZ) * speed;
+
+					actorRippleData.numActors++;
+				}
+			}
+		}
+
+		singleton.actorRippleBuffer->Update(actorRippleData);
+
+		const auto* state = globals::state;
+		const std::uint32_t frameIndex = state ? state->frameCount : singleton.lastTimingFrameIndex;
+		if (singleton.lastTimingFrameIndex != frameIndex) {
+			if (singleton.hasLastTimingSample) {
+				singleton.lastGameTimeHours = singleton.currentGameTimeHours;
+				singleton.lastRealTimeSeconds = singleton.currentRealTimeSeconds;
+				singleton.lastTimeScale = singleton.currentTimeScale;
+			}
+			singleton.lastTimingFrameIndex = frameIndex;
+		}
+
+		float gameTimeHours = 0.0f;
+		float realTimeSeconds = 0.0f;
+		float timeScale = 1.0f;
+
+		if (const auto calendar = RE::Calendar::GetSingleton()) {
+			gameTimeHours = calendar->GetHoursPassed();
+			timeScale = calendar->GetTimescale();
+		}
+
+		if (globals::state) {
+			realTimeSeconds = globals::state->timer;
+		}
+
+		perFrameData.GameTimeHours = gameTimeHours;
+		perFrameData.RealTimeSeconds = realTimeSeconds;
+		perFrameData.TimeScale = timeScale;
+		perFrameData.CellWorldSize = 4096.0f;
+		perFrameData.PrevGameTimeHours = singleton.hasLastTimingSample ? singleton.lastGameTimeHours : gameTimeHours;
+		perFrameData.PrevRealTimeSeconds = singleton.hasLastTimingSample ? singleton.lastRealTimeSeconds : realTimeSeconds;
+		perFrameData.PrevTimeScale = singleton.hasLastTimingSample ? singleton.lastTimeScale : timeScale;
+
+		singleton.perFrame->Update(perFrameData);
+
+		ID3D11Buffer* buffers[1] = { singleton.perFrame->CB() };
+		context->VSSetConstantBuffers(7, 1, buffers);
+		context->PSSetConstantBuffers(7, 1, buffers);
+
+		// Bind actor ripple buffer to slot 10
+		ID3D11Buffer* actorBuffers[1] = { singleton.actorRippleBuffer->CB() };
+		context->PSSetConstantBuffers(10, 1, actorBuffers);
+
+		singleton.currentGameTimeHours = gameTimeHours;
+		singleton.currentRealTimeSeconds = realTimeSeconds;
+		singleton.currentTimeScale = timeScale;
+		singleton.hasLastTimingSample = true;
+	}
+
+	// ---- Fill and bind per-tile constant buffer ----
+	{
+		int32_t x, y;
+		Util::WorldToCell(pass->geometry->world.translate, x, y);
+
+		// Determine LOD level from the shape name if available
+		int32_t lodLevel = 1;
+
+		if (pass->geometry->name.c_str()) {
+			const char* name = pass->geometry->name.c_str();
+			if (strncmp(name, "WaterLOD_", 9) == 0) {
+				lodLevel = atoi(name + 9);
+				if (lodLevel != 1 && lodLevel != 4 && lodLevel != 8 && lodLevel != 16 && lodLevel != 32) {
+					lodLevel = 1;
+				}
+			}
+		}
+
+		if (singleton.perTile) {
+			PerTile perTileData{};
+
+			RE::TESWorldSpace* activeWorldSpace = nullptr;
+			std::uint32_t worldSpaceId = 0;
+			if (const auto tes = RE::TES::GetSingleton()) {
+				activeWorldSpace = tes->GetRuntimeData2().worldSpace;
+				if (activeWorldSpace) {
+					worldSpaceId = activeWorldSpace->GetFormID();
+				}
+			}
+
+			auto mixKey = [](std::uint64_t seed, std::uint64_t value) noexcept {
+				seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+				return seed;
+			};
+
+			std::uint64_t tileKeySeed = 0;
+			tileKeySeed = mixKey(tileKeySeed, static_cast<std::uint64_t>(worldSpaceId));
+			tileKeySeed = mixKey(tileKeySeed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(lodLevel)));
+			tileKeySeed = mixKey(tileKeySeed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)));
+			tileKeySeed = mixKey(tileKeySeed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)));
+			const std::uint64_t tileKey = tileKeySeed;
+
+			float prevNormalX = 0.0f;
+			float prevNormalY = 0.0f;
+			float prevDistance = 10000.0f;
+			float prevSegments = 32.0f;
+			const auto prevTileIt = singleton.prevTileData.find(tileKey);
+			if (prevTileIt != singleton.prevTileData.end()) {
+				prevNormalX = prevTileIt->second.normalX;
+				prevNormalY = prevTileIt->second.normalY;
+				prevDistance = prevTileIt->second.distance;
+				prevSegments = prevTileIt->second.segmentsPerAxis;
+			}
+
+			perTileData.PrevData[0] = prevNormalX;
+			perTileData.PrevData[1] = prevNormalY;
+			perTileData.PrevData[2] = prevDistance;
+			perTileData.PrevData[3] = prevSegments;
+
+			perTileData.TileData[0] = static_cast<float>(x);
+			perTileData.TileData[1] = static_cast<float>(y);
+			perTileData.TileData[2] = static_cast<float>(lodLevel);
+			perTileData.TileData[3] = 1.0f;
+
+			float currentSegmentsPerAxis = prevSegments;
+			if (const auto triShape = pass->geometry->AsTriShape()) {
+				auto& runtimeData = triShape->GetTrishapeRuntimeData();
+				const float triangleCount = static_cast<float>(runtimeData.triangleCount);
+				if (triangleCount > 0.0f) {
+					currentSegmentsPerAxis = std::max(1.0f, std::sqrt(triangleCount * 0.5f));
+				}
+			}
+			perTileData.PrevData[3] = currentSegmentsPerAxis;
+
+			float storedNormalX = prevNormalX;
+			float storedNormalY = prevNormalY;
+			float storedDistance = prevDistance;
+
+			singleton.prevTileData[tileKey] = PBRWater::PrevTileData{ storedNormalX, storedNormalY, storedDistance, currentSegmentsPerAxis };
+
+			singleton.perTile->Update(perTileData);
+
+			ID3D11Buffer* tileBuffers[1] = { singleton.perTile->CB() };
+			context->VSSetConstantBuffers(8, 1, tileBuffers);
+			context->PSSetConstantBuffers(8, 1, tileBuffers);
+		}
+	}
+
+	// ---- Determine technique for tessellation compatibility ----
+	uint32_t technique = (pass->passEnum >> 11) & 0xF;
+	bool techniqueSupportsTessel = (technique < 8);
+
+	bool tessellationEnabled = singleton.settings.tessellation.EnableTessellation &&
+	                           singleton.AreTessellationShadersReady() &&
+	                           techniqueSupportsTessel;
+
+	static bool loggedTessSetup = false;
+	static int tessFrameCount = 0;
+	tessFrameCount++;
+	bool shouldLog = !loggedTessSetup;
+
+	if (shouldLog) {
+		logger::info("[PBR Water] SetupGeometry - passEnum:0x{:X} technique:{} numLights:{} tessCompat:{}",
+			pass->passEnum, technique, pass->numLights, techniqueSupportsTessel);
+		loggedTessSetup = true;
+	}
+
+	// CRITICAL: Call original SetupGeometry FIRST to set up VS, PS, textures, etc.
+	// THEN apply tessellation state after, so it's not overwritten by the original
+	func(waterShader, pass);
+
+	// ---- Post-original: Bind terrain heightmap texture to VS/DS ----
+	ID3D11ShaderResourceView* terrainHeightSRV[1] = { nullptr };
+	context->PSGetShaderResources(60, 1, terrainHeightSRV);
+	if (terrainHeightSRV[0]) {
+		context->VSSetShaderResources(60, 1, terrainHeightSRV);
+		context->DSSetShaderResources(60, 1, terrainHeightSRV);
+		terrainHeightSRV[0]->Release();
+	}
+
+	// Bind a linear sampler to VS/DS for terrain heightmap sampling (slot 12)
+	ID3D11SamplerState* terrainSampler[1] = { nullptr };
+	context->PSGetSamplers(4, 1, terrainSampler);
+	if (terrainSampler[0]) {
+		context->VSSetSamplers(12, 1, terrainSampler);
+		context->DSSetSamplers(12, 1, terrainSampler);
+		terrainSampler[0]->Release();
+	}
+
+	// ---- Tessellation Setup ----
+
+	// Track if we need to bind just the geometry shader (for tri visualizer without tessellation)
+	bool geometryShaderOnlyForVisualizer = !tessellationEnabled &&
+	                                        singleton.settings.general.ShowWireframe &&
+	                                        singleton.AreTessellationShadersReady() &&
+	                                        techniqueSupportsTessel;
+
+	if (tessellationEnabled) {
+		if (shouldLog) {
+			logger::info("[PBR Water] Tessellation enabled - HS: {:p}, DS: {:p}, GS: {:p}",
+				(void*)singleton.waterHullShader.get(), (void*)singleton.waterDomainShader.get(), (void*)singleton.waterGeometryShader.get());
+		}
+
+		// Update tessellation constant buffer with current camera position
+		if (singleton.tessellationParams) {
+			TessellationParams tessParams{};
+			tessParams.TessellationMinDistance = singleton.settings.tessellation.TessellationMinDistance;
+			tessParams.TessellationMaxDistance = singleton.settings.tessellation.TessellationMaxDistance;
+			tessParams.TessellationMinFactor = singleton.settings.tessellation.TessellationMinFactor;
+			tessParams.TessellationMaxFactor = singleton.settings.tessellation.TessellationMaxFactor;
+
+			auto cameraPos = Util::GetEyePosition(0);
+			tessParams.CameraWorldPosX = cameraPos.x;
+			tessParams.CameraWorldPosY = cameraPos.y;
+			tessParams.CameraWorldPosZ = cameraPos.z;
+			tessParams.DetailHeightScale = 0.0f;
+
+			if (shouldLog) {
+				logger::info("[PBR Water] Tess params - MinDist:{} MaxDist:{} MinFactor:{} MaxFactor:{} CamPos:({},{},{})",
+					tessParams.TessellationMinDistance, tessParams.TessellationMaxDistance,
+					tessParams.TessellationMinFactor, tessParams.TessellationMaxFactor,
+					tessParams.CameraWorldPosX, tessParams.CameraWorldPosY, tessParams.CameraWorldPosZ);
+			}
+
+			singleton.tessellationParams->Update(tessParams);
+
+			ID3D11Buffer* tessBuffers[1] = { singleton.tessellationParams->CB() };
+			context->HSSetConstantBuffers(9, 1, tessBuffers);
+			context->DSSetConstantBuffers(9, 1, tessBuffers);
+		}
+
+		// Save original topology for RestoreGeometry
+		context->IAGetPrimitiveTopology(&originalTopology);
+
+		if (shouldLog) {
+			logger::info("[PBR Water] Original topology after func: {}", static_cast<int>(originalTopology));
+		}
+
+		// Set patch list topology for tessellation (3 control points per patch)
+		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+
+		// Bind hull, domain, and geometry shaders
+		context->HSSetShader(singleton.waterHullShader.get(), nullptr, 0);
+		context->DSSetShader(singleton.waterDomainShader.get(), nullptr, 0);
+		context->GSSetShader(singleton.waterGeometryShader.get(), nullptr, 0);
+
+		if (shouldLog) {
+			ID3D11HullShader* boundHS = nullptr;
+			ID3D11DomainShader* boundDS = nullptr;
+			ID3D11GeometryShader* boundGS = nullptr;
+			context->HSGetShader(&boundHS, nullptr, nullptr);
+			context->DSGetShader(&boundDS, nullptr, nullptr);
+			context->GSGetShader(&boundGS, nullptr, nullptr);
+			logger::info("[PBR Water] After bind - HS: {:p}, DS: {:p}, GS: {:p}", (void*)boundHS, (void*)boundDS, (void*)boundGS);
+			if (boundHS) boundHS->Release();
+			if (boundDS) boundDS->Release();
+			if (boundGS) boundGS->Release();
+
+			D3D11_PRIMITIVE_TOPOLOGY currentTopo;
+			context->IAGetPrimitiveTopology(&currentTopo);
+			logger::info("[PBR Water] After set - topology: {} (expected 35 for 3-control-point patch list)", static_cast<int>(currentTopo));
+		}
+
+		// Bind VS constant buffers to DS as well (DS needs the same transforms)
+		ID3D11Buffer* vsBuffers[3] = { nullptr, nullptr, nullptr };
+		context->VSGetConstantBuffers(0, 3, vsBuffers);
+		context->DSSetConstantBuffers(0, 3, vsBuffers);
+
+		// Bind the FrameBuffer cbuffer (b12) to HS and DS - needed for CameraPosAdjust
+		ID3D11Buffer* frameBuffer[1] = { nullptr };
+		context->PSGetConstantBuffers(12, 1, frameBuffer);
+		if (frameBuffer[0]) {
+			context->HSSetConstantBuffers(12, 1, frameBuffer);
+			context->DSSetConstantBuffers(12, 1, frameBuffer);
+		}
+
+		if (shouldLog) {
+			logger::info("[PBR Water] VS CBs bound to DS - b0:{:p} b1:{:p} b2:{:p} b12:{:p}",
+				(void*)vsBuffers[0], (void*)vsBuffers[1], (void*)vsBuffers[2], (void*)frameBuffer[0]);
+		}
+
+		// Also bind the PBR Water per-frame buffer to HS/DS
+		if (singleton.perFrame) {
+			ID3D11Buffer* perFrameBuffers[1] = { singleton.perFrame->CB() };
+			context->HSSetConstantBuffers(7, 1, perFrameBuffers);
+			context->DSSetConstantBuffers(7, 1, perFrameBuffers);
+		}
+
+		// Bind normal textures to DS for tessellation
+		{
+			ID3D11ShaderResourceView* normalSRVs[3] = { nullptr, nullptr, nullptr };
+			ID3D11SamplerState* normalSamplers[3] = { nullptr, nullptr, nullptr };
+			context->PSGetShaderResources(4, 3, normalSRVs);
+			context->PSGetSamplers(4, 3, normalSamplers);
+			context->DSSetShaderResources(4, 3, normalSRVs);
+			context->DSSetSamplers(4, 3, normalSamplers);
+
+			for (int i = 0; i < 3; i++) {
+				if (normalSRVs[i]) normalSRVs[i]->Release();
+				if (normalSamplers[i]) normalSamplers[i]->Release();
+			}
+
+			// Also bind flowmap textures (slots 8-9) for flowmap water
+			ID3D11ShaderResourceView* flowmapSRVs[2] = { nullptr, nullptr };
+			ID3D11SamplerState* flowmapSamplers[2] = { nullptr, nullptr };
+			context->PSGetShaderResources(8, 2, flowmapSRVs);
+			context->PSGetSamplers(8, 2, flowmapSamplers);
+			context->DSSetShaderResources(8, 2, flowmapSRVs);
+			context->DSSetSamplers(8, 2, flowmapSamplers);
+			for (int i = 0; i < 2; i++) {
+				if (flowmapSRVs[i]) flowmapSRVs[i]->Release();
+				if (flowmapSamplers[i]) flowmapSamplers[i]->Release();
+			}
+		}
+
+		tessellationActiveForPass = true;
+		loggedTessSetup = true;
+	} else if (geometryShaderOnlyForVisualizer) {
+		// Bind only the geometry shader for tri visualization without tessellation
+		context->GSSetShader(singleton.waterGeometryShader.get(), nullptr, 0);
+		tessellationActiveForPass = true;
+
+		static bool loggedGSOnly = false;
+		if (!loggedGSOnly) {
+			logger::info("[PBR Water] Wireframe view active - binding GS only (no tessellation): {:p}", (void*)singleton.waterGeometryShader.get());
+			loggedGSOnly = true;
+		}
+	} else if (!loggedTessSetup && singleton.settings.tessellation.EnableTessellation) {
+		logger::warn("[PBR Water] Tessellation enabled in settings but shaders missing - HS:{:p} DS:{:p} GS:{:p}",
+			(void*)singleton.waterHullShader.get(), (void*)singleton.waterDomainShader.get(), (void*)singleton.waterGeometryShader.get());
+		loggedTessSetup = true;
+	}
+}
+
+void PBRWater::BSWaterShader_RestoreGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass, uint32_t renderFlags)
+{
+	// Restore tessellation state after the draw call
+	if (tessellationActiveForPass) {
+		auto context = globals::d3d::context;
+
+		// Unbind hull, domain, and geometry shaders
+		context->HSSetShader(nullptr, nullptr, 0);
+		context->DSSetShader(nullptr, nullptr, 0);
+		context->GSSetShader(nullptr, nullptr, 0);
+
+		// Restore original topology
+		if (originalTopology != D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) {
+			context->IASetPrimitiveTopology(originalTopology);
+		}
+
+		tessellationActiveForPass = false;
+	}
+
+	func(waterShader, pass, renderFlags);
 }
