@@ -167,7 +167,7 @@ void GrassCollision::Update()
 		auto eyePos = float2{ eyePosNI.x, eyePosNI.y };
 
 		float worldSize = 4096.0f;
-		uint textureArrayDims = 512;
+		uint textureArrayDims = 4096;
 
 		float cellSize = worldSize / textureArrayDims;
 
@@ -243,9 +243,9 @@ void GrassCollision::SetupResources()
 
 	{
 		D3D11_TEXTURE2D_DESC texDesc = {
-			.Width = 512,
-			.Height = 512,
-			.MipLevels = 1,
+		.Width = 4096,
+		.Height = 4096,
+		.MipLevels = 1,
 			.ArraySize = 1,
 			.Format = DXGI_FORMAT_R16G16B16A16_UNORM,
 			.SampleDesc = { .Count = 1 },
@@ -382,7 +382,7 @@ void GrassCollision::UpdateCollisionTexture()
 		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
 		context->CSSetShader(GetCollisionUpdateCS(), nullptr, 0);
-		context->Dispatch(512 / 8, 512 / 8, 1);
+		context->Dispatch(4096 / 8, 4096 / 8, 1);
 	}
 
 	context->CSSetShader(nullptr, nullptr, 0);
