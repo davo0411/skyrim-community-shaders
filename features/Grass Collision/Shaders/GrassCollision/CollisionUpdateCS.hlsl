@@ -82,9 +82,15 @@ groupshared BoundingBoxPacked SharedBoundingBoxes[64];
 				if (centerHeight - baseRadius < collision.y){
 					float dist = distance(collisionInstance.xy, cellCentreMS);
 					
-					if (dist < baseRadius) {
+					// Extend influence by 1 cell beyond the radius so boundary-adjacent
+					// cells store centerHeight (zero depression) instead of the sentinel
+					// value. This prevents bilinear interpolation in the consumer from
+					// blending collision heights with the 2048 sentinel, which causes
+					// pixelated staircase edges on the snow parallax deformity.
+					float CELL_SIZE_LOCAL = WORLD_SIZE / TEXTURE_SIZE;
+					if (dist < baseRadius + CELL_SIZE_LOCAL) {
 						float t = dist / baseRadius;
-						float depthFactor = 1.0 - t * t;
+						float depthFactor = max(0.0, 1.0 - t * t);
 						
 						float depth = baseRadius * 0.4 * depthFactor * 0.8;
 						float height = centerHeight - depth;
