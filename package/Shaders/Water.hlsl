@@ -90,14 +90,21 @@ struct VS_OUTPUT
 	float4 WPosition : TEXCOORD0;
 	float4 TexCoord1 : TEXCOORD1;
 	float4 TexCoord2 : TEXCOORD2;
-#		if defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP) /*!defined(NORMAL_TEXCOORD) && !defined(BLEND_NORMALS) && !defined(VC)*/)
+#		if defined(PBR_WATER)
+	// PBR Water: always declare TexCoord3/4/MPosition for tessellation pipeline (HS/DS need all fields)
 	float4 TexCoord3 : TEXCOORD3;
-#		endif
-#		if defined(FLOWMAP)
 	nointerpolation float2 TexCoord4 : TEXCOORD4;
-#		endif
-#		if NUM_SPECULAR_LIGHTS == 0
 	float4 MPosition : TEXCOORD5;
+#		else
+#			if defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP) /*!defined(NORMAL_TEXCOORD) && !defined(BLEND_NORMALS) && !defined(VC)*/)
+	float4 TexCoord3 : TEXCOORD3;
+#			endif
+#			if defined(FLOWMAP)
+	nointerpolation float2 TexCoord4 : TEXCOORD4;
+#			endif
+#			if NUM_SPECULAR_LIGHTS == 0
+	float4 MPosition : TEXCOORD5;
+#			endif
 #		endif
 #	endif
 
@@ -124,11 +131,24 @@ struct VS_OUTPUT
 #	endif
 
 	float4 NormalsScale : TEXCOORD8;
+#	if defined(PBR_WATER)
+	float4 UnifiedWaveInfo : TEXCOORD9;       // xy = primary wave direction, z = wave height, w = shore influence
+	float4 UnifiedWaveNormal : TEXCOORD10;    // xyz = geometric wave normal, w = horizontal displacement
+	float3 Barycentric : TEXCOORD11;          // Barycentric coordinates for wireframe debug
+	float4 DepthDebug : TEXCOORD12;           // x=depth, y=debugCode, z=terrainZ, w=waterZ
+#	endif
 #	if defined(VR)
 	float ClipDistance : SV_ClipDistance0;  // o11
 	float CullDistance : SV_CullDistance0;  // p11
 #	endif  // VR
 };
+
+#if defined(PBR_WATER)
+#	include "PBRWater/GerstnerWaves.hlsli"
+#	include "PBRWater/WaterActorRipples.hlsli"
+#	include "PBRWater/WaterFoam.hlsli"
+#	include "PBRWater/WaterDepthEstimation.hlsli"
+#endif // PBR_WATER
 
 #	ifdef VSHADER
 
@@ -168,6 +188,11 @@ cbuffer PerGeometry : register(b2)
 #		endif  // VR
 };
 
+#if defined(PBR_WATER) && defined(FLOWMAP)
+SamplerState FlowMapSamplerVS : register(s8);
+Texture2D<float4> FlowMapTexVS : register(t8);
+#endif
+
 VS_OUTPUT main(VS_INPUT input)
 {
 	VS_OUTPUT vsout;
@@ -179,19 +204,135 @@ VS_OUTPUT main(VS_INPUT input)
 	);
 	vsout.NormalsScale = NormalsScale;
 
-	float4 inputPosition = float4(input.Position.xyz, 1.0);
-	float4 worldPos = mul(World[eyeIndex], inputPosition);
-	float4 worldViewPos = mul(WorldViewProj[eyeIndex], inputPosition);
+#	if defined(PBR_WATER)
+	vsout.UnifiedWaveInfo = 0.0.xxxx;
+	vsout.UnifiedWaveNormal = float4(0.0f, 0.0f, 1.0f, 0.0f);
+	vsout.Barycentric = float3(0.333f, 0.333f, 0.334f);
+	vsout.DepthDebug = 0.0.xxxx;
+#	endif
 
+	float4 inputPosition = float4(input.Position.xyz, 1.0);
+	float4 worldPos;
+	float4 worldViewPos;
+
+#if defined(PBR_WATER)
+	float4 currentPosition = inputPosition;
+	float4 previousPosition = inputPosition;
+	float4 worldPosBase = mul(World[eyeIndex], inputPosition);
+	float2 waveWorldPos = worldPosBase.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+	float2 waveWorldPosPrev = worldPosBase.xy + FrameBuffer::CameraPreviousPosAdjust[eyeIndex].xy;
+	float2 flowBiasDirVS = float2(0.0f, 0.0f);
+	float flowBiasWeightVS = 0.0f;
+
+#	if defined(FLOWMAP)
+	if ((ObjectUV.x > 0.0f) && (ObjectUV.y > 0.0f) && (ObjectUV.z > 0.0f)) {
+		float2 dims = max(float2(ObjectUV.x, ObjectUV.y), float2(1.0f, 1.0f));
+		float2 cellShiftFlow = float2(floor(ObjectUV.z * 0.5f), floor((ObjectUV.z - 1.0f) * 0.5f));
+		float2 centerScaledUV = float2(0.5f, 0.5f) * ObjectUV.z - cellShiftFlow;
+		float2 flowUV = (CellTexCoordOffset.xy + centerScaledUV) / dims;
+		float4 flowSample = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, flowUV, 0.0f);
+		float flowStrength = saturate(flowSample.z * flowSample.w);
+		float2 rawFlow = -(flowSample.xy * 2.0f - 1.0f);
+		float flowLenSq = dot(rawFlow, rawFlow);
+		if (flowStrength > 0.001f && flowLenSq > 1e-5f) {
+			flowBiasDirVS = rawFlow * rsqrt(flowLenSq);
+			flowBiasWeightVS = flowStrength;
+		}
+	}
+#	endif
+
+	float waveTimeSeconds = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
+	float waveDayPhase = ComputeWaveDayPhase(GameTimeHours);
+
+	// Wave displacement variables
+	float3 waveDisplacement = float3(0.0f, 0.0f, 0.0f);
+	float3 waveNormal = float3(0.0f, 0.0f, 1.0f);
+	float2 wavePrimaryDir = float2(-0.70710678f, 0.70710678f);
+	float shoreInfluence = 0.0f;
+	float horizontalDisplacement = 0.0f;
+
+	// Depth estimation for wave attenuation
+	DepthEstimationDebug depthDebug;
+	depthDebug.depth = 1e5f;
+	depthDebug.debugCode = 0.0f;
+	depthDebug.terrainZ = 0.0f;
+	depthDebug.waterZ = 0.0f;
+	float estimatedDepth = 1e5f;
+
+	if (TessellationEnabled < 0.5f) {
+		float cameraDistVS = length(worldPosBase.xyz);
+
+		// Estimate water depth from terrain heightmap
+		float3 absoluteWorldPos = worldPosBase.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
+		estimatedDepth = EstimateWaterDepthFromTerrain(
+			absoluteWorldPos,
+			float2(TerrainScaleX, TerrainScaleY),
+			float2(TerrainOffsetX, TerrainOffsetY),
+			TerrainZRangeMin,
+			TerrainZRangeMax,
+			depthDebug
+		);
+
+		WaveSample currentWave = CalculateWaterDisplacement(waveWorldPos,
+			float2(0.0f, 0.0f), float2(0.0f, 0.0f), WaveIntensity, WaveAmplitude, WaveSpeed,
+			WaveSteepness, waveTimeSeconds, waveDayPhase, flowBiasDirVS, flowBiasWeightVS, false,
+			cameraDistVS, estimatedDepth);
+		waveDisplacement = currentWave.displacement;
+		waveNormal = currentWave.normal;
+		wavePrimaryDir = currentWave.primaryDirection;
+		shoreInfluence = currentWave.shoreInfluence;
+		horizontalDisplacement = length(waveDisplacement.xy);
+	}
+
+	// Store debug info for pixel shader visualization
+	vsout.DepthDebug = float4(depthDebug.depth, depthDebug.debugCode, depthDebug.terrainZ, depthDebug.waterZ);
+
+	vsout.UnifiedWaveInfo = float4(wavePrimaryDir, waveDisplacement.z, shoreInfluence);
+	vsout.UnifiedWaveNormal = float4(waveNormal, horizontalDisplacement);
+
+	currentPosition.xyz += waveDisplacement;
+
+	// For DLSS/FG motion vectors, calculate previous frame wave state
+	float3 prevWaveDisplacement = float3(0.0f, 0.0f, 0.0f);
+	if (TessellationEnabled < 0.5f) {
+		float waveTimeSecondsPrev = ComputeWaveTimeSeconds(PrevGameTimeHours, PrevRealTimeSeconds);
+		float waveDayPhasePrev = ComputeWaveDayPhase(PrevGameTimeHours);
+		float cameraDistVSPrev = length(worldPosBase.xyz);
+		WaveSample prevWave = CalculateWaterDisplacement(waveWorldPos, float2(0.0f, 0.0f), float2(0.0f, 0.0f),
+			WaveIntensity, WaveAmplitude, WaveSpeed, WaveSteepness, waveTimeSecondsPrev,
+			waveDayPhasePrev, flowBiasDirVS, flowBiasWeightVS, true, cameraDistVSPrev);
+		prevWaveDisplacement = prevWave.displacement;
+	}
+
+	// Apply previous displacement in local space then transform
+	previousPosition = float4(input.Position.xyz + prevWaveDisplacement, 1.0);
+
+	inputPosition = currentPosition;
+	worldPos = mul(World[eyeIndex], currentPosition);
+	worldViewPos = mul(WorldViewProj[eyeIndex], currentPosition);
+#else
+	worldPos = mul(World[eyeIndex], inputPosition);
+	worldViewPos = mul(WorldViewProj[eyeIndex], inputPosition);
+#endif
+
+#if defined(PBR_WATER)
+	// Don't modify depth with wave displacement - use true projected depth
+	vsout.HPosition = worldViewPos;
+#else
 	float heightMult = min((1.0 / 10000.0) * max(worldViewPos.z - 70000, 0), 1);
 
 	vsout.HPosition.xy = worldViewPos.xy;
 	vsout.HPosition.z = heightMult * 0.5 + worldViewPos.z;
 	vsout.HPosition.w = worldViewPos.w;
+#endif
 
 #		if defined(STENCIL)
 	vsout.WorldPosition = worldPos;
+#if defined(PBR_WATER)
+	vsout.PreviousWorldPosition = mul(PreviousWorld[eyeIndex], previousPosition);
+#else
 	vsout.PreviousWorldPosition = mul(PreviousWorld[eyeIndex], inputPosition);
+#endif
 #		else
 
 #		if !defined(UNIFIED_WATER)
@@ -318,6 +459,109 @@ VS_OUTPUT main(VS_INPUT input)
 }
 
 #	endif
+
+// ============================================================================
+// HULL SHADER - Tessellation control
+// ============================================================================
+#	ifdef HSHADER
+
+// Include tessellation system BEFORE any shader definitions
+#		if defined(PBR_WATER)
+#			include "PBRWater/WaterTessellation.hlsli"
+#		else
+// Fallback for non-PBR water - simple distance-based tessellation
+HS_CONSTANT_OUTPUT PatchConstantFunc(InputPatch<VS_OUTPUT, 3> patch, uint patchID : SV_PrimitiveID)
+{
+	HS_CONSTANT_OUTPUT output;
+	float3 center = (patch[0].WPosition.xyz + patch[1].WPosition.xyz + patch[2].WPosition.xyz) / 3.0f;
+	float dist = length(center);
+	float factor = lerp(TessellationMaxFactor, TessellationMinFactor, saturate(dist / TessellationMaxDistance));
+	output.EdgeTess[0] = output.EdgeTess[1] = output.EdgeTess[2] = output.InsideTess = factor;
+	return output;
+}
+#		endif
+
+// Hull shader control point output - passes VS_OUTPUT through
+typedef VS_OUTPUT HS_OUTPUT;
+
+// Hull shader main - passes through control points
+[domain("tri")]
+[partitioning("fractional_odd")]
+[outputtopology("triangle_ccw")]
+[outputcontrolpoints(3)]
+[patchconstantfunc("PatchConstantFunc")]
+[maxtessfactor(64.0)]
+HS_OUTPUT main(InputPatch<VS_OUTPUT, 3> patch, uint cpID : SV_OutputControlPointID, uint patchID : SV_PrimitiveID)
+{
+	return patch[cpID];
+}
+
+#	endif  // HSHADER
+
+// ============================================================================
+// DOMAIN SHADER - Tessellation evaluation
+// ============================================================================
+#	ifdef DSHADER
+
+#		if defined(PBR_WATER)
+#			include "PBRWater/WaterTessellation.hlsli"
+#			include "PBRWater/GerstnerWaves.hlsli"
+#		endif
+
+// Domain shader cbuffers - need same cbuffers as VS for matrix transforms
+cbuffer PerGeometryDS : register(b2)
+{
+#		if !defined(VR)
+	row_major float4x4 World[1] : packoffset(c0);
+	row_major float4x4 PreviousWorld[1] : packoffset(c4);
+	row_major float4x4 WorldViewProj[1] : packoffset(c8);
+	float3 ObjectUV : packoffset(c12);
+	float4 CellTexCoordOffset : packoffset(c13);
+#		else
+	row_major float4x4 World[2] : packoffset(c0);
+	row_major float4x4 PreviousWorld[2] : packoffset(c8);
+	row_major float4x4 WorldViewProj[2] : packoffset(c16);
+	float3 ObjectUV : packoffset(c24);
+	float4 CellTexCoordOffset : packoffset(c25);
+#		endif
+};
+
+// Domain shader - uses DomainShaderImpl from WaterTessellation.hlsli
+// Provides curvature-adaptive tessellation with proper Gerstner wave displacement
+[domain("tri")]
+VS_OUTPUT main(HS_CONSTANT_OUTPUT patchConst, float3 bary : SV_DomainLocation, const OutputPatch<VS_OUTPUT, 3> patch)
+{
+	uint eyeIndex = 0;  // DS runs after VS which already handled stereo
+	return DomainShaderImpl(patchConst, bary, patch, eyeIndex);
+}
+
+#	endif  // DSHADER
+
+// ============================================================================
+// GEOMETRY SHADER - Assigns per-triangle barycentric coordinates for tri visualization
+// ============================================================================
+#	if defined(GSHADER) || defined(GEOMETRYSHADER)
+
+[maxvertexcount(3)]
+void main(triangle VS_OUTPUT input[3], inout TriangleStream<VS_OUTPUT> outStream)
+{
+	VS_OUTPUT v0 = input[0];
+	VS_OUTPUT v1 = input[1];
+	VS_OUTPUT v2 = input[2];
+
+#	if defined(PBR_WATER)
+	v0.Barycentric = float3(1.0f, 0.0f, 0.0f);
+	v1.Barycentric = float3(0.0f, 1.0f, 0.0f);
+	v2.Barycentric = float3(0.0f, 0.0f, 1.0f);
+#	endif
+
+	outStream.Append(v0);
+	outStream.Append(v1);
+	outStream.Append(v2);
+	outStream.RestartStrip();
+}
+
+#	endif  // GSHADER || GEOMETRYSHADER
 
 typedef VS_OUTPUT PS_INPUT;
 
@@ -684,14 +928,16 @@ FlowmapData GetFlowmapDataWorldSpace(FlowmapData textureSpaceData)
 // Structure to return both normal and ripple/splash color information
 struct WaterNormalData
 {
-	float3 normal;
-	float4 rippleInfo;  // xyz = scaled ripple normal (normalized normal * intensity), w = splash effect intensity
+	float3 normal;           // Full-detail normal for specular/reflections
+	float3 diffuseNormal;    // Softer normal for diffuse lighting (less wave distortion)
+	float4 rippleInfo;       // xyz = scaled ripple normal (normalized normal * intensity), w = splash effect intensity
 };
 
 WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float depth, uint eyeIndex)
 {
 	WaterNormalData result;
 	result.rippleInfo = float4(0, 0, 0, 0);
+	result.diffuseNormal = float3(0, 0, 1);  // Default to flat normal
 	float3 normalScalesRcp = rcp(input.NormalsScale.xyz);
 
 #			if defined(WATER_PARALLAX)
@@ -863,6 +1109,62 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	finalNormal = WetnessEffects::ReorientNormal(rippleNormal, finalNormal);
 #			endif
 
+#			if defined(PBR_WATER)
+	// Apply actor wading ripples (player + NPCs)
+	if (RippleStrength > 0.01f) {
+		float2 playerPos = float2(PlayerPosX, PlayerPosY);
+		float2 playerVelocity = float2(PlayerVelocityX, PlayerVelocityY);
+		// Convert camera-relative water position to absolute world coordinates
+		float2 waterWorldPos = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+		float4 actorRipples = PlayerRipples::GetAllActorRipples(
+			waterWorldPos,
+			RealTimeSeconds,
+			playerPos,
+			playerVelocity,
+			PlayerInWater,
+			PlayerWaterDepth
+		);
+
+		// Blend ripple normal with current normal, scaled by RippleStrength
+		if (abs(actorRipples.w) > 0.0001f) {
+			float3 scaledRippleNormal = float3(actorRipples.xy * RippleStrength, actorRipples.z);
+			scaledRippleNormal = normalize(scaledRippleNormal);
+			finalNormal = PlayerRipples::ApplyRippleNormal(scaledRippleNormal, finalNormal);
+		}
+	}
+
+	// Blend in Gerstner wave normals from vertex/domain shader
+	float3 waveNormalGeom = input.UnifiedWaveNormal.xyz;
+	float waveNormalLen = length(waveNormalGeom);
+
+	// Save the texture-based normal before wave blending for diffuse calculations
+	float3 textureNormal = finalNormal;
+
+	if (waveNormalLen > 0.01f && WaveIntensity > 0.01f) {
+		waveNormalGeom = normalize(waveNormalGeom);
+		// Use UDN blending to combine texture normals with geometric wave normals
+		float3 waveNormalTangent = float3(waveNormalGeom.xy, waveNormalGeom.z);
+		finalNormal = normalize(float3(
+			finalNormal.xy + waveNormalTangent.xy * WaveIntensity,
+			finalNormal.z * waveNormalTangent.z
+		));
+	}
+
+	// Create a softer "diffuse normal" that has reduced wave influence
+	float3 diffuseNormalResult = textureNormal;
+	if (waveNormalLen > 0.01f && WaveIntensity > 0.01f) {
+		float diffuseDampening = 0.35f;
+		float3 dampenedWaveNormal = normalize(float3(waveNormalGeom.xy * diffuseDampening, waveNormalGeom.z));
+		diffuseNormalResult = normalize(float3(
+			textureNormal.xy + dampenedWaveNormal.xy * WaveIntensity * 0.5f,
+			textureNormal.z * dampenedWaveNormal.z
+		));
+	}
+
+	// Store both normals: full detail for specular, dampened for diffuse
+	result.diffuseNormal = diffuseNormalResult;
+#			endif
+
 	result.normal = finalNormal;
 	return result;
 }
@@ -875,6 +1177,19 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 		float ssrFraction = 0.0;
 		float3 reflectionColor = 0.0.xxx;
 		float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
+
+		// Water surface roughness for reflection sampling
+		float waterReflectionRoughness = 0.08;
+#			if defined(PBR_WATER)
+		waterReflectionRoughness = lerp(0.05, 0.15, saturate(WaveIntensity));
+#			endif
+
+		// Horizon specular occlusion - prevents cubemap from showing where geometry blocks reflections
+		float horizon = saturate(1.0 + dot(R, float3(0, 0, 1)));
+		horizon *= horizon;
+
+		// Filter reflections by upward-facing normals to prevent underwater elements reflecting on wave tops
+		float upwardFacingMask = saturate((normal.z - 0.3) * 2.5);
 
 		if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Cubemap) {
 #			if defined(DYNAMIC_CUBEMAPS)
@@ -891,7 +1206,7 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #					endif
 
 				sh2 skylighting = Skylighting::sample(SharedData::skylightingSettings, Skylighting::SkylightingProbeArray, Skylighting::stbn_vec3_2Dx1D_128x128x64, input.HPosition.xy, positionMSSkylight, R);
-				sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, 0.0);
+				sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, waterReflectionRoughness);
 
 				float skylightingSpecular = SphericalHarmonics::FuncProductIntegral(skylighting, specularLobe);
 				skylightingSpecular = lerp(1.0, skylightingSpecular, Skylighting::getFadeOutFactor(input.WPosition.xyz));
@@ -911,6 +1226,10 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 
 				dynamicCubemap = Color::IrradianceToGamma(lerp(specularIrradiance, specularIrradianceReflections, skylightingSpecular));
 			}
+
+			// Apply horizon, skylighting, and upward-facing occlusion to cubemap reflections
+			skylightingSpecular *= skylightingSpecular;
+			dynamicCubemap *= horizon * skylightingSpecular * upwardFacingMask;
 #				else
 			float3 dynamicCubemap = DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, 0);
 #				endif
@@ -953,13 +1272,39 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 				float4 ssrReflectionColorRaw = RawSSRReflectionTex.Sample(RawSSRReflectionSampler, ssrReflectionUvDR);
 				float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7);
 
-				finalSsrReflectionColor = max(0, ssrReflectionColor.xyz);
-				ssrFraction = saturate(ssrReflectionColor.w * distanceFactor * ssrAmount);
+				// Apply horizon and upward-facing occlusion to SSR to prevent underwater elements
+				finalSsrReflectionColor = max(0, ssrReflectionColor.xyz) * horizon * upwardFacingMask;
+
+				ssrFraction = saturate(ssrReflectionColor.w * distanceFactor * ssrAmount * horizon * upwardFacingMask);
 			}
 		}
 #			endif
 
 		float3 finalReflectionColor = Color::IrradianceToGamma(lerp(Color::IrradianceToLinear(reflectionColor), Color::IrradianceToLinear(finalSsrReflectionColor), ssrFraction));
+
+#			if defined(PBR_WATER)
+		// Apply physically-based BRDF to reflections
+		float3 V = -viewDirection;
+		float NdotV = max(dot(normal, V), 1e-5f);
+
+		// Use BRDF.hlsli's analytical DFG approximation
+		float2 envBRDF = BRDF::EnvBRDF(waterReflectionRoughness, NdotV);
+
+		// Water F0 and F90 for dielectric interface (air-water)
+		const float waterF0 = 0.02f;
+		const float waterF90 = 1.0f;
+
+		// Apply the DFG terms: (F0 * envBRDF.x + F90 * envBRDF.y)
+		float specularBRDF = waterF0 * envBRDF.x + waterF90 * envBRDF.y;
+
+		finalReflectionColor *= specularBRDF;
+
+		// Apply reflection strength multiplier only when ESP overrides enabled
+		if (EnableLightingOverrides > 0.5f) {
+			finalReflectionColor *= ReflectionStrength;
+		}
+#			endif
+
 		return finalReflectionColor;
 	}
 	return ReflectionColor.xyz * VarAmounts.y;
@@ -986,6 +1331,8 @@ float3 GetLdotN(float3 normal)
 #			endif
 }
 
+#			include "Common/BRDF.hlsli"
+
 float GetFresnelValue(float3 normal, float3 viewDirection)
 {
 #			if defined(UNDERWATER)
@@ -993,8 +1340,23 @@ float GetFresnelValue(float3 normal, float3 viewDirection)
 #			else
 	float3 actualNormal = normal;
 #			endif
-	float viewAngle = 1 - saturate(dot(-viewDirection, actualNormal));
+	float NdotV = saturate(dot(-viewDirection, actualNormal));
+
+#			if defined(PBR_WATER)
+	// Water has IOR ~1.33, giving F0 = ((1.33-1)/(1.33+1))^2 ≈ 0.02
+	// Use BRDF.hlsli's Schlick approximation for physically correct fresnel
+	float F0;
+	if (EnableLightingOverrides > 0.5f) {
+		F0 = FresnelBias;
+	} else {
+		F0 = max(FresnelRI.x, 0.02f);
+	}
+	float3 fresnelVec = BRDF::F_Schlick(float3(F0, F0, F0), NdotV);
+	return fresnelVec.x;
+#			else
+	float viewAngle = 1 - NdotV;
 	return (1 - FresnelRI.x) * pow(viewAngle, 5) + FresnelRI.x;
+#			endif
 }
 
 struct DiffuseOutput
@@ -1003,7 +1365,139 @@ struct DiffuseOutput
 	float3 refractionDiffuseColor;
 	float depth;
 	float refractionMul;
+	float3 scatter;       // Physically-based in-scattered light
+	float3 transmittance; // Light transmission through water
+	float3 waveSSS;       // Wave edge subsurface scattering
 };
+
+// ============================================================================
+// PHYSICALLY-BASED WATER SCATTERING
+// Based on real water absorption/scattering coefficients
+// Reference: https://s.campbellsci.com/documents/es/technical-papers/obs_light_absorption.pdf
+// ============================================================================
+#if defined(PBR_WATER)
+
+// Henyey-Greenstein phase function for anisotropic scattering
+float PhaseHenyeyGreenstein(float cosTheta, float g)
+{
+	const float scale = 0.25f / Math::PI;
+	float g2 = g * g;
+	float num = 1.0f - g2;
+	float denom = pow(abs(1.0f + g2 - 2.0f * g * cosTheta), 1.5f);
+	return scale * num / max(denom, 0.0001f);
+}
+
+struct WaterScatteringResult
+{
+	float3 scatter;
+	float3 transmittance;
+};
+
+WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosWS, float3 sunDir, float3 sunColor, float occlusion)
+{
+	WaterScatteringResult result;
+	result.scatter = 0.0f;
+	result.transmittance = 1.0f;
+
+	float3 worldDir = endPosWS - startPosWS;
+	float dist = length(worldDir);
+	if (dist < 0.01f) {
+		return result;
+	}
+
+	worldDir = worldDir / dist;
+
+	// Water optical coefficients (per game unit, ~1.428 cm)
+	float3 hue = normalize(rcp(max(ShallowColor.xyz, 0.001f)));
+	const float3 scatterCoeff = hue * 0.002f * 2.0f * 1.428f;
+	const float3 absorpCoeff = hue * 0.0002f * 2.0f * 1.428f;
+	const float3 extinction = scatterCoeff + absorpCoeff;
+
+	float cosTheta = dot(sunDir, worldDir);
+	float phase = PhaseHenyeyGreenstein(cosTheta, 0.5f);
+
+	float distRatio = abs(sunDir.z / max(abs(worldDir.z), 0.001f));
+
+	const float cutoffTransmittance = 0.01f;
+	float maxExtinction = max(extinction.x, max(extinction.y, extinction.z));
+	float cutoffDist = -log(cutoffTransmittance) / ((1.0f + distRatio) * maxExtinction);
+
+	float marchDist = min(dist, cutoffDist);
+	float sunMarchDist = marchDist * distRatio;
+
+	const uint nSteps = 8;
+	const float step = 1.0f / nSteps;
+
+	float3 scatter = 0.0f;
+	float3 transmittance = 1.0f;
+
+	[unroll]
+	for (uint i = 0; i < nSteps; ++i) {
+		float t = (i + 0.5f) * step;
+		float3 sampleTransmittance = exp(-step * marchDist * extinction);
+		transmittance *= sampleTransmittance;
+		float3 sunTransmittance = exp(-sunMarchDist * t * extinction);
+		float3 inScatter = scatterCoeff * phase * sunTransmittance;
+		scatter += inScatter * (1.0f - sampleTransmittance) / max(extinction, 0.0001f) * transmittance;
+	}
+
+	result.scatter = scatter * sunColor * occlusion * 3.0f;
+	result.transmittance = exp(-dist * (1.0f + distRatio) * extinction);
+
+	return result;
+}
+
+// ============================================================================
+// WAVE EDGE SUBSURFACE SCATTERING (PBR)
+// Based on FFTWater.shader approach using Smith masking for smooth transitions
+// ============================================================================
+
+float SmithMaskingBeckmannWater(float3 H, float3 S, float a)
+{
+	float hdots = max(0.001f, saturate(dot(H, S)));
+	float a2 = a * a;
+	float hdots2 = hdots * hdots;
+	float tanTheta = sqrt((1.0f - hdots2) / hdots2);
+	float A = 1.0f / (a * tanTheta);
+	return A < 1.6f ? (1.0f - 1.259f * A + 0.396f * A * A) / (3.535f * A + 2.181f * A * A) : 0.0f;
+}
+
+float3 CalculateWaveEdgeSSS(
+	float3 viewDirection,
+	float3 waveNormal,
+	float3 sunDir,
+	float3 sunColor,
+	float waveHeight,
+	float horizontalDisplacement,
+	float3 shallowColor,
+	float3 deepColor)
+{
+	float3 mesoNormal = normalize(waveNormal);
+	float3 toCamera = -viewDirection;
+	float3 halfwayDir = normalize(sunDir + toCamera);
+
+	float roughness = 0.1f;
+	float lightMask = SmithMaskingBeckmannWater(halfwayDir, sunDir, roughness);
+
+	float H = max(0.0f, waveHeight);
+
+	float wavePeakScatterStrength = 1.5f;
+	float scatterStrength = 0.3f;
+
+	float LdotV = saturate(dot(sunDir, viewDirection));
+	float normalMask = pow(saturate(0.5f - 0.5f * dot(sunDir, mesoNormal)), 3.0f);
+	float k1 = wavePeakScatterStrength * H * pow(LdotV, 4.0f) * normalMask;
+
+	float NdotV = saturate(dot(mesoNormal, toCamera));
+	float k2 = scatterStrength * pow(NdotV, 2.0f);
+
+	float3 scatterColor = lerp(deepColor, shallowColor, 0.5f);
+
+	float3 scatter = (k1 + k2) * scatterColor * sunColor * rcp(1.0f + lightMask);
+
+	return scatter;
+}
+#endif  // PBR_WATER
 
 DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDirection, inout float4 distanceMul, float refractionsDepthFactor, float fresnel, uint eyeIndex, float3 viewPosition, float noise, float depth)
 {
@@ -1080,11 +1574,85 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	float refractionMul = 1 - pow(saturate((-distanceMul.x * FogParam.z + FogParam.z) / FogParam.w), FogNearColor.w);
 #				endif
 
+#				if defined(PBR_WATER)
+	// Physically-based water scattering
+	WaterScatteringResult scatterResult;
+	scatterResult.scatter = 0.0f;
+	scatterResult.transmittance = 1.0f;
+
+	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior)) {
+		float scatterOcclusion = 1.0f;
+
+#					if defined(TERRAIN_SHADOWS)
+		scatterOcclusion *= TerrainShadows::GetTerrainShadow(input.WPosition.xyz, LinearSampler);
+#					endif
+
+#					if defined(SKYLIGHTING)
+#						if defined(VR)
+		float3 scatterPosMSSkylight = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz - FrameBuffer::CameraPosAdjust[0].xyz;
+#						else
+		float3 scatterPosMSSkylight = input.WPosition.xyz;
+#						endif
+		sh2 scatterSkylightingSH = Skylighting::sample(SharedData::skylightingSettings, Skylighting::SkylightingProbeArray, Skylighting::stbn_vec3_2Dx1D_128x128x64, input.HPosition.xy, scatterPosMSSkylight, float3(0, 0, 1));
+		float scatterSkylighting = SphericalHarmonics::Unproject(scatterSkylightingSH, float3(0, 0, 1));
+		scatterOcclusion *= saturate(scatterSkylighting);
+#					endif
+
+		scatterResult = CalculateWaterScattering(
+			input.WPosition.xyz,
+			refractionWorldPosition.xyz,
+			SunDir.xyz,
+			SunColor.xyz * SunDir.w,
+			scatterOcclusion
+		);
+	}
+
+	// Enhanced depth-based absorption using Beer-Lambert law
+	if (EnableLightingOverrides > 0.5f) {
+		float depthMeters = distanceMul.x * FogParam.z * 0.01f;
+		float absorption = 1.0f - exp(-AbsorptionDensity * depthMeters);
+		float transparencyFactor = saturate(WaterTransparency * (1.0f - absorption));
+		refractionDiffuseColor = lerp(ShallowColor.xyz, DeepColor.xyz, saturate(distanceMul.y + absorption * 0.5f));
+		float3 scatterColor = DeepColor.xyz * ScatteringCoeff * (1.0f - absorption);
+		refractionDiffuseColor += scatterColor;
+		refractionMul = saturate(refractionMul * transparencyFactor);
+	}
+#				endif
+
 	DiffuseOutput output;
 	output.refractionColor = refractionColor;
 	output.refractionDiffuseColor = refractionDiffuseColor;
 	output.depth = depth;
 	output.refractionMul = refractionMul;
+#				if defined(PBR_WATER)
+	output.scatter = scatterResult.scatter;
+	output.transmittance = scatterResult.transmittance;
+
+	// PBR wave scatter using Smith masking for smooth transitions
+	float3 rawWaveSSS = CalculateWaveEdgeSSS(
+		viewDirection,
+		input.UnifiedWaveNormal.xyz,
+		SunDir.xyz,
+		SunColor.xyz * SunDir.w,
+		input.UnifiedWaveInfo.z,
+		input.UnifiedWaveNormal.w,
+		ShallowColor.xyz,
+		DeepColor.xyz
+	);
+
+	// Smooth distance fade for wave SSS
+	float camDist = input.WPosition.w;
+	float sssFade = 1.0f - saturate((camDist - WaveFadeStart) / max(WaveFadeEnd - WaveFadeStart, 1.0f));
+	sssFade = sssFade * sssFade * (3.0f - 2.0f * sssFade);  // Smoothstep
+
+	float scatterLuminance = dot(scatterResult.scatter, float3(0.2126f, 0.7152f, 0.0722f));
+	float scatterMuting = saturate(1.0f - scatterLuminance * 0.5f);
+	output.waveSSS = rawWaveSSS * sssFade * scatterMuting;
+#				else
+	output.scatter = 0.0f;
+	output.transmittance = 1.0f;
+	output.waveSSS = 0.0f;
+#				endif
 	return output;
 #			else
 	DiffuseOutput output;
@@ -1092,6 +1660,9 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	output.refractionDiffuseColor = output.refractionColor;
 	output.depth = 1;
 	output.refractionMul = 1;
+	output.scatter = 0.0f;
+	output.transmittance = 1.0f;
+	output.waveSSS = 0.0f;
 	return output;
 #			endif
 }
@@ -1193,7 +1764,49 @@ PS_OUTPUT main(PS_INPUT input)
 	WaterNormalData waterData = GetWaterNormal(input, distanceBlendFactor, depthControl.z, viewDirection, depth, eyeIndex);
 	float3 normal = waterData.normal;
 
+#		if defined(PBR_WATER)
+	// Use the softer diffuse normal for diffuse lighting to prevent wave distortion
+	float3 diffuseNormal = waterData.diffuseNormal;
+#		else
+	float3 diffuseNormal = normal;
+#		endif
+
+#		if defined(PBR_WATER)
+	float waterDepth = 1e5f;
+	{
+#		if defined(DEPTH)
+		float surfaceDepth = -viewPosition.z;
+		if (depth > 0.0f)
+			waterDepth = max(0.0f, depth - surfaceDepth);
+#		endif
+	}
+#		endif
+
 	float fresnel = GetFresnelValue(normal, viewDirection);
+
+#			if defined(SKYLIGHTING) && defined(PBR_WATER)
+	float skylightingDiffuse = 1.0;
+	float skylightingSpecular = 1.0;
+	const bool inWorldSkylight = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InWorld);
+	if (inWorldSkylight && !(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior)) {
+#				if defined(VR)
+		float3 positionMSSkylight = input.WPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz - FrameBuffer::CameraPosAdjust[0].xyz;
+#				else
+		float3 positionMSSkylight = input.WPosition.xyz;
+#				endif
+		sh2 skylightingSH = Skylighting::sample(SharedData::skylightingSettings, Skylighting::SkylightingProbeArray, Skylighting::stbn_vec3_2Dx1D_128x128x64, input.HPosition.xy, positionMSSkylight, normal);
+		skylightingDiffuse = SphericalHarmonics::FuncProductIntegral(skylightingSH, SphericalHarmonics::EvaluateCosineLobe(float3(0, 0, 1))) / Math::PI;
+		skylightingDiffuse = saturate(skylightingDiffuse);
+		skylightingDiffuse = lerp(1.0, skylightingDiffuse, Skylighting::getFadeOutFactor(input.WPosition.xyz));
+		skylightingDiffuse = Skylighting::mixDiffuse(SharedData::skylightingSettings, skylightingDiffuse);
+
+		float waterRoughness = lerp(0.05, 0.15, saturate(WaveIntensity));
+		sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, waterRoughness);
+		skylightingSpecular = SphericalHarmonics::FuncProductIntegral(skylightingSH, specularLobe);
+		skylightingSpecular = lerp(1.0, skylightingSpecular, Skylighting::getFadeOutFactor(input.WPosition.xyz));
+		skylightingSpecular = Skylighting::mixSpecular(SharedData::skylightingSettings, skylightingSpecular);
+	}
+#			endif
 
 #			if defined(SPECULAR) && (NUM_SPECULAR_LIGHTS != 0)
 	float3 finalColor = 0.0.xxx;
@@ -1225,11 +1838,19 @@ PS_OUTPUT main(PS_INPUT input)
 	float screenNoise = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
 
 	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, depthControl.y, eyeIndex);
-	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth);
+	// Use diffuseNormal for diffuse lighting to prevent wave distortion of base color
+	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, diffuseNormal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth);
 
 	float3 diffuseColor = lerp(diffuseOutput.refractionColor, diffuseOutput.refractionDiffuseColor, diffuseOutput.refractionMul);
 
 	depthControl = DepthControl * (distanceMul - 1) + 1;
+#				if defined(PBR_WATER)
+	// Use enhanced depth control values only when ESP overrides enabled
+	if (EnableLightingOverrides > 0.5f) {
+		float4 overrideDepth = float4(DepthReflections, DepthRefractions, DepthNormals, DepthSpecularLighting);
+		depthControl = overrideDepth * (distanceMul - 1) + 1;
+	}
+#				endif
 
 	float3 specularLighting = 0;
 
@@ -1287,11 +1908,62 @@ PS_OUTPUT main(PS_INPUT input)
 
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior) && any(sunColor > 0.0)) {
 		sunColor *= ShadowSampling::GetWaterShadow(screenNoise, input.WPosition.xyz, eyeIndex);
+#						if defined(SKYLIGHTING) && defined(PBR_WATER)
+		sunColor *= skylightingSpecular;
+#						endif
+
+#						if defined(PBR_WATER)
+		// Wave self-shadowing: waves can cast shadows on other wave surfaces
+		float waveTimeSec = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
+		float waveDayPh = ComputeWaveDayPhase(GameTimeHours);
+		float2 waveWorldPosPS = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+		float currentWaveHeight = input.UnifiedWaveInfo.z;
+
+		float waveSelfShadow = CalculateWaveSelfShadow(
+			waveWorldPosPS,
+			currentWaveHeight,
+			SunDir.xyz,
+			WaveIntensity,
+			WaveAmplitude,
+			waveTimeSec,
+			waveDayPh
+		);
+		sunColor *= waveSelfShadow;
+#						endif
 	}
 
 #					if defined(VC)
+#						if defined(PBR_WATER)
+	// PBR fresnel-based blending: fresnel determines reflection/refraction ratio directly
+	float specularFraction = fresnel * diffuseOutput.refractionMul;
+#						else
 	float specularFraction = lerp(1, fresnel * diffuseOutput.refractionMul, distanceBlendFactor);
+#						endif
 	float3 finalColorPreFog = lerp(diffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
+
+#						if defined(PBR_WATER)
+	finalColorPreFog += diffuseOutput.scatter;
+	finalColorPreFog += diffuseOutput.waveSSS;
+
+	// Foam contribution - physically-based wave breaking detection
+	if (FoamEnabled > 0.5f) {
+		float2 waveWorldPosPS1 = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+		float waveTimeSec1 = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
+		float waveDayPh1 = ComputeWaveDayPhase(GameTimeHours);
+		float waveHeightPS1 = input.UnifiedWaveInfo.z;
+		float horizDispPS1 = input.UnifiedWaveNormal.w;
+
+		float foamIntensity = GetFoamIntensity(
+			waveWorldPosPS1, waveHeightPS1, horizDispPS1,
+			WaveIntensity, WaveAmplitude,
+			waveTimeSec1, waveDayPh1,
+			FoamThreshold, FoamIntensity, FoamSharpness
+		);
+
+		float3 foamColor = GetFoamColor();
+		finalColorPreFog = lerp(finalColorPreFog, foamColor, foamIntensity);
+	}
+#						endif
 
 #						if !defined(UNIFIED_WATER)
 	float fogDistanceFactor = input.FogParam.w;
@@ -1318,8 +1990,37 @@ float3 finalColor = lerp(finalColorPreFog, fogColor * PosAdjust[eyeIndex].w, Col
 #						endif
 
 #					else
+#						if defined(PBR_WATER)
+	// PBR fresnel-based blending: fresnel determines reflection/refraction ratio directly
+	float specularFraction = fresnel;
+#						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
+#						endif
 	float3 finalColorPreFog = lerp(diffuseOutput.refractionDiffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
+
+#						if defined(PBR_WATER)
+	finalColorPreFog += diffuseOutput.scatter;
+	finalColorPreFog += diffuseOutput.waveSSS;
+
+	// Foam contribution - physically-based wave breaking detection
+	if (FoamEnabled > 0.5f) {
+		float2 waveWorldPosPS2 = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+		float waveTimeSec2 = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
+		float waveDayPh2 = ComputeWaveDayPhase(GameTimeHours);
+		float waveHeightPS2 = input.UnifiedWaveInfo.z;
+		float horizDispPS2 = input.UnifiedWaveNormal.w;
+
+		float foamIntensity2 = GetFoamIntensity(
+			waveWorldPosPS2, waveHeightPS2, horizDispPS2,
+			WaveIntensity, WaveAmplitude,
+			waveTimeSec2, waveDayPh2,
+			FoamThreshold, FoamIntensity, FoamSharpness
+		);
+
+		float3 foamColor2 = GetFoamColor();
+		finalColorPreFog = lerp(finalColorPreFog, foamColor2, foamIntensity2);
+	}
+#						endif
 
 #						if !defined(UNIFIED_WATER)
     float fogDistanceFactor = input.FogParam.w;
@@ -1360,6 +2061,72 @@ finalColorPreFog = lerp(finalColorPreFog, preFogColor * PosAdjust[eyeIndex].w, C
 
 #				endif
 #			endif
+
+#		if defined(PBR_WATER)
+	// Depth Estimation Debug Visualization
+	// Uncomment to enable depth debug view
+	//#define DEBUG_WATER_DEPTH
+	#if defined(DEBUG_WATER_DEPTH)
+	{
+		float depthDbg = input.DepthDebug.x;
+		float debugCode = input.DepthDebug.y;
+		float terrainZ = input.DepthDebug.z;
+		float waterZ = input.DepthDebug.w;
+
+		DepthEstimationDebug debugInfo;
+		debugInfo.depth = depthDbg;
+		debugInfo.debugCode = debugCode;
+		debugInfo.terrainZ = terrainZ;
+		debugInfo.waterZ = waterZ;
+		finalColor = VisualizeDepthEstimation(debugInfo);
+	}
+	#endif
+
+	if (WireframeEnabled > 0.5f) {
+		float3 baryCoords = input.Barycentric;
+
+		if (WireframeEnabled > 1.5f) {
+			// Mode 2: Raw barycentric visualization (debug)
+			finalColor = baryCoords;
+		} else {
+			// Mode 1: Wireframe visualization
+			float3 baryDeriv = fwidth(baryCoords);
+
+			bool geometryShaderActive = any(baryDeriv > 1e-5.xxx);
+
+			if (geometryShaderActive) {
+				float3 edgeDist = baryCoords / max(baryDeriv, 1e-6.xxx);
+				float minEdgeDist = min(edgeDist.x, min(edgeDist.y, edgeDist.z));
+
+				float wireThickness = 0.4f;
+				float wireSmooth = 0.3f;
+				float wireHighlight = 1.0f - smoothstep(wireThickness - wireSmooth, wireThickness + wireSmooth, minEdgeDist);
+
+				float vertexThickness = 1.2f;
+				float vertexSmooth = 1.5f;
+				float3 vertexDist = (1.0f - baryCoords) / max(baryDeriv, 1e-6.xxx);
+				float minVertDist = min(vertexDist.x, min(vertexDist.y, vertexDist.z));
+				float vertexHighlight = 1.0f - smoothstep(vertexThickness - vertexSmooth, vertexThickness + vertexSmooth, minVertDist);
+
+				float3 wireColor = float3(0.95f, 0.45f, 0.15f);
+				float3 vertexColor = float3(0.15f, 0.95f, 0.35f);
+
+				finalColor = lerp(finalColor, wireColor, wireHighlight);
+				finalColor = lerp(finalColor, vertexColor, vertexHighlight);
+			} else {
+				float2 worldUV = input.WPosition.xy * 0.01f;
+				float2 gridFrac = frac(worldUV);
+				float2 gridDist = min(gridFrac, 1.0f - gridFrac);
+				float2 gridFw = max(fwidth(worldUV), 1e-4.xx);
+				float gridLine = 1.0f - smoothstep(gridFw.x * 0.5f, gridFw.x * 1.5f, min(gridDist.x, gridDist.y));
+
+				float3 fallbackColor = float3(0.8f, 0.2f, 0.2f);
+				finalColor = lerp(finalColor, fallbackColor, gridLine * 0.8f);
+			}
+		}
+	}
+#		endif
+
 	psout.Lighting = saturate(float4(finalColor, isSpecular));
 #		endif
 
@@ -1370,7 +2137,14 @@ finalColorPreFog = lerp(finalColorPreFog, preFogColor * PosAdjust[eyeIndex].w, C
 	float VdotN = dot(viewDirection, normal);
 	psout.WaterMask = float4(0, 0, VdotN, 0);
 
+#	if defined(PBR_WATER)
+	// Output camera-only motion vectors for Gerstner waves
+	// Pass the SAME world position for both current and previous frame projection
+	// This captures camera movement without the wave animation component
+	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.WorldPosition);
+#	else
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.PreviousWorldPosition);
+#	endif
 #		endif
 
 	return psout;
