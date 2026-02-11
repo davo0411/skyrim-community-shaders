@@ -169,6 +169,14 @@ struct PBRWater : public Feature
 		bool EnableWaterScattering = true;
 	};
 
+	// Shader buffer data - must match PBRWaterSettings in SharedData.hlsli
+	struct alignas(16) ShaderBRDFSettings
+	{
+		uint32_t EnableBRDFSpecular;
+		uint32_t EnableWaterScattering;
+		uint32_t _padding[2];
+	};
+
 	struct Settings
 	{
 		GeneralSettings general;
@@ -386,6 +394,15 @@ struct PBRWater : public Feature
 
 	void CompileTessellationShadersAsync();
 	bool AreTessellationShadersReady() const { return tessellationShadersReady.load(); }
+
+	ShaderBRDFSettings GetShaderBRDFSettings() const
+	{
+		return {
+			settings.brdf.EnableBRDFSpecular ? 1u : 0u,
+			settings.brdf.EnableWaterScattering ? 1u : 0u,
+			{ 0, 0 }
+		};
+	}
 
 	// Timing tracking
 	float lastGameTimeHours = 0.0f;

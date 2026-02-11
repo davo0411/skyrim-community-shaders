@@ -1196,6 +1196,7 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #				if defined(SKYLIGHTING)
 
 			float3 dynamicCubemap;
+			float skylightingSpecular = 1.0;
 			if (SharedData::InInterior) {
 				dynamicCubemap = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, 0).xyz;
 			} else {
@@ -1208,7 +1209,7 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 				sh2 skylighting = Skylighting::sample(SharedData::skylightingSettings, Skylighting::SkylightingProbeArray, Skylighting::stbn_vec3_2Dx1D_128x128x64, input.HPosition.xy, positionMSSkylight, R);
 				sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, waterReflectionRoughness);
 
-				float skylightingSpecular = SphericalHarmonics::FuncProductIntegral(skylighting, specularLobe);
+				skylightingSpecular = SphericalHarmonics::FuncProductIntegral(skylighting, specularLobe);
 				skylightingSpecular = lerp(1.0, skylightingSpecular, Skylighting::getFadeOutFactor(input.WPosition.xyz));
 				skylightingSpecular = Skylighting::mixSpecular(SharedData::skylightingSettings, skylightingSpecular);
 
@@ -1393,7 +1394,7 @@ struct WaterScatteringResult
 	float3 transmittance;
 };
 
-WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosWS, float3 sunDir, float3 sunColor, float occlusion)
+WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosWS, float3 sunDir, float3 sunColor, float occlusion, float cameraDistance)
 {
 	WaterScatteringResult result;
 	result.scatter = 0.0f;
@@ -1425,8 +1426,30 @@ WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosW
 	float marchDist = min(dist, cutoffDist);
 	float sunMarchDist = marchDist * distRatio;
 
-	const uint nSteps = 8;
+	// Distance-based LOD: reduce steps at distance for performance
+	// Smooth transition zones ensure no popping
+	uint nSteps = 8;
+	float lodFade = 1.0f;
+	
+	const float lod1Distance = 4096.0f;   // Medium distance threshold
+	const float lod2Distance = 8192.0f;   // Far distance threshold
+	
+	if (cameraDistance > lod2Distance) {
+		nSteps = 4;  // Minimal steps at far distance
+		float fadeStart = lod2Distance;
+		float fadeEnd = lod2Distance + 2048.0f;
+		lodFade = 1.0f - saturate((cameraDistance - fadeStart) / (fadeEnd - fadeStart));
+	} else if (cameraDistance > lod1Distance) {
+		nSteps = 6;  // Medium quality at medium distance
+		float fadeStart = lod1Distance;
+		float fadeEnd = lod1Distance + 2048.0f;
+		float blend = saturate((cameraDistance - fadeStart) / (fadeEnd - fadeStart));
+		nSteps = (uint)lerp(8, 6, blend);
+		lodFade = 1.0f - blend * 0.3f;  // Slight intensity reduction
+	}
+	
 	const float step = 1.0f / nSteps;
+
 
 	float3 scatter = 0.0f;
 	float3 transmittance = 1.0f;
@@ -1441,7 +1464,8 @@ WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosW
 		scatter += inScatter * (1.0f - sampleTransmittance) / max(extinction, 0.0001f) * transmittance;
 	}
 
-	result.scatter = scatter * sunColor * occlusion * 3.0f;
+	// Apply LOD fade to maintain scattering presence at distance without popping
+	result.scatter = scatter * sunColor * occlusion * 3.0f * lodFade;
 	result.transmittance = exp(-dist * (1.0f + distRatio) * extinction);
 
 	return result;
@@ -1598,12 +1622,14 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 		scatterOcclusion *= saturate(scatterSkylighting);
 #					endif
 
+		float camDist = input.WPosition.w;
 		scatterResult = CalculateWaterScattering(
 			input.WPosition.xyz,
 			refractionWorldPosition.xyz,
 			SunDir.xyz,
 			SunColor.xyz * SunDir.w,
-			scatterOcclusion
+			scatterOcclusion,
+			camDist
 		);
 	}
 
@@ -1625,8 +1651,14 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	output.depth = depth;
 	output.refractionMul = refractionMul;
 #				if defined(PBR_WATER)
-	output.scatter = scatterResult.scatter;
-	output.transmittance = scatterResult.transmittance;
+	// Apply water scattering if enabled
+	if (SharedData::pbrWaterSettings.EnableWaterScattering) {
+		output.scatter = scatterResult.scatter;
+		output.transmittance = scatterResult.transmittance;
+	} else {
+		output.scatter = 0.0f;
+		output.transmittance = 1.0f;
+	}
 
 	// PBR wave scatter using Smith masking for smooth transitions
 	float3 rawWaveSSS = CalculateWaveEdgeSSS(
