@@ -356,6 +356,21 @@ void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 	bool attaching = false;
 
 	if (block && block->loaded && !block->attached && block->chunk && block->water) {
+		const auto node = block->node;
+		const auto worldSpace = node && node->manager ? node->manager->worldSpace : nullptr;
+		if (!worldSpace || !waterSystem || !singleton.waterCache) {
+			func(block);
+			return;
+		}
+
+		const auto lodLevel = node->GetLODLevel();
+		const auto instructions = singleton.waterCache->GetInstructions(worldSpace, lodLevel, node->baseCellX, node->baseCellY);
+		if (!instructions) {
+			logger::warn("[Unified Water] No instructions found for {} chunk at {}, {}", worldSpace->GetFormEditorID(), node->baseCellX, node->baseCellY);
+			func(block);
+			return;
+		}
+
 		block->chunk->DetachChild2(block->water);
 		block->water->local.translate = block->chunk->local.translate;
 
@@ -371,17 +386,6 @@ void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 		}
 
 		attaching = true;
-
-		const auto node = block->node;
-		const auto lodLevel = node->GetLODLevel();
-		const auto worldSpace = block->node->manager->worldSpace;
-
-		const auto instructions = singleton.waterCache->GetInstructions(worldSpace, lodLevel, node->baseCellX, node->baseCellY);
-		if (!instructions) {
-			logger::warn("[Unified Water] No instructions found for {} chunk at {}, {}", worldSpace->GetFormEditorID(), node->baseCellX, node->baseCellY);
-			func(block);
-			return;
-		}
 
 		for (auto& instruction : *instructions) {
 			if (!instruction.form.ptr)
@@ -410,6 +414,7 @@ void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 		return;
 
 	for (auto& [shape, instruction] : built) {
+		auto waterObjectCount = waterSystem->waterObjects.size();
 		waterSystem->AddWater(shape, instruction->form.ptr, instruction->waterHeight, nullptr, true, false);
 
 		if (const auto prop = shape->GetGeometryRuntimeData().properties[1].get(); prop && prop->GetRTTI() == globals::rtti::BSWaterShaderPropertyRTTI.get()) {
@@ -425,9 +430,8 @@ void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 		}
 
 		// Remove from WaterSystem, will manage it ourselves
-		if (!waterSystem->waterObjects.empty()) {
+		if (waterSystem->waterObjects.size() > waterObjectCount)
 			waterSystem->waterObjects.pop_back();
-		}
 	}
 
 	(*singleton.gWaterLOD)->AttachChild(block->water, true);
