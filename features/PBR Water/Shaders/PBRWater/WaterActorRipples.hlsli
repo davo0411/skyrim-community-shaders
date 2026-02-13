@@ -1,9 +1,19 @@
 #ifndef __WATER_ACTOR_RIPPLES_HLSLI__
 #define __WATER_ACTOR_RIPPLES_HLSLI__
 
-// Player Ripples System for PBR Water
-// Generates procedural wading ripples around actors (player and NPCs) in water
-// Based on the vanilla ISWaterDisplacement wading system and WetnessEffects ripple approach
+// Actor Ripple System for PBR Water
+// Generates procedural wading ripples around actors (player and NPCs) in water.
+//
+// Physics model:
+//   Concentric expanding ring waves from each actor as a continuous point source.
+//   h(r,t) = A * sin(k*r - omega*t) / sqrt(r)   (2D circular wave with energy conservation)
+//   Normal offset = radial_dir * dh/dr ≈ radial_dir * A * k * cos(k*r - omega*t) / sqrt(r)
+//
+//   For moving actors, a Doppler shift compresses rings ahead and stretches them behind,
+//   plus a Kelvin V-wake envelope at ~19.47 degrees creates the characteristic wake arms.
+//
+// Returns float2 tangent-space normal offsets that are added directly to finalNormal.xy,
+// avoiding the accumulation/normalization bugs of the previous system.
 
 #define MAX_ACTOR_RIPPLES 32
 
@@ -13,9 +23,9 @@ struct ActorRippleData
 	float PosY;
 	float Speed;
 	float InWater;
-	float VelocityX;  // Actual velocity for wake direction
+	float VelocityX;
 	float VelocityY;
-	float WaterDepth;  // Depth below water surface (negative = above)
+	float WaterDepth;
 	float Pad0;
 };
 
@@ -30,288 +40,152 @@ cbuffer ActorRippleBuffer : register(b10)
 
 namespace PlayerRipples
 {
-	// Constants matching vanilla wading behavior
-	static const float MAX_RIPPLE_RADIUS = 512.0f;   // Maximum expansion radius
+	// ========================================================================
+	// Concentric expanding ring ripples
+	// ========================================================================
+	// Works for both stationary and moving actors. For moving actors, a Doppler
+	// shift is applied: rings compress ahead (higher frequency) and stretch
+	// behind (lower frequency), naturally creating a bow-wave appearance.
 
-	// Kelvin wake angle: ~19.47 degrees (arcsin(1/3))
-	// This is the angle at which wake waves propagate from a moving object
-	static const float KELVIN_ANGLE = 0.3398f;       // radians (~19.47 degrees)
-
-	// Hash function for procedural variation
-	float hash(float2 p)
+	float2 ExpandingRings(float2 worldPos, float2 sourcePos, float time,
+	                      float strength, float2 velocity)
 	{
-		float h = dot(p, float2(127.1f, 311.7f));
-		return frac(sin(h) * 43758.5453123f);
+		float2 delta = worldPos - sourcePos;
+		float dist = length(delta);
+
+		if (dist < 2.0 || dist > RippleRadius)
+			return float2(0, 0);
+
+		float2 radialDir = delta / dist;
+		float speed = length(velocity);
+
+		// Doppler shift for moving sources
+		// cosAngle: +1 = ahead of actor's movement, -1 = behind
+		float2 moveDir = speed > 15.0 ? velocity / speed : float2(0, 0);
+		float speedRatio = saturate(speed / 300.0);
+		float cosAngle = dot(radialDir, moveDir);
+		float doppler = 1.0 + speedRatio * cosAngle * 0.6;
+
+		// Ring wavenumbers with Doppler shift applied
+		float k1 = RippleWaveFreq1 * doppler;
+		float k2 = RippleWaveFreq2 * doppler;
+
+		// Phase: k*r - omega*t gives outward expanding rings
+		float omega = RippleWaveSpeed;
+		float phase1 = k1 * dist - omega * time;
+		float phase2 = k2 * dist - omega * 1.4 * time;  // slightly offset speed for variety
+
+		// 2D circular wave spreading: amplitude ~ 1/sqrt(r)
+		float spreading = rsqrt(max(dist, 4.0));
+
+		// Gradient: d/dr[A*sin(kr-wt)/sqrt(r)] ≈ A*k*cos(kr-wt)/sqrt(r)
+		float gradient = k1 * cos(phase1) + 0.5 * k2 * cos(phase2);
+		gradient *= spreading * strength;
+
+		// Distance envelope
+		float fade = 1.0 - smoothstep(RippleRadius * 0.7, RippleRadius, dist);
+		float nearBlend = smoothstep(2.0, 12.0, dist);  // avoid center singularity
+
+		// More disturbance when actor is moving
+		float moveBoost = 1.0 + speedRatio * 0.5;
+
+		return radialDir * gradient * fade * nearBlend * moveBoost;
 	}
 
-	// Calculate wake-shaped ripples with V-pattern behind moving actor
-	// This creates the characteristic arrowhead/chevron wake pattern
-	float4 EvaluateWakeRipples(float2 worldPos, float2 actorPos, float2 moveDir, float time, float speed, float baseStrength)
+	// ========================================================================
+	// Kelvin V-wake for moving actors
+	// ========================================================================
+	// Creates the characteristic arrowhead wake pattern at ~19.47 degrees
+	// behind a moving actor (the universal Kelvin wake angle).
+
+	float2 KelvinWake(float2 worldPos, float2 actorPos, float2 velocity,
+	                  float time, float strength)
 	{
-		float2 toPos = worldPos - actorPos;
-		float dist = length(toPos);
+		float speed = length(velocity);
+		if (speed < 20.0)
+			return float2(0, 0);
 
-		if (dist > MAX_RIPPLE_RADIUS || dist < 0.001f)
-			return float4(0, 0, 1, 0);
-
-		float2 dir = toPos / dist;
-
-		// Position relative to movement direction
-		float forward = dot(dir, moveDir);      // +1 = directly in front, -1 = directly behind
+		float2 moveDir = velocity / speed;
 		float2 perpDir = float2(-moveDir.y, moveDir.x);
-		float sideways = dot(dir, perpDir);     // Signed lateral distance
-		float absSideways = abs(sideways);
+		float2 delta = worldPos - actorPos;
+		float dist = length(delta);
 
-		// Speed factor affects wake intensity and shape
-		float speedFactor = saturate(speed / 300.0f);
+		if (dist < 4.0 || dist > RippleRadius)
+			return float2(0, 0);
 
-		// === BOW WAVE (in front) ===
-		float bowWave = 0.0f;
-		float bowGradient = 0.0f;
-		if (forward > 0.1f) {
-			// Bow wave: compressed waves directly in front
-			float bowDist = dist * (1.0f + absSideways * 2.0f);  // Narrower at sides
-			float bowPhase = bowDist * 0.15f - time * 6.0f;
-			bowWave = sin(bowPhase) * exp(-bowDist * 0.015f);
-			bowWave *= forward * speedFactor;  // Stronger when more directly in front
-			bowWave *= smoothstep(MAX_RIPPLE_RADIUS * 0.3f, 0.0f, dist);  // Only close to actor
+		float2 dir = delta / dist;
 
-			bowGradient = cos(bowPhase) * 0.15f * exp(-bowDist * 0.015f) * forward * speedFactor;
-		}
+		// Coordinates relative to movement direction
+		float ahead = dot(delta, moveDir);    // positive = in front of actor
+		float lateral = dot(delta, perpDir);  // signed lateral distance
+		float absLateral = abs(lateral);
 
-		// === KELVIN WAKE (V-shape behind) ===
-		float wakeWave = 0.0f;
-		float2 wakeGradientDir = dir;
-		float wakeGradient = 0.0f;
-		if (forward < 0.3f) {
-			float behind = max(0.0f, -forward + 0.3f);  // How far behind (0 at sides, 1 at back)
+		// Only behind the actor (with a small transition zone)
+		if (ahead > 32.0)
+			return float2(0, 0);
 
-			// V-wake arms: waves propagate at Kelvin angle from movement direction
-			// The wake pattern forms along lines at ~19.47 degrees from the path
-			float wakeAngle = atan2(absSideways, behind + 0.001f);
+		float behind = max(0.0, -ahead + 32.0);
 
-			// Wake is strongest along the Kelvin angle lines
-			float angleFromKelvin = abs(wakeAngle - KELVIN_ANGLE);
-			float wakeArmStrength = exp(-angleFromKelvin * angleFromKelvin * 8.0f);
+		// Kelvin wake: waves concentrate along lines at tan(19.47°) ≈ 0.354
+		float expectedLateral = behind * 0.354;
+		float lateralDeviation = absLateral - expectedLateral;
 
-			// Transverse waves (perpendicular to wake arms)
-			float armDist = dist * (0.5f + behind * 0.5f);
-			float transversePhase = armDist * 0.08f - time * 4.0f;
-			float transverseWave = sin(transversePhase);
+		// Gaussian envelope along wake arms (width scales with distance)
+		float armWidth = max(16.0, behind * 0.12);
+		float armStrength = exp(-lateralDeviation * lateralDeviation / (2.0 * armWidth * armWidth));
 
-			// Divergent waves (along wake arms, create the V pattern)
-			float divergentPhase = (absSideways * 3.0f + behind * dist * 0.02f) - time * 3.0f;
-			float divergentWave = sin(divergentPhase) * 0.7f;
+		// Transverse wave pattern along the wake arms
+		float armDist = sqrt(behind * behind + lateral * lateral);
+		float wakePhase = armDist * 0.06 - time * 3.0;
+		float wakeGrad = cos(wakePhase) * 0.06;
 
-			// Combine wake components
-			wakeWave = (transverseWave * 0.6f + divergentWave * 0.4f) * wakeArmStrength;
-			wakeWave *= behind;  // Fade toward sides
-			wakeWave *= speedFactor;
+		// Scaling
+		float speedFactor = saturate(speed / 250.0);
+		float spreading = rsqrt(max(armDist, 8.0));
+		float fade = 1.0 - smoothstep(RippleRadius * 0.5, RippleRadius, dist);
 
-			// Distance falloff for wake
-			float wakeFalloff = exp(-dist * 0.003f) * (1.0f - smoothstep(MAX_RIPPLE_RADIUS * 0.7f, MAX_RIPPLE_RADIUS, dist));
-			wakeWave *= wakeFalloff;
-
-			// Wake gradient for normal calculation
-			// Gradient points along the wake arm direction
-			float armAngle = atan2(sideways, -forward + 0.001f);
-			wakeGradientDir = float2(cos(armAngle), sin(armAngle));
-			wakeGradient = cos(transversePhase) * 0.08f * wakeArmStrength * behind * speedFactor * wakeFalloff;
-		}
-
-		// === TURBULENT CENTER (directly behind) ===
-		float turbulence = 0.0f;
-		float turbGradient = 0.0f;
-		if (forward < -0.5f && absSideways < 0.4f) {
-			// Churning water directly behind the actor
-			float turbDist = dist;
-			float turbPhase1 = turbDist * 0.2f - time * 8.0f + hash(actorPos) * 6.28f;
-			float turbPhase2 = turbDist * 0.15f - time * 6.0f + hash(actorPos.yx) * 6.28f;
-
-			turbulence = (sin(turbPhase1) * 0.5f + sin(turbPhase2) * 0.3f);
-			turbulence *= (1.0f - absSideways / 0.4f);  // Fade toward edges
-			turbulence *= smoothstep(MAX_RIPPLE_RADIUS * 0.4f, 0.0f, dist);  // Close range only
-			turbulence *= speedFactor * 1.2f;
-
-			turbGradient = (cos(turbPhase1) * 0.5f * 0.2f + cos(turbPhase2) * 0.3f * 0.15f);
-			turbGradient *= (1.0f - absSideways / 0.4f) * speedFactor;
-		}
-
-		// === COMBINE ALL WAVE COMPONENTS ===
-		float totalWave = bowWave + wakeWave + turbulence;
-		totalWave *= baseStrength;
-
-		// Distance-based overall falloff (linear, not squared for better visibility)
-		float overallFalloff = 1.0f - smoothstep(0.0f, MAX_RIPPLE_RADIUS, dist);
-		totalWave *= overallFalloff;
-
-		// Near boost for immediate splash effect (increased from 2x to 5x)
-		float nearBoost = 1.0f + smoothstep(128.0f, 0.0f, dist) * 5.0f;
-		totalWave *= nearBoost;
-
-		// Calculate combined gradient for normal
-		float2 gradientDir = dir;
-		float totalGradient = 0.0f;
-
-		// Blend gradients based on wave contributions
-		float bowWeight = abs(bowWave);
-		float wakeWeight = abs(wakeWave);
-		float turbWeight = abs(turbulence);
-		float totalWeight = bowWeight + wakeWeight + turbWeight + 0.001f;
-
-		totalGradient = (bowGradient * bowWeight + wakeGradient * wakeWeight + turbGradient * turbWeight) / totalWeight;
-		totalGradient *= baseStrength * overallFalloff * nearBoost;
-
-		// Blend gradient directions
-		if (wakeWeight > bowWeight && wakeWeight > turbWeight) {
-			gradientDir = lerp(dir, wakeGradientDir, 0.5f);
-		}
-
-		float3 normal = normalize(float3(-gradientDir * totalGradient, 1.0f));
-
-		return float4(normal, totalWave);
+		return dir * wakeGrad * armStrength * spreading * speedFactor * strength * fade;
 	}
 
-	// Gentle circular ripples for stationary actors
-	// Only generated when actor has minimal velocity (truly stationary)
-	float4 GetStationaryRipples(float2 actorPos, float2 worldPos, float time, float rippleStrength)
+	// ========================================================================
+	// Main entry: accumulate normal offsets from all actors
+	// ========================================================================
+	// Returns float2 tangent-space normal offset to add to finalNormal.xy.
+	// This is intentionally additive (not weighted by wave height) so every
+	// actor's contribution is directly visible.
+
+	float2 GetAllActorRippleOffsets(float2 worldPos, float time,
+	                                float2 playerPos, float2 playerVelocity,
+	                                float playerInWater, float playerWaterDepth)
 	{
-		float2 toPos = worldPos - actorPos;
-		float dist = length(toPos);
+		float2 total = float2(0, 0);
 
-		if (dist > MAX_RIPPLE_RADIUS)
-			return float4(0, 0, 1, 0);
+		// Player ripples
+		if (playerInWater > 0.5 && playerWaterDepth <= 100.0) {
+			float playerSpeed = length(playerVelocity);
+			float strength = lerp(0.8, 1.5, saturate(playerSpeed / 300.0));
 
-		// Subtle breathing/idle motion ripples (very gentle)
-		// These should be minimal - just enough to show presence
-		float wave1 = sin(dist * 0.08f - time * 1.5f);  // Slower, gentler than before
-		float wave2 = sin(dist * 0.12f - time * 2.0f) * 0.4f;
-
-		float combinedWave = (wave1 + wave2) / 1.4f;
-
-		// Stronger distance falloff to keep ripples closer
-		float falloff = 1.0f - smoothstep(0.0f, MAX_RIPPLE_RADIUS * 0.5f, dist);
-
-		// Much reduced amplitude (was * 3.0f, now * 0.3f) for subtle idle ripples
-		float amplitude = combinedWave * falloff * rippleStrength * 0.3f;
-
-		float2 dir = dist > 0.001f ? toPos / dist : float2(0, 1);
-
-		float waveGradient = cos(dist * 0.08f - time * 1.5f) * 0.08f +
-		                     cos(dist * 0.12f - time * 2.0f) * 0.4f * 0.12f;
-		waveGradient /= 1.4f;
-		waveGradient *= falloff * rippleStrength * 0.3f;
-
-		float3 normal = normalize(float3(-dir * waveGradient * 2.0f, 1.0f));
-
-		return float4(normal, amplitude);
-	}
-
-	// Reorient a ripple normal onto the base water normal
-	float3 ApplyRippleNormal(float3 rippleNormal, float3 baseNormal)
-	{
-		float3 result = baseNormal;
-		result.xy += rippleNormal.xy * 1.5f;
-		return normalize(result);
-	}
-
-	// Calculate ripples from a single actor position
-	// Creates realistic V-shaped wake patterns based on actual movement
-	float4 GetActorRipples(float2 actorPos, float2 worldPos, float time, float2 velocity, float inWater, float waterDepth)
-	{
-		if (inWater < 0.5f)
-			return float4(0, 0, 1, 0);
-
-		// Don't create ripples if actor is fully submerged (waterDepth > 100 = head underwater)
-		if (waterDepth > 100.0f)
-			return float4(0, 0, 1, 0);
-
-		float2 toPos = worldPos - actorPos;
-		float dist = length(toPos);
-
-		if (dist > MAX_RIPPLE_RADIUS)
-			return float4(0, 0, 1, 0);
-
-		// Calculate actual speed from velocity vector
-		float actualSpeed = length(velocity);
-
-		// Movement threshold: require actual velocity to create directional wake
-		// Below 10 units/sec is considered stationary (idle sway/breathing motion)
-		float movementThreshold = 10.0f;
-
-		// Increased base strength for better visibility (was 0.5-1.5, now 0.8-2.0)
-		float baseStrength = lerp(0.8f, 2.0f, saturate(actualSpeed / 300.0f));
-
-		// For truly stationary actors (very low velocity), use gentle circular ripples
-		if (actualSpeed < movementThreshold) {
-			// Only create subtle idle ripples, not constant strong ones
-			return GetStationaryRipples(actorPos, worldPos, time, baseStrength * 0.5f);
+			total += ExpandingRings(worldPos, playerPos, time, strength, playerVelocity);
+			total += KelvinWake(worldPos, playerPos, playerVelocity, time, strength);
 		}
 
-		// For moving actors, create wake pattern using actual velocity direction
-		float2 moveDir = normalize(velocity);
-
-		return EvaluateWakeRipples(worldPos, actorPos, moveDir, time, actualSpeed, baseStrength);
-	}
-
-	// Main function: Calculate ripples from ALL actors (player + NPCs)
-	float4 GetAllActorRipples(float2 worldPos, float time, float2 playerPos, float2 playerVelocity, float playerInWater, float playerWaterDepth)
-	{
-		float3 resultNormal = float3(0, 0, 1);
-		float resultHeight = 0.0f;
-		float totalWeight = 0.0f;
-
-		// Player ripples - use wake pattern based on actual velocity
-		if (playerInWater > 0.5f) {
-			// Don't create ripples if player is fully submerged
-			if (playerWaterDepth <= 100.0f) {
-				float actualSpeed = length(playerVelocity);
-				float movementThreshold = 10.0f;
-
-				// Increased base strength for better visibility (was 1.0-2.0, now 1.2-2.5)
-				float baseStrength = lerp(1.2f, 2.5f, saturate(actualSpeed / 300.0f));
-
-				float4 playerResult;
-				if (actualSpeed < movementThreshold) {
-					// Truly stationary player gets very subtle circular ripples
-					playerResult = GetStationaryRipples(playerPos, worldPos, time, baseStrength * 0.5f);
-				} else {
-					// Moving player gets wake pattern using actual velocity direction
-					float2 moveDir = normalize(playerVelocity);
-					playerResult = EvaluateWakeRipples(worldPos, playerPos, moveDir, time, actualSpeed, baseStrength);
-				}
-
-				if (playerResult.w != 0.0f) {
-					float weight = abs(playerResult.w);
-					resultNormal.xy += playerResult.xy * weight;
-					resultHeight += playerResult.w;
-					totalWeight += weight;
-				}
-			}
-		}
-
-		// Add ripples from all tracked NPCs
-		uint actorCount = min(NumActorRipples, MAX_ACTOR_RIPPLES);
-		for (uint i = 0; i < actorCount; i++) {
+		// NPC ripples
+		uint count = min(NumActorRipples, MAX_ACTOR_RIPPLES);
+		for (uint i = 0; i < count; i++) {
 			ActorRippleData actor = ActorRipples[i];
+			if (actor.InWater < 0.5 || actor.WaterDepth > 100.0)
+				continue;
+
 			float2 actorPos = float2(actor.PosX, actor.PosY);
-			float2 actorVelocity = float2(actor.VelocityX, actor.VelocityY);
+			float2 actorVel = float2(actor.VelocityX, actor.VelocityY);
+			float actorSpeed = length(actorVel);
+			float strength = lerp(0.5, 1.2, saturate(actorSpeed / 300.0));
 
-			float4 actorResult = GetActorRipples(actorPos, worldPos, time, actorVelocity, actor.InWater, actor.WaterDepth);
-			if (actorResult.w != 0.0f) {
-				float weight = abs(actorResult.w);
-				resultNormal.xy += actorResult.xy * weight;
-				resultHeight += actorResult.w;
-				totalWeight += weight;
-			}
+			total += ExpandingRings(worldPos, actorPos, time, strength, actorVel);
+			total += KelvinWake(worldPos, actorPos, actorVel, time, strength);
 		}
 
-		// Normalize accumulated normal
-		if (totalWeight > 0.001f) {
-			resultNormal = normalize(resultNormal);
-		}
-
-		return float4(resultNormal, resultHeight);
+		return total;
 	}
 }
 

@@ -1119,29 +1119,6 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			endif
 
 #			if defined(PBR_WATER)
-	// Apply actor wading ripples (player + NPCs)
-	if (RippleStrength > 0.01f) {
-		float2 playerPos = float2(PlayerPosX, PlayerPosY);
-		float2 playerVelocity = float2(PlayerVelocityX, PlayerVelocityY);
-		// Convert camera-relative water position to absolute world coordinates
-		float2 waterWorldPos = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
-		float4 actorRipples = PlayerRipples::GetAllActorRipples(
-			waterWorldPos,
-			RealTimeSeconds,
-			playerPos,
-			playerVelocity,
-			PlayerInWater,
-			PlayerWaterDepth
-		);
-
-		// Blend ripple normal with current normal, scaled by RippleStrength
-		if (abs(actorRipples.w) > 0.0001f) {
-			float3 scaledRippleNormal = float3(actorRipples.xy * RippleStrength, actorRipples.z);
-			scaledRippleNormal = normalize(scaledRippleNormal);
-			finalNormal = PlayerRipples::ApplyRippleNormal(scaledRippleNormal, finalNormal);
-		}
-	}
-
 	// Blend in Gerstner wave normals from vertex/domain shader
 	float3 waveNormalGeom = input.UnifiedWaveNormal.xyz;
 	float waveNormalLen = length(waveNormalGeom);
@@ -1179,6 +1156,29 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 			textureNormal.xy + dampenedWaveNormal.xy * WaveIntensity * diffuseBlend,
 			textureNormal.z * dampenedWaveNormal.z
 		));
+	}
+
+	// Apply actor wading ripples ON TOP of wave normals.
+	// This runs AFTER Gerstner wave blending so ripples are always visible
+	// and not overwritten by the dominant wave normal contribution.
+	if (RippleStrength > 0.01f) {
+		float2 waterWorldPos = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+		float2 rippleOffset = PlayerRipples::GetAllActorRippleOffsets(
+			waterWorldPos,
+			RealTimeSeconds,
+			float2(PlayerPosX, PlayerPosY),
+			float2(PlayerVelocityX, PlayerVelocityY),
+			PlayerInWater,
+			PlayerWaterDepth
+		);
+
+		float rippleScale = RippleStrength * RippleNormalStrength;
+		finalNormal = normalize(float3(
+			finalNormal.xy + rippleOffset * rippleScale,
+			finalNormal.z));
+		diffuseNormalResult = normalize(float3(
+			diffuseNormalResult.xy + rippleOffset * rippleScale * 0.5,
+			diffuseNormalResult.z));
 	}
 
 	// Store both normals: full detail for specular, dampened for diffuse
