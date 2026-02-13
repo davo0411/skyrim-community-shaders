@@ -203,70 +203,217 @@ if (light.lightFlags & Shadow) {
 
 | Approach | Description | Pros | Cons |
 |----------|-------------|------|------|
-| **A: Patch comparison** | Find `cmp reg, 4` / `jge` and change immediate to 8 | Minimal code change | Fragile across versions |
-| **B: Replace function** | Hook the entire accumulation function | Full control | Must reimplement loop |
-| **C: Detour Accumulate** | Let vanilla run, then extend | Compat-safe | Complex state management |
+| **A: Patch comparison** | Find `cmp reg, 4` / `jge` and change immediate to 8 | Minimal code change | Fragile across versions; still need RT redirect |
+| **B: Replace function** | Hook the entire accumulation function | Full control | Must reimplement loop; needs relocation research |
+| **C: Detour Accumulate** | Let vanilla run 4 lights, then extend post-hoc | Compat-safe; uses existing hooks | Must call `Accumulate()`+`Render()` ourselves |
+| **D: Screen-space shadows** | No engine hooks; SS ray-march for overflow lights | Zero engine interaction | Contact-only shadows, no self-shadowing |
+| **E: Temporal cycling** | Rotate lights through 4 slots across frames | No shadow mask changes needed | Temporal artifacts, complex slot management |
+#### Approach C: Detour Accumulate — Detailed Analysis (Recommended)
 
-**Recommended: Approach B** — Hook the accumulation function and re-implement the loop with
-the higher limit. This gives full control and is the most maintainable approach.
+The key insight is that the engine's shadow pipeline runs in **strict sequential batch phases**:
 
-**Relocation research needed:**
 ```
-SE:  The accumulation loop is in Main::DrawWorld — find the sub-function that
-     iterates shadowLightsAccum. Look for references to DrawWorld::shadowLightMaskIndex.
-     Candidates: REL::ID(35560), offsets around the shadowmap rendering section.
-
-AE:  Corresponding AE relocation.
-
-VR:  Corresponding VR relocation (may differ in structure due to stereo rendering).
+Phase 1: ACCUMULATE ALL    → iterates shadowLightsAccum, assigns maskIndex 0–3, exits at ≥ 4
+Phase 2: RENDER ALL SHADOW MAPS  → calls BSShadowLight::Render() for each accumulated light
+Phase 3: RENDER ALL SHADOW MASKS → BSUtilityShader writes to kSHADOW_MASK RGBA per light
+Phase 4: LIGHTING          → pixel shaders read shadow mask
 ```
 
-#### Hook 2: Shadow Mask Render Target Redirect
+This is **batched, NOT interleaved** per-light. Evidence:
+- `Main_RenderShadowMaps` fires once (already hooked in `Deferred.cpp`) wrapping ALL shadow maps
+- `Main_RenderShadowmasks` fires once wrapping ALL mask passes
+- Shadow map virtuals (`BSShadowLight::Render()`) fire INSIDE phase 2, not interleaved with phase 3
 
-**Target:** The point where `BSUtilityShader` renders shadow masks.
+Because phases are sequential, we can **inject between Phase 1 and Phase 2** to handle extra lights.
 
-**What to change:**
-- For `maskIndex` 0–3: vanilla render to RGBA channels (unchanged)
-- For `maskIndex` 4–7: swap render target to our `Texture2DArray` slice
+##### C3: Hybrid Detour (Safest, Recommended)
 
-**Implementation:**
+Let vanilla handle its 4 lights end-to-end, then render extras ourselves:
+
+1. Vanilla runs phases 1–3 normally (4 lights accumulated, shadow maps rendered, masks written)
+2. After `Main_RenderShadowMaps` completes (hook already exists in `Deferred.cpp`),
+   scan `activeShadowLights` for lights where `maskIndex == 255` (engine sentinel for "not accumulated")
+3. For each extra light:
+   a. Call `Accumulate()` virtual to set up internal state (camera, culling, descriptors)
+   b. Call `Render()` virtual to generate its shadow depth map
+4. During `Main_RenderShadowmasks`, intercept the utility shader to render
+   each extra light's shadow mask to our `Texture2DArray` slices
+5. Bind the extended array SRV for the lighting shader
+
+**Implementation using existing hooks:**
+
 ```cpp
-// During the shadow mask render pass for each light:
-void BeforeShadowmaskRender(uint32_t maskIndex) {
-    if (maskIndex >= 4) {
-        // Save current RT
-        context->OMGetRenderTargets(1, &savedRT, &savedDSV);
-        // Bind our extended slice
-        context->OMSetRenderTargets(1, &sliceRTVs[maskIndex], savedDSV);
-    }
-}
+// In Deferred::Hooks::Main_RenderShadowMaps::thunk():
+void thunk() {
+    func();  // Vanilla: accumulate + render shadow maps for 4 lights
 
-void AfterShadowmaskRender(uint32_t maskIndex) {
-    if (maskIndex >= 4) {
-        // Restore vanilla RT
-        context->OMSetRenderTargets(1, &savedRT, savedDSV);
+    // --- OUR EXTENSION ---
+    auto* ssn = globals::game::smState->shadowSceneNode[0];
+    auto& shadowLights = ssn->GetRuntimeData().activeShadowLights;
+
+    uint32_t extendedChannel = 4;  // Start after vanilla's 4 slots
+
+    for (auto& lightPtr : shadowLights) {
+        if (extendedChannel >= kMaxShadowLights) break;
+
+        auto* light = static_cast<RE::BSShadowLight*>(lightPtr.get());
+        GET_INSTANCE_MEMBER(maskIndex, light);
+
+        if (maskIndex == 255) {  // Engine sentinel: "not accumulated"
+            // This light was skipped by vanilla — handle it ourselves
+            uint32_t dummyGlobalCount = extendedChannel;
+            NiPointer<NiAVObject> scene = ssn; // world root
+
+            light->Accumulate(dummyGlobalCount, extendedChannel, scene);
+            light->Render();  // Generate shadow depth map
+        }
     }
+
+    globals::deferred->EarlyPrepasses();  // Existing CS code
 }
 ```
 
-**Note:** We also need to handle the utility shader's output write mask. The vanilla shader
-uses `maskIndex` to select which RGBA channel to write. For extended slots, we need the
-shader to always write to `.r` (since each array slice is R-only). This may require:
-- A shader define/permutation for extended shadow mask mode
-- Or: patching the output write mask in the blend state
+**Why this is safe:**
+- We call `Accumulate()` AFTER vanilla's loop is done — no interference
+- `Accumulate()` is a well-defined virtual: it assigns `this->maskIndex = maskChannel++`
+  and sets up shadowmap descriptors, culling cameras, etc.
+- `Render()` uses the state set up by `Accumulate()` — it renders depth from the light's POV
+- Values `maskIndex = 4, 5, 6, 7` are unused by vanilla — no conflicts
+- Existing hooks (`Main_RenderShadowMaps`, `BSUtilityShader`) give us all needed injection points
 
-#### Hook 3: Shadow Mask Clear
+**Risk:** `Accumulate()` might have internal assumptions about `maskChannel < 4` (e.g., indexing
+into `focusShadowmapDescriptors[4]`). However, that array is for **cascade splits** on the
+directional light, not for mask channel selection — point lights use `shadowmapDescriptors`
+(a `BSTArray`, dynamically sized). Point light `Accumulate()` implementations should be safe.
 
-**Target:** Where the engine clears `kSHADOW_MASK` before the shadow pass.
+**Hook surface for Approach C3:**
 
-**What to change:** Also clear our extended array slices to 1.0 (fully lit = no shadow).
+| Hook | Location | Already In CS? | Used For |
+|------|----------|----------------|----------|
+| `Main_RenderShadowMaps` | `Deferred.cpp` | ✅ Yes | Inject after accumulation, before lighting |
+| `Main_RenderShadowmasks` | `FrameAnnotations.cpp` | ✅ Yes (perf event) | Intercept shadow mask writes for extra lights |
+| `BSUtilityShader` dispatch | `State.cpp` | ✅ Yes (`CopyShadowData`) | Redirect RT for maskIndex ≥ 4 |
+| `BSLightingShader_SetupGeometry` | `LightLimitFix.h` | ✅ Yes | Read extended shadow data |
 
-#### Hook 4: Bind Extended Shadow Mask SRV
+**New hooks needed:**
 
-**Target:** After shadow mask rendering, before the lighting pass.
+| Hook | Purpose | Difficulty |
+|------|---------|------------|
+| Shadow mask clear | Clear extended array slices to 1.0 | Easy — extend `Main_RenderShadowmasks` |
+| Bind extended SRV | Attach `t48` for extended shadow array | Easy — in LLF `Prepass()` |
 
-**What to change:** Bind `ExtendedShadowMaskArray` SRV to shader register `t48` so the
-lighting shaders can sample from it.
+##### Shadow Mask Render Redirect (for maskIndex ≥ 4)
+
+For extra lights, the utility shader's shadow mask pass needs output redirected:
+
+| Method | Description | Complexity |
+|--------|-------------|------------|
+| **Blend state swap** | Set `RenderTargetWriteMask = R` and swap to array slice RTV | Low |
+| **Shader permutation** | Add `EXTENDED_SHADOW_SLOT` define writing to `.r` only | Medium |
+| **Our own compute pass** | Skip BSUtilityShader; do shadow comparison in compute | Medium |
+
+The blend state swap is simplest: before rendering a shadow mask for maskIndex ≥ 4,
+save the current RT, bind our array slice RTV, and force write mask to R-only.
+
+```cpp
+// Pseudocode in the BSUtilityShader shadowmask hook:
+uint32_t currentMaskIndex = GetCurrentShadowLightMaskIndex();
+if (currentMaskIndex >= 4) {
+    context->OMGetRenderTargets(1, &savedRT, &savedDSV);
+    context->OMSetRenderTargets(1, &sliceRTVs[currentMaskIndex], savedDSV);
+    func(shader, technique);  // Render shadow mask to our slice
+    context->OMSetRenderTargets(1, &savedRT, savedDSV);
+} else {
+    func(shader, technique);  // Vanilla path
+}
+```
+
+---
+
+#### Approach D: No Engine Hooks — Screen-Space Shadows for Overflow Lights
+
+The most decoupled approach: completely bypass the engine's shadow pipeline for extra lights
+and use **screen-space shadow ray-marching** instead. Community Shaders already implements
+Screen-Space Shadows for the directional light (`ScreenSpaceShadows.cpp`, `t45`).
+
+**How it works:**
+
+1. During LLF's `UpdateLights()`, identify shadow-capable lights where `maskIndex == 255`
+2. For each, dispatch a compute shader that ray-marches from each pixel toward the light
+   position through the depth buffer
+3. Store results in a `Texture2DArray` (one slice per extra shadow light)
+4. In the lighting shader, for lights with `shadowLightIndex >= 4`, sample from the
+   screen-space shadow buffer instead of the shadow mask
+
+**Pros:**
+- **Zero engine hooks** — no interaction with the accumulation/rendering pipeline at all
+- Simpler implementation — compute shader + depth buffer (already available infrastructure)
+- No shadow map memory overhead for extra lights
+- Reuses existing SSS patterns in Community Shaders
+
+**Cons:**
+- **Contact shadows only** — can't shadow objects behind the camera or off-screen
+- No self-shadowing for geometry in the light's shadow volume
+- Ray marching quality depends on depth buffer resolution
+- Each extra light adds a full-screen compute dispatch (~0.3ms each at 1080p)
+- Not as visually accurate as real shadow maps
+
+**Best suited for:** A pragmatic first implementation that provides "good enough" shadows
+for overflow lights without any engine-side risk. Can be upgraded to Approach C later.
+
+```hlsl
+// Compute shader: ScreenSpacePointShadow.hlsl
+[numthreads(8, 8, 1)]
+void main(uint3 DTid : SV_DispatchThreadID) {
+    float depth = DepthBuffer.Load(int3(DTid.xy, 0)).x;
+    float3 worldPos = ReconstructWorldPos(DTid.xy, depth);
+
+    float shadow = 1.0;
+    float3 toLight = LightPosition - worldPos;
+    float lightDist = length(toLight);
+    float3 rayDir = toLight / lightDist;
+
+    // March from surface toward light through depth buffer
+    float stepSize = lightDist / NUM_STEPS;
+    for (uint i = 1; i <= NUM_STEPS; i++) {
+        float3 samplePos = worldPos + rayDir * stepSize * i;
+        float2 sampleUV = ProjectToScreen(samplePos);
+        float sampleDepth = DepthBuffer.SampleLevel(LinearClamp, sampleUV, 0).x;
+        float expectedDepth = LinearizeDepth(samplePos);
+
+        if (sampleDepth < expectedDepth - bias) {
+            shadow = 0.0;
+            break;
+        }
+    }
+    OutputShadow[uint3(DTid.xy, lightSlice)] = shadow;
+}
+```
+
+---
+
+#### Approach E: Temporal Shadow Cycling
+
+Rotate which point lights occupy the 4 shadow slots across frames:
+
+- Frame N: Lights A, B, C, D have shadow slots
+- Frame N+1: Lights A, B, E, F have shadow slots
+- Cached shadow from frame N is used for C and D in frame N+1
+- Exponential moving average blends new and cached shadows
+
+**Pros:** No shadow mask format changes, minimal GPU cost increase, doubles effective capacity.
+**Cons:** Temporal ghosting, moving lights/player break the cache, complex slot management,
+needs motion vectors for reprojection.
+
+---
+
+#### Recommended Implementation Strategy
+
+| Phase | Approach | Risk | Effort | Visual Quality |
+|-------|----------|------|--------|---------------|
+| **Phase 1** (Quick win) | **D: Screen-space shadows** for overflow lights | Very low | Low | Good (contact only) |
+| **Phase 2** (Proper fix) | **C3: Hybrid detour** using existing hooks | Medium | Medium | Excellent (real shadow maps) |
+| **Phase 3** (Polish) | **E: Temporal cycling** for slot competition smoothing | Low | Medium | Excellent + smooth transitions |
 
 ### Phase 2: LLF C++ Changes
 
@@ -406,63 +553,74 @@ Each shadow-casting light requires:
 
 ## Implementation Roadmap
 
-### Step 1: Relocation Research (Critical Path)
-- [ ] Identify the exact function containing the shadow light accumulation loop
-- [ ] Find the `cmp reg, 4` instruction and surrounding context
-- [ ] Map relocations for SE, AE, and VR
-- [ ] Verify `BSShadowLight::Accumulate()` behavior when maskIndex > 3
+### Step 1: Screen-Space Point Light Shadows (Phase 1 — No Engine Hooks)
+- [ ] Create `ScreenSpacePointShadow.hlsl` compute shader (ray-march depth buffer toward each light)
+- [ ] In LLF `UpdateLights()`, identify lights where `maskIndex == 255` (overflow lights)
+- [ ] Dispatch compute shader per overflow light, write to `Texture2DArray`
+- [ ] Bind result as SRV `t48` in LLF `Prepass()`
+- [ ] Update `ExtendedShadowMask::GetShadow()` to sample from it
+- [ ] Test in shadow-heavy interiors
 
-### Step 2: Engine Fix — Accumulation Hook
-- [ ] Implement `ShadowLightLimitFix::Hooks::DrawWorld_AccumulateShadowLights`
-- [ ] Test that maskIndex values 4+ are correctly assigned
-- [ ] Verify no engine crashes from extended maskIndex values
+### Step 2: Engine Detour — Accumulate + Render Extra Lights (Phase 2)
+- [ ] In `Main_RenderShadowMaps` thunk (existing hook), after `func()`:
+      scan `activeShadowLights` for `maskIndex == 255` lights
+- [ ] Call `Accumulate()` on each with counter starting at 4
+- [ ] Call `Render()` on each to generate shadow depth maps
+- [ ] Verify no engine crash from `maskIndex > 3` in `Accumulate()`
+- [ ] Test that shadow maps are actually generated
 
 ### Step 3: Extended Shadow Mask Resources
-- [ ] Create Texture2DArray and per-slice RTVs
-- [ ] Hook shadow mask clear to also clear extended slices
-- [ ] Bind extended SRV to lighting shader
+- [ ] Create `Texture2DArray` (screenW × screenH × kMaxShadowLights slices, `R8_UNORM`)
+- [ ] Create per-slice RTVs for rendering
+- [ ] Hook shadow mask clear to also clear extended slices to 1.0
+- [ ] Bind extended SRV to `t48` for lighting shaders
 
 ### Step 4: Shadow Mask Render Redirect
-- [ ] Hook BSUtilityShader shadow mask render pass
-- [ ] Redirect maskIndex 4+ to array slices
-- [ ] Handle utility shader output write mask (R-only for extended)
+- [ ] In `BSUtilityShader` dispatch hook (State.cpp, already exists for `CopyShadowData`):
+      detect when rendering shadow mask for `maskIndex >= 4`
+- [ ] Save current RT, swap to our array slice RTV, render, restore RT
+- [ ] Handle output write mask (blend state or shader permutation)
 
 ### Step 5: LLF Integration
-- [ ] Update ShadowBitMask population for extended range
-- [ ] Update shader to use ExtendedShadowMask::GetShadow()
-- [ ] Update clustered light buffer shadow data
+- [ ] `ShadowBitMask` population: also set bits 4–7 for extended shadow lights
+- [ ] Update shader: `ExtendedShadowMask::GetShadow()` for all shadow light lookups
+- [ ] Remove `shadowMaskIndex != 255` exclusion for lights with extended slots
+- [ ] Update `StrictLightDataCB` population for per-geometry shadow data
 
 ### Step 6: Deferred Pipeline
-- [ ] Extend CopyShadowData for additional shadow lights
-- [ ] Update PerGeometry struct and shader cbuffer layout
-- [ ] Test with deferred rendering pipeline
+- [ ] Extend `CopyShadowData` for additional shadow lights (projection matrices)
+- [ ] Update `PerGeometry::ShadowMapProj` array size and shader cbuffer layout
+- [ ] Test with deferred rendering pipeline active
 
-### Step 7: Testing & Optimization
-- [ ] Test in shadow-heavy interiors (Blue Palace, Dragonsreach)
+### Step 7: Temporal Cycling (Phase 3 — Polish)
+- [ ] Implement priority queue for shadow light slot assignment
+- [ ] Cache previous frame's shadow data per light
+- [ ] Smooth shadow fade-in/out when lights gain/lose slots
+- [ ] Reprojection for cached shadows when camera moves
+
+### Step 8: Testing & Optimization
+- [ ] Test in shadow-heavy interiors (Blue Palace, Dragonsreach, modded interiors)
 - [ ] Performance profiling with 4/6/8 shadow lights
-- [ ] VR compatibility testing
-- [ ] Shadow transition smoothing
+- [ ] VR compatibility testing (stereo shadow maps, doubled viewports)
+- [ ] INI setting: `iMaxShadowLights` (user-configurable, default 6)
+- [ ] Quality presets: Low=4 (vanilla), Medium=6, High=8
 
-## Alternative Approaches Considered
+## Alternative Approaches Considered (Not Recommended)
 
-### A: Virtual Shadow Maps (VSM)
-Replace the entire shadow system with a virtual shadow map (like UE5). This would remove the
+### Virtual Shadow Maps (VSM)
+Replace the entire shadow system with a virtual shadow map (like UE5). Would remove the
 per-light limit entirely but is a massive undertaking requiring a complete shadow system rewrite.
+Not practical as a Community Shaders feature — would essentially be writing a new renderer.
 
-### B: Shadow Map Atlas
-Instead of separate shadow maps per light, pack all shadow maps into a single large atlas
-texture. The shadow mask would then be replaced by direct atlas lookups in the lighting shader.
-This is cleaner but requires rewriting the shadow map rendering pipeline.
+### Shadow Map Atlas
+Pack all shadow maps into a single large atlas texture. The shadow mask would then be replaced
+by direct atlas lookups in the lighting shader. Cleaner architecturally but requires rewriting
+the shadow map rendering pipeline — too invasive for an engine fix.
 
-### C: Tiled Shadow Mask
-Instead of RGBA channels, use a tiled approach where different screen regions can have different
-shadow light assignments. This is used in some deferred renderers but doesn't fit Skyrim's
-forward+ architecture well.
-
-### D: Temporal Shadow Cycling
-Cycle shadow lights across frames — render 4 lights in frame N, 4 different lights in frame N+1,
-and blend the results. This doubles effective capacity with minimal GPU cost but introduces
-temporal artifacts and requires careful state management.
+### Tiled Shadow Mask
+Use a tiled approach where different screen regions can have different shadow light assignments.
+Used in some deferred renderers but doesn't fit Skyrim's forward+ architecture well.
+The per-tile bookkeeping overhead likely exceeds the benefit for the typical 4→8 light increase.
 
 ## Files Created/Modified
 
