@@ -1,9 +1,7 @@
 #pragma once
 
 #include "Feature.h"
-#include <atomic>
 #include <cstdint>
-#include <future>
 #include <limits>
 #include <unordered_map>
 
@@ -386,14 +384,6 @@ struct PBRWater : public Feature
 	winrt::com_ptr<ID3D11HullShader> waterHullShader;
 	winrt::com_ptr<ID3D11DomainShader> waterDomainShader;
 	winrt::com_ptr<ID3D11GeometryShader> waterGeometryShader;
-
-	// Async shader compilation state
-	std::atomic<bool> tessellationShadersReady{ false };
-	std::atomic<bool> tessellationShadersCompiling{ false };
-	std::future<void> shaderCompileFuture;
-
-	void CompileTessellationShadersAsync();
-	bool AreTessellationShadersReady() const { return tessellationShadersReady.load(); }
 
 	ShaderBRDFSettings GetShaderBRDFSettings() const
 	{

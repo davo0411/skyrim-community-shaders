@@ -158,15 +158,6 @@ void PBRWater::DrawSettings()
 				ImGui::Text("Hardware tessellation for dynamic mesh density based on distance.");
 			}
 
-			// Show tessellation shader compilation status
-			if (tessellationShadersCompiling.load()) {
-				ImGui::SameLine();
-				ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "(Compiling shaders...)");
-			} else if (!AreTessellationShadersReady() && settings.tessellation.EnableTessellation) {
-				ImGui::SameLine();
-				ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "(Shader compilation failed)");
-			}
-
 			if (settings.tessellation.EnableTessellation) {
 				ImGui::Indent();
 				ImGui::SliderFloat("Min Distance", &settings.tessellation.TessellationMinDistance, 64.0f, 1024.0f, "%.0f");
@@ -510,77 +501,8 @@ void PBRWater::SetupResources()
 	tessellationParams = new ConstantBuffer(ConstantBufferDesc<TessellationParams>());
 	actorRippleBuffer = new ConstantBuffer(ConstantBufferDesc<ActorRippleBuffer>());
 
-	// Start async tessellation shader compilation
-	CompileTessellationShadersAsync();
-}
-
-void PBRWater::CompileTessellationShadersAsync()
-{
-	// Don't start if already compiling or ready
-	if (tessellationShadersCompiling.load() || tessellationShadersReady.load()) {
-		return;
-	}
-
-	tessellationShadersCompiling.store(true);
-	logger::info("[PBR Water] Starting async tessellation shader compilation");
-
-	// Launch compilation on a separate thread
-	shaderCompileFuture = std::async(std::launch::async, [this]() {
-		// Compile tessellation shaders
-		// Using SPECULAR + FLOWMAP + BLEND_NORMALS as the common water permutation
-		// NUM_SPECULAR_LIGHTS must match what the game's VS uses for correct VS_OUTPUT structure
-		std::vector<std::pair<const char*, const char*>> tessDefines = {
-			{ "HSHADER", "" },
-			{ "UNIFIED_WATER", "" },
-			{ "PBR_WATER", "" },
-			{ "SPECULAR", "" },
-			{ "NUM_SPECULAR_LIGHTS", "0" },
-			{ "FLOWMAP", "" },
-			{ "BLEND_NORMALS", "" },
-			{ "NORMAL_TEXCOORD", "" }
-		};
-
-		bool allSuccess = true;
-
-		if (auto* hullShader = static_cast<ID3D11HullShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", tessDefines, "hs_5_0"))) {
-			waterHullShader.attach(hullShader);
-			logger::debug("[PBR Water] Hull shader compiled successfully");
-		} else {
-			logger::error("[PBR Water] Failed to compile hull shader");
-			allSuccess = false;
-		}
-
-		// Domain shader with same defines but DSHADER instead of HSHADER
-		tessDefines[0] = { "DSHADER", "" };
-
-		if (auto* domainShader = static_cast<ID3D11DomainShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", tessDefines, "ds_5_0"))) {
-			waterDomainShader.attach(domainShader);
-			logger::debug("[PBR Water] Domain shader compiled successfully");
-		} else {
-			logger::error("[PBR Water] Failed to compile domain shader");
-			allSuccess = false;
-		}
-
-		// Geometry shader for proper per-triangle barycentric coordinates (needed for wireframe view)
-		tessDefines[0] = { "GSHADER", "" };
-
-		if (auto* geometryShader = static_cast<ID3D11GeometryShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", tessDefines, "gs_5_0"))) {
-			waterGeometryShader.attach(geometryShader);
-			logger::debug("[PBR Water] Geometry shader compiled successfully");
-		} else {
-			logger::error("[PBR Water] Failed to compile geometry shader");
-			allSuccess = false;
-		}
-
-		tessellationShadersCompiling.store(false);
-		tessellationShadersReady.store(allSuccess);
-
-		if (allSuccess) {
-			logger::info("[PBR Water] Tessellation shaders compiled successfully (async)");
-		} else {
-			logger::warn("[PBR Water] Some tessellation shaders failed to compile");
-		}
-	});
+	// Tessellation shaders will be compiled lazily on first water render
+	// This avoids needing to create a mock BSShader object during early init
 }
 
 void PBRWater::Reset()
@@ -598,11 +520,11 @@ void PBRWater::Reset()
 
 void PBRWater::ClearShaderCache()
 {
-	tessellationShadersReady.store(false);
 	waterHullShader = nullptr;
 	waterDomainShader = nullptr;
 	waterGeometryShader = nullptr;
-	CompileTessellationShadersAsync();
+
+	// Shaders will be recompiled lazily on next water render
 }
 
 void PBRWater::PostPostLoad()
@@ -674,6 +596,55 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 {
 	auto& singleton = globals::features::pbrWater;
 	auto context = globals::d3d::context;
+
+	// Lazy compilation of tessellation shaders on first water render
+	if (!singleton.waterHullShader || !singleton.waterDomainShader || !singleton.waterGeometryShader) {
+		uint32_t descriptor = static_cast<uint32_t>(SIE::ShaderCache::WaterShaderFlags::NormalTexCoord) |
+		                      static_cast<uint32_t>(SIE::ShaderCache::WaterShaderFlags::Flowmap) |
+		                      static_cast<uint32_t>(SIE::ShaderCache::WaterShaderFlags::BlendNormals);
+
+		// Temporarily force synchronous compilation to ensure shaders are available immediately
+		// (GetHullShaderBlob returns nullptr in async mode and queues compilation for later)
+		bool wasAsync = globals::shaderCache->IsAsync();
+		if (wasAsync) {
+			globals::shaderCache->SetAsync(false);
+		}
+
+		if (!singleton.waterHullShader) {
+			if (auto* hullBlob = globals::shaderCache->GetHullShaderBlob(*waterShader, descriptor)) {
+				auto device = globals::d3d::device;
+				ID3D11HullShader* hullShader = nullptr;
+				if (SUCCEEDED(device->CreateHullShader(hullBlob->GetBufferPointer(), hullBlob->GetBufferSize(), nullptr, &hullShader))) {
+					singleton.waterHullShader.attach(hullShader);
+				}
+			}
+		}
+
+		if (!singleton.waterDomainShader) {
+			if (auto* domainBlob = globals::shaderCache->GetDomainShaderBlob(*waterShader, descriptor)) {
+				auto device = globals::d3d::device;
+				ID3D11DomainShader* domainShader = nullptr;
+				if (SUCCEEDED(device->CreateDomainShader(domainBlob->GetBufferPointer(), domainBlob->GetBufferSize(), nullptr, &domainShader))) {
+					singleton.waterDomainShader.attach(domainShader);
+				}
+			}
+		}
+
+		if (!singleton.waterGeometryShader) {
+			if (auto* geometryBlob = globals::shaderCache->GetGeometryShaderBlob(*waterShader, descriptor)) {
+				auto device = globals::d3d::device;
+				ID3D11GeometryShader* geometryShader = nullptr;
+				if (SUCCEEDED(device->CreateGeometryShader(geometryBlob->GetBufferPointer(), geometryBlob->GetBufferSize(), nullptr, &geometryShader))) {
+					singleton.waterGeometryShader.attach(geometryShader);
+				}
+			}
+		}
+
+		// Restore async mode if it was enabled
+		if (wasAsync) {
+			globals::shaderCache->SetAsync(true);
+		}
+	}
 
 	// Clean up any lingering tessellation state from previous passes BEFORE calling func()
 	// This ensures the original SetupGeometry sees a clean non-tessellated pipeline state
@@ -772,7 +743,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 
 		// Set tessellation enabled flag - tells VS to skip wave displacement so DS can handle it
 		bool tessellationEnabled = singleton.settings.tessellation.EnableTessellation &&
-		                           singleton.AreTessellationShadersReady();
+		                           singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader;
 		perFrameData.TessellationEnabled = tessellationEnabled ? 1.0f : 0.0f;
 		perFrameData.WaveFadeStart = singleton.settings.waves.WaveFadeStart;
 		perFrameData.WaveFadeEnd = singleton.settings.waves.WaveFadeEnd;
@@ -1077,7 +1048,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	bool techniqueSupportsTessel = (technique < 8);
 
 	bool tessellationEnabled = singleton.settings.tessellation.EnableTessellation &&
-	                           singleton.AreTessellationShadersReady() &&
+	                           singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
 	                           techniqueSupportsTessel;
 
 	static bool loggedTessSetup = false;
@@ -1118,7 +1089,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	// Track if we need to bind just the geometry shader (for tri visualizer without tessellation)
 	bool geometryShaderOnlyForVisualizer = !tessellationEnabled &&
 	                                        singleton.settings.general.ShowWireframe &&
-	                                        singleton.AreTessellationShadersReady() &&
+	                                        singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
 	                                        techniqueSupportsTessel;
 
 	if (tessellationEnabled) {
@@ -1251,7 +1222,8 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 			logger::info("[PBR Water] Wireframe view active - binding GS only (no tessellation): {:p}", (void*)singleton.waterGeometryShader.get());
 			loggedGSOnly = true;
 		}
-	} else if (!loggedTessSetup && singleton.settings.tessellation.EnableTessellation) {
+	} else if (!loggedTessSetup && singleton.settings.tessellation.EnableTessellation &&
+	           singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader) {
 		logger::warn("[PBR Water] Tessellation enabled in settings but shaders missing - HS:{:p} DS:{:p} GS:{:p}",
 			(void*)singleton.waterHullShader.get(), (void*)singleton.waterDomainShader.get(), (void*)singleton.waterGeometryShader.get());
 		loggedTessSetup = true;
