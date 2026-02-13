@@ -617,6 +617,19 @@ namespace Hooks
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	struct CreateRenderTarget_MainCopy
+	{
+		static void thunk(RE::BSGraphics::Renderer* This, RE::RENDER_TARGETS::RENDER_TARGET a_target, RE::BSGraphics::RenderTargetProperties* a_properties)
+		{
+			globals::state->ModifyRenderTarget(a_target, a_properties);
+			// Upgrade kMAIN_COPY to match kMAIN's HDR format
+			a_properties->format = RE::BSGraphics::Format::kR16G16B16A16_FLOAT;
+			logger::info("HDR: Upgrading kMAIN_COPY render target to R16G16B16A16_FLOAT");
+			func(This, a_target, a_properties);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	struct CreateRenderTarget_Normals
 	{
 		static void thunk(RE::BSGraphics::Renderer* This, RE::RENDER_TARGETS::RENDER_TARGET a_target, RE::BSGraphics::RenderTargetProperties* a_properties)
@@ -1002,6 +1015,8 @@ namespace Hooks
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");
 		stl::write_thunk_call<CreateRenderTarget_Main>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x3F0, 0x3F3, 0x548));
+		// kMAIN_COPY hook - offsets estimated based on spacing pattern (may need adjustment)
+		stl::write_thunk_call<CreateRenderTarget_MainCopy>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x403, 0x406, 0x560));
 		stl::write_thunk_call<CreateRenderTarget_Normals>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x458, 0x45B, 0x5B0));
 		stl::write_thunk_call<CreateRenderTarget_NormalsSwap>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x46B, 0x46E, 0x5C3));
 		stl::write_thunk_call<CreateRenderTarget_MotionVectors>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x4F0, 0x4EF, 0x64E));
