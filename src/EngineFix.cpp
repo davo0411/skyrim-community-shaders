@@ -1,13 +1,16 @@
 ﻿#include "EngineFix.h"
 
+#include "EngineFixes/ShadowLightLimitFix.h"
 #include "EngineFixes/ShadowmapCascadeCullingFix.h"
 
 const std::vector<EngineFix*>& EngineFix::GetOnPostPostLoadFixesList()
 {
 	static ShadowmapCascadeCullingFix shadowmapCascadeCullingFix;
+	static ShadowLightLimitFix shadowLightLimitFix;
 
 	static std::vector<EngineFix*> fixes = {
-		&shadowmapCascadeCullingFix
+		&shadowmapCascadeCullingFix,
+		&shadowLightLimitFix
 	};
 
 	return fixes;
