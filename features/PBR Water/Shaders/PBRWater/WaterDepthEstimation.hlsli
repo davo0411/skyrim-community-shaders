@@ -218,31 +218,67 @@ float3 VisualizeDepthEstimation(DepthEstimationDebug debugInfo)
 }
 
 /**
- * Multi-sample depth estimation with filtering for more stable results
- * Samples depth at multiple points around the query position and averages
- * This reduces noise from terrain geometry edges
+ * Computes the shore direction by sampling terrain height gradient.
+ * Shore direction points from deep water toward shallow water (toward the shore).
+ * Also returns shore distance (water depth) and gradient magnitude.
  *
- * @param waterWorldPos Absolute world position of water surface
+ * @param waterWorldPos Absolute world XYZ position of water surface
  * @param scaleXY Terrain heightmap scale
  * @param offsetXY Terrain heightmap offset
  * @param zRangeMin Minimum Z value
  * @param zRangeMax Maximum Z value
- * @param sampleRadius Radius in world units to sample (default 64 units)
- * @return Averaged water depth estimate
+ * @param outShoreDir Normalized 2D direction toward shore (XY plane)
+ * @param outGradientMag Magnitude of the depth gradient (higher = steeper shore)
+ * @return Water depth at the center position
  */
-float EstimateWaterDepthFiltered(float3 waterWorldPos, float2 scaleXY, float2 offsetXY, float zRangeMin, float zRangeMax, float sampleRadius = 64.0f)
+float ComputeShoreDirection(
+	float3 waterWorldPos,
+	float2 scaleXY, float2 offsetXY,
+	float zRangeMin, float zRangeMax,
+	out float2 outShoreDir,
+	out float outGradientMag)
 {
-	// just center sample for now
+	outShoreDir = float2(0.0f, 0.0f);
+	outGradientMag = 0.0f;
+
+#if !defined(VSHADER) && !defined(DSHADER)
+	return 1e5f;
+#else
+	// Sample center depth
 	float centerDepth = EstimateWaterDepthFromTerrain(waterWorldPos, scaleXY, offsetXY, zRangeMin, zRangeMax);
 
-	// Can add more samples here later if needed
-	// float3 offset1 = waterWorldPos + float3(sampleRadius, 0, 0);
-	// float3 offset2 = waterWorldPos + float3(0, sampleRadius, 0);
-	// float3 offset3 = waterWorldPos + float3(-sampleRadius, 0, 0);
-	// float3 offset4 = waterWorldPos + float3(0, -sampleRadius, 0);
-	// Average valid samples
+	if (centerDepth >= 1e4f) {
+		return centerDepth;  // No valid heightmap data
+	}
+
+	// Sample terrain height at +X and +Y offsets to compute gradient
+	// Use a moderate offset for stable gradient estimation
+	const float sampleOffset = 128.0f;  // game units (~1.8m)
+
+	float heightCenter = SampleTerrainHeight(waterWorldPos.xy, scaleXY, offsetXY, zRangeMin, zRangeMax);
+	float heightPosX = SampleTerrainHeight(waterWorldPos.xy + float2(sampleOffset, 0.0f), scaleXY, offsetXY, zRangeMin, zRangeMax);
+	float heightPosY = SampleTerrainHeight(waterWorldPos.xy + float2(0.0f, sampleOffset), scaleXY, offsetXY, zRangeMin, zRangeMax);
+
+	// Check validity - if any sample is invalid, fall back to no gradient
+	if (heightCenter < -1e5f || heightPosX < -1e5f || heightPosY < -1e5f) {
+		return centerDepth;
+	}
+
+	// Terrain gradient: positive gradient means terrain rises in that direction
+	// Shore direction = toward rising terrain = toward shallower water
+	float2 terrainGrad = float2(
+		(heightPosX - heightCenter) / sampleOffset,
+		(heightPosY - heightCenter) / sampleOffset
+	);
+
+	outGradientMag = length(terrainGrad);
+
+	if (outGradientMag > 0.001f) {
+		outShoreDir = terrainGrad / outGradientMag;  // Normalized direction toward shore
+	}
 
 	return centerDepth;
+#endif
 }
 
 #endif // __WATER_DEPTH_ESTIMATION_HLSLI__

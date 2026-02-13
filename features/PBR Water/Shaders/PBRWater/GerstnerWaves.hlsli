@@ -437,64 +437,97 @@ CellWaveData BlendCellWaves(
 }
 
 // ============================================================================
-// DEPTH-BASED WAVE MODULATION HELPERS
+// SHORE WAVE GENERATION
 // ============================================================================
+// Generates simple shore-directed Gerstner waves that grow as water gets
+// shallower, replacing the deep-water cell waves which are attenuated.
+// Shore direction comes from terrain heightmap gradient sampling.
 
-// Calculate shallow water amplitude reduction factor
-// Prevents large waves in shallow rivers/streams
-float CalculateShallowWaterFactor(float waterDepth)
+struct ShoreWaveResult
 {
-	if (ShallowWaveDepthMax <= ShallowWaveDepthMin) {
-		return 1.0f;  // Disabled if range invalid
-	}
-	
-	// Shallow water: reduce amplitude progressively
-	// waterDepth < Min: very shallow, waves heavily reduced
-	// waterDepth > Max: deep water, full wave amplitude
-	float depthFactor = saturate((waterDepth - ShallowWaveDepthMin) / 
-	                             max(ShallowWaveDepthMax - ShallowWaveDepthMin, 0.01f));
-	
-	// Use smoothstep for natural transition
-	depthFactor = depthFactor * depthFactor * (3.0f - 2.0f * depthFactor);
-	
-	// Minimum wave amplitude in shallow water (10% of full)
-	// Even very shallow water should have subtle ripples
-	return lerp(0.1f, 1.0f, depthFactor);
-}
+	float3 displacement;
+	float3 tangentAccum;
+	float3 binormalAccum;
+};
 
-// Calculate shore-directed wave influence based on depth gradient
-// Returns: influence factor (0-1) and shore direction (normalized)
-float2 CalculateShoreWaveInfluence(float waterDepth, float2 worldPos, out float2 shoreDirection)
+ShoreWaveResult EvaluateShoreWaves(
+	float2 worldPos,
+	float2 shoreDir,      // Normalized direction toward shore
+	float shoreInfluence,  // 0..1 (0 = deep, 1 = very shallow)
+	float depthGameUnits,  // Water depth in game units
+	float timeSeconds,
+	float amplitudeMult,
+	float steepnessMult
+)
 {
-	shoreDirection = float2(0.0f, 0.0f);
-	
-	// Only apply shore waves in shallow transitional zone
-	if (waterDepth >= ShoreWaveDepthThreshold || ShoreWaveStrength <= 0.001f) {
-		return float2(0.0f, 0.0f);  // Too deep or disabled
+	ShoreWaveResult result;
+	result.displacement = float3(0, 0, 0);
+	result.tangentAccum = float3(0, 0, 0);
+	result.binormalAccum = float3(0, 0, 0);
+
+	if (shoreInfluence < 0.01f) {
+		return result;
 	}
-	
-	// Calculate influence based on depth
-	// Strongest at depth=0 (shore), fades to 0 at threshold
-	float depthNormalized = saturate(waterDepth / max(ShoreWaveDepthThreshold, 0.01f));
-	float shoreInfluence = (1.0f - depthNormalized) * ShoreWaveStrength;
-	
-	// Use smoothstep for natural falloff
-	shoreInfluence = shoreInfluence * shoreInfluence * (3.0f - 2.0f * shoreInfluence);
-	
-	// Estimate shore direction from depth gradient
-	// Sample nearby points to determine depth gradient
-	float sampleDist = 50.0f;  // Distance for gradient sampling (in game units)
-	
-	// Sample depth at cardinal directions (simplified - in practice you'd sample actual depth)
-	// For now, we'll use a heuristic: waves flow toward shallower water
-	// This is approximate since we don't have a depth map, but creates reasonable behavior
-	
-	// Use world position to create pseudo-gradient toward zero depth
-	// This creates waves that generally flow toward shores/banks
-	float2 gradientDir = normalize(worldPos - floor(worldPos / 5000.0f) * 5000.0f);
-	shoreDirection = -gradientDir;  // Waves flow opposite to depth increase
-	
-	return float2(shoreInfluence, 0.0f);
+
+	// Shore wave parameters: 3 waves with decreasing wavelength
+	// Wavelengths shorten in shallow water (real physics: wavelength ~ sqrt(depth))
+	// Keep them modest to look like lapping shore waves
+	float depthM = depthGameUnits / M_TO_GAME_UNIT;
+	float depthFactor = saturate(depthM / 5.0f);  // 0 at shore, 1 at ~5m depth
+
+	// Shore waves: travel toward shore with slight angular spread
+	float baseAngle = atan2(shoreDir.y, shoreDir.x);
+	float gravityGame = UW_GRAVITY * M_TO_GAME_UNIT;
+
+	// 3 shore wave components with different scales
+	static const float wavelengthsM[3] = { 8.0f, 4.0f, 2.0f };
+	static const float amplitudesM[3] = { 0.15f, 0.08f, 0.03f };
+	static const float angleOffsets[3] = { 0.0f, 0.25f, -0.3f };
+
+	[unroll]
+	for (int w = 0; w < 3; w++) {
+		float angle = baseAngle + angleOffsets[w];
+		float2 dir = float2(cos(angle), sin(angle));
+
+		float wavelengthGame = wavelengthsM[w] * M_TO_GAME_UNIT;
+		// Amplitude grows as depth decreases (waves shoal)
+		// But cap at very shallow to avoid clipping through terrain
+		float shoalFactor = lerp(1.0f, 0.3f, depthFactor);  // Stronger near shore
+		float ampGame = amplitudesM[w] * M_TO_GAME_UNIT * amplitudeMult * shoalFactor * shoreInfluence;
+
+		float k = UW_TWO_PI / wavelengthGame;
+		float omega = sqrt(gravityGame * k);
+
+		float phase = k * dot(dir, worldPos) - omega * timeSeconds;
+		float sinP, cosP;
+		sincos(phase, sinP, cosP);
+
+		float steepness = 0.4f * steepnessMult;
+		float QA = steepness * ampGame;
+
+		result.displacement.x += dir.x * QA * cosP;
+		result.displacement.y += dir.y * QA * cosP;
+		result.displacement.z += ampGame * sinP;
+
+		float kA = k * ampGame;
+		float QkA = steepness * kA;
+
+		float DxDxQkAsin = dir.x * dir.x * QkA * sinP;
+		float DxDyQkAsin = dir.x * dir.y * QkA * sinP;
+		float DyDyQkAsin = dir.y * dir.y * QkA * sinP;
+		float DxkAcos = dir.x * kA * cosP;
+		float DykAcos = dir.y * kA * cosP;
+
+		result.tangentAccum.x += DxDxQkAsin;
+		result.tangentAccum.y += DxDyQkAsin;
+		result.tangentAccum.z += DxkAcos;
+
+		result.binormalAccum.x += DxDyQkAsin;
+		result.binormalAccum.y += DyDyQkAsin;
+		result.binormalAccum.z += DykAcos;
+	}
+
+	return result;
 }
 
 // ============================================================================
@@ -515,7 +548,9 @@ WaveSample CalculateWaterDisplacement(
 	float flowBiasWeight,
 	bool usePreviousFrame,
 	float cameraDistance = 0.0f,
-	float waterDepth = 1e5f  // Water depth in game units (default = very deep)
+	float waterDepth = 1e5f,  // Water depth in game units (default = very deep)
+	float2 shoreDirection = float2(0.0f, 0.0f),  // Normalized dir toward shore from terrain gradient
+	float shoreGradientMag = 0.0f  // Magnitude of terrain gradient (0 = flat/no shore)
 )
 {
 	WaveSample result;
@@ -540,46 +575,43 @@ WaveSample CalculateWaterDisplacement(
 		}
 	}
 	
-	// DEPTH-BASED WAVE ATTENUATION SYSTEM
-	// Uses configurable min/max depth thresholds from UI settings
-	// waterDepth should be provided by caller (from depth buffer sampling)
-	// Falls back to deep water if depth is not available (waterDepth > 1e4)
+	// DEPTH-BASED WAVE CROSSFADE SYSTEM
+	// Instead of killing waves in shallow water, crossfade from deep-water cell waves
+	// to simpler shore-directed waves. This ensures continuous wave coverage from
+	// deep water all the way to the shoreline.
+	//
+	// depthBlend: 0 = at shore (all shore waves), 1 = deep water (all cell waves)
+	// shoreInfluence: 1 - depthBlend, passed to PS for normal blend reduction
 	
-	float depthAttenuationFactor = 1.0f;
+	float depthBlend = 1.0f;
+	float shoreWaveInfluence = 0.0f;
+	bool hasShoreData = false;
 	
-	// Only apply depth attenuation if we have valid depth data
-	if (waterDepth < 1e4f) {
-		// Calculate attenuation based on ShallowWaveDepthMin and ShallowWaveDepthMax
-		// ShallowWaveDepthMin: depth where waves start reducing (e.g., 50 = ~0.7m)
-		// ShallowWaveDepthMax: depth where waves reach full strength (e.g., 500 = ~7m)
+	// Only apply depth crossfade if we have valid depth data
+	if (waterDepth < 1e4f && ShallowWaveDepthMax > ShallowWaveDepthMin) {
+		// Map depth to [0,1] using min/max thresholds
+		// ShallowWaveDepthMin (~50 game units / ~0.7m): shore waves at full strength
+		// ShallowWaveDepthMax (~500 game units / ~7m): cell waves at full strength
+		float depthNormalized = (waterDepth - ShallowWaveDepthMin) / 
+		                        max(ShallowWaveDepthMax - ShallowWaveDepthMin, 1.0f);
+		depthBlend = saturate(depthNormalized);
+		depthBlend = depthBlend * depthBlend * (3.0f - 2.0f * depthBlend);  // smoothstep
 		
-		if (ShallowWaveDepthMax > ShallowWaveDepthMin) {
-			// Map depth to [0,1] range using min/max thresholds
-			float depthNormalized = (waterDepth - ShallowWaveDepthMin) / 
-			                        max(ShallowWaveDepthMax - ShallowWaveDepthMin, 1.0f);
-			
-			// Clamp and smooth the transition
-			depthAttenuationFactor = saturate(depthNormalized);
-			
-			// Apply smoothstep for natural falloff
-			// Smoothstep formula: t² * (3 - 2t)
-			depthAttenuationFactor = depthAttenuationFactor * depthAttenuationFactor * 
-			                         (3.0f - 2.0f * depthAttenuationFactor);
-			
-			// Calculate shore influence for effects that need it
-			// High shore influence (close to 1.0) means very shallow water
-			result.shoreInfluence = 1.0f - depthAttenuationFactor;
-			
-			// Early exit if waves are completely suppressed
-			if (depthAttenuationFactor < 0.001f) {
-				return result;  // Water too shallow for any waves
-			}
+		// Shore influence: high near shore, zero in deep water
+		shoreWaveInfluence = (1.0f - depthBlend) * ShoreWaveStrength;
+		result.shoreInfluence = shoreWaveInfluence;
+		
+		// Check if we have valid shore direction from terrain gradient
+		hasShoreData = (shoreGradientMag > 0.001f && shoreWaveInfluence > 0.01f);
+		
+		// Early exit only if completely dry (negative depth / terrain above water)
+		if (waterDepth <= 0.0f) {
+			return result;
 		}
 	}
 	
-	// Apply depth attenuation to wave intensity
-	// This reduces wave amplitude in shallow water while maintaining full strength in deep water
-	float globalAmplitude = waveIntensity * amplitudeMult * distanceFade * depthAttenuationFactor;
+	// Deep water cell waves: amplitude scaled by depthBlend (fades in shallow water)
+	float deepWaveAmplitude = waveIntensity * amplitudeMult * distanceFade * depthBlend;
 	
 	float userWavelengths[6] = {
 		max(Wave1Wavelength, 1.0f),
@@ -626,7 +658,7 @@ WaveSample CalculateWaterDisplacement(
 		float wavelengthM = userWavelengths[oct];
 		float cellSizeGame = wavelengthM * M_TO_GAME_UNIT * 6.0f;  // Slightly smaller cells for more variation
 		
-		float octaveAmp = userAmplitudes[oct] * globalAmplitude;
+		float octaveAmp = userAmplitudes[oct] * deepWaveAmplitude;
 		float octaveSteep = userSteepness[oct] * steepnessMult;
 		float octaveSpeed = speedMult;
 		
@@ -656,6 +688,27 @@ WaveSample CalculateWaterDisplacement(
 		}
 	}
 	
+	// Blend in shore-directed waves when near shoreline
+	if (hasShoreData) {
+		float shoreAmpMult = waveIntensity * amplitudeMult * distanceFade;
+		ShoreWaveResult shoreWaves = EvaluateShoreWaves(
+			worldPos,
+			shoreDirection,
+			shoreWaveInfluence,
+			waterDepth,
+			timeSeconds,
+			shoreAmpMult,
+			steepnessMult
+		);
+
+		totalDisp += shoreWaves.displacement;
+		totalTangent += shoreWaves.tangentAccum;
+		totalBinormal += shoreWaves.binormalAccum;
+		// Shore waves are low-frequency enough to contribute to geometric normal
+		geoTangent += shoreWaves.tangentAccum;
+		geoBinormal += shoreWaves.binormalAccum;
+	}
+
 	// Clamp tangent/binormal perturbations to prevent extreme deformation
 	// This prevents triangular artifacts on steep waves while preserving detail
 	const float maxTangentPerturbation = 0.8f;  // Allows up to 80% perturbation

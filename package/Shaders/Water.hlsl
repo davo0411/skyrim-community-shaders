@@ -262,21 +262,30 @@ VS_OUTPUT main(VS_INPUT input)
 	if (TessellationEnabled < 0.5f) {
 		float cameraDistVS = length(worldPosBase.xyz);
 
-		// Estimate water depth from terrain heightmap
+		// Estimate water depth and shore direction from terrain heightmap
 		float3 absoluteWorldPos = worldPosBase.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
-		estimatedDepth = EstimateWaterDepthFromTerrain(
+		float2 shoreDirVS = float2(0.0f, 0.0f);
+		float shoreGradVS = 0.0f;
+		estimatedDepth = ComputeShoreDirection(
 			absoluteWorldPos,
 			float2(TerrainScaleX, TerrainScaleY),
 			float2(TerrainOffsetX, TerrainOffsetY),
 			TerrainZRangeMin,
 			TerrainZRangeMax,
-			depthDebug
+			shoreDirVS,
+			shoreGradVS
 		);
+
+		// Fill debug info from depth
+		depthDebug.depth = estimatedDepth;
+		depthDebug.debugCode = (estimatedDepth >= 1e4f) ? 1.0f : 0.0f;
+		depthDebug.terrainZ = absoluteWorldPos.z - estimatedDepth;
+		depthDebug.waterZ = absoluteWorldPos.z;
 
 		WaveSample currentWave = CalculateWaterDisplacement(waveWorldPos,
 			float2(0.0f, 0.0f), float2(0.0f, 0.0f), WaveIntensity, WaveAmplitude, WaveSpeed,
 			WaveSteepness, waveTimeSeconds, waveDayPhase, flowBiasDirVS, flowBiasWeightVS, false,
-			cameraDistVS, estimatedDepth);
+			cameraDistVS, estimatedDepth, shoreDirVS, shoreGradVS);
 		waveDisplacement = currentWave.displacement;
 		waveNormal = currentWave.normal;
 		wavePrimaryDir = currentWave.primaryDirection;
@@ -1137,26 +1146,37 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	float3 waveNormalGeom = input.UnifiedWaveNormal.xyz;
 	float waveNormalLen = length(waveNormalGeom);
 
+	// Shore influence: reduces texture normal, boosts wave geometric normal
+	// This makes shore-directed wave normals more visible near the shoreline
+	float shoreInfluence = input.UnifiedWaveInfo.w;  // 0 = deep water, 1 = at shore
+
 	// Save the texture-based normal before wave blending for diffuse calculations
-	float3 textureNormal = finalNormal;
+	// Reduce texture normal strength near shore so wave shape dominates
+	float textureNormalScale = lerp(1.0f, 0.2f, shoreInfluence);
+	float3 textureNormal = normalize(float3(finalNormal.xy * textureNormalScale, finalNormal.z));
+	finalNormal = textureNormal;
 
 	if (waveNormalLen > 0.01f && WaveIntensity > 0.01f) {
 		waveNormalGeom = normalize(waveNormalGeom);
 		// Use UDN blending to combine texture normals with geometric wave normals
+		// Boost wave normal strength near shore for more prominent wave shapes
+		float waveNormalBoost = lerp(1.0f, 1.5f, shoreInfluence);
 		float3 waveNormalTangent = float3(waveNormalGeom.xy, waveNormalGeom.z);
 		finalNormal = normalize(float3(
-			finalNormal.xy + waveNormalTangent.xy * WaveIntensity,
+			finalNormal.xy + waveNormalTangent.xy * WaveIntensity * waveNormalBoost,
 			finalNormal.z * waveNormalTangent.z
 		));
 	}
 
 	// Create a softer "diffuse normal" that has reduced wave influence
+	// Near shore, reduce dampening so wave lighting is more visible
 	float3 diffuseNormalResult = textureNormal;
 	if (waveNormalLen > 0.01f && WaveIntensity > 0.01f) {
-		float diffuseDampening = 0.35f;
+		float diffuseDampening = lerp(0.35f, 0.7f, shoreInfluence);
+		float diffuseBlend = lerp(0.5f, 0.8f, shoreInfluence);
 		float3 dampenedWaveNormal = normalize(float3(waveNormalGeom.xy * diffuseDampening, waveNormalGeom.z));
 		diffuseNormalResult = normalize(float3(
-			textureNormal.xy + dampenedWaveNormal.xy * WaveIntensity * 0.5f,
+			textureNormal.xy + dampenedWaveNormal.xy * WaveIntensity * diffuseBlend,
 			textureNormal.z * dampenedWaveNormal.z
 		));
 	}

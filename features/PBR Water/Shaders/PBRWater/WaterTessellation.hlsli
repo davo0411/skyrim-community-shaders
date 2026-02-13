@@ -263,16 +263,25 @@ VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const Out
 
 	float cameraDistDS = length(interpWPosition.xyz);
 
-	// Estimate water depth from terrain heightmap
+	// Estimate water depth and shore direction from terrain heightmap
 	float3 absoluteWorldPos = interpWPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	DepthEstimationDebug depthDebug;
-	float estimatedDepthDS = EstimateWaterDepthFromTerrain(
+	float2 shoreDirDS = float2(0.0f, 0.0f);
+	float shoreGradDS = 0.0f;
+	float estimatedDepthDS = ComputeShoreDirection(
 		absoluteWorldPos,
 		float2(TerrainScaleX, TerrainScaleY),
 		float2(TerrainOffsetX, TerrainOffsetY),
 		TerrainZRangeMin,
 		TerrainZRangeMax,
-		depthDebug);
+		shoreDirDS,
+		shoreGradDS);
+	
+	// Fill debug info
+	depthDebug.depth = estimatedDepthDS;
+	depthDebug.debugCode = (estimatedDepthDS >= 1e4f) ? 1.0f : 0.0f;
+	depthDebug.terrainZ = absoluteWorldPos.z - estimatedDepthDS;
+	depthDebug.waterZ = absoluteWorldPos.z;
 
 	WaveSample waveSample = CalculateWaterDisplacement(
 		waveWorldPos,
@@ -288,7 +297,9 @@ VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const Out
 		0.0f,
 		false,
 		cameraDistDS,
-		estimatedDepthDS);
+		estimatedDepthDS,
+		shoreDirDS,
+		shoreGradDS);
 
 	output.DepthDebug = float4(depthDebug.depth, depthDebug.debugCode, depthDebug.terrainZ, depthDebug.waterZ);
 
