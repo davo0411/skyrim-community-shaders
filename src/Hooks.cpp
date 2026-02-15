@@ -248,6 +248,26 @@ namespace GrassExtensions
 	};
 }
 
+// Hooks ISTemporalAA_UI's Render and Dispatch vfuncs to skip the pass when HDR Display is loaded.
+// The vanilla shader has hardcoded saturate on output which clamps values to [0,1],
+// destroying HDR data. Hooks both vtable paths (pixel shader Render and compute Dispatch)
+// to ensure the pass is skipped regardless of how the engine dispatches the shader.
+struct HDR_ISTemporalAA_UI_RenderSkip
+{
+	static void thunk(void*, RE::BSTriShape*, RE::ImageSpaceEffectParam*)
+	{
+	}
+	static inline REL::Relocation<decltype(thunk)> func;
+};
+
+struct HDR_ISTemporalAA_UI_DispatchSkip
+{
+	static void thunk(void*, uint32_t, uint32_t, uint32_t)
+	{
+	}
+	static inline REL::Relocation<decltype(thunk)> func;
+};
+
 // HDR hooks - installed when Upscaling is NOT loaded but HDR Display IS loaded.
 // These replicate the critical hooks from Upscaling::PostPostLoad that the HDR pipeline depends on:
 // - Main_PostProcessing: wraps ISHDR with RedirectFramebuffer/RestoreFramebuffer so HDR values
@@ -262,20 +282,7 @@ struct HDR_Main_PostProcessing
 		if (hdr)
 			hdr->RedirectFramebuffer();
 
-		// ISTemporalAA_UI runs post-tonemapping on kFRAMEBUFFER and clamps to SDR range.
-		// When HDR is active, skip this pass to preserve HDR values >1.0.
-		auto imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
-		GET_INSTANCE_MEMBER(BSImagespaceShaderISTemporalAA, imageSpaceManager);
-		RE::BSImagespaceShader* savedUITAA = nullptr;
-		if (hdr && BSImagespaceShaderISTemporalAA->taaEnabled) {
-			savedUITAA = BSImagespaceShaderISTemporalAA->BSImagespaceShaderISTemporalAA_UI;
-			BSImagespaceShaderISTemporalAA->BSImagespaceShaderISTemporalAA_UI = nullptr;
-		}
-
 		func(a_this, a3, a_target, a_4, a_5);
-
-		if (savedUITAA)
-			BSImagespaceShaderISTemporalAA->BSImagespaceShaderISTemporalAA_UI = savedUITAA;
 
 		if (hdr)
 			hdr->RestoreFramebuffer();
@@ -1080,6 +1087,12 @@ namespace Hooks
 			logger::info("Installing HDR pipeline hooks (Upscaling not loaded)");
 			stl::detour_thunk<HDR_MenuManagerDrawInterfaceStartHook>(REL::RelocationID(79947, 82084));
 			stl::write_thunk_call<HDR_Main_PostProcessing>(REL::RelocationID(100430, 107148).address() + REL::Relocate(0x1F0, 0x1E7, 0x206));
+		}
+
+		if (globals::features::hdrDisplay.loaded) {
+			logger::info("Installing ISTemporalAA_UI skip for HDR (Render + Dispatch)");
+			stl::write_vfunc<0x1, HDR_ISTemporalAA_UI_RenderSkip>(RE::VTABLE_BSImagespaceShaderISTemporalAA_UI[3]);
+			stl::write_vfunc<0xC, HDR_ISTemporalAA_UI_DispatchSkip>(RE::VTABLE_BSImagespaceShaderISTemporalAA_UI[0]);
 		}
 	}
 

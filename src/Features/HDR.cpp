@@ -514,11 +514,6 @@ void HDR::SetupResources()
 	auto renderer = globals::game::renderer;
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
-	if (!main.texture || !main.SRV || !main.UAV) {
-		logger::error("[HDR] kMAIN render target not fully initialized - cannot setup HDR resources");
-		return;
-	}
-
 	D3D11_TEXTURE2D_DESC texDesc{};
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
@@ -925,6 +920,8 @@ void HDR::UpgradeLDRRenderTargets()
 		RE::RENDER_TARGETS::kLDR_BLURSWAP,
 		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY,
 		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY2,
+		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
+		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
 	};
 
 	for (auto targetId : ldrTargets) {

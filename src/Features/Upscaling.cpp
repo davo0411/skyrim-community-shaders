@@ -1838,18 +1838,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	if (hdr)
 		hdr->RedirectFramebuffer();
 
-	// ISTemporalAA_UI runs post-tonemapping on kFRAMEBUFFER and clamps to SDR range.
-	// When HDR is active, skip this pass to preserve HDR values >1.0.
-	RE::BSImagespaceShader* savedUITAA = nullptr;
-	if (hdr && BSImagespaceShaderISTemporalAA->taaEnabled) {
-		savedUITAA = BSImagespaceShaderISTemporalAA->BSImagespaceShaderISTemporalAA_UI;
-		BSImagespaceShaderISTemporalAA->BSImagespaceShaderISTemporalAA_UI = nullptr;
-	}
-
 	func(a_this, a3, a_target, a_4, a_5);
-
-	if (savedUITAA)
-		BSImagespaceShaderISTemporalAA->BSImagespaceShaderISTemporalAA_UI = savedUITAA;
 
 	// Restore kFRAMEBUFFER after ISHDR — hdrTexture now has the HDR scene
 	if (hdr)
