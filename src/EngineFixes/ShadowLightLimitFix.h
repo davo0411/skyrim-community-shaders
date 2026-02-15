@@ -36,6 +36,12 @@
 ///
 struct ShadowLightLimitFix : EngineFix
 {
+	static ShadowLightLimitFix* GetSingleton()
+	{
+		static ShadowLightLimitFix singleton;
+		return &singleton;
+	}
+
 	std::string GetName() override { return "Shadow Light Limit Fix"; }
 
 	void Install() override;
@@ -52,11 +58,16 @@ struct ShadowLightLimitFix : EngineFix
 
 	/// Texture2DArray: screenW × screenH × kMaxShadowLights slices.
 	/// Each slice stores one shadow light's shadow factor (R8_UNORM).
-	/// Slices 0–3 are populated by copying from the vanilla RGBA shadow mask.
 	/// Slices 4+ are written directly by our extended shadow mask passes.
 	winrt::com_ptr<ID3D11Texture2D> shadowMaskArray;
 	winrt::com_ptr<ID3D11ShaderResourceView> shadowMaskArraySRV;
 	winrt::com_ptr<ID3D11RenderTargetView> shadowMaskSliceRTVs[kMaxShadowLights];
+
+	/// Saved render target to restore after an extended shadow mask pass.
+	ID3D11RenderTargetView* savedRT = nullptr;
+	ID3D11DepthStencilView* savedDSV = nullptr;
+
+	bool resourcesSetup = false;
 
 	// =========================================================================
 	// Extended Shadow Light Tracking
@@ -76,6 +87,30 @@ struct ShadowLightLimitFix : EngineFix
 	uint32_t extendedShadowCount = 0;
 
 	// =========================================================================
+	// Shadow Mask Phase Tracking
+	// =========================================================================
+
+	/// Number of lights in shadowLightsAccum before we added our extended ones.
+	/// Used to detect which shadow mask draws are for extended lights.
+	uint32_t vanillaAccumCount = 0;
+
+	/// Per-frame counter tracking which shadow mask draw call we're on
+	/// (point/spot lights only — directional is always vanilla slot 0).
+	uint32_t shadowMaskPointDrawIndex = 0;
+
+	/// True if we're currently rendering to an extended slice (need to restore).
+	bool currentlyRedirected = false;
+
+	/// Pre-created blend state that writes to R channel only.
+	/// Used when rendering shadow masks to our R8_UNORM extended slices.
+	winrt::com_ptr<ID3D11BlendState> shadowMaskWriteBlendState;
+
+	/// Saved blend state to restore after extended shadow mask pass.
+	ID3D11BlendState* savedBlendState = nullptr;
+	float savedBlendFactor[4] = {};
+	UINT savedSampleMask = 0xFFFFFFFF;
+
+	// =========================================================================
 	// Methods
 	// =========================================================================
 
@@ -87,15 +122,28 @@ struct ShadowLightLimitFix : EngineFix
 	/// calls Accumulate() + Render() to generate their shadow maps.
 	void AccumulateAndRenderExtendedLights();
 
-	/// Called during the shadow mask phase.
+	/// Called during the shadow mask phase (from State::Draw).
 	/// For maskIndex >= 4, redirects the BSUtilityShader output to our
 	/// Texture2DArray slices instead of the vanilla RGBA shadow mask.
 	void BeginExtendedShadowMaskPass(uint32_t maskIndex);
 	void EndExtendedShadowMaskPass(uint32_t maskIndex);
+
+	/// Called from State::Draw for each shadow mask draw call.
+	/// Detects whether the current draw is for an extended light and redirects RT.
+	void HandleShadowMaskDraw(uint32_t pixelDescriptor);
+
+	/// Restores RT/blend state if we redirected in a previous draw call.
+	void RestorePreviousRedirect();
+
+	/// Called at frame end (from State::Reset) to reset per-frame tracking.
+	void ResetFrameState();
 
 	/// Clears extended shadow mask slices to 1.0 (fully lit) before rendering.
 	void ClearExtendedSlices();
 
 	/// Binds the extended shadow mask SRV (t48) for lighting shaders.
 	void BindExtendedShadowMaskSRV();
+
+	/// Returns true if any extended shadow lights were rendered this frame.
+	bool HasExtendedShadows() const { return extendedShadowCount > 0; }
 };

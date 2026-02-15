@@ -6,11 +6,10 @@
 const std::vector<EngineFix*>& EngineFix::GetOnPostPostLoadFixesList()
 {
 	static ShadowmapCascadeCullingFix shadowmapCascadeCullingFix;
-	static ShadowLightLimitFix shadowLightLimitFix;
 
 	static std::vector<EngineFix*> fixes = {
 		&shadowmapCascadeCullingFix,
-		&shadowLightLimitFix
+		ShadowLightLimitFix::GetSingleton()
 	};
 
 	return fixes;

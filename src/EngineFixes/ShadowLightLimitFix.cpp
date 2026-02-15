@@ -1,5 +1,6 @@
 #include "ShadowLightLimitFix.h"
 
+#include "ShaderCache.h"
 #include "State.h"
 
 // =============================================================================
@@ -24,11 +25,6 @@ void ShadowLightLimitFix::SetupResources()
 	}
 
 	// Create extended shadow mask Texture2DArray
-	//
-	// Format: R8_UNORM — shadow factor is a scalar 0.0–1.0 occlusion value.
-	// Memory: width × height × kMaxShadowLights bytes
-	//   At 1920×1080 × 8 slices = ~16 MB
-
 	D3D11_TEXTURE2D_DESC texDesc{};
 	texDesc.Width = width;
 	texDesc.Height = height;
@@ -44,7 +40,7 @@ void ShadowLightLimitFix::SetupResources()
 
 	DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, nullptr, shadowMaskArray.put()));
 
-	// SRV for the full array (sampling in lighting shaders at t48)
+	// SRV for the full array (t48 in lighting shaders)
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 	srvDesc.Format = DXGI_FORMAT_R8_UNORM;
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -56,7 +52,7 @@ void ShadowLightLimitFix::SetupResources()
 	DX::ThrowIfFailed(device->CreateShaderResourceView(
 		shadowMaskArray.get(), &srvDesc, shadowMaskArraySRV.put()));
 
-	// Per-slice RTVs (for writing shadow mask to individual slices)
+	// Per-slice RTVs
 	for (uint32_t i = 0; i < kMaxShadowLights; i++) {
 		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 		rtvDesc.Format = DXGI_FORMAT_R8_UNORM;
@@ -69,6 +65,19 @@ void ShadowLightLimitFix::SetupResources()
 			shadowMaskArray.get(), &rtvDesc, shadowMaskSliceRTVs[i].put()));
 	}
 
+	// Pre-create blend state for writing to R8_UNORM extended slices.
+	// The BSUtilityShader shadow mask techniques write psout.Color.xyzw = value,
+	// but we only want to capture the R channel into our R8 texture.
+	D3D11_BLEND_DESC blendDesc{};
+	blendDesc.AlphaToCoverageEnable = FALSE;
+	blendDesc.IndependentBlendEnable = FALSE;
+	blendDesc.RenderTarget[0].BlendEnable = FALSE;
+	blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
+
+	DX::ThrowIfFailed(device->CreateBlendState(&blendDesc, shadowMaskWriteBlendState.put()));
+
+	resourcesSetup = true;
+
 	logger::info("[ShadowLightLimitFix] Created extended shadow mask: {}x{} x {} slices",
 		width, height, kMaxShadowLights);
 }
@@ -79,6 +88,8 @@ void ShadowLightLimitFix::ReleaseResources()
 	for (auto& rtv : shadowMaskSliceRTVs)
 		rtv = nullptr;
 	shadowMaskArray = nullptr;
+	shadowMaskWriteBlendState = nullptr;
+	resourcesSetup = false;
 }
 
 // =============================================================================
@@ -87,15 +98,13 @@ void ShadowLightLimitFix::ReleaseResources()
 
 void ShadowLightLimitFix::AccumulateAndRenderExtendedLights()
 {
-	// Called after vanilla Main_RenderShadowMaps completes.
-	// At this point, the engine has:
-	//   - Accumulated 4 shadow lights (maskIndex 0–3 assigned)
-	//   - Rendered their shadow depth maps
-	//   - Lights with maskIndex == 255 were skipped
-	//
-	// We now process the overflow lights.
+	if (!resourcesSetup)
+		return;
 
 	auto smState = globals::game::smState;
+	if (!smState)
+		return;
+
 	auto* ssn = smState->shadowSceneNode[0];
 	if (!ssn)
 		return;
@@ -105,41 +114,36 @@ void ShadowLightLimitFix::AccumulateAndRenderExtendedLights()
 	extendedLights.clear();
 	extendedShadowCount = 0;
 
+	// Record how many lights the engine accumulated (before our additions).
+	// Phase 3 will iterate shadowLightsAccum — if Accumulate() adds to it,
+	// we need to know which entries are ours so we can redirect their output.
+	vanillaAccumCount = static_cast<uint32_t>(ssn->GetRuntimeData().shadowLightsAccum.size());
+
 	uint32_t extendedChannel = kVanillaMaxShadowLights;
 
 	for (auto& lightPtr : shadowLights) {
 		if (extendedChannel >= kMaxShadowLights)
 			break;
 
-		auto* bsLight = lightPtr.get();
-		if (!bsLight || !bsLight->IsShadowLight())
+		auto* shadowLight = lightPtr.get();
+		if (!shadowLight)
 			continue;
 
-		auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
 		GET_INSTANCE_MEMBER(maskIndex, shadowLight);
 
 		if (maskIndex != 255)
 			continue;  // Already accumulated by vanilla (maskIndex 0–3)
 
-		// This light overflowed the vanilla limit.
-		//
-		// Strategy:
-		//   1. Call Accumulate() to set up internal state (cameras, culling, descriptors)
-		//   2. Call Render() to generate the shadow depth map
-		//
-		// Accumulate() will do: this->maskIndex = extendedChannel++
-		// Render() uses the camera/culling state set by Accumulate()
-		//
-		// Risk note: Accumulate() may have internal assumptions about maskChannel < 4.
-		// For point lights (BSShadowParabolicLight), this should be safe because:
-		//   - maskIndex is just stored as a uint32, not used to index focusShadowmapDescriptors[4]
-		//     (that array is for cascade splits, only used by directional lights)
-		//   - The shadowmap descriptor setup uses shadowmapDescriptors (a BSTArray, dynamic)
+		// Use the light's scene graph index for correct culling scene
+		GET_INSTANCE_MEMBER(sceneGraphIndex, shadowLight);
+		auto* lightSSN = smState->shadowSceneNode[sceneGraphIndex];
+		if (!lightSSN)
+			lightSSN = ssn;
 
-		uint32_t dummyGlobalCount = extendedChannel;
-		RE::NiPointer<RE::NiAVObject> scene(ssn);
+		uint32_t globalCount = extendedChannel;
+		RE::NiPointer<RE::NiAVObject> scene(lightSSN);
 
-		shadowLight->Accumulate(dummyGlobalCount, extendedChannel, scene);
+		shadowLight->Accumulate(globalCount, extendedChannel, scene);
 		shadowLight->Render();
 
 		extendedLights.push_back({ shadowLight, extendedChannel - 1 });
@@ -149,6 +153,8 @@ void ShadowLightLimitFix::AccumulateAndRenderExtendedLights()
 	}
 
 	if (extendedShadowCount > 0) {
+		ClearExtendedSlices();
+
 		logger::trace("[ShadowLightLimitFix] Accumulated {} extended shadow lights this frame",
 			extendedShadowCount);
 	}
@@ -156,53 +162,141 @@ void ShadowLightLimitFix::AccumulateAndRenderExtendedLights()
 
 void ShadowLightLimitFix::ClearExtendedSlices()
 {
+	if (!resourcesSetup)
+		return;
+
 	auto context = globals::d3d::context;
-	float clearColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  // 1.0 = fully lit (no shadow)
+	float clearColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 	for (uint32_t i = kVanillaMaxShadowLights; i < kMaxShadowLights; i++) {
-		context->ClearRenderTargetView(shadowMaskSliceRTVs[i].get(), clearColor);
+		if (shadowMaskSliceRTVs[i])
+			context->ClearRenderTargetView(shadowMaskSliceRTVs[i].get(), clearColor);
 	}
+}
+
+// =============================================================================
+// Shadow Mask Phase Interception
+// =============================================================================
+
+void ShadowLightLimitFix::HandleShadowMaskDraw(uint32_t pixelDescriptor)
+{
+	if (!resourcesSetup || !extendedShadowCount)
+		return;
+
+	using UFlags = SIE::ShaderCache::UtilityShaderFlags;
+
+	// Restore state from the previous redirected draw (if any)
+	RestorePreviousRedirect();
+
+	// Only track point/spot shadow mask draws (not directional).
+	// The directional light (RenderShadowmask, bit 21) always uses slot 0.
+	// Point/spot lights use RenderShadowmaskSpot/Pb/Dpb (bits 22-24).
+	static constexpr uint32_t kPointSpotMask =
+		static_cast<uint32_t>(UFlags::RenderShadowmaskSpot) |
+		static_cast<uint32_t>(UFlags::RenderShadowmaskPb) |
+		static_cast<uint32_t>(UFlags::RenderShadowmaskDpb);
+
+	if (!(pixelDescriptor & kPointSpotMask))
+		return;
+
+	// Each point/spot shadow mask draw corresponds to one light in shadowLightsAccum
+	// (after the directional light at index 0).
+	// Draws 0..(vanillaPointCount-1) are vanilla lights; subsequent draws are ours.
+	uint32_t vanillaPointCount = (vanillaAccumCount > 0) ? vanillaAccumCount - 1 : 0;
+
+	if (shadowMaskPointDrawIndex >= vanillaPointCount) {
+		// This draw is for one of our extended lights
+		uint32_t extIndex = shadowMaskPointDrawIndex - vanillaPointCount;
+		if (extIndex < extendedLights.size()) {
+			uint32_t slotIndex = extendedLights[extIndex].assignedSlot;
+			BeginExtendedShadowMaskPass(slotIndex);
+		}
+	}
+
+	shadowMaskPointDrawIndex++;
+}
+
+void ShadowLightLimitFix::RestorePreviousRedirect()
+{
+	if (!currentlyRedirected)
+		return;
+
+	auto context = globals::d3d::context;
+
+	// Restore the original render target
+	if (savedRT || savedDSV) {
+		context->OMSetRenderTargets(1, &savedRT, savedDSV);
+		if (savedRT) savedRT->Release();
+		if (savedDSV) savedDSV->Release();
+		savedRT = nullptr;
+		savedDSV = nullptr;
+	}
+
+	// Restore the original blend state
+	if (savedBlendState) {
+		context->OMSetBlendState(savedBlendState, savedBlendFactor, savedSampleMask);
+		savedBlendState->Release();
+		savedBlendState = nullptr;
+	}
+
+	currentlyRedirected = false;
 }
 
 void ShadowLightLimitFix::BeginExtendedShadowMaskPass(uint32_t maskIndex)
 {
-	if (maskIndex < kVanillaMaxShadowLights)
-		return;  // Vanilla handles slots 0–3
+	if (!resourcesSetup)
+		return;
+
+	if (maskIndex < kVanillaMaxShadowLights || maskIndex >= kMaxShadowLights)
+		return;
 
 	auto context = globals::d3d::context;
 
-	// Swap render target from the vanilla RGBA shadow mask to our extended array slice.
-	// The BSUtilityShader will write its shadow comparison result to .r of our slice
-	// instead of to an RGBA channel of the vanilla RT.
+	// Save current render target
+	savedRT = nullptr;
+	savedDSV = nullptr;
+	context->OMGetRenderTargets(1, &savedRT, &savedDSV);
+
+	// Redirect to our extended array slice
 	auto* sliceRTV = shadowMaskSliceRTVs[maskIndex].get();
+	context->OMSetRenderTargets(1, &sliceRTV, savedDSV);
 
-	// Get current DSV (depth stencil) — we need to keep it
-	ID3D11RenderTargetView* currentRT = nullptr;
-	ID3D11DepthStencilView* currentDSV = nullptr;
-	context->OMGetRenderTargets(1, &currentRT, &currentDSV);
+	// Save and override blend state.
+	// The engine's blend state for maskIndex >= 4 has an invalid write mask
+	// (1 << maskIndex overflows the 4-bit RGBA write mask range).
+	// We override to write to R channel of our R8_UNORM slice.
+	savedBlendState = nullptr;
+	context->OMGetBlendState(&savedBlendState, savedBlendFactor, &savedSampleMask);
+	float defaultFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	context->OMSetBlendState(shadowMaskWriteBlendState.get(), defaultFactor, 0xFFFFFFFF);
 
-	context->OMSetRenderTargets(1, &sliceRTV, currentDSV);
-
-	if (currentRT)
-		currentRT->Release();
-	if (currentDSV)
-		currentDSV->Release();
+	currentlyRedirected = true;
 }
 
 void ShadowLightLimitFix::EndExtendedShadowMaskPass(uint32_t maskIndex)
 {
-	if (maskIndex < kVanillaMaxShadowLights)
-		return;
+	RestorePreviousRedirect();
+}
 
-	// RT will be restored by the engine's normal flow at the end of the shadowmask
-	// phase — or we could save/restore here if needed for safety.
+void ShadowLightLimitFix::ResetFrameState()
+{
+	// Ensure any lingering redirect is cleaned up
+	RestorePreviousRedirect();
+
+	shadowMaskPointDrawIndex = 0;
+	extendedShadowCount = 0;
+	extendedLights.clear();
+	vanillaAccumCount = 0;
 }
 
 void ShadowLightLimitFix::BindExtendedShadowMaskSRV()
 {
+	if (!resourcesSetup || !extendedShadowCount)
+		return;
+
 	auto context = globals::d3d::context;
 	auto* srv = shadowMaskArraySRV.get();
-	context->PSSetShaderResources(48, 1, &srv);  // t48 in lighting shaders
+	context->PSSetShaderResources(48, 1, &srv);
 }
 
 // =============================================================================
@@ -211,20 +305,6 @@ void ShadowLightLimitFix::BindExtendedShadowMaskSRV()
 
 void ShadowLightLimitFix::Install()
 {
-	// Approach C3 leverages EXISTING Community Shaders hooks:
-	//
-	// 1. Main_RenderShadowMaps (Deferred.cpp)
-	//    Already hooked. We call AccumulateAndRenderExtendedLights() from its thunk.
-	//
-	// 2. BSUtilityShader dispatch (State.cpp, CopyShadowData path)
-	//    Already hooked. We intercept shadowmask renders for maskIndex >= 4.
-	//
-	// 3. LLF Prepass (LightLimitFix.cpp)
-	//    Already runs. We call BindExtendedShadowMaskSRV() there.
-	//
-	// NO NEW RELOCATION IDS NEEDED for the core integration.
-	// The only new hooks are thin wrappers around existing hook points.
-
 	logger::info("[ShadowLightLimitFix] Installed (max {} shadow lights, using Approach C3 hybrid detour)",
 		kMaxShadowLights);
 }

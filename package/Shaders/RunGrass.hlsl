@@ -422,6 +422,7 @@ cbuffer AlphaTestRefCB : register(b11)
 
 #	if defined(LIGHT_LIMIT_FIX)
 #		include "LightLimitFix/LightLimitFix.hlsli"
+#		include "LightLimitFix/ExtendedShadowMask.hlsli"
 #	endif
 
 #	if defined(ISL) && defined(LIGHT_LIMIT_FIX)
@@ -706,7 +707,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 				float shadowComponent = 1.0;
 				if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
-					shadowComponent = shadowColor[light.shadowLightIndex];
+					shadowComponent = ExtendedShadowMask::GetShadow(input.HPosition.xy, shadowColor, light.shadowLightIndex);
 					lightShadow *= shadowComponent;
 				}
 
@@ -946,7 +947,7 @@ PS_OUTPUT main(PS_INPUT input)
 
 				float shadowComponent = 1.0;
 				if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
-					shadowComponent = shadowColor[light.shadowLightIndex];
+					shadowComponent = ExtendedShadowMask::GetShadow(input.HPosition.xy, shadowColor, light.shadowLightIndex);
 					lightShadow *= shadowComponent;
 				}
 

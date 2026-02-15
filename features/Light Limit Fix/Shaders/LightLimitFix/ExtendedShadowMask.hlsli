@@ -59,8 +59,9 @@ namespace ExtendedShadowMask
 		}
 		else if (maskIndex < kMaxShadowLights)
 		{
-			// Extended path: sample from array texture slice
-			return ExtendedShadowMaskArray.Load(int3(int2(screenPos), 0), maskIndex).x;
+			// Extended path: sample from Texture2DArray slice.
+			// Load(int4(x, y, arraySlice, mipLevel))
+			return ExtendedShadowMaskArray.Load(int4(int2(screenPos), maskIndex, 0)).x;
 		}
 		else
 		{

@@ -321,6 +321,9 @@ void LightLimitFix::Prepass()
 	views[2] = lightGrid->srv.get();
 	context->PSSetShaderResources(35, ARRAYSIZE(views), views);
 
+	// Bind extended shadow mask array (t48) for lights with maskIndex >= 4
+	ShadowLightLimitFix::GetSingleton()->BindExtendedShadowMaskSRV();
+
 	state->EndPerfEvent();
 }
 

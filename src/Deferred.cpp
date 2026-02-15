@@ -15,6 +15,7 @@
 #include "Features/Upscaling.h"
 #include "Features/WeatherEditor.h"
 
+#include "EngineFixes/ShadowLightLimitFix.h"
 #include "Hooks.h"
 
 struct DepthStates
@@ -653,6 +654,11 @@ ID3D11ComputeShader* Deferred::GetComputeMainCompositeInterior()
 void Deferred::Hooks::Main_RenderShadowMaps::thunk()
 {
 	func();
+
+	// After vanilla shadow maps are rendered, accumulate+render overflow lights.
+	// This extends the 4-shadow-light limit by processing lights with maskIndex == 255.
+	ShadowLightLimitFix::GetSingleton()->AccumulateAndRenderExtendedLights();
+
 	globals::deferred->EarlyPrepasses();
 };
 

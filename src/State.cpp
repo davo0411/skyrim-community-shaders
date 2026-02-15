@@ -5,6 +5,7 @@
 #include <pystring/pystring.h>
 
 #include "Deferred.h"
+#include "EngineFixes/ShadowLightLimitFix.h"
 #include "FeatureIssues.h"
 #include "Features/CloudShadows.h"
 #include "Features/PerformanceOverlay.h"
@@ -66,8 +67,21 @@ void State::Draw()
 
 		if (currentShader && updateShader) {
 			if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
-				if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
-					deferred->CopyShadowData();
+				// Check for ANY shadow mask technique (directional, spot, or point light)
+				static constexpr uint32_t kAnyShadowMask =
+					static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask) |
+					static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmaskSpot) |
+					static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmaskPb) |
+					static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmaskDpb);
+
+				if (currentPixelDescriptor & kAnyShadowMask) {
+					// CopyShadowData fires for directional shadow mask draws
+					if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
+						deferred->CopyShadowData();
+					}
+
+					// Redirect render target for extended shadow lights (maskIndex >= 4)
+					ShadowLightLimitFix::GetSingleton()->HandleShadowMaskDraw(currentPixelDescriptor);
 				}
 			}
 		}
@@ -137,6 +151,7 @@ void State::Debug()
 void State::Reset()
 {
 	Feature::ForEachLoadedFeature("Reset", [](Feature* feature) { feature->Reset(); });
+	ShadowLightLimitFix::GetSingleton()->ResetFrameState();
 	if (!globals::game::ui->GameIsPaused())
 		timer += RE::GetSecondsSinceLastFrame();
 	lastModifiedPixelDescriptor = 0;
@@ -168,6 +183,7 @@ void State::Setup()
 	globals::truePBR->SetupResources();
 	SetupResources();
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
+	ShadowLightLimitFix::GetSingleton()->SetupResources();
 	globals::deferred->SetupResources();
 
 	// Load per-weather settings after features are setup

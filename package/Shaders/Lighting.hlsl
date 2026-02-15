@@ -883,6 +883,7 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 
 #	if defined(LIGHT_LIMIT_FIX)
 #		include "LightLimitFix/LightLimitFix.hlsli"
+#		include "LightLimitFix/ExtendedShadowMask.hlsli"
 #	endif
 
 #	if defined(ISL) && defined(LIGHT_LIMIT_FIX)
@@ -2634,7 +2635,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		float shadowComponent = 1.0;
 		if (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow) {
 			if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
-				shadowComponent = shadowColor[light.shadowLightIndex];
+				shadowComponent = ExtendedShadowMask::GetShadow(input.Position.xy, shadowColor, light.shadowLightIndex);
 				lightShadow *= shadowComponent;
 			}
 		}
