@@ -32,6 +32,7 @@
 #include "Features/VolumetricLighting.h"
 #include "Features/WaterEffects.h"
 #include "Features/WeatherEditor.h"
+#include "Features/SkyScattering.h"
 #include "Features/WetnessEffects.h"
 #include "Menu.h"
 #include "ShaderCache.h"
@@ -82,6 +83,7 @@ namespace globals
 		RenderDoc renderDoc{};
 		WeatherEditor weatherEditor{};
 		ExponentialHeightFog exponentialHeightFog{};
+		SkyScattering skyScattering{};
 
 		namespace llf
 		{

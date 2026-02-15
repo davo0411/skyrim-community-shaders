@@ -237,7 +237,21 @@ namespace SharedData
 		uint Enabled;
 		uint3 _padding;
 	};
+	struct SkyScatteringSettings
+	{
+		uint Enabled;
+		float Opacity;
+		uint NumLayers;
+		float CloudShadowStrength;
 
+		float3 ScatterTint;
+		float ScatterAmount;
+
+		float SilverIntensity;
+		float SilverSpread;
+		float AmbientDarkening;
+		float pad0;
+	};
 	struct ExponentialHeightFogSettings
 	{
 		uint enabled;
@@ -271,6 +285,7 @@ namespace SharedData
 		LinearLightingSettings linearLightingSettings;
 		TerrainBlendingSettings terrainBlendingSettings;
 		ExponentialHeightFogSettings exponentialHeightFogSettings;
+		SkyScatteringSettings skyScatteringSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

@@ -155,7 +155,7 @@ struct PS_OUTPUT
 	float4 Color : SV_Target0;
 	float4 MotionVectors : SV_Target1;
 	float4 Normal : SV_Target2;
-#if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
+#if (defined(CLOUD_SHADOWS) || defined(SKY_SCATTERING)) && defined(CLOUDS) && !defined(DEFERRED)
 	float4 CloudShadows : SV_Target3;
 #endif
 };
@@ -186,6 +186,10 @@ cbuffer AlphaTestRefCB : register(b11)
 
 #	if defined(CLOUD_SHADOWS)
 #		include "CloudShadows/CloudShadows.hlsli"
+#	endif
+
+#	if defined(SKY_SCATTERING)
+#		include "SkyScattering/SkyScattering.hlsli"
 #	endif
 
 Texture2D<float> TexDepthSampler : register(t17);
@@ -247,12 +251,21 @@ PS_OUTPUT main(PS_INPUT input)
 	psout.Color = float4(0, 0, 0, 1.0);
 #	endif  // OCCLUSION
 
+#	if defined(SKY_SCATTERING) && defined(CLOUDS) && !defined(DEFERRED)
+	// Apply volumetric scattering effects to cloud color
+	// viewDir from cloud world position gives us the view direction for scattering
+	{
+		float3 viewDir = normalize(input.WorldPosition.xyz);
+		psout.Color = SkyScattering::ApplyCloudScattering(psout.Color, viewDir, SampBaseSampler, SharedData::skyScatteringSettings);
+	}
+#	endif
+
 	float2 screenMotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.PreviousWorldPosition, eyeIndex);
 
 	psout.MotionVectors = float4(screenMotionVector, 0, psout.Color.w);
 	psout.Normal = float4(0.5, 0.5, 0, psout.Color.w);
 
-#	if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
+#	if (defined(CLOUD_SHADOWS) || defined(SKY_SCATTERING)) && defined(CLOUDS) && !defined(DEFERRED)
 	psout.CloudShadows = float4(1, 1, 1, psout.Color.w);
 
 	float depth = TexDepthSampler.Load(int3(input.Position.xy, 0));

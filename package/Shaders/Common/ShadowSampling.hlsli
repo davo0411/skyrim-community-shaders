@@ -157,6 +157,11 @@ namespace ShadowSampling
 			worldShadow *= CloudShadows::GetCloudShadowMult(positionWS, LinearSampler);
 #endif
 
+#if defined(SKY_SCATTERING)
+		if (!SharedData::InMapMenu && SharedData::skyScatteringSettings.Enabled)
+			worldShadow *= SkyScattering::GetScatteringShadow(positionWS, LinearSampler, SharedData::skyScatteringSettings.Opacity, SharedData::skyScatteringSettings.NumLayers);
+#endif
+
 		return worldShadow;
 	}
 

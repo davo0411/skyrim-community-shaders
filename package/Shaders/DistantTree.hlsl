@@ -175,6 +175,10 @@ const static float DepthOffsets[16] = {
 #		include "CloudShadows/CloudShadows.hlsli"
 #	endif
 
+#	if defined(SKY_SCATTERING)
+#		include "SkyScattering/SkyScattering.hlsli"
+#	endif
+
 #	if defined(IBL)
 #		include "IBL/IBL.hlsli"
 #	endif

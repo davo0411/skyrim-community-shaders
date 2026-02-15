@@ -442,6 +442,10 @@ cbuffer AlphaTestRefCB : register(b11)
 #		include "CloudShadows/CloudShadows.hlsli"
 #	endif
 
+#	if defined(SKY_SCATTERING)
+#		include "SkyScattering/SkyScattering.hlsli"
+#	endif
+
 #	if defined(SKYLIGHTING)
 #		include "Skylighting/Skylighting.hlsli"
 #	endif

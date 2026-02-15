@@ -28,6 +28,10 @@ RWTexture3D<float> DensityRW : register(u0);
 #		include "CloudShadows/CloudShadows.hlsli"
 #	endif
 
+#	if defined(SKY_SCATTERING)
+#		include "SkyScattering/SkyScattering.hlsli"
+#	endif
+
 #	include "Common/ShadowSampling.hlsli"
 
 cbuffer PerTechnique : register(b0)

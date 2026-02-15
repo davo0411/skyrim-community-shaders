@@ -31,6 +31,7 @@ struct ExtendedTranslucency;
 struct Upscaling;
 struct WeatherEditor;
 struct ExponentialHeightFog;
+struct SkyScattering;
 
 class State;
 class Deferred;
@@ -87,6 +88,7 @@ namespace globals
 		extern RenderDoc renderDoc;
 		extern WeatherEditor weatherEditor;
 		extern ExponentialHeightFog exponentialHeightFog;
+		extern SkyScattering skyScattering;
 
 		namespace llf
 		{
