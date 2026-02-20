@@ -350,11 +350,13 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 	if (tes->interiorCell)
 		return;
 
-	const auto& gridCells = tes->gridCells;
-
-	const int32_t offsetX = tes->currentGridX - static_cast<int32_t>(gridCells->length >> 1);
-	const int32_t offsetY = tes->currentGridY - static_cast<int32_t>(gridCells->length >> 1);
-	const int32_t length = static_cast<int32_t>(gridCells->length);
+	// Use position-based culling: cull LOD4 tiles that fall within the loaded grid area.
+	// This uses currentGridX/Y (the grid center cell) and gridCells->length (the grid size)
+	// rather than checking individual cell loading states. This is reliable during interior->exterior
+	// transitions because the grid center and dimensions are set BEFORE cells are fully loaded,
+	// so tiles get correctly culled even if UpdateWaterMeshSubVisibility fires while cells are
+	// still being populated.
+	const int32_t halfGrid = static_cast<int32_t>(tes->gridCells->length >> 1);
 
 	for (const auto& child : waterParent->GetChildren()) {
 		if (!child)
@@ -363,18 +365,9 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 		int32_t x, y;
 		Util::WorldToCell(child->world.translate, x, y);
 
-		x -= offsetX;
-		y -= offsetY;
-
-		bool cull = false;
-		if (x >= 0 && y >= 0 && x < length && y < length) {
-			// Cull if a cell exists in this grid position at all, regardless of its loading state.
-			// During interior->exterior transitions, cells may be allocated in the grid but not yet
-			// in kAttached state. Previously we only culled for kAttached/state6, which meant tiles
-			// remained visible during the transition and z-fought with the displacement mesh.
-			if (gridCells->GetCell(x, y) != nullptr)
-				cull = true;
-		}
+		const int32_t dx = x - tes->currentGridX;
+		const int32_t dy = y - tes->currentGridY;
+		const bool cull = (std::abs(dx) <= halfGrid && std::abs(dy) <= halfGrid);
 
 		child->SetAppCulled(cull);
 	}
@@ -460,6 +453,35 @@ void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 		// Remove from WaterSystem, will manage it ourselves
 		if (!waterSystem->waterObjects.empty()) {
 			waterSystem->waterObjects.pop_back();
+		}
+	}
+
+	// For LOD4 tiles, apply initial culling to prevent z-fighting with the displacement mesh.
+	// Newly created tiles default to visible (AppCulled = false). UpdateWaterMeshSubVisibility
+	// may or may not fire at the right time during interior->exterior transitions, so we must
+	// set the correct cull state here at creation time.
+	// Use instruction coordinates (guaranteed correct) with position-based culling that only
+	// depends on grid center and dimensions, not individual cell loading state.
+	{
+		const auto node = block->node;
+		const auto lodLevel = node->GetLODLevel();
+		if (lodLevel == 4) {
+			const auto tes = globals::game::tes;
+			if (tes && tes->gridCells && !tes->interiorCell) {
+				const int32_t halfGrid = static_cast<int32_t>(tes->gridCells->length >> 1);
+				for (auto& [shape, instruction] : built) {
+					const int32_t dx = instruction->x - tes->currentGridX;
+					const int32_t dy = instruction->y - tes->currentGridY;
+					if (std::abs(dx) <= halfGrid && std::abs(dy) <= halfGrid)
+						shape->SetAppCulled(true);
+				}
+			} else if (tes && tes->interiorCell) {
+				// Attaching during an interior: force-cull all LOD4 tiles.
+				// Player can't see exterior water from inside, and leaving them visible
+				// would cause z-fighting when exiting back to exterior.
+				for (auto& [shape, instruction] : built)
+					shape->SetAppCulled(true);
+			}
 		}
 	}
 
