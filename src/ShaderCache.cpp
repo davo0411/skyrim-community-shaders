@@ -1738,7 +1738,7 @@ namespace SIE
 				{ "BSImagespaceShaderReflectionsRayTracing", RE::ImageSpaceManager::GetCurrentIndex(ISReflectionsRayTracing) },
 				//{ "BSImagespaceShaderReflectionsDebugSpecMask", RE::ImageSpaceManager::GetCurrentIndex(ISReflectionsDebugSpecMask) },
 
-				{ "BSImagespaceShaderISTemporalAA_UI", RE::ImageSpaceManager::GetCurrentIndex(ISTemporalAA_UI) },
+				{ "BSImagespaceShaderISTemporalAA", RE::ImageSpaceManager::GetCurrentIndex(ISTemporalAA) },
 
 				{ "BSImagespaceShaderVolumetricLightingRaymarchCS", 256 },
 				{ "BSImagespaceShaderVolumetricLightingGenerateCS", 257 },
