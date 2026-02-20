@@ -4,6 +4,7 @@ class Flowmap
 {
 public:
 	bool TryGetFlowmap(RE::NiPointer<RE::NiSourceTexture>& outFlowmapTex) const;
+	RE::NiSourceTexture* GetFlowmapTextureRaw() const { return flowmapTex.get(); }
 	int32_t GetWidth() const { return width; }
 	int32_t GetHeight() const { return height; }
 	float GetInverseWidth() const { return invWidth; }

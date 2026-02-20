@@ -221,6 +221,18 @@ void UnifiedWater::SetFlowmapTex() const
 	logger::debug("[Unified Water] [Flowmap] Texture set");
 }
 
+void UnifiedWater::EnsureFlowmapTexBound() const
+{
+	if (!flowmap || !gFlowMapSourceTex)
+		return;
+
+	// Check if the game's water system has overwritten our flowmap texture
+	// (happens during interior->exterior transitions when the game reinitializes the water system)
+	auto* ourTex = flowmap->GetFlowmapTextureRaw();
+	if (ourTex && gFlowMapSourceTex->get() != ourTex)
+		*gFlowMapSourceTex = RE::NiPointer(ourTex);
+}
+
 void UnifiedWater::PostPostLoad()
 {
 	stl::detour_thunk<TES_SetWorldSpace>(REL::RelocationID(13170, 13315));
@@ -299,7 +311,14 @@ void UnifiedWater::TES_SetWorldSpace::thunk(RE::TES* tes, RE::TESWorldSpace* wor
 {
 	func(tes, worldSpace, isExterior);
 
-	globals::features::unifiedWater.waterCache->SetCurrentWorldSpace(worldSpace);
+	auto& singleton = globals::features::unifiedWater;
+	singleton.waterCache->SetCurrentWorldSpace(worldSpace);
+
+	// Restore our flowmap texture after world space transition.
+	// The game's water system re-initialization during interior->exterior transitions
+	// can overwrite the global flowmap texture pointer with a new (empty) texture.
+	if (isExterior)
+		singleton.SetFlowmapTex();
 }
 
 void UnifiedWater::TES_DestroySkyCell::thunk(RE::TES* tes)
@@ -454,10 +473,14 @@ void UnifiedWater::BGSTerrainBlock_Detach::thunk(RE::BGSTerrainBlock* block)
 	}
 }
 
-void UnifiedWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass)
+void UnifiedWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass, uint32_t renderFlags)
 {
 	const auto& singleton = globals::features::unifiedWater;
 	if (singleton.flowmap) {
+		// Ensure our flowmap texture is bound - the game's water system can overwrite the global
+		// during interior->exterior transitions, so we must restore it before every water pass
+		singleton.EnsureFlowmapTexBound();
+
 		// ObjectUV.xyz below, xy contains width and height, z contains mesh scale
 		// Previously flowmap size was in x, yz contained flowmap offset for water displacement mesh
 		*singleton.gFlowMapSize = singleton.flowmap->GetWidth();                                            // ObjectUV.x
@@ -479,7 +502,7 @@ void UnifiedWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader,
 		}
 	}
 
-	func(waterShader, pass);
+	func(waterShader, pass, renderFlags);
 }
 
 void UnifiedWater::TESWaterSystem_UpdateDisplacementMeshPosition::thunk(RE::TESWaterSystem* waterSystem)
