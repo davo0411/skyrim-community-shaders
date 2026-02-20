@@ -340,6 +340,16 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 	if (!tes || !tes->gridCells)
 		return;
 
+	// Do NOT update LOD water tile culling while in an interior.
+	// When in an interior, tes->gridCells contains the interior cell grid whose coordinates
+	// don't correspond to exterior water tile positions. Running the culling logic against
+	// the interior grid would incorrectly un-cull ALL exterior LOD water tiles (cull = false).
+	// When the player then exits to the exterior, both the un-culled LOD tiles and the
+	// displacement mesh (close water) would be visible at the same Z height, causing z-fighting
+	// that manifests as camera-dependent flickering on flow-mapped water.
+	if (tes->interiorCell)
+		return;
+
 	const auto& gridCells = tes->gridCells;
 
 	const int32_t offsetX = tes->currentGridX - static_cast<int32_t>(gridCells->length >> 1);
@@ -358,7 +368,11 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 
 		bool cull = false;
 		if (x >= 0 && y >= 0 && x < length && y < length) {
-			if (const auto cell = gridCells->GetCell(x, y); cell && cell->cellState.any(RE::TESObjectCELL::CellState::kAttached, static_cast<RE::TESObjectCELL::CellState>(6)))
+			// Cull if a cell exists in this grid position at all, regardless of its loading state.
+			// During interior->exterior transitions, cells may be allocated in the grid but not yet
+			// in kAttached state. Previously we only culled for kAttached/state6, which meant tiles
+			// remained visible during the transition and z-fought with the displacement mesh.
+			if (gridCells->GetCell(x, y) != nullptr)
 				cull = true;
 		}
 
