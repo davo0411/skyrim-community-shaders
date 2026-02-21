@@ -111,7 +111,16 @@ private:
 	RE::NiPoint2* gDisplacementMeshPos = nullptr;
 	RE::NiPoint2* gDisplacementMeshFlowCellOffset = nullptr;
 
+	// Deferred recull: set when transitioning interior->exterior, processed during water
+	// rendering when grid state is guaranteed to be stable.
+	std::atomic<bool> pendingRecull{ false };
+	// Number of frames to keep per-pass cull-checking active after a recull.
+	// Covers the frame where the recull ran (AppCulled takes effect next frame)
+	// plus one extra safety frame for any engine un-culling that may lag the transition.
+	std::atomic<int> recullFramesLeft{ 0 };
+
 	void SetFlowmapTex() const;
 	void EnsureFlowmapTexBound() const;
+	void RecullAllLOD4Tiles() const;
 	static bool LoadOrderChanged();
 };

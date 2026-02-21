@@ -233,6 +233,35 @@ void UnifiedWater::EnsureFlowmapTexBound() const
 		*gFlowMapSourceTex = RE::NiPointer(ourTex);
 }
 
+void UnifiedWater::RecullAllLOD4Tiles() const
+{
+	const auto tes = globals::game::tes;
+	if (!tes || !tes->gridCells || tes->interiorCell || !gWaterLOD || !*gWaterLOD)
+		return;
+
+	const int32_t halfGrid = static_cast<int32_t>(tes->gridCells->length >> 1);
+
+	for (const auto& blockWater : (*gWaterLOD)->GetChildren()) {
+		if (!blockWater || !blockWater->AsNode())
+			continue;
+
+		for (const auto& tile : blockWater->AsNode()->GetChildren()) {
+			if (!tile)
+				continue;
+
+			int32_t x, y;
+			Util::WorldToCell(tile->world.translate, x, y);
+
+			const int32_t dx = x - tes->currentGridX;
+			const int32_t dy = y - tes->currentGridY;
+			tile->SetAppCulled(std::abs(dx) <= halfGrid && std::abs(dy) <= halfGrid);
+		}
+	}
+
+	logger::debug("[Unified Water] Deferred recull completed: grid center ({}, {}), halfGrid {}",
+		tes->currentGridX, tes->currentGridY, halfGrid);
+}
+
 void UnifiedWater::PostPostLoad()
 {
 	stl::detour_thunk<TES_SetWorldSpace>(REL::RelocationID(13170, 13315));
@@ -317,8 +346,20 @@ void UnifiedWater::TES_SetWorldSpace::thunk(RE::TES* tes, RE::TESWorldSpace* wor
 	// Restore our flowmap texture after world space transition.
 	// The game's water system re-initialization during interior->exterior transitions
 	// can overwrite the global flowmap texture pointer with a new (empty) texture.
-	if (isExterior)
+	if (isExterior) {
 		singleton.SetFlowmapTex();
+
+		// Schedule a deferred recull of all LOD4 water tiles.
+		// During the interior->exterior transition, the engine may un-cull all LOD tiles
+		// (restoring gWaterLOD visibility), or UpdateWaterMeshSubVisibility may fire with
+		// stale grid coordinates. Either way, LOD4 tiles can end up un-culled and overlapping
+		// with per-cell water, causing z-fighting visible as camera-dependent flickering on
+		// flow-mapped water.
+		// The recull is processed in BSWaterShader::SetupGeometry, which fires during water
+		// rendering when the cell grid and currentGridX/Y are guaranteed to be finalized.
+		singleton.pendingRecull.store(true, std::memory_order_release);
+		singleton.recullFramesLeft.store(3, std::memory_order_release);
+	}
 }
 
 void UnifiedWater::TES_DestroySkyCell::thunk(RE::TES* tes)
@@ -512,6 +553,39 @@ void UnifiedWater::BGSTerrainBlock_Detach::thunk(RE::BGSTerrainBlock* block)
 void UnifiedWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass, uint32_t renderFlags)
 {
 	const auto& singleton = globals::features::unifiedWater;
+
+	// Process deferred recull: runs once on the first water render pass after an
+	// interior->exterior transition, when all grid state is finalized.
+	if (singleton.pendingRecull.exchange(false, std::memory_order_acq_rel)) {
+		singleton.RecullAllLOD4Tiles();
+	}
+
+	// For a few frames after the recull, check each render pass against the cull region.
+	// AppCulled set by RecullAllLOD4Tiles takes effect on future scene traversal, but
+	// render passes already generated for the CURRENT frame still execute. This per-pass
+	// check prevents those stale passes from rendering, avoiding even a single frame of
+	// z-fighting between LOD4 tiles and per-cell water.
+	// Only applies to UW's LOD4 tiles (identified by grandparent being gWaterLOD), not
+	// to the engine's per-cell water or displacement mesh.
+	if (singleton.recullFramesLeft.load(std::memory_order_acquire) > 0) {
+		const auto tes = globals::game::tes;
+		if (tes && tes->gridCells && !tes->interiorCell && pass->geometry && singleton.gWaterLOD && *singleton.gWaterLOD) {
+			auto* parent = pass->geometry->parent;
+			auto* grandparent = parent ? parent->parent : nullptr;
+			if (grandparent == *singleton.gWaterLOD) {
+				const int32_t halfGrid = static_cast<int32_t>(tes->gridCells->length >> 1);
+				int32_t x, y;
+				Util::WorldToCell(pass->geometry->world.translate, x, y);
+				const int32_t dx = x - tes->currentGridX;
+				const int32_t dy = y - tes->currentGridY;
+				if (std::abs(dx) <= halfGrid && std::abs(dy) <= halfGrid) {
+					pass->geometry->SetAppCulled(true);
+					return;  // Skip this render pass entirely
+				}
+			}
+		}
+	}
+
 	if (singleton.flowmap) {
 		// Ensure our flowmap texture is bound - the game's water system can overwrite the global
 		// during interior->exterior transitions, so we must restore it before every water pass
@@ -546,6 +620,17 @@ void UnifiedWater::TESWaterSystem_UpdateDisplacementMeshPosition::thunk(RE::TESW
 	func(waterSystem);
 
 	const auto& singleton = globals::features::unifiedWater;
+
+	// Decrement the per-pass recull guard frame counter.
+	// This runs once per frame, ensuring the per-pass cull check in SetupGeometry
+	// is only active for a limited number of frames after an interior->exterior transition.
+	// Only decrement after pendingRecull has been consumed (i.e., the recull has actually
+	// been processed in SetupGeometry). This prevents the counter from expiring during
+	// loading screens before water rendering even begins.
+	int frames = singleton.recullFramesLeft.load(std::memory_order_acquire);
+	if (frames > 0 && !singleton.pendingRecull.load(std::memory_order_acquire))
+		singleton.recullFramesLeft.store(frames - 1, std::memory_order_release);
+
 	if (!singleton.flowmap)
 		return;
 
