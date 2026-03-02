@@ -328,17 +328,16 @@ namespace ExtendedMaterials
 		viewDirTS.xy /= viewDirTS.z * 0.7 + 0.3 + params.FlattenAmount;  // Fix for objects at extreme viewing angles
 #endif
 
-		float nearBlendToFar = saturate(distance / 2048.0);
 #if defined(LANDSCAPE)
 #	if defined(TRUE_PBR)
-		float blendFactor = SharedData::extendedMaterialSettings.EnableHeightBlending ? sqrt(saturate(1 - nearBlendToFar)) : 0;
+		float blendFactor = SharedData::extendedMaterialSettings.EnableHeightBlending ? 1.0 : 0;
 		float4 w1 = lerp(input.LandBlendWeights1, smoothstep(0, 1, input.LandBlendWeights1), blendFactor);
 		float2 w2 = lerp(input.LandBlendWeights2.xy, smoothstep(0, 1, input.LandBlendWeights2.xy), blendFactor);
 		float scale = max(params[0].HeightScale * w1.x, max(params[1].HeightScale * w1.y, max(params[2].HeightScale * w1.z, max(params[3].HeightScale * w1.w, max(params[4].HeightScale * w2.x, params[5].HeightScale * w2.y)))));
 		float scalercp = rcp(scale);
 		float maxHeight = 0.1 * scale;
 #	else
-		float blendFactor = SharedData::extendedMaterialSettings.EnableHeightBlending ? sqrt(saturate(1 - nearBlendToFar)) : 0;
+		float blendFactor = SharedData::extendedMaterialSettings.EnableHeightBlending ? 1.0 : 0;
 		float4 w1 = lerp(input.LandBlendWeights1, smoothstep(0, 1, input.LandBlendWeights1), blendFactor);
 		float2 w2 = lerp(input.LandBlendWeights2.xy, smoothstep(0, 1, input.LandBlendWeights2.xy), blendFactor);
 		float scale = 1;
@@ -350,18 +349,9 @@ namespace ExtendedMaterials
 #endif
 		float minHeight = maxHeight * 0.5;
 
-#if defined(LANDSCAPE)
-		if (nearBlendToFar < 1.0) {
-#else
-#	if defined(TRUE_PBR)
-		if ((PBRFlags & PBR::Flags::InterlayerParallax) != 0 || nearBlendToFar < 1.0)
-#	else
-		if (nearBlendToFar < 1.0)
-#	endif
 		{
-#endif
 			float maxSteps = SharedData::InInterior ? 8 : 16;
-			uint numSteps = uint((maxSteps * (1.0 - nearBlendToFar)) + 0.5);
+			uint numSteps = uint(maxSteps);
 			numSteps = clamp(numSteps, 1, max(6, scale * maxSteps));
 
 			float stepSize = rcp(numSteps);
@@ -482,28 +472,10 @@ namespace ExtendedMaterials
 				parallaxAmount = (pt1.x * delta2 - pt2.x * delta1) / denominator;
 			}
 
-#if defined(TRUE_PBR)
-			if ((PBRFlags & PBR::Flags::InterlayerParallax) != 0)
-				nearBlendToFar = 0;
-			else
-#endif
-				nearBlendToFar *= nearBlendToFar;
 			float offset = (1.0 - parallaxAmount) * -maxHeight + minHeight;
-			pixelOffset = lerp(parallaxAmount * scale, 0, nearBlendToFar);
-			return lerp(viewDirTS.xy * offset + coords.xy, coords, nearBlendToFar);
+			pixelOffset = parallaxAmount * scale;
+			return viewDirTS.xy * offset + coords.xy;
 		}
-
-#if defined(LANDSCAPE)
-		weights[0] = input.LandBlendWeights1.x;
-		weights[1] = input.LandBlendWeights1.y;
-		weights[2] = input.LandBlendWeights1.z;
-		weights[3] = input.LandBlendWeights1.w;
-		weights[4] = input.LandBlendWeights2.x;
-		weights[5] = input.LandBlendWeights2.y;
-#endif
-
-		pixelOffset = 0;
-		return coords;
 	}
 
 	// https://advances.realtimerendering.com/s2006/Tatarchuk-POM.pdf
