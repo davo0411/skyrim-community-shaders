@@ -259,6 +259,11 @@ namespace SharedData
 		float4 inscatteringTint;
 		float cubemapMipLevel;
 		float3 pad;
+	struct PBRWaterSettings
+	{
+		uint EnableBRDFSpecular;
+		uint EnableWaterScattering;
+		uint2 _padding;
 	};
 
 	cbuffer FeatureData : register(b6)
@@ -279,6 +284,7 @@ namespace SharedData
 		LinearLightingSettings linearLightingSettings;
 		TerrainBlendingSettings terrainBlendingSettings;
 		ExponentialHeightFogSettings exponentialHeightFogSettings;
+		PBRWaterSettings pbrWaterSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

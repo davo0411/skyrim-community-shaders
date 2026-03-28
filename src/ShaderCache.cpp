@@ -105,6 +105,9 @@ namespace SIE
 		constexpr const char* VertexShaderProfile = "vs_5_0";
 		constexpr const char* PixelShaderProfile = "ps_5_0";
 		constexpr const char* ComputeShaderProfile = "cs_5_0";
+		constexpr const char* HullShaderProfile = "hs_5_0";
+		constexpr const char* DomainShaderProfile = "ds_5_0";
+		constexpr const char* GeometryShaderProfile = "gs_5_0";
 
 		static std::wstring GetShaderPath(const std::string_view& name)
 		{
@@ -120,6 +123,12 @@ namespace SIE
 				return PixelShaderProfile;
 			case ShaderClass::Compute:
 				return ComputeShaderProfile;
+			case ShaderClass::Hull:
+				return HullShaderProfile;
+			case ShaderClass::Domain:
+				return DomainShaderProfile;
+			case ShaderClass::Geometry:
+				return GeometryShaderProfile;
 			}
 			return nullptr;
 		}
@@ -1307,6 +1316,12 @@ namespace SIE
 				return std::format(L"Data/ShaderCache/{}/{:X}.vso", std::wstring(name.begin(), name.end()), descriptor);
 			case ShaderClass::Compute:
 				return std::format(L"Data/ShaderCache/{}/{:X}.cso", std::wstring(name.begin(), name.end()), descriptor);
+			case ShaderClass::Hull:
+				return std::format(L"Data/ShaderCache/{}/{:X}.hso", std::wstring(name.begin(), name.end()), descriptor);
+			case ShaderClass::Domain:
+				return std::format(L"Data/ShaderCache/{}/{:X}.dso", std::wstring(name.begin(), name.end()), descriptor);
+			case ShaderClass::Geometry:
+				return std::format(L"Data/ShaderCache/{}/{:X}.gso", std::wstring(name.begin(), name.end()), descriptor);
 			}
 			return {};
 		}
@@ -1383,6 +1398,10 @@ namespace SIE
 				defines[lastIndex++] = { "PSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Compute) {
 				defines[lastIndex++] = { "CSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Hull) {
+				defines[lastIndex++] = { "HSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Domain) {
+				defines[lastIndex++] = { "DSHADER", nullptr };
 			}
 			if (globals::state->IsDeveloperMode()) {
 				defines[lastIndex++] = { "D3DCOMPILE_SKIP_OPTIMIZATION", nullptr };
@@ -1922,6 +1941,120 @@ namespace SIE
 		return nullptr;
 	}
 
+	ID3DBlob* ShaderCache::GetHullShaderBlob(const RE::BSShader& shader, uint32_t descriptor)
+	{
+		auto state = globals::state;
+		if (!((ShaderCache::IsSupportedShader(shader) || state->IsDeveloperMode() && state->IsShaderEnabled(shader)) && state->enableCShaders)) {
+			return nullptr;
+		}
+
+		if (!SShaderCache::ResolveImageSpaceDescriptor(shader, descriptor)) {
+			return nullptr;
+		}
+
+		if (state->IsDeveloperMode()) {
+			// Track this shader as active
+			TrackActiveShader(ShaderClass::Hull, shader, descriptor);
+
+			auto key = SIE::SShaderCache::GetShaderString(ShaderClass::Hull, shader, descriptor, true);
+			if (blockedKeyIndex != -1 && !blockedKey.empty() && key == blockedKey) {
+				if (std::find(blockedIDs.begin(), blockedIDs.end(), descriptor) == blockedIDs.end()) {
+					blockedIDs.push_back(descriptor);
+					logger::debug("Skipping blocked shader {:X}:{} total: {}", descriptor, blockedKey, blockedIDs.size());
+				}
+				return nullptr;
+			}
+		}
+
+		// Check if already compiled in shaderMap
+		if (auto* blob = GetCompletedShader(ShaderClass::Hull, shader, descriptor)) {
+			return blob;
+		}
+
+		if (IsAsync()) {
+			compilationSet.Add({ ShaderClass::Hull, shader, descriptor });
+			return nullptr;
+		} else {
+			return SIE::SShaderCache::CompileShader(ShaderClass::Hull, shader, descriptor, true);
+		}
+	}
+
+	ID3DBlob* ShaderCache::GetDomainShaderBlob(const RE::BSShader& shader, uint32_t descriptor)
+	{
+		auto state = globals::state;
+		if (!((ShaderCache::IsSupportedShader(shader) || state->IsDeveloperMode() && state->IsShaderEnabled(shader)) && state->enableCShaders)) {
+			return nullptr;
+		}
+
+		if (!SShaderCache::ResolveImageSpaceDescriptor(shader, descriptor)) {
+			return nullptr;
+		}
+
+		if (state->IsDeveloperMode()) {
+			// Track this shader as active
+			TrackActiveShader(ShaderClass::Domain, shader, descriptor);
+
+			auto key = SIE::SShaderCache::GetShaderString(ShaderClass::Domain, shader, descriptor, true);
+			if (blockedKeyIndex != -1 && !blockedKey.empty() && key == blockedKey) {
+				if (std::find(blockedIDs.begin(), blockedIDs.end(), descriptor) == blockedIDs.end()) {
+					blockedIDs.push_back(descriptor);
+					logger::debug("Skipping blocked shader {:X}:{} total: {}", descriptor, blockedKey, blockedIDs.size());
+				}
+				return nullptr;
+			}
+		}
+
+		// Check if already compiled in shaderMap
+		if (auto* blob = GetCompletedShader(ShaderClass::Domain, shader, descriptor)) {
+			return blob;
+		}
+
+		if (IsAsync()) {
+			compilationSet.Add({ ShaderClass::Domain, shader, descriptor });
+			return nullptr;
+		} else {
+			return SIE::SShaderCache::CompileShader(ShaderClass::Domain, shader, descriptor, true);
+		}
+	}
+
+	ID3DBlob* ShaderCache::GetGeometryShaderBlob(const RE::BSShader& shader, uint32_t descriptor)
+	{
+		auto state = globals::state;
+		if (!((ShaderCache::IsSupportedShader(shader) || state->IsDeveloperMode() && state->IsShaderEnabled(shader)) && state->enableCShaders)) {
+			return nullptr;
+		}
+
+		if (!SShaderCache::ResolveImageSpaceDescriptor(shader, descriptor)) {
+			return nullptr;
+		}
+
+		if (state->IsDeveloperMode()) {
+			// Track this shader as active
+			TrackActiveShader(ShaderClass::Geometry, shader, descriptor);
+
+			auto key = SIE::SShaderCache::GetShaderString(ShaderClass::Geometry, shader, descriptor, true);
+			if (blockedKeyIndex != -1 && !blockedKey.empty() && key == blockedKey) {
+				if (std::find(blockedIDs.begin(), blockedIDs.end(), descriptor) == blockedIDs.end()) {
+					blockedIDs.push_back(descriptor);
+					logger::debug("Skipping blocked shader {:X}:{} total: {}", descriptor, blockedKey, blockedIDs.size());
+				}
+				return nullptr;
+			}
+		}
+
+		// Check if already compiled in shaderMap
+		if (auto* blob = GetCompletedShader(ShaderClass::Geometry, shader, descriptor)) {
+			return blob;
+		}
+
+		if (IsAsync()) {
+			compilationSet.Add({ ShaderClass::Geometry, shader, descriptor });
+			return nullptr;
+		} else {
+			return SIE::SShaderCache::CompileShader(ShaderClass::Geometry, shader, descriptor, true);
+		}
+	}
+
 	ShaderCache::~ShaderCache()
 	{
 		Clear();
@@ -2024,7 +2157,7 @@ namespace SIE
 				shaderMap.erase(entry.key);
 			}
 
-			// Handle vertex, pixel, and compute shaders (each will lock)
+			// Handle vertex, pixel, compute, hull, and domain shaders
 			switch (entry.shaderClass) {
 			case SIE::ShaderClass::Vertex:
 				ReleaseShader(vertexShaders, vertexShadersMutex, entry.type, entry.descriptor);
@@ -2034,6 +2167,10 @@ namespace SIE
 				break;
 			case SIE::ShaderClass::Compute:
 				ReleaseShader(computeShaders, computeShadersMutex, entry.type, entry.descriptor);
+				break;
+			case SIE::ShaderClass::Hull:
+			case SIE::ShaderClass::Domain:
+				// Hull and Domain shaders are stored as ID3DBlob* in shaderMap, no separate release needed
 				break;
 			default:
 				logger::warn("Unexpected shader class: {}", static_cast<int>(entry.shaderClass));

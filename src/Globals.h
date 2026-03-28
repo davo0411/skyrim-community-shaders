@@ -19,6 +19,7 @@ struct ScreenSpaceGI;
 struct ScreenSpaceShadows;
 struct Skylighting;
 struct TerrainVariation;
+struct PBRWater;
 struct SkySync;
 struct SubsurfaceScattering;
 struct TerrainBlending;
@@ -75,6 +76,7 @@ namespace globals
 		extern ScreenSpaceShadows screenSpaceShadows;
 		extern Skylighting skylighting;
 		extern TerrainVariation terrainVariation;
+		extern PBRWater pbrWater;
 		extern SkySync skySync;
 		extern SubsurfaceScattering subsurfaceScattering;
 		extern TerrainBlending terrainBlending;

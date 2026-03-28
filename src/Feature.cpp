@@ -16,6 +16,7 @@
 #include "Features/LODBlending.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
+#include "Features/PBRWater/PBRWater.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/RenderDoc.h"
 #include "Features/ScreenSpaceGI.h"
@@ -232,6 +233,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::hairSpecular,
 		&globals::features::interiorSun,
 		&globals::features::terrainVariation,
+		&globals::features::pbrWater,
 		&globals::features::ibl,
 		&globals::features::extendedTranslucency,
 		&globals::features::upscaling,
