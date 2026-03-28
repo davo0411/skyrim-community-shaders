@@ -1,5 +1,6 @@
 #include "ThemeManager.h"
 #include "../Menu.h"
+#include "ThemePresets.h"
 
 #include "BackgroundBlur.h"
 #include "Fonts.h"
@@ -7,13 +8,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <iomanip>
-#include <numeric>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +26,7 @@
 #include "../Util.h"
 #include "../Utils/FileSystem.h"
 #include "../Utils/UI.h"
+#include "Features/VR.h"
 
 using namespace SKSE;
 
@@ -96,7 +95,31 @@ void ThemeManager::SetupImGuiStyle(const Menu& menu)
 		globalScale = Constants::DEFAULT_GLOBAL_SCALE;  // Ensure built-in themes stay at 0.0
 	}
 
-	styleCopy.ScaleAllSizes(exp2(globalScale));
+	// Scale style sizes by GlobalScale and font-size ratio (theme values target 1080p baseline)
+	float fontScale = 1.0f;
+	auto& io = ImGui::GetIO();
+	if (io.FontDefault) {
+		constexpr float kBaselineFontSize = Constants::DEFAULT_SCREEN_HEIGHT * Constants::DEFAULT_FONT_RATIO;
+		fontScale = io.FontDefault->FontSize / kBaselineFontSize;
+	}
+	const float scaleFactor = fontScale * exp2(globalScale);
+	styleCopy.ScaleAllSizes(scaleFactor);
+
+	// ScaleAllSizes skips border and separator sizes — scale them manually, flooring non-zero values at 1px
+	auto scaleSize = [scaleFactor](float value) -> float {
+		if (value <= 0.0f)
+			return 0.0f;
+		return ImMax(1.0f, ImTrunc(value * scaleFactor));
+	};
+	styleCopy.WindowBorderSize = scaleSize(themeSettings.Style.WindowBorderSize);
+	styleCopy.ChildBorderSize = scaleSize(themeSettings.Style.ChildBorderSize);
+	styleCopy.PopupBorderSize = scaleSize(themeSettings.Style.PopupBorderSize);
+	styleCopy.FrameBorderSize = scaleSize(themeSettings.Style.FrameBorderSize);
+	styleCopy.TabBorderSize = scaleSize(themeSettings.Style.TabBorderSize);
+	styleCopy.TabBarBorderSize = scaleSize(themeSettings.Style.TabBarBorderSize);
+	styleCopy.SeparatorTextBorderSize = scaleSize(themeSettings.Style.SeparatorTextBorderSize);
+	styleCopy.DockingSeparatorSize = scaleSize(themeSettings.Style.DockingSeparatorSize);
+
 	styleCopy.MouseCursorScale = 1.f;
 	style = styleCopy;
 	style.HoverDelayNormal = themeSettings.TooltipHoverDelay;
@@ -561,8 +584,9 @@ bool ThemeManager::LoadTheme(const std::string& themeName, json& themeSettings)
 		return true;
 	}
 
+	std::string safeFileName = Util::FileHelpers::SanitizeFileName(themeName);
 	auto it = std::find_if(themes.begin(), themes.end(),
-		[&themeName](const ThemeInfo& theme) { return theme.name == themeName; });
+		[&safeFileName](const ThemeInfo& theme) { return theme.name == safeFileName; });
 
 	if (it == themes.end()) {
 		logger::warn("Theme not found: {}", themeName);
@@ -596,6 +620,10 @@ bool ThemeManager::SaveTheme(const std::string& themeName, const json& themeSett
 		logger::warn("Cannot save theme with empty name");
 		return false;
 	}
+	if (IsPresetTheme(themeName)) {
+		logger::warn("Cannot overwrite preset theme: {}", themeName);
+		return false;
+	}
 
 	// Create the full theme JSON structure
 	json fullTheme = {
@@ -606,10 +634,7 @@ bool ThemeManager::SaveTheme(const std::string& themeName, const json& themeSett
 		{ "Theme", themeSettings }
 	};
 
-	// Generate safe filename (remove invalid characters)
-	std::string safeFileName = themeName;
-	std::replace_if(safeFileName.begin(), safeFileName.end(), [](char c) { return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|'; }, '_');
-
+	std::string safeFileName = Util::FileHelpers::SanitizeFileName(themeName);
 	auto themesDir = GetThemesDirectory();
 	auto filePath = themesDir / (safeFileName + ".json");
 
@@ -660,6 +685,15 @@ void ThemeManager::RefreshThemes()
 std::filesystem::path ThemeManager::GetThemesDirectory() const
 {
 	return Util::PathHelpers::GetThemesPath();
+}
+
+bool ThemeManager::IsPresetTheme(const std::string& themeName) const
+{
+	for (const char* preset : ThemePresets::names) {
+		if (themeName == preset)
+			return true;
+	}
+	return false;
 }
 
 void ThemeManager::CreateDefaultThemeFiles()
@@ -794,11 +828,17 @@ float ThemeManager::ResolveFontSize(const Menu& menu)
 	}
 
 	// Otherwise, compute dynamic default based on current screen resolution
-	float dynamicSize = Constants::DEFAULT_FONT_SIZE;
-	if (globals::state && globals::state->screenSize.y > 0) {
+	float dynamicSize;
+	if (globals::game::isVR) {
+		// VR: use overlay height
+		dynamicSize = VR::Config::kOverlayHeight * Constants::DEFAULT_FONT_RATIO;
+	} else if (globals::state && globals::state->screenSize.y > 0) {
+		// Non-VR: use current screen height
 		dynamicSize = globals::state->screenSize.y * Constants::DEFAULT_FONT_RATIO;
 	} else {
-		logger::warn("ThemeManager::ResolveFontSize() - Falling back to DEFAULT_FONT_SIZE due to missing screen height.");
+		// Fallback: use default font size
+		logger::warn("ThemeManager::ResolveFontSize() - Falling back to Constants::DEFAULT_FONT_SIZE due to missing screen height.");
+		dynamicSize = Constants::DEFAULT_FONT_SIZE;
 	}
 	return std::clamp(dynamicSize, Constants::MIN_FONT_SIZE, Constants::MAX_FONT_SIZE);
 }

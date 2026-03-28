@@ -2,8 +2,7 @@
 
 #include <BS_thread_pool.hpp>
 #include <efsw/efsw.hpp>
-
-static constexpr REL::Version SHADER_CACHE_VERSION = { 0, 0, 0, 42 };
+#include <vector>
 
 using namespace std::chrono;
 
@@ -336,6 +335,7 @@ namespace SIE
 		void SetAsync(bool value);
 		bool IsDump() const;
 		void SetDump(bool value);
+		void StopCompilation();
 
 		bool IsDiskCache() const;
 		void SetDiskCache(bool value);
@@ -424,6 +424,13 @@ namespace SIE
 		uint64_t GetCachedHitTasks();
 		uint64_t GetCompletedTasks();
 		uint64_t GetFailedTasks();
+		/**
+		 * @brief Count currently failed shader entries in the shader map.
+		 *
+		 * This inspects the `shaderMap` under lock and returns the number of
+		 * entries whose status is `ShaderCompilationTask::Status::Failed`.
+		 */
+		uint64_t GetCurrentFailedCount();
 		uint64_t GetTotalTasks();
 		void IncCacheHitTasks();
 		void ToggleErrorMessages();
@@ -441,6 +448,8 @@ namespace SIE
 		void ClearShaderMap(RE::BSShader::Type a_type);
 		void InsertModifiedShaderMap(const std::string& a_shader, std::chrono::time_point<std::chrono::system_clock> a_time);
 		std::chrono::time_point<std::chrono::system_clock> GetModifiedShaderMapTime(const std::string& a_shader);
+
+		ShaderFileDependencyTracker* GetDependencyTracker() { return dependencyTracker.get(); }
 
 		int32_t compilationThreadCount = std::max({ static_cast<int32_t>(std::thread::hardware_concurrency()) - 4, static_cast<int32_t>(std::thread::hardware_concurrency()) * 3 / 4, 1 });
 		int32_t backgroundCompilationThreadCount = std::max(static_cast<int32_t>(std::thread::hardware_concurrency()) / 2, 1);
@@ -723,12 +732,15 @@ namespace SIE
 		efsw::FileWatcher* fileWatcher = nullptr;
 		efsw::WatchID watchID;
 		UpdateListener* listener = nullptr;
+
+		std::unique_ptr<ShaderFileDependencyTracker> dependencyTracker;
 	};
 
 	// Inherits from the abstract listener class, and implements the the file action handler
 	class UpdateListener : public efsw::FileWatchListener
 	{
 	public:
+		UpdateListener(ShaderFileDependencyTracker* deps);
 		/**
 		 * @brief Updates the shader cache for a specific file path and determines whether to clear the cache.
 		 *
@@ -751,6 +763,7 @@ namespace SIE
 		void handleFileAction(efsw::WatchID, const std::string& dir, const std::string& filename, efsw::Action action, std::string) override;
 
 	private:
+		ShaderFileDependencyTracker* deps;
 		struct fileAction
 		{
 			efsw::WatchID watchID;
@@ -761,6 +774,5 @@ namespace SIE
 		};
 		std::mutex actionMutex;
 		std::vector<fileAction> queue{};
-		size_t lastQueueSize = queue.size();
 	};
 }
