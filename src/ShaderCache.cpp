@@ -1402,6 +1402,8 @@ namespace SIE
 				defines[lastIndex++] = { "HSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Domain) {
 				defines[lastIndex++] = { "DSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Geometry) {
+				defines[lastIndex++] = { "GSHADER", nullptr };
 			}
 			if (globals::state->IsDeveloperMode()) {
 				defines[lastIndex++] = { "D3DCOMPILE_SKIP_OPTIMIZATION", nullptr };
@@ -1975,7 +1977,7 @@ namespace SIE
 			compilationSet.Add({ ShaderClass::Hull, shader, descriptor });
 			return nullptr;
 		} else {
-			return SIE::SShaderCache::CompileShader(ShaderClass::Hull, shader, descriptor, true);
+			return SIE::SShaderCache::CompileShader(ShaderClass::Hull, shader, descriptor, isDiskCache, dependencyTracker.get());
 		}
 	}
 
@@ -2013,7 +2015,7 @@ namespace SIE
 			compilationSet.Add({ ShaderClass::Domain, shader, descriptor });
 			return nullptr;
 		} else {
-			return SIE::SShaderCache::CompileShader(ShaderClass::Domain, shader, descriptor, true);
+			return SIE::SShaderCache::CompileShader(ShaderClass::Domain, shader, descriptor, isDiskCache, dependencyTracker.get());
 		}
 	}
 
@@ -2051,7 +2053,7 @@ namespace SIE
 			compilationSet.Add({ ShaderClass::Geometry, shader, descriptor });
 			return nullptr;
 		} else {
-			return SIE::SShaderCache::CompileShader(ShaderClass::Geometry, shader, descriptor, true);
+			return SIE::SShaderCache::CompileShader(ShaderClass::Geometry, shader, descriptor, isDiskCache, dependencyTracker.get());
 		}
 	}
 
@@ -2170,7 +2172,8 @@ namespace SIE
 				break;
 			case SIE::ShaderClass::Hull:
 			case SIE::ShaderClass::Domain:
-				// Hull and Domain shaders are stored as ID3DBlob* in shaderMap, no separate release needed
+			case SIE::ShaderClass::Geometry:
+				// Hull, domain, and geometry shaders are stored as ID3DBlob* in shaderMap, no separate release needed
 				break;
 			default:
 				logger::warn("Unexpected shader class: {}", static_cast<int>(entry.shaderClass));

@@ -112,10 +112,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FoamIntensityFlowmap,
 	FoamThreshold,
 	FoamSharpness,
-	LargeWaveSlopeRequirement,
-	SmallWaveSlopeMultiplier,
-	SmallWaveBaseOffset,
-	SmallWaveHeightRange)
+	FoamIntersectionRange,
+	FoamIntersectionIntensity)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PBRWater::BRDFSettings,
@@ -400,55 +398,39 @@ void PBRWater::DrawSettings()
 
 			if (settings.foam.EnableFoam) {
 				ImGui::Spacing();
-				ImGui::Text("General Foam Settings");
-				ImGui::Separator();
 
-				ImGui::SliderFloat("Foam Intensity", &settings.foam.FoamIntensity, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("Lake / Ocean Intensity", &settings.foam.FoamIntensity, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Overall foam strength for non-flowmap water (lakes, ocean).\nAlso shifts height threshold upward (higher = tighter to peak).");
+					ImGui::Text("Foam density on standing water (lakes, ocean).\n0 = no foam, 1 = natural, 2 = heavy.");
 				}
 
-				ImGui::SliderFloat("Foam Intensity (Flowmap)", &settings.foam.FoamIntensityFlowmap, 0.0f, 2.0f, "%.2f");
+				ImGui::SliderFloat("River Intensity", &settings.foam.FoamIntensityFlowmap, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Foam strength for flowmap water (rivers).");
+					ImGui::Text("Foam density on flowing water (rivers, streams).\n0 = no foam, 1 = natural, 2 = heavy.");
 				}
 
-				ImGui::SliderFloat("Height Threshold", &settings.foam.FoamThreshold, 0.0f, 0.9f, "%.2f");
+				ImGui::SliderFloat("Height Threshold", &settings.foam.FoamThreshold, 0.0f, 0.8f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Minimum wave height for foam appearance.\nLower values = foam appears lower on waves.");
+					ImGui::Text("How far down the wave foam extends.\n0 = foam on any raised water, 0.8 = only the very peak.");
 				}
 
-				ImGui::SliderFloat("Edge Sharpness", &settings.foam.FoamSharpness, 0.5f, 8.0f, "%.2f");
+				ImGui::SliderFloat("Edge Sharpness", &settings.foam.FoamSharpness, 0.5f, 4.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("How sharply foam edges are defined.\nHigher = more crisp edges.");
-				}
-
-				ImGui::Spacing();
-				ImGui::Text("Large Wave Foam (Waves 1-3)");
-				ImGui::Separator();
-
-				ImGui::SliderFloat("Slope Requirement", &settings.foam.LargeWaveSlopeRequirement, 0.0f, 0.8f, "%.2f");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Minimum slope ratio for large waves to generate foam.\nHigher = only steep waves foam (prevents foam on gentle rolling tops).\nLower = more foam on larger waves.");
+					ImGui::Text("Contrast of foam bubble edges.\nLow = soft / diffuse, High = crisp / defined.");
 				}
 
 				ImGui::Spacing();
-				ImGui::Text("Small Wave Foam (Waves 4-6)");
+				ImGui::Text("Intersection Foam");
 				ImGui::Separator();
 
-				ImGui::SliderFloat("Slope Multiplier", &settings.foam.SmallWaveSlopeMultiplier, 1.0f, 5.0f, "%.2f");
+				ImGui::SliderFloat("Contact Range", &settings.foam.FoamIntersectionRange, 10.0f, 300.0f, "%.0f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("How easily small waves generate foam based on slope.\nHigher = more foam on small waves.");
+					ImGui::Text("Distance (game units) from submerged geometry where foam appears.\nControls how wide the foam band is around rocks, shores, etc.");
 				}
 
-				ImGui::SliderFloat("Base Foam Offset", &settings.foam.SmallWaveBaseOffset, 0.0f, 0.5f, "%.2f");
+				ImGui::SliderFloat("Contact Intensity", &settings.foam.FoamIntersectionIntensity, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Base foam amount for small waves regardless of slope.\nAdds minimum foam to all small wave crests.");
-				}
-
-				ImGui::SliderFloat("Height Range", &settings.foam.SmallWaveHeightRange, 0.5f, 1.0f, "%.2f");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Height range requirement for small wave foam.\nLower = foam appears on smaller height variations.");
+					ImGui::Text("Strength of foam at geometry intersections.\n0 = disabled, 1 = natural, 2 = heavy.");
 				}
 			}
 			ImGui::EndTabItem();
@@ -660,6 +642,13 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	tessellationActiveForPass = false;
 	originalTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
+	// Tessellation HS/DS is only bound for water techniques < 8; for LOD/simple/etc. VS must displace waves.
+	const uint32_t waterTechnique = (pass->passEnum >> 11) & 0xF;
+	const bool techniqueSupportsTessel = (waterTechnique < 8);
+	const bool tessellationActiveThisPass = singleton.settings.tessellation.EnableTessellation &&
+	                                        singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
+	                                        techniqueSupportsTessel;
+
 	// ---- Fill and bind per-frame constant buffer ----
 	if (singleton.perFrame) {
 		PerFrame perFrameData{};
@@ -741,10 +730,8 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		perFrameData.Wave5AngleOffset = singleton.settings.waves.Wave5AngleOffset;
 		perFrameData.Wave6AngleOffset = singleton.settings.waves.Wave6AngleOffset;
 
-		// Set tessellation enabled flag - tells VS to skip wave displacement so DS can handle it
-		bool tessellationEnabled = singleton.settings.tessellation.EnableTessellation &&
-		                           singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader;
-		perFrameData.TessellationEnabled = tessellationEnabled ? 1.0f : 0.0f;
+		// Per-pass: only skip VS displacement when HS/DS will actually run for this draw
+		perFrameData.TessellationEnabled = tessellationActiveThisPass ? 1.0f : 0.0f;
 		perFrameData.WaveFadeStart = singleton.settings.waves.WaveFadeStart;
 		perFrameData.WaveFadeEnd = singleton.settings.waves.WaveFadeEnd;
 
@@ -773,10 +760,13 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		perFrameData.FoamIntensityFlowmap = singleton.settings.foam.FoamIntensityFlowmap;
 		perFrameData.FoamThreshold = singleton.settings.foam.FoamThreshold;
 		perFrameData.FoamSharpness = singleton.settings.foam.FoamSharpness;
-		perFrameData.FoamLargeWaveSlopeRequirement = singleton.settings.foam.LargeWaveSlopeRequirement;
-		perFrameData.FoamSmallWaveSlopeMultiplier = singleton.settings.foam.SmallWaveSlopeMultiplier;
-		perFrameData.FoamSmallWaveBaseOffset = singleton.settings.foam.SmallWaveBaseOffset;
-		perFrameData.FoamSmallWaveHeightRange = singleton.settings.foam.SmallWaveHeightRange;
+		perFrameData.FoamIntersectionRange = singleton.settings.foam.FoamIntersectionRange;
+		perFrameData.FoamIntersectionIntensity = singleton.settings.foam.FoamIntersectionIntensity;
+		perFrameData.FoamPad_c22z = 0.0f;
+		perFrameData.FoamPad_c22w = 0.0f;
+		perFrameData.FoamPad_c23x = 0.0f;
+		perFrameData.FoamPad_c23y = 0.0f;
+		perFrameData.FoamPad_c23z = 0.0f;
 
 		// Depth-based wave control settings
 		perFrameData.ShallowWaveDepthMin = singleton.settings.waves.ShallowWaveDepthMin;
@@ -1043,14 +1033,6 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		}
 	}
 
-	// ---- Determine technique for tessellation compatibility ----
-	uint32_t technique = (pass->passEnum >> 11) & 0xF;
-	bool techniqueSupportsTessel = (technique < 8);
-
-	bool tessellationEnabled = singleton.settings.tessellation.EnableTessellation &&
-	                           singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
-	                           techniqueSupportsTessel;
-
 	static bool loggedTessSetup = false;
 	static int tessFrameCount = 0;
 	tessFrameCount++;
@@ -1058,7 +1040,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 
 	if (shouldLog) {
 		logger::info("[PBR Water] SetupGeometry - passEnum:0x{:X} technique:{} numLights:{} tessCompat:{}",
-			pass->passEnum, technique, pass->numLights, techniqueSupportsTessel);
+			pass->passEnum, waterTechnique, pass->numLights, techniqueSupportsTessel);
 		loggedTessSetup = true;
 	}
 
@@ -1087,18 +1069,13 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	// ---- Tessellation Setup ----
 
 	// Track if we need to bind just the geometry shader (for tri visualizer without tessellation)
-	bool geometryShaderOnlyForVisualizer = !tessellationEnabled &&
+	bool geometryShaderOnlyForVisualizer = !tessellationActiveThisPass &&
 	                                        singleton.settings.general.ShowWireframe &&
 	                                        singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
 	                                        techniqueSupportsTessel;
 
-	if (tessellationEnabled) {
-		if (shouldLog) {
-			logger::info("[PBR Water] Tessellation enabled - HS: {:p}, DS: {:p}, GS: {:p}",
-				(void*)singleton.waterHullShader.get(), (void*)singleton.waterDomainShader.get(), (void*)singleton.waterGeometryShader.get());
-		}
-
-		// Update tessellation constant buffer with current camera position
+	if (tessellationActiveThisPass) {
+		// Update tessellation constant buffer
 		if (singleton.tessellationParams) {
 			TessellationParams tessParams{};
 			tessParams.TessellationMinDistance = singleton.settings.tessellation.TessellationMinDistance;
@@ -1112,120 +1089,65 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 			tessParams.CameraWorldPosZ = cameraPos.z;
 			tessParams.DetailHeightScale = 0.0f;
 
-			if (shouldLog) {
-				logger::info("[PBR Water] Tess params - MinDist:{} MaxDist:{} MinFactor:{} MaxFactor:{} CamPos:({},{},{})",
-					tessParams.TessellationMinDistance, tessParams.TessellationMaxDistance,
-					tessParams.TessellationMinFactor, tessParams.TessellationMaxFactor,
-					tessParams.CameraWorldPosX, tessParams.CameraWorldPosY, tessParams.CameraWorldPosZ);
-			}
-
 			singleton.tessellationParams->Update(tessParams);
 
-			ID3D11Buffer* tessBuffers[1] = { singleton.tessellationParams->CB() };
-			context->HSSetConstantBuffers(9, 1, tessBuffers);
-			context->DSSetConstantBuffers(9, 1, tessBuffers);
+			ID3D11Buffer* tessCB = singleton.tessellationParams->CB();
+			context->HSSetConstantBuffers(9, 1, &tessCB);
+			context->DSSetConstantBuffers(9, 1, &tessCB);
 		}
 
-		// Save original topology for RestoreGeometry
 		context->IAGetPrimitiveTopology(&originalTopology);
-
-		if (shouldLog) {
-			logger::info("[PBR Water] Original topology after func: {}", static_cast<int>(originalTopology));
-		}
-
-		// Set patch list topology for tessellation (3 control points per patch)
 		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
 
-		// Bind hull, domain, and geometry shaders
 		context->HSSetShader(singleton.waterHullShader.get(), nullptr, 0);
 		context->DSSetShader(singleton.waterDomainShader.get(), nullptr, 0);
 		context->GSSetShader(singleton.waterGeometryShader.get(), nullptr, 0);
 
-		if (shouldLog) {
-			ID3D11HullShader* boundHS = nullptr;
-			ID3D11DomainShader* boundDS = nullptr;
-			ID3D11GeometryShader* boundGS = nullptr;
-			context->HSGetShader(&boundHS, nullptr, nullptr);
-			context->DSGetShader(&boundDS, nullptr, nullptr);
-			context->GSGetShader(&boundGS, nullptr, nullptr);
-			logger::info("[PBR Water] After bind - HS: {:p}, DS: {:p}, GS: {:p}", (void*)boundHS, (void*)boundDS, (void*)boundGS);
-			if (boundHS) boundHS->Release();
-			if (boundDS) boundDS->Release();
-			if (boundGS) boundGS->Release();
-
-			D3D11_PRIMITIVE_TOPOLOGY currentTopo;
-			context->IAGetPrimitiveTopology(&currentTopo);
-			logger::info("[PBR Water] After set - topology: {} (expected 35 for 3-control-point patch list)", static_cast<int>(currentTopo));
-		}
-
-		// Bind VS constant buffers to DS as well (DS needs the same transforms)
+		// Forward VS constant buffers (b0-b2) to DS for transforms
 		ID3D11Buffer* vsBuffers[3] = { nullptr, nullptr, nullptr };
 		context->VSGetConstantBuffers(0, 3, vsBuffers);
 		context->DSSetConstantBuffers(0, 3, vsBuffers);
 
-		// Bind the FrameBuffer cbuffer (b12) to HS and DS - needed for CameraPosAdjust
-		ID3D11Buffer* frameBuffer[1] = { nullptr };
-		context->PSGetConstantBuffers(12, 1, frameBuffer);
-		if (frameBuffer[0]) {
-			context->HSSetConstantBuffers(12, 1, frameBuffer);
-			context->DSSetConstantBuffers(12, 1, frameBuffer);
+		// Forward FrameBuffer (b12) to HS and DS for CameraPosAdjust
+		ID3D11Buffer* frameBuffer = nullptr;
+		context->PSGetConstantBuffers(12, 1, &frameBuffer);
+		if (frameBuffer) {
+			context->HSSetConstantBuffers(12, 1, &frameBuffer);
+			context->DSSetConstantBuffers(12, 1, &frameBuffer);
 		}
 
-		if (shouldLog) {
-			logger::info("[PBR Water] VS CBs bound to DS - b0:{:p} b1:{:p} b2:{:p} b12:{:p}",
-				(void*)vsBuffers[0], (void*)vsBuffers[1], (void*)vsBuffers[2], (void*)frameBuffer[0]);
-		}
-
-		// Also bind the PBR Water per-frame buffer to HS/DS
+		// Forward PBR Water per-frame (b7) to HS/DS
 		if (singleton.perFrame) {
-			ID3D11Buffer* perFrameBuffers[1] = { singleton.perFrame->CB() };
-			context->HSSetConstantBuffers(7, 1, perFrameBuffers);
-			context->DSSetConstantBuffers(7, 1, perFrameBuffers);
+			ID3D11Buffer* perFrameCB = singleton.perFrame->CB();
+			context->HSSetConstantBuffers(7, 1, &perFrameCB);
+			context->DSSetConstantBuffers(7, 1, &perFrameCB);
 		}
 
-		// Bind normal textures to DS for tessellation
-		{
-			ID3D11ShaderResourceView* normalSRVs[3] = { nullptr, nullptr, nullptr };
-			ID3D11SamplerState* normalSamplers[3] = { nullptr, nullptr, nullptr };
-			context->PSGetShaderResources(4, 3, normalSRVs);
-			context->PSGetSamplers(4, 3, normalSamplers);
-			context->DSSetShaderResources(4, 3, normalSRVs);
-			context->DSSetSamplers(4, 3, normalSamplers);
+		// Forward normal SRVs/samplers (slots 4-6) and flowmap (slots 8-9) to DS
+		ID3D11ShaderResourceView* srvs[5] = {};
+		ID3D11SamplerState* samplers[5] = {};
+		context->PSGetShaderResources(4, 3, srvs);
+		context->PSGetSamplers(4, 3, samplers);
+		context->PSGetShaderResources(8, 2, srvs + 3);
+		context->PSGetSamplers(8, 2, samplers + 3);
 
-			for (int i = 0; i < 3; i++) {
-				if (normalSRVs[i]) normalSRVs[i]->Release();
-				if (normalSamplers[i]) normalSamplers[i]->Release();
-			}
+		context->DSSetShaderResources(4, 3, srvs);
+		context->DSSetSamplers(4, 3, samplers);
+		context->DSSetShaderResources(8, 2, srvs + 3);
+		context->DSSetSamplers(8, 2, samplers + 3);
 
-			// Also bind flowmap textures (slots 8-9) for flowmap water
-			ID3D11ShaderResourceView* flowmapSRVs[2] = { nullptr, nullptr };
-			ID3D11SamplerState* flowmapSamplers[2] = { nullptr, nullptr };
-			context->PSGetShaderResources(8, 2, flowmapSRVs);
-			context->PSGetSamplers(8, 2, flowmapSamplers);
-			context->DSSetShaderResources(8, 2, flowmapSRVs);
-			context->DSSetSamplers(8, 2, flowmapSamplers);
-			for (int i = 0; i < 2; i++) {
-				if (flowmapSRVs[i]) flowmapSRVs[i]->Release();
-				if (flowmapSamplers[i]) flowmapSamplers[i]->Release();
-			}
+		for (int i = 0; i < 5; i++) {
+			if (srvs[i]) srvs[i]->Release();
+			if (samplers[i]) samplers[i]->Release();
 		}
 
 		tessellationActiveForPass = true;
-		loggedTessSetup = true;
 	} else if (geometryShaderOnlyForVisualizer) {
-		// Bind only the geometry shader for tri visualization without tessellation
 		context->GSSetShader(singleton.waterGeometryShader.get(), nullptr, 0);
 		tessellationActiveForPass = true;
-
-		static bool loggedGSOnly = false;
-		if (!loggedGSOnly) {
-			logger::info("[PBR Water] Wireframe view active - binding GS only (no tessellation): {:p}", (void*)singleton.waterGeometryShader.get());
-			loggedGSOnly = true;
-		}
-	} else if (!loggedTessSetup && singleton.settings.tessellation.EnableTessellation &&
-	           singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader) {
-		logger::warn("[PBR Water] Tessellation enabled in settings but shaders missing - HS:{:p} DS:{:p} GS:{:p}",
-			(void*)singleton.waterHullShader.get(), (void*)singleton.waterDomainShader.get(), (void*)singleton.waterGeometryShader.get());
+	} else if (!loggedTessSetup && singleton.settings.tessellation.EnableTessellation && techniqueSupportsTessel &&
+	           !(singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader)) {
+		logger::warn("[PBR Water] Tessellation enabled but hull/domain/geometry shaders failed to compile");
 		loggedTessSetup = true;
 	}
 }

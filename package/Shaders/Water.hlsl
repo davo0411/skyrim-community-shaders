@@ -1161,10 +1161,16 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	return result;
 }
 
-float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular)
+#			include "Common/BRDF.hlsli"
+
+float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection,
+	float distanceFactor, float refractionsDepthFactor, uint eyeIndex = 0)
 {
-	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections))
-		return ReflectionColor.xyz * VarAmounts.y;
+	if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections) {
+		float3 finalSsrReflectionColor = 0.0.xxx;
+		float ssrFraction = 0.0;
+		float3 reflectionColor = 0.0.xxx;
+		float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
 
 		// Water surface roughness for reflection sampling
 		float waterReflectionRoughness = 0.08;
@@ -1179,8 +1185,9 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 		// Filter reflections by upward-facing normals to prevent underwater elements reflecting on wave tops
 		float upwardFacingMask = saturate((normal.z - 0.3) * 2.5);
 
-	float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
-	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
+		if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Cubemap) {
+#			if defined(DYNAMIC_CUBEMAPS)
+#				if defined(SKYLIGHTING)
 
 			float3 dynamicCubemap;
 			float skylightingSpecular = 1.0;
@@ -1206,12 +1213,11 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 					specularIrradiance = Color::IrradianceToLinear(DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
 				}
 
-		float3 specularIrradianceReflections = 1.0;
-		if (skylightingSpecular > 0.0)
-			specularIrradianceReflections = Color::IrradianceToLinear(DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
+				float3 specularIrradianceReflections = 1.0;
 
-		dynamicCubemap = Color::IrradianceToGamma(lerp(specularIrradiance, specularIrradianceReflections, skylightingSpecular));
-	}
+				if (skylightingSpecular > 0.0) {
+					specularIrradianceReflections = Color::IrradianceToLinear(DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
+				}
 
 				dynamicCubemap = Color::IrradianceToGamma(lerp(specularIrradiance, specularIrradianceReflections, skylightingSpecular));
 			}
@@ -1224,15 +1230,30 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #				endif
 
 #				if defined(VR)
-	// Reflection cubemap is incorrect for interiors in VR, ignore it
-	if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior || SharedData::HideSky)
-		reflectionAmount = 0.0;
+			// Reflection cubemap is incorrect for interiors in VR, ignore it
+			if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior || SharedData::HideSky)
+				reflectionColor = dynamicCubemap.xyz;
+			else
+				reflectionColor = lerp(dynamicCubemap.xyz, CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz, saturate(length(input.WPosition.xyz) / 1024.0));
 #				else
-	if (SharedData::HideSky)
-		reflectionAmount = 0.0;
+			if (SharedData::HideSky)
+				reflectionColor = dynamicCubemap.xyz;
+			else
+				reflectionColor = lerp(dynamicCubemap.xyz, CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz, saturate(length(input.WPosition.xyz) / 1024.0));
 #				endif
-	reflectionColor = lerp(dynamicCubemap, reflectionColor, reflectionAmount);
+#			else
+			reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
 #			endif
+		} else {
+#			if !defined(LOD) && NUM_SPECULAR_LIGHTS == 0
+			float4 reflectionNormalRaw = float4((VarAmounts.w * refractionsDepthFactor) * normal.xy + input.MPosition.xy, input.MPosition.z, 1);
+#			else
+			float4 reflectionNormalRaw = float4(VarAmounts.w * normal.xy, 0, 1);
+#			endif
+
+			float4 reflectionNormal = mul(transpose(TextureProj[eyeIndex]), reflectionNormalRaw);
+			reflectionColor = ReflectionTex.SampleLevel(ReflectionSampler, reflectionNormal.xy / reflectionNormal.ww, 0).xyz;
+		}
 
 #			if !defined(LOD) && NUM_SPECULAR_LIGHTS == 0
 		if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Cubemap) {
@@ -1305,8 +1326,6 @@ float3 GetLdotN(float3 normal)
 #			endif
 }
 
-#			include "Common/BRDF.hlsli"
-
 float GetFresnelValue(float3 normal, float3 viewDirection)
 {
 #			if defined(UNDERWATER)
@@ -1339,9 +1358,10 @@ struct DiffuseOutput
 	float3 refractionDiffuseColor;
 	float depth;
 	float refractionMul;
-	float3 scatter;       // Physically-based in-scattered light
-	float3 transmittance; // Light transmission through water
-	float3 waveSSS;       // Wave edge subsurface scattering
+	float3 refractedViewDirection;  // World-space direction used for 3D shadow filtering along the refracted ray
+	float3 scatter;                 // Physically-based in-scattered light
+	float3 transmittance;           // Light transmission through water
+	float3 waveSSS;                 // Wave edge subsurface scattering
 };
 
 // ============================================================================
@@ -1445,19 +1465,17 @@ WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosW
 }
 
 // ============================================================================
-// WAVE EDGE SUBSURFACE SCATTERING (PBR)
-// Based on FFTWater.shader approach using Smith masking for smooth transitions
+// WAVE EDGE LIGHTING — Forward scatter, rim glow, subsurface transmission
 // ============================================================================
-
-float SmithMaskingBeckmannWater(float3 H, float3 S, float a)
-{
-	float hdots = max(0.001f, saturate(dot(H, S)));
-	float a2 = a * a;
-	float hdots2 = hdots * hdots;
-	float tanTheta = sqrt((1.0f - hdots2) / hdots2);
-	float A = 1.0f / (a * tanTheta);
-	return A < 1.6f ? (1.0f - 1.259f * A + 0.396f * A * A) / (3.535f * A + 2.181f * A * A) : 0.0f;
-}
+//
+// Four terms:
+//   1. FORWARD SCATTER — Light transmitted through wave crests. Scales with
+//      raw wave height (game units) for amplitude-proportional intensity.
+//   2. RIM GLOW — Silhouette edge highlights at grazing view angles.
+//   3. AMBIENT SCATTER — Always-on view-dependent baseline that keeps
+//      the water surface alive even on gentle waves.
+//   4. WRAP DIFFUSE — Half-Lambert term that extends illumination around
+//      wave curvature, softening the transition into troughs.
 
 float3 CalculateWaveEdgeSSS(
 	float3 viewDirection,
@@ -1469,30 +1487,42 @@ float3 CalculateWaveEdgeSSS(
 	float3 shallowColor,
 	float3 deepColor)
 {
-	float3 mesoNormal = normalize(waveNormal);
-	float3 toCamera = -viewDirection;
-	float3 halfwayDir = normalize(sunDir + toCamera);
+	float3 N = normalize(waveNormal);
+	float3 V = -viewDirection;
+	float3 L = sunDir;
 
-	float roughness = 0.1f;
-	float lightMask = SmithMaskingBeckmannWater(halfwayDir, sunDir, roughness);
+	float NdotL = dot(N, L);
+	float NdotV = saturate(dot(N, V));
 
-	float H = max(0.0f, waveHeight);
+	float maxAmp = max(Wave1Amplitude * WaveAmplitude * M_TO_GAME_UNIT, 1.0f);
+	float normHeight = saturate(max(0.0f, waveHeight) / maxAmp);
 
-	float wavePeakScatterStrength = 1.5f;
-	float scatterStrength = 0.3f;
+	float3 sssColor = lerp(deepColor, shallowColor, 0.65f);
 
-	float LdotV = saturate(dot(sunDir, viewDirection));
-	float normalMask = pow(saturate(0.5f - 0.5f * dot(sunDir, mesoNormal)), 3.0f);
-	float k1 = wavePeakScatterStrength * H * pow(LdotV, 4.0f) * normalMask;
+	// ── 1. FORWARD SCATTER ──────────────────────────────────────────────
+	float LdotV = saturate(dot(L, viewDirection));
+	float forwardPhase = pow(LdotV, 4.0f);
 
-	float NdotV = saturate(dot(mesoNormal, toCamera));
-	float k2 = scatterStrength * pow(NdotV, 2.0f);
+	// Surfaces whose normal faces away from the sun transmit more light
+	float normalMask = pow(saturate(0.5f - 0.5f * NdotL), 2.0f);
 
-	float3 scatterColor = lerp(deepColor, shallowColor, 0.5f);
+	// normHeight (0-1) drives intensity — no raw game unit blowout
+	float forwardTerm = forwardPhase * normalMask * normHeight * 0.8f;
 
-	float3 scatter = (k1 + k2) * scatterColor * sunColor * rcp(1.0f + lightMask);
+	// ── 2. RIM GLOW ─────────────────────────────────────────────────────
+	float rim = pow(1.0f - NdotV, 3.0f);
+	float wrapLit = saturate(NdotL * 0.4f + 0.6f);
+	float rimTerm = rim * wrapLit * normHeight * 0.35f;
 
-	return scatter;
+	// ── 3. AMBIENT SCATTER ──────────────────────────────────────────────
+	float ambientTerm = 0.08f * NdotV * NdotV;
+
+	// ── 4. WRAP DIFFUSE ─────────────────────────────────────────────────
+	float wrapDiffuse = saturate(NdotL * 0.5f + 0.5f);
+	float wrapTerm = wrapDiffuse * normHeight * 0.15f;
+
+	// ── COMBINE ─────────────────────────────────────────────────────────
+	return (forwardTerm + rimTerm + ambientTerm + wrapTerm) * sssColor * sunColor;
 }
 #endif  // PBR_WATER
 
@@ -1598,11 +1628,19 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	}
 #				endif
 
+	// Direction for shadow ray march: toward refracted sample, or view direction if degenerate
+	float3 refractedViewDirection = viewDirection;
+	float3 refractedDelta = refractionWorldPosition.xyz - input.WPosition.xyz;
+	float refractedLenSq = dot(refractedDelta, refractedDelta);
+	if (refractedLenSq > 1e-10)
+		refractedViewDirection = refractedDelta * rsqrt(refractedLenSq);
+
 	DiffuseOutput output;
 	output.refractionColor = refractionColor;
 	output.refractionDiffuseColor = refractionDiffuseColor;
 	output.depth = depth;
 	output.refractionMul = refractionMul;
+	output.refractedViewDirection = refractedViewDirection;
 #				if defined(PBR_WATER)
 	// Apply water scattering if enabled
 	if (SharedData::pbrWaterSettings.EnableWaterScattering) {
@@ -1613,7 +1651,6 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 		output.transmittance = 1.0f;
 	}
 
-	// PBR wave scatter using Smith masking for smooth transitions
 	float3 rawWaveSSS = CalculateWaveEdgeSSS(
 		viewDirection,
 		input.UnifiedWaveNormal.xyz,
@@ -1754,6 +1791,16 @@ PS_OUTPUT main(PS_INPUT input)
 	float2 screenUV = FrameBuffer::ViewToUV(viewPosition, true, eyeIndex);
 	const bool inWorld = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InWorld);
 
+#			if defined(PBR_WATER) && defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	float foamIntersectionProximity = 0.0f;
+	if (FoamEnabled > 0.5f && FoamIntersectionIntensity > 0.0f && FoamIntersectionRange > 0.0f) {
+		float sceneVSDepth = depth;
+		float waterVSDepth = viewPosition.z;
+		float depthGap = max(sceneVSDepth - waterVSDepth, 0.0f);
+		foamIntersectionProximity = (1.0f - saturate(depthGap / FoamIntersectionRange)) * FoamIntersectionIntensity;
+	}
+#			endif
+
 #			if defined(SKYLIGHTING)
 	float wetnessOcclusion = 1.0;
 
@@ -1810,8 +1857,9 @@ PS_OUTPUT main(PS_INPUT input)
 	float fresnel = GetFresnelValue(normal, viewDirection);
 
 #			if defined(SKYLIGHTING) && defined(PBR_WATER)
-	float skylightingDiffuse = 1.0;
-	float skylightingSpecular = 1.0;
+	// Reset PBR path defaults (skylightingDiffuse / skylightingSpecular already declared above when SKYLIGHTING)
+	skylightingDiffuse = 1.0;
+	skylightingSpecular = 1.0;
 	const bool inWorldSkylight = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InWorld);
 	if (inWorldSkylight && !(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior)) {
 #				if defined(VR)
@@ -1859,13 +1907,10 @@ PS_OUTPUT main(PS_INPUT input)
 	isSpecular = true;
 #			else
 
-#				if defined(SKYLIGHTING)
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, skylightingSpecular);
-#				else
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, 1.0);
-#				endif
+	float screenNoise = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
 
-	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, depth);
+	// Diffuse first: refraction direction is required for filtered directional shadow sampling
+	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, diffuseNormal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth);
 
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, eyeIndex, surfaceShadow);
@@ -1887,9 +1932,8 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 
 	diffuseOutput.refractionDiffuseColor = dirColor + ambientColor;
+
 	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, depthControl.y, eyeIndex);
-	// Use diffuseNormal for diffuse lighting to prevent wave distortion of base color
-	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, diffuseNormal, viewDirection, distanceMul, depthControl.y, fresnel, eyeIndex, viewPosition, screenNoise, depth);
 
 	float3 diffuseColor = lerp(diffuseOutput.refractionColor, diffuseOutput.refractionDiffuseColor, diffuseOutput.refractionMul);
 
@@ -1957,7 +2001,6 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float3 sunColor = GetSunColor(normal, viewDirection, input.WPosition.xyz, eyeIndex) * surfaceShadow;
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior) && any(sunColor > 0.0)) {
-		sunColor *= ShadowSampling::GetWaterShadow(screenNoise, input.WPosition.xyz, eyeIndex) * surfaceShadow;
 #						if defined(SKYLIGHTING) && defined(PBR_WATER)
 		sunColor *= skylightingSpecular;
 #						endif
@@ -1979,7 +2022,6 @@ PS_OUTPUT main(PS_INPUT input)
 			waveDayPh
 		);
 		sunColor *= waveSelfShadow;
-    sunColor *= surfaceShadow;
 #						endif
 	}
 
@@ -1996,23 +2038,25 @@ PS_OUTPUT main(PS_INPUT input)
 	finalColorPreFog += diffuseOutput.scatter;
 	finalColorPreFog += diffuseOutput.waveSSS;
 
-	// Foam contribution - physically-based wave breaking detection
 	if (FoamEnabled > 0.5f) {
-		float2 waveWorldPosPS1 = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
-		float waveTimeSec1 = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
-		float waveDayPh1 = ComputeWaveDayPhase(GameTimeHours);
-		float waveHeightPS1 = input.UnifiedWaveInfo.z;
-		float horizDispPS1 = input.UnifiedWaveNormal.w;
-
-		float foamIntensity = GetFoamIntensity(
-			waveWorldPosPS1, waveHeightPS1, horizDispPS1,
-			WaveIntensity, WaveAmplitude,
-			waveTimeSec1, waveDayPh1,
-			FoamThreshold, FoamIntensity, FoamSharpness
-		);
-
-		float3 foamColor = GetFoamColor();
-		finalColorPreFog = lerp(finalColorPreFog, foamColor, foamIntensity);
+		float intersectVC = 0.0f;
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+		intersectVC = foamIntersectionProximity;
+#							endif
+		FoamResult foam = CalculateFoam(
+			input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy,
+			input.UnifiedWaveNormal.xyz,
+			input.UnifiedWaveInfo.z,
+			input.UnifiedWaveNormal.w,
+			input.UnifiedWaveInfo.xy,
+			input.UnifiedWaveInfo.w,
+			ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds),
+			input.WPosition.w,
+			FoamIntensity,
+			SunDir.xyz,
+			SunColor.xyz * SunDir.w,
+			intersectVC);
+		finalColorPreFog = lerp(finalColorPreFog, foam.color, foam.alpha);
 	}
 #						endif
 
@@ -2063,23 +2107,25 @@ PS_OUTPUT main(PS_INPUT input)
 	finalColorPreFog += diffuseOutput.scatter;
 	finalColorPreFog += diffuseOutput.waveSSS;
 
-	// Foam contribution - physically-based wave breaking detection
 	if (FoamEnabled > 0.5f) {
-		float2 waveWorldPosPS2 = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
-		float waveTimeSec2 = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
-		float waveDayPh2 = ComputeWaveDayPhase(GameTimeHours);
-		float waveHeightPS2 = input.UnifiedWaveInfo.z;
-		float horizDispPS2 = input.UnifiedWaveNormal.w;
-
-		float foamIntensity2 = GetFoamIntensity(
-			waveWorldPosPS2, waveHeightPS2, horizDispPS2,
-			WaveIntensity, WaveAmplitude,
-			waveTimeSec2, waveDayPh2,
-			FoamThreshold, FoamIntensity, FoamSharpness
-		);
-
-		float3 foamColor2 = GetFoamColor();
-		finalColorPreFog = lerp(finalColorPreFog, foamColor2, foamIntensity2);
+		float intersectFM = 0.0f;
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+		intersectFM = foamIntersectionProximity;
+#							endif
+		FoamResult foam2 = CalculateFoam(
+			input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy,
+			input.UnifiedWaveNormal.xyz,
+			input.UnifiedWaveInfo.z,
+			input.UnifiedWaveNormal.w,
+			input.UnifiedWaveInfo.xy,
+			input.UnifiedWaveInfo.w,
+			ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds),
+			input.WPosition.w,
+			FoamIntensityFlowmap,
+			SunDir.xyz,
+			SunColor.xyz * SunDir.w,
+			intersectFM);
+		finalColorPreFog = lerp(finalColorPreFog, foam2.color, foam2.alpha);
 	}
 #						endif
 

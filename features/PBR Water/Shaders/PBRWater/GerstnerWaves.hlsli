@@ -176,13 +176,13 @@ cbuffer UnifiedWaterPerFrame : register(b7)
 	float FoamIntensityFlowmap : packoffset(c21.y);
 	float FoamThreshold : packoffset(c21.z);
 	float FoamSharpness : packoffset(c21.w);
-	float FoamLargeWaveSlopeRequirement : packoffset(c22.x);
-	float FoamSmallWaveSlopeMultiplier : packoffset(c22.y);
-	float FoamSmallWaveBaseOffset : packoffset(c22.z);
-	float FoamSmallWaveHeightRange : packoffset(c22.w);
-	float FoamPad0 : packoffset(c23.x);
-	float FoamPad1 : packoffset(c23.y);
-	float FoamPad2 : packoffset(c23.z);
+	float FoamIntersectionRange : packoffset(c22.x);
+	float FoamIntersectionIntensity : packoffset(c22.y);
+	float FoamPad_c22z : packoffset(c22.z);
+	float FoamPad_c22w : packoffset(c22.w);
+	float FoamPad_c23x : packoffset(c23.x);
+	float FoamPad_c23y : packoffset(c23.y);
+	float FoamPad_c23z : packoffset(c23.z);
 	
 	// Depth-based wave controls
 	float ShallowWaveDepthMin : packoffset(c23.w);      // Depth where waves start reducing (shallow end)
@@ -278,8 +278,8 @@ struct WaveSample
 // Each cell generates N unique waves based on its coordinates
 // Adjacent cells blend together smoothly to hide transitions
 
-// Number of waves per cell per octave - more waves = richer interaction
-#define WAVES_PER_CELL 6
+// Number of waves per cell per octave
+#define WAVES_PER_CELL 4
 
 struct CellWaveData
 {
@@ -312,58 +312,40 @@ CellWaveData EvaluateCellWaves(
 		uint(cellCoord.y + 10000) ^ (octaveIndex * 6271)
 	));
 	
-	float gravityGame = UW_GRAVITY * M_TO_GAME_UNIT;
-	
-	// Track displacement for wave interaction (domain warping within cell)
-	float2 warpedPos = worldPosInCell;
+	static const float gravityGame = UW_GRAVITY * M_TO_GAME_UNIT;
 	
 	[unroll]
 	for (int w = 0; w < WAVES_PER_CELL; w++) {
 		uint waveSeed = uhash(cellSeed ^ (w * 104729));
 		
 		float4 rnd = hashf24(uint2(waveSeed, w));
-		float2 rnd2 = hashf22(uint2(waveSeed + 1, w + 1));
 		
 		float angle = rnd.x * UW_TWO_PI;
 		float2 dir = float2(cos(angle), sin(angle));
 		
-		// Wider wavelength variation for more diversity (0.4x to 1.8x)
 		float wavelengthVariation = 0.4f + rnd.y * 1.4f;
 		float wavelengthM = baseWavelength * wavelengthVariation;
 		float wavelengthGame = wavelengthM * M_TO_GAME_UNIT;
 		
-		// Wider amplitude variation (0.2x to 2.0x) for stronger peaks/troughs
 		float amplitudeVariation = 0.2f + rnd.z * 1.8f;
 		float amplitudeM = baseAmplitude * amplitudeVariation;
 		float amplitudeGame = amplitudeM * M_TO_GAME_UNIT;
 		
 		float phaseOffset = rnd.w * UW_TWO_PI;
 		
-		// Additional phase variation from second random pair
-		phaseOffset += rnd2.x * UW_PI;
-		
 		float k = UW_TWO_PI / wavelengthGame;
 		float omega = sqrt(gravityGame * k) * speedMult;
 		
-		// Use warped position for wave interaction
-		float phase = k * dot(dir, warpedPos) - omega * timeSeconds + phaseOffset;
+		float phase = k * dot(dir, worldPosInCell) - omega * timeSeconds + phaseOffset;
 		
 		float sinP, cosP;
 		sincos(phase, sinP, cosP);
 		
 		float QA = steepness * amplitudeGame;
 		
-		float3 waveDisp;
-		waveDisp.x = dir.x * QA * cosP;
-		waveDisp.y = dir.y * QA * cosP;
-		waveDisp.z = amplitudeGame * sinP;
-		
-		result.displacement += waveDisp;
-		
-		// Domain warping: each wave shifts position for subsequent waves
-		// This creates wave-to-wave interaction and breaks patterns
-		float warpStrength = 0.15f * amplitudeGame;
-		warpedPos -= waveDisp.xy * warpStrength;
+		result.displacement.x += dir.x * QA * cosP;
+		result.displacement.y += dir.y * QA * cosP;
+		result.displacement.z += amplitudeGame * sinP;
 		
 		float kA = k * amplitudeGame;
 		float QkA = steepness * kA;
@@ -388,7 +370,7 @@ CellWaveData EvaluateCellWaves(
 
 float smoothBlend(float t)
 {
-	return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+	return t * t * (3.0f - 2.0f * t);
 }
 
 CellWaveData BlendCellWaves(
@@ -610,7 +592,6 @@ WaveSample CalculateWaterDisplacement(
 		}
 	}
 	
-	// Deep water cell waves: amplitude scaled by depthBlend (fades in shallow water)
 	float deepWaveAmplitude = waveIntensity * amplitudeMult * distanceFade * depthBlend;
 	
 	float userWavelengths[6] = {
@@ -646,29 +627,35 @@ WaveSample CalculateWaterDisplacement(
 	float3 geoTangent = float3(0, 0, 0);
 	float3 geoBinormal = float3(0, 0, 0);
 	
-	// Cross-octave warping: larger waves influence sampling of smaller waves
-	float2 warpedWorldPos = worldPos;
+	// Distance LOD: skip fine octaves at distance (PS normal maps cover detail)
+	float fadeRange = max(WaveFadeEnd - WaveFadeStart, 1.0f);
+	float lodNorm = saturate((cameraDistance - WaveFadeStart * 0.25f) * rcp(fadeRange));
+	// octaveActive[i]: first 3 always on, 3=mid-range, 4-5=near only
+	bool octaveActive3 = (lodNorm < 0.6f);
+	bool octaveActive45 = (lodNorm < 0.3f);
 	
 	[unroll]
 	for (int oct = 0; oct < 6; oct++) {
-		if (userAmplitudes[oct] < 0.0001f) {
+		if (userAmplitudes[oct] < 0.0001f)
 			continue;
-		}
+		if (oct == 3 && !octaveActive3)
+			continue;
+		if (oct >= 4 && !octaveActive45)
+			continue;
 		
 		float wavelengthM = userWavelengths[oct];
-		float cellSizeGame = wavelengthM * M_TO_GAME_UNIT * 6.0f;  // Slightly smaller cells for more variation
+		float cellSizeGame = wavelengthM * M_TO_GAME_UNIT * 6.0f;
 		
 		float octaveAmp = userAmplitudes[oct] * deepWaveAmplitude;
 		float octaveSteep = userSteepness[oct] * steepnessMult;
-		float octaveSpeed = speedMult;
 		
 		CellWaveData cellData = BlendCellWaves(
-			warpedWorldPos,  // Use warped position for cross-octave interaction
+			worldPos,
 			cellSizeGame,
 			wavelengthM,
 			octaveAmp,
 			octaveSteep,
-			octaveSpeed,
+			speedMult,
 			timeSeconds,
 			uint(oct)
 		);
@@ -676,11 +663,6 @@ WaveSample CalculateWaterDisplacement(
 		totalDisp += cellData.displacement;
 		totalTangent += cellData.tangentAccum;
 		totalBinormal += cellData.binormalAccum;
-		
-		// Cross-octave warping: this octave's displacement affects smaller wave sampling
-		// Strength decreases for smaller waves to prevent chaos
-		float crossWarpStrength = 0.25f * (1.0f - float(oct) / 6.0f);
-		warpedWorldPos -= cellData.displacement.xy * crossWarpStrength;
 		
 		if (oct < 3) {
 			geoTangent += cellData.tangentAccum;
@@ -797,8 +779,11 @@ WaveSample CalculateWaterDisplacement(
 }
 
 // ============================================================================
-// WAVE SELF-SHADOWING (Simplified - avoids nested loop unroll issues)
+// WAVE SELF-SHADOWING — Ray-march against dominant waves
 // ============================================================================
+// Marches 4 steps along the sun's horizontal projection and evaluates
+// the two largest waves (wave 1 & 2) to check whether a nearby crest
+// occludes the light reaching this pixel.  Cost: 2 sincos + 8 sin.
 
 float CalculateWaveSelfShadow(
 	float2 worldPos,
@@ -807,20 +792,64 @@ float CalculateWaveSelfShadow(
 	float waveIntensity,
 	float amplitudeMult,
 	float timeSeconds,
-	float dayPhase
-)
+	float dayPhase)
 {
-	// Simplified implementation - just use current height and light angle
-	// Full wave sampling in a loop causes unroll issues
-	if (waveIntensity <= 0.01f || lightDir.z > 0.95f) {
+	if (waveIntensity <= 0.01f)
 		return 1.0f;
+
+	// Sun nearly overhead → no meaningful wave-to-wave occlusion
+	float lightHorizLen = length(lightDir.xy);
+	if (lightHorizLen < 0.05f)
+		return 1.0f;
+
+	float2 marchDir = lightDir.xy / lightHorizLen;
+	float slopeRatio = lightDir.z / lightHorizLen;
+
+	// Precompute wave 1 direction
+	static const float2 baseDir = float2(-0.70710678f, 0.70710678f);
+	float sinA1, cosA1;
+	sincos(Wave1AngleOffset, sinA1, cosA1);
+	float2 dir1 = float2(baseDir.x * cosA1 - baseDir.y * sinA1,
+	                      baseDir.x * sinA1 + baseDir.y * cosA1);
+	float wl1 = max(Wave1Wavelength * M_TO_GAME_UNIT, 1.0f);
+	float k1 = UW_TWO_PI / wl1;
+	float omega1 = sqrt(UW_GRAVITY * M_TO_GAME_UNIT * k1) * WaveSpeed;
+	float amp1 = Wave1Amplitude * M_TO_GAME_UNIT * amplitudeMult * waveIntensity;
+
+	// Precompute wave 2 direction
+	float sinA2, cosA2;
+	sincos(Wave2AngleOffset, sinA2, cosA2);
+	float2 dir2 = float2(baseDir.x * cosA2 - baseDir.y * sinA2,
+	                      baseDir.x * sinA2 + baseDir.y * cosA2);
+	float wl2 = max(Wave2Wavelength * M_TO_GAME_UNIT, 1.0f);
+	float k2 = UW_TWO_PI / wl2;
+	float omega2 = sqrt(UW_GRAVITY * M_TO_GAME_UNIT * k2) * WaveSpeed;
+	float amp2 = Wave2Amplitude * M_TO_GAME_UNIT * amplitudeMult * waveIntensity;
+
+	// March distance spans ~1 wavelength of wave 1
+	float marchLength = wl1;
+
+	float shadow = 1.0f;
+
+	[unroll]
+	for (int i = 0; i < 4; i++) {
+		float t = (float(i) + 0.5f) * 0.25f;
+		float dist = marchLength * t;
+		float2 samplePos = worldPos + marchDir * dist;
+
+		float sampleHeight = amp1 * sin(k1 * dot(dir1, samplePos) - omega1 * timeSeconds)
+		                   + amp2 * sin(k2 * dot(dir2, samplePos) - omega2 * timeSeconds);
+
+		// Height of the shadow ray at this horizontal distance
+		float rayHeight = currentHeight + dist * slopeRatio;
+
+		// Soft occlusion: penumbra proportional to how far the crest exceeds the ray
+		float occlusion = saturate((sampleHeight - rayHeight) * rcp(max(amp1, 0.01f)) + 0.3f);
+		shadow = min(shadow, 1.0f - occlusion);
 	}
-	
-	// Simple approximation based on wave amplitude and light angle
-	float maxWaveHeight = Wave1Amplitude * M_TO_GAME_UNIT * waveIntensity * amplitudeMult;
-	float shadowFactor = saturate(lightDir.z * 2.0f); // More shadow at grazing angles
-	
-	return lerp(0.7f, 1.0f, shadowFactor);
+
+	// Ambient floor: even fully shadowed areas get some indirect light
+	return lerp(0.35f, 1.0f, shadow);
 }
 
 #endif // __GERSTNER_WAVES_HLSLI__

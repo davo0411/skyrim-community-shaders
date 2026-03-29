@@ -244,37 +244,34 @@ float ComputeShoreDirection(
 #if !defined(VSHADER) && !defined(DSHADER)
 	return 1e5f;
 #else
-	// Sample center depth
-	float centerDepth = EstimateWaterDepthFromTerrain(waterWorldPos, scaleXY, offsetXY, zRangeMin, zRangeMax);
+	// Single center sample — reused for both depth and gradient baseline
+	float heightCenter = SampleTerrainHeight(waterWorldPos.xy, scaleXY, offsetXY, zRangeMin, zRangeMax);
 
-	if (centerDepth >= 1e4f) {
-		return centerDepth;  // No valid heightmap data
+	if (heightCenter < -1e5f) {
+		return 1e5f;
 	}
 
-	// Sample terrain height at +X and +Y offsets to compute gradient
-	// Use a moderate offset for stable gradient estimation
-	const float sampleOffset = 128.0f;  // game units (~1.8m)
+	float centerDepth = waterWorldPos.z - heightCenter;
+	if (centerDepth < 0.0f)
+		centerDepth = 0.0f;
 
-	float heightCenter = SampleTerrainHeight(waterWorldPos.xy, scaleXY, offsetXY, zRangeMin, zRangeMax);
+	const float sampleOffset = 128.0f;
 	float heightPosX = SampleTerrainHeight(waterWorldPos.xy + float2(sampleOffset, 0.0f), scaleXY, offsetXY, zRangeMin, zRangeMax);
 	float heightPosY = SampleTerrainHeight(waterWorldPos.xy + float2(0.0f, sampleOffset), scaleXY, offsetXY, zRangeMin, zRangeMax);
 
-	// Check validity - if any sample is invalid, fall back to no gradient
-	if (heightCenter < -1e5f || heightPosX < -1e5f || heightPosY < -1e5f) {
+	if (heightPosX < -1e5f || heightPosY < -1e5f) {
 		return centerDepth;
 	}
 
-	// Terrain gradient: positive gradient means terrain rises in that direction
-	// Shore direction = toward rising terrain = toward shallower water
 	float2 terrainGrad = float2(
-		(heightPosX - heightCenter) / sampleOffset,
-		(heightPosY - heightCenter) / sampleOffset
+		(heightPosX - heightCenter) * rcp(sampleOffset),
+		(heightPosY - heightCenter) * rcp(sampleOffset)
 	);
 
 	outGradientMag = length(terrainGrad);
 
 	if (outGradientMag > 0.001f) {
-		outShoreDir = terrainGrad / outGradientMag;  // Normalized direction toward shore
+		outShoreDir = terrainGrad * rcp(outGradientMag);
 	}
 
 	return centerDepth;

@@ -151,14 +151,12 @@ struct PBRWater : public Feature
 	struct FoamSettings
 	{
 		bool EnableFoam = true;
-		float FoamIntensity = 1.5f;
-		float FoamIntensityFlowmap = 0.3f;
-		float FoamThreshold = 0.6f;
+		float FoamIntensity = 1.0f;
+		float FoamIntensityFlowmap = 1.0f;
+		float FoamThreshold = 0.3f;
 		float FoamSharpness = 2.0f;
-		float LargeWaveSlopeRequirement = 0.3f;
-		float SmallWaveSlopeMultiplier = 3.0f;
-		float SmallWaveBaseOffset = 0.2f;
-		float SmallWaveHeightRange = 0.7f;
+		float FoamIntersectionRange = 100.0f;
+		float FoamIntersectionIntensity = 1.0f;
 	};
 
 	struct BRDFSettings
@@ -310,13 +308,13 @@ struct PBRWater : public Feature
 		float FoamIntensityFlowmap;
 		float FoamThreshold;
 		float FoamSharpness;
-		float FoamLargeWaveSlopeRequirement;
-		float FoamSmallWaveSlopeMultiplier;
-		float FoamSmallWaveBaseOffset;
-		float FoamSmallWaveHeightRange;
-		float FoamPad0;
-		float FoamPad1;
-		float FoamPad2;
+		float FoamIntersectionRange;
+		float FoamIntersectionIntensity;
+		float FoamPad_c22z;
+		float FoamPad_c22w;
+		float FoamPad_c23x;
+		float FoamPad_c23y;
+		float FoamPad_c23z;
 
 		// Depth-based wave control
 		float ShallowWaveDepthMin;
