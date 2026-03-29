@@ -20,6 +20,8 @@ cbuffer PerFrame : register(b0)
 	float isSceneLinear : packoffset(c1.y);
 	float isMainOrLoadingMenu : packoffset(c1.z);
 	float fgTweenMenuMidAlphaBoost : packoffset(c1.w);  ///< TweenMenu: soften AA band when compositing here (UIBrightnessCS skips while paused)
+	float gamutExpansion : packoffset(c2.x);             ///< BT.2020 chroma boost (0 = off)
+	float3 _padC2 : packoffset(c2.y);
 }
 
 [numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
@@ -48,6 +50,10 @@ cbuffer PerFrame : register(b0)
 		sceneBT2020 = max(sceneBT2020, 0.0);
 
 		if (skipUI) {
+			// When off, skip Expand entirely — matches pre–chroma-expansion path bit-for-bit.
+			if (gamutExpansion > 0.0) {
+				sceneBT2020 = Color::ExpandBT2020ChromaLinear(sceneBT2020, gamutExpansion);
+			}
 			finalColor = Color::pq::Encode(sceneBT2020, sRGB_WhiteLevelNits);
 		} else {
 			const float menuUIBrightnessScale = 0.695652f;
@@ -71,7 +77,12 @@ cbuffer PerFrame : register(b0)
 				compositedLinear = max(0.0, lerp(luma.xxx, compositedLinear, menuSaturation));
 			}
 			float3 compositedBT2020 = Color::BT709ToBT2020(compositedLinear);
-			finalColor = Color::pq::Encode(max(0.0, compositedBT2020), sRGB_WhiteLevelNits);
+			if (gamutExpansion > 0.0) {
+				compositedBT2020 = Color::ExpandBT2020ChromaLinear(max(0.0, compositedBT2020), gamutExpansion);
+				finalColor = Color::pq::Encode(compositedBT2020, sRGB_WhiteLevelNits);
+			} else {
+				finalColor = Color::pq::Encode(max(0.0, compositedBT2020), sRGB_WhiteLevelNits);
+			}
 		}
 	} else {
 		float3 sceneGamma = scene.rgb;

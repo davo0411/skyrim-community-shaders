@@ -177,6 +177,27 @@ namespace Color
 		return mul(BT2020_2_BT709, color);
 	}
 
+	// BT.2020 linear: scale chroma away from Rec.2020 grey while clamping to non-negative RGB (approx. hue preserve).
+	// strength 0 = off. Use for HDR output to use more of the BT.2020 gamut than Rec.709 content would fill alone.
+	float3 ExpandBT2020ChromaLinear(float3 rgb2020, float strength)
+	{
+		if (strength <= 0.0)
+			return rgb2020;
+		static const float3 kLuma = float3(0.2627066, 0.6779996, 0.0592938);
+		float y = dot(rgb2020, kLuma);
+		float3 chroma = rgb2020 - y;
+		float m = 1.0 + strength;
+		float mMax = m;
+		if (chroma.x < -1e-8)
+			mMax = min(mMax, (-y) / chroma.x);
+		if (chroma.y < -1e-8)
+			mMax = min(mMax, (-y) / chroma.y);
+		if (chroma.z < -1e-8)
+			mMax = min(mMax, (-y) / chroma.z);
+		m = min(m, mMax);
+		return y + chroma * m;
+	}
+
 	namespace pq
 	{
 		static const float M1 = 2610.f / 16384.f;           // 0.1593017578125f;

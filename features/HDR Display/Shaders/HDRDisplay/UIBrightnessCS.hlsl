@@ -26,6 +26,8 @@ cbuffer PerFrame : register(b0)
 	float isSceneLinear : packoffset(c1.y);             ///< Unused in this shader
 	float isMainOrLoadingMenu : packoffset(c1.z);       ///< Unused; layout matches HDRDataCB
 	float fgTweenMenuMidAlphaBoost : packoffset(c1.w);  ///< 1 = TweenMenu open: apply mid-alpha AA boost only for pause UI
+	float gamutExpansion : packoffset(c2.x);
+	float3 _padC2 : packoffset(c2.y);
 }
 
 // UI reference brightness in nits — matches typical SDR monitor brightness.
@@ -70,6 +72,9 @@ static const float UI_REFERENCE_NITS = 80.0;
 			float3 uiStraight = ui.rgb / aIn;
 			float3 uiLinear = Color::SrgbToLinear(max(0, uiStraight));
 			float3 uiBT2020 = Color::BT709ToBT2020(uiLinear);
+			if (gamutExpansion > 0.0) {
+				uiBT2020 = Color::ExpandBT2020ChromaLinear(uiBT2020, gamutExpansion);
+			}
 			float3 uiNits = uiBT2020 * UI_REFERENCE_NITS * uiBrightness;
 			ui.rgb = Color::pq::Encode(uiNits / 10000.0, 10000.0) * aOut;
 			ui.a = aOut;
@@ -79,6 +84,9 @@ static const float UI_REFERENCE_NITS = 80.0;
 			// adds the contribution additively without occluding the scene.
 			float3 uiLinear = Color::SrgbToLinear(max(0, ui.rgb));
 			float3 uiBT2020 = Color::BT709ToBT2020(uiLinear);
+			if (gamutExpansion > 0.0) {
+				uiBT2020 = Color::ExpandBT2020ChromaLinear(uiBT2020, gamutExpansion);
+			}
 			float3 uiNits = uiBT2020 * UI_REFERENCE_NITS * uiBrightness;
 			ui.rgb = Color::pq::Encode(uiNits / 10000.0, 10000.0);
 		}

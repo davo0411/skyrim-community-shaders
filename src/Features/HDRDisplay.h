@@ -39,6 +39,7 @@ struct HDRDisplay : public Feature
 		uint hdrPaperWhite = 203;         // Reference white brightness in nits for HDR
 		uint hdrPeakNits = 800;           // Maximum display brightness in nits for HDR
 		float hdrUIBrightness = 2.3f;     // UI brightness multiplier for HDR mode
+		float hdrGamutExpansion = 0.f;    // BT.2020 chroma boost (0 = off) before PQ encode
 		bool dontShowHDRWarning = false;  // User preference to suppress HDR warning popup
 		bool hdrAutoDetected = false;     // Has auto-detection run at least once?
 	};
@@ -96,6 +97,8 @@ struct HDRDisplay : public Feature
 		float isSceneLinear;             ///< 1.0 = Linear Lighting active, scene already linear
 		float pad0;                      ///< 1.0 = main menu/loading screen active
 		float fgTweenMenuMidAlphaBoost;  ///< 1.0 = TweenMenu (pause) open — FG UIBrightnessCS mid-alpha boost only
+		float gamutExpansion;            ///< BT.2020 chroma expansion strength (0 = off)
+		float padC2[3];                  ///< align to 16 bytes
 	};
 
 	static_assert((sizeof(HDRDataCB) % 16) == 0, "CB size not padded correctly");

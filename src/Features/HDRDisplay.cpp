@@ -9,6 +9,7 @@
 #include "State.h"
 #include "Upscaling.h"
 #include "Util.h"
+#include <algorithm>
 #include <dxgi1_4.h>
 #include <dxgi1_6.h>
 #include <imgui.h>
@@ -247,6 +248,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	hdrPaperWhite,
 	hdrPeakNits,
 	hdrUIBrightness,
+	hdrGamutExpansion,
 	dontShowHDRWarning,
 	hdrAutoDetected);
 
@@ -488,6 +490,18 @@ void HDRDisplay::DrawSettings()
 				ImGui::Text("Adjusts UI brightness in HDR mode. UI renders at 80 nits baseline,");
 				ImGui::Text("independent of Paper White setting. 1.0x = 80 nits.");
 			}
+
+			float oldGamut = settings.hdrGamutExpansion;
+			float currentGamut = settings.hdrGamutExpansion;
+			ImGui::SliderFloat("HDR chroma expansion", &currentGamut, 0.f, 1.5f, "%.2f");
+			if (oldGamut != currentGamut) {
+				settings.hdrGamutExpansion = currentGamut;
+				UpdateHDRData();
+			}
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("Artistically stretches color toward BT.2020 primaries after the 709→2020 transform.");
+				ImGui::Text("0 = vanilla mapping. Higher = more vivid (not physically accurate).");
+			}
 		}
 	}
 }
@@ -529,6 +543,7 @@ void HDRDisplay::RestoreDefaultSettings()
 	settings.hdrPaperWhite = 203;
 	settings.hdrPeakNits = 1000;
 	settings.hdrUIBrightness = 2.3f;
+	settings.hdrGamutExpansion = 0.f;
 	settings.dontShowHDRWarning = false;
 }
 
@@ -1238,6 +1253,8 @@ void HDRDisplay::UpdateHDRData() const
 	data.pad0 = isMainOrLoadingMenu ? 1.f : 0.f;
 	// TweenMenu = pause UI. ScaleUIBrightnessForFG skips while GameIsPaused(), so HDROutputCS applies the same mid-alpha boost when compositing gamma UI.
 	data.fgTweenMenuMidAlphaBoost = (ui && ui->IsMenuOpen(RE::TweenMenu::MENU_NAME)) ? 1.f : 0.f;
+	data.gamutExpansion = std::clamp(settings.hdrGamutExpansion, 0.f, 1.5f);
+	data.padC2[0] = data.padC2[1] = data.padC2[2] = 0.f;
 	hdrDataCB->Update(data);
 }
 
