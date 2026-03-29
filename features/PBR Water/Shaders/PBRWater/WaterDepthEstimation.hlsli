@@ -1,6 +1,10 @@
 #ifndef __WATER_DEPTH_ESTIMATION_HLSLI__
 #define __WATER_DEPTH_ESTIMATION_HLSLI__
 
+// Camera distance² above which shore code uses one heightmap tap (depth only). Full gradient uses
+// three taps — domain shaders invoke this per tessellated vertex, so this saves enormous bandwidth.
+static const float kWaterTerrainGradientDetailDistSq = 2800.0f * 2800.0f;
+
 // ============================================================================
 // WATER DEPTH ESTIMATION FROM TERRAIN HEIGHTMAP
 // ============================================================================
@@ -215,6 +219,29 @@ float3 VisualizeDepthEstimation(DepthEstimationDebug debugInfo)
 		float t = saturate(depth / 50.0f);
 		return lerp(float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), t);
 	}
+}
+
+/**
+ * One heightmap sample — water depth for wave attenuation only. No shore direction (callers should
+ * leave gradient at 0; shore waves fall back to flow / default diagonal like flat streams).
+ */
+float ComputeShoreDepthOnly(
+	float3 waterWorldPos,
+	float2 scaleXY, float2 offsetXY,
+	float zRangeMin, float zRangeMax)
+{
+#if !defined(VSHADER) && !defined(DSHADER)
+	return 1e5f;
+#else
+	float heightCenter = SampleTerrainHeight(waterWorldPos.xy, scaleXY, offsetXY, zRangeMin, zRangeMax);
+
+	if (heightCenter < -1e5f) {
+		return 1e5f;
+	}
+
+	float centerDepth = waterWorldPos.z - heightCenter;
+	return max(centerDepth, 0.0f);
+#endif
 }
 
 /**

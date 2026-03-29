@@ -11,12 +11,17 @@
 // Pipeline: VS -> HS -> Tessellator -> DS -> PS
 //
 // SEAM PREVENTION: Each outer level is a symmetric function of that edge’s two endpoints only
-// (same midpoint → same factor on both triangles). Wave-importance boost was removed — it made
-// outers depend on the third vertex’s hint and chased the camera.
+// (same midpoint → same factor on both triangles). Dynamic tess scales by a wave crest proxy
+// evaluated only at the edge midpoint (shared edge → identical midpoint → identical scale).
 
-// Fixed tuning (not exposed to CPU). Wave boost on edges (from per-vertex VS hints) is removed —
-// it coupled tess to the third vertex of each triangle and moved with the camera.
-static const float kTessOffscreenScale = 0.55f;   // only used for degenerate / behind-camera clip
+// Fixed tuning (not exposed to CPU)
+static const float kTessOffscreenScale = 0.55f;           // degenerate / behind-camera w
+static const float kTessFarOffscreenScale = 0.22f;        // clearly outside NDC (generous margin — avoids crawl)
+static const float kTessFrustumMarginNDC = 1.35f;         // |ndc| beyond ~viewport; conservative vs tight clip
+static const float kTessUltraFarDistanceMul = 1.4f;       // beyond max tess distance × this → extra-low triangles
+static const float kTessUltraFarFactorScale = 0.42f;      // scales min factor in ultra-far tier (pre-wave)
+static const float kTessDynamicMulMin = 2.0f / 6.0f;      // min mult vs max (flat between waves vs crest)
+static const float kTessDynamicMulMax = 1.0f;             // max mult at |sin(phase)|-weighted crests
 
 cbuffer TessellationParams : register(b9)
 {
@@ -42,7 +47,7 @@ struct HS_CONSTANT_OUTPUT
 
 float CalculateDistanceTessellation(float distSq)
 {
-	float minDistSq = TessellationMinDistance * TessellationMinDistance;
+	float minDistSq = 0.0f;  // cbuffer min distance removed from UI; treat full tess from camera
 	float maxDistSq = TessellationMaxDistance * TessellationMaxDistance;
 
 	if (distSq >= maxDistSq)
@@ -66,10 +71,14 @@ float CalculateDistanceTessellation(float distSq)
 float GetPatchScreenTessScale(float3 centerWorld, uint eyeIndex)
 {
 	float4 clip = mul(FrameBuffer::CameraViewProj[eyeIndex], float4(centerWorld, 1.0f));
-	// Only reduce tess for degenerate / behind-camera; do not use NDC margin — that made tessellation
-	// view-dependent in a way that crawled with camera motion and distorted shared patch edges.
 	if (clip.w <= 1e-4f) {
 		return kTessOffscreenScale;
+	}
+	float rw = rcp(clip.w);
+	float nx = clip.x * rw;
+	float ny = clip.y * rw;
+	if (abs(nx) > kTessFrustumMarginNDC || abs(ny) > kTessFrustumMarginNDC) {
+		return kTessFarOffscreenScale;
 	}
 	return 1.0f;
 }
@@ -95,6 +104,68 @@ float CombineEdgeTess(float distBased, float screenScale)
 	return min(t, TessellationMaxFactor);
 }
 
+#if defined(HSHADER)
+// GerstnerWaves.hlsli must be included before this file (Water.hlsl hull). Cheap proxy for
+// primary swells only — matches crest/trough emphasis (|sin(phase)|), not full cell synthesis.
+float WaveTessEdgeDynamicMul(float2 worldXYAbs, float timeSeconds)
+{
+	if (WaveIntensity <= 0.001f) {
+		return kTessDynamicMulMin;
+	}
+
+	const float gGame = UW_GRAVITY * M_TO_GAME_UNIT;
+	float wi = WaveIntensity * WaveAmplitude;
+
+	float acc = 0.0f;
+	float wsum = 0.0f;
+
+	{
+		float wlGame = max(Wave1Wavelength, 0.25f) * M_TO_GAME_UNIT;
+		float k = UW_TWO_PI / wlGame;
+		float omega = sqrt(gGame * k) * WaveSpeed;
+		float2 dir = float2(cos(Wave1AngleOffset), sin(Wave1AngleOffset));
+		float phase = k * dot(dir, worldXYAbs) - omega * timeSeconds;
+		float s = abs(sin(phase));
+		float ampG = max(Wave1Amplitude, 0.0f) * M_TO_GAME_UNIT;
+		float wt = ampG * k * wi * (0.2f + saturate(Wave1Steepness));
+		acc += wt * s;
+		wsum += wt;
+	}
+	{
+		float wlGame = max(Wave2Wavelength, 0.25f) * M_TO_GAME_UNIT;
+		float k = UW_TWO_PI / wlGame;
+		float omega = sqrt(gGame * k) * WaveSpeed;
+		float2 dir = float2(cos(Wave2AngleOffset), sin(Wave2AngleOffset));
+		float phase = k * dot(dir, worldXYAbs) - omega * timeSeconds;
+		float s = abs(sin(phase));
+		float ampG = max(Wave2Amplitude, 0.0f) * M_TO_GAME_UNIT;
+		float wt = ampG * k * wi * (0.2f + saturate(Wave2Steepness));
+		acc += wt * s;
+		wsum += wt;
+	}
+	{
+		float wlGame = max(Wave3Wavelength, 0.25f) * M_TO_GAME_UNIT;
+		float k = UW_TWO_PI / wlGame;
+		float omega = sqrt(gGame * k) * WaveSpeed;
+		float2 dir = float2(cos(Wave3AngleOffset), sin(Wave3AngleOffset));
+		float phase = k * dot(dir, worldXYAbs) - omega * timeSeconds;
+		float s = abs(sin(phase));
+		float ampG = max(Wave3Amplitude, 0.0f) * M_TO_GAME_UNIT;
+		float wt = ampG * k * wi * (0.2f + saturate(Wave3Steepness));
+		acc += wt * s;
+		wsum += wt;
+	}
+
+	float crestMetric = saturate(acc / max(wsum, 1e-5f));
+	return lerp(kTessDynamicMulMin, kTessDynamicMulMax, crestMetric);
+}
+
+float2 WaveTessEdgeMidWorldXY(float3 edgeMidCamRel)
+{
+	return edgeMidCamRel.xy + FrameBuffer::CameraPosAdjust[0].xy;
+}
+#endif // HSHADER
+
 // ============================================================================
 // HULL SHADER PATCH CONSTANT FUNCTION
 // ============================================================================
@@ -110,11 +181,44 @@ HS_CONSTANT_OUTPUT PatchConstantFunc(InputPatch<VS_OUTPUT, 3> patch, uint patchI
 	float3 patchCenter = (p0 + p1 + p2) * 0.333333f;
 	float centerDistSq = dot(patchCenter, patchCenter);
 	float maxDistSq = TessellationMaxDistance * TessellationMaxDistance;
+	float ultraMaxDistSq = maxDistSq * (kTessUltraFarDistanceMul * kTessUltraFarDistanceMul);
 
 	const uint eyeIdx = 0u;
 	float screenScale = GetPatchScreenTessScale(patchCenter, eyeIdx);
 
-	// Distance-only cull: patches well beyond max distance get minimum factor
+#if defined(HSHADER)
+	// Backface: discard patches facing away from the camera (camera at origin in cam-relative space).
+	float3 e1 = p1 - p0;
+	float3 e2 = p2 - p0;
+	float3 faceN = cross(e1, e2);
+	float faceNLen = length(faceN);
+	if (faceNLen < 1e-15f) {
+		output.EdgeTess[0] = output.EdgeTess[1] = output.EdgeTess[2] = 0.0f;
+		output.InsideTess = 0.0f;
+		return output;
+	}
+	faceN *= rcp(faceNLen);
+	float centerLenSq = max(centerDistSq, 1e-12f);
+	float3 viewTowardCamera = (-patchCenter) * rsqrt(centerLenSq);
+	if (dot(faceN, viewTowardCamera) <= 0.0f) {
+		output.EdgeTess[0] = output.EdgeTess[1] = output.EdgeTess[2] = 0.0f;
+		output.InsideTess = 0.0f;
+		return output;
+	}
+
+	float waveTimeHull = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
+#endif
+
+	// Beyond normal max distance: skip wave dynamic mult — fewer triangles, no seam mismatch vs edges
+	if (centerDistSq >= ultraMaxDistSq) {
+		float ultraBase = max(1.0f, TessellationMinFactor * kTessUltraFarFactorScale);
+		float t = CombineEdgeTess(ultraBase, screenScale);
+		output.EdgeTess[0] = output.EdgeTess[1] = output.EdgeTess[2] = t;
+		output.InsideTess = t;
+		return output;
+	}
+
+	// Distance-only: patches at/outer band of max tess distance get minimum factor (no wave mult)
 	if (centerDistSq >= maxDistSq) {
 		float t = CombineEdgeTess(TessellationMinFactor, screenScale);
 		output.EdgeTess[0] = t;
@@ -129,9 +233,22 @@ HS_CONSTANT_OUTPUT PatchConstantFunc(InputPatch<VS_OUTPUT, 3> patch, uint patchI
 	float d1 = CalculateEdgeTessellation(p2, p0);
 	float d2 = CalculateEdgeTessellation(p0, p1);
 
+#if defined(HSHADER)
+	float3 mid0 = (p1 + p2) * 0.5f;
+	float3 mid1 = (p2 + p0) * 0.5f;
+	float3 mid2 = (p0 + p1) * 0.5f;
+	float wMul0 = WaveTessEdgeDynamicMul(WaveTessEdgeMidWorldXY(mid0), waveTimeHull);
+	float wMul1 = WaveTessEdgeDynamicMul(WaveTessEdgeMidWorldXY(mid1), waveTimeHull);
+	float wMul2 = WaveTessEdgeDynamicMul(WaveTessEdgeMidWorldXY(mid2), waveTimeHull);
+
+	output.EdgeTess[0] = min(CombineEdgeTess(d0, screenScale) * wMul0, TessellationMaxFactor);
+	output.EdgeTess[1] = min(CombineEdgeTess(d1, screenScale) * wMul1, TessellationMaxFactor);
+	output.EdgeTess[2] = min(CombineEdgeTess(d2, screenScale) * wMul2, TessellationMaxFactor);
+#else
 	output.EdgeTess[0] = CombineEdgeTess(d0, screenScale);
 	output.EdgeTess[1] = CombineEdgeTess(d1, screenScale);
 	output.EdgeTess[2] = CombineEdgeTess(d2, screenScale);
+#endif
 	output.InsideTess = (output.EdgeTess[0] + output.EdgeTess[1] + output.EdgeTess[2]) * 0.333333f;
 
 	return output;
@@ -156,25 +273,37 @@ VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const Out
 	float4 interpTexCoord2 = patch[0].TexCoord2 * bary.x + patch[1].TexCoord2 * bary.y + patch[2].TexCoord2 * bary.z;
 #endif
 
-#if defined(UNIFIED_WATER)
+// PBR_WATER: VS always runs Gerstner when tess is off; domain must match. UNIFIED_WATER alone is optional.
+#if defined(PBR_WATER)
 	float2 waveWorldPos = interpWPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
 
 	float waveTimeSeconds = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
 	float waveDayPhase = ComputeWaveDayPhase(GameTimeHours);
 
-	float cameraDistDS = length(interpWPosition.xyz);
+	float cameraDistSqDS = dot(interpWPosition.xyz, interpWPosition.xyz);
+	float cameraDistDS = sqrt(cameraDistSqDS);
 
 	float3 absoluteWorldPos = interpWPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float2 shoreDirDS = float2(0.0f, 0.0f);
 	float shoreGradDS = 0.0f;
-	float estimatedDepthDS = ComputeShoreDirection(
-		absoluteWorldPos,
-		float2(TerrainScaleX, TerrainScaleY),
-		float2(TerrainOffsetX, TerrainOffsetY),
-		TerrainZRangeMin,
-		TerrainZRangeMax,
-		shoreDirDS,
-		shoreGradDS);
+	float estimatedDepthDS;
+	if (cameraDistSqDS > kWaterTerrainGradientDetailDistSq) {
+		estimatedDepthDS = ComputeShoreDepthOnly(
+			absoluteWorldPos,
+			float2(TerrainScaleX, TerrainScaleY),
+			float2(TerrainOffsetX, TerrainOffsetY),
+			TerrainZRangeMin,
+			TerrainZRangeMax);
+	} else {
+		estimatedDepthDS = ComputeShoreDirection(
+			absoluteWorldPos,
+			float2(TerrainScaleX, TerrainScaleY),
+			float2(TerrainOffsetX, TerrainOffsetY),
+			TerrainZRangeMin,
+			TerrainZRangeMax,
+			shoreDirDS,
+			shoreGradDS);
+	}
 
 	DepthEstimationDebug depthDebug;
 	depthDebug.depth = estimatedDepthDS;
@@ -232,7 +361,7 @@ VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const Out
 	output.FogParam = patch[0].FogParam * bary.x + patch[1].FogParam * bary.y + patch[2].FogParam * bary.z;
 #endif
 
-#if defined(UNIFIED_WATER)
+#if defined(UNIFIED_WATER) || defined(PBR_WATER)
 	output.TexCoord3 = patch[0].TexCoord3 * bary.x + patch[1].TexCoord3 * bary.y + patch[2].TexCoord3 * bary.z;
 	output.TexCoord4 = patch[0].TexCoord4;
 #else

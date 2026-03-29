@@ -18,7 +18,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PBRWater::TessellationSettings,
 	EnableTessellation,
-	TessellationMinDistance,
 	TessellationMaxDistance,
 	TessellationMinFactor,
 	TessellationMaxFactor)
@@ -157,9 +156,6 @@ void PBRWater::DrawSettings()
 
 			if (settings.tessellation.EnableTessellation) {
 				ImGui::Indent();
-				ImGui::SliderFloat("Min Distance", &settings.tessellation.TessellationMinDistance, 64.0f, 1024.0f, "%.0f");
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Distance (game units) where maximum tessellation is applied.\nCloser water gets more subdivision.");
 				ImGui::SliderFloat("Max Distance", &settings.tessellation.TessellationMaxDistance, 1024.0f, 16384.0f, "%.0f");
 				if (ImGui::IsItemHovered())
 					ImGui::SetTooltip("Distance (game units) where minimum tessellation is applied.\nBeyond this, water triangles are minimized (~2 tris).");
@@ -243,36 +239,16 @@ void PBRWater::DrawSettings()
 			ImGui::Spacing();
 
 			if (ImGui::TreeNodeEx("Shore Waves", ImGuiTreeNodeFlags_DefaultOpen)) {
-				ImGui::Text("Crossfade between open-water and shore-directed waves.");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text(
-						"In shallow water, ocean Gerstner waves fade out and are\n"
-						"replaced by waves that propagate toward the shoreline.\n"
-						"The two ranges below control where this transition happens.");
-				}
-
-				ImGui::SliderFloat("Shore Blend Start", &settings.waves.ShoreBlendStart, 0.0f, 500.0f, "%.0f");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text(
-						"Depth (game units) where shore waves are at full strength\n"
-						"and ocean waves are fully faded out.\n"
-						"~70 units = 1 metre.  Default: 50 (~0.7m)");
-				}
-
-				ImGui::SliderFloat("Shore Blend End", &settings.waves.ShoreBlendEnd, 50.0f, 2000.0f, "%.0f");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text(
-						"Depth (game units) where ocean waves are at full strength\n"
-						"and shore waves have fully faded out.\n"
-						"Default: 500 (~7m)");
-				}
-
+				ImGui::TextWrapped(
+					"Large ocean swells (waves 1–3) fade linearly with depth and stop below ~5 m; "
+					"detail waves 4–6 stay at full strength in shallow water and streams. "
+					"Shore-directed swells blend in between ~5 m and ~30 m (shader constants).");
+				ImGui::Spacing();
 				ImGui::SliderFloat("Shore Wave Strength", &settings.waves.ShoreWaveStrength, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
 					ImGui::Text(
-						"Overall intensity of shore-directed waves.\n"
-						"0 = disabled (ocean waves everywhere),\n"
-						"1 = default, 2 = very strong shore waves.");
+						"Intensity of shore-directed Gerstner swells in the 5–30 m depth band.\n"
+						"0 = disabled.");
 				}
 
 				ImGui::TreePop();
@@ -768,9 +744,9 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		perFrameData.FoamPad_c23y = 0.0f;
 		perFrameData.FoamPad_c23z = 0.0f;
 
-		// Depth-based wave control settings
-		perFrameData.ShallowWaveDepthMin = singleton.settings.waves.ShoreBlendStart;
-		perFrameData.ShallowWaveDepthMax = singleton.settings.waves.ShoreBlendEnd;
+		// Legacy shader slots (unused — shallow large-wave range is fixed in GerstnerWaves.hlsli)
+		perFrameData.ShallowWaveDepthMin = 0.0f;
+		perFrameData.ShallowWaveDepthMax = 0.0f;
 		perFrameData.ShoreWavePad0 = 0.0f;
 		perFrameData.ShoreWaveStrength = singleton.settings.waves.ShoreWaveStrength;
 
@@ -1078,7 +1054,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		// Update tessellation constant buffer
 		if (singleton.tessellationParams) {
 			TessellationParams tessParams{};
-			tessParams.TessellationMinDistance = singleton.settings.tessellation.TessellationMinDistance;
+			tessParams.TessellationMinDistance = 0.0f;
 			tessParams.TessellationMaxDistance = singleton.settings.tessellation.TessellationMaxDistance;
 			tessParams.TessellationMinFactor = singleton.settings.tessellation.TessellationMinFactor;
 			tessParams.TessellationMaxFactor = singleton.settings.tessellation.TessellationMaxFactor;
@@ -1101,7 +1077,13 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 
 		context->HSSetShader(singleton.waterHullShader.get(), nullptr, 0);
 		context->DSSetShader(singleton.waterDomainShader.get(), nullptr, 0);
-		context->GSSetShader(singleton.waterGeometryShader.get(), nullptr, 0);
+		// Geometry shader exists only to emit barycentrics for wireframe debug — binding it on every
+		// tessellated draw destroys throughput (historically ~2–3× GS expansion cost on top of tess).
+		if (singleton.settings.general.ShowWireframe && singleton.waterGeometryShader) {
+			context->GSSetShader(singleton.waterGeometryShader.get(), nullptr, 0);
+		} else {
+			context->GSSetShader(nullptr, nullptr, 0);
+		}
 
 		// Forward VS constant buffers (b0-b2) to DS for transforms
 		ID3D11Buffer* vsBuffers[3] = { nullptr, nullptr, nullptr };

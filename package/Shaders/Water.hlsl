@@ -260,21 +260,31 @@ VS_OUTPUT main(VS_INPUT input)
 	float estimatedDepth = 1e5f;
 
 	if (TessellationEnabled < 0.5f) {
-		float cameraDistVS = length(worldPosBase.xyz);
+		float cameraDistSqVS = dot(worldPosBase.xyz, worldPosBase.xyz);
+		float cameraDistVS = sqrt(cameraDistSqVS);
 
 		// Estimate water depth and shore direction from terrain heightmap
 		float3 absoluteWorldPos = worldPosBase.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 		float2 shoreDirVS = float2(0.0f, 0.0f);
 		float shoreGradVS = 0.0f;
-		estimatedDepth = ComputeShoreDirection(
-			absoluteWorldPos,
-			float2(TerrainScaleX, TerrainScaleY),
-			float2(TerrainOffsetX, TerrainOffsetY),
-			TerrainZRangeMin,
-			TerrainZRangeMax,
-			shoreDirVS,
-			shoreGradVS
-		);
+		if (cameraDistSqVS > kWaterTerrainGradientDetailDistSq) {
+			estimatedDepth = ComputeShoreDepthOnly(
+				absoluteWorldPos,
+				float2(TerrainScaleX, TerrainScaleY),
+				float2(TerrainOffsetX, TerrainOffsetY),
+				TerrainZRangeMin,
+				TerrainZRangeMax);
+		} else {
+			estimatedDepth = ComputeShoreDirection(
+				absoluteWorldPos,
+				float2(TerrainScaleX, TerrainScaleY),
+				float2(TerrainOffsetX, TerrainOffsetY),
+				TerrainZRangeMin,
+				TerrainZRangeMax,
+				shoreDirVS,
+				shoreGradVS
+			);
+		}
 
 		// Fill debug info from depth
 		depthDebug.depth = estimatedDepth;
@@ -476,6 +486,8 @@ VS_OUTPUT main(VS_INPUT input)
 
 // Include tessellation system BEFORE any shader definitions
 #		if defined(PBR_WATER)
+// Gerstner must come first: hull uses wave phase for dynamic tess + UnifiedWaterPerFrame (b7)
+#			include "PBRWater/GerstnerWaves.hlsli"
 #			include "PBRWater/WaterTessellation.hlsli"
 #		else
 // Fallback for non-PBR water - simple distance-based tessellation
@@ -1115,12 +1127,12 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 
 	if (waveNormalLen > 0.01f && WaveIntensity > 0.01f) {
 		waveNormalGeom = normalize(waveNormalGeom);
-		// Use UDN blending to combine texture normals with geometric wave normals
-		// Boost wave normal strength near shore for more prominent wave shapes
+		// UDN-style blend: geometric wave xy + texture. Do not multiply by WaveIntensity here —
+		// Gerstner output (UnifiedWaveNormal) already scales with waveIntensity in the VS/DS.
 		float waveNormalBoost = lerp(1.0f, 1.5f, shoreInfluence);
 		float3 waveNormalTangent = float3(waveNormalGeom.xy, waveNormalGeom.z);
 		finalNormal = normalize(float3(
-			finalNormal.xy + waveNormalTangent.xy * WaveIntensity * waveNormalBoost,
+			finalNormal.xy + waveNormalTangent.xy * waveNormalBoost,
 			finalNormal.z * waveNormalTangent.z
 		));
 	}
@@ -1133,7 +1145,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 		float diffuseBlend = lerp(0.5f, 0.8f, shoreInfluence);
 		float3 dampenedWaveNormal = normalize(float3(waveNormalGeom.xy * diffuseDampening, waveNormalGeom.z));
 		diffuseNormalResult = normalize(float3(
-			textureNormal.xy + dampenedWaveNormal.xy * WaveIntensity * diffuseBlend,
+			textureNormal.xy + dampenedWaveNormal.xy * diffuseBlend,
 			textureNormal.z * dampenedWaveNormal.z
 		));
 	}
@@ -1899,21 +1911,25 @@ PS_OUTPUT main(PS_INPUT input)
 #						endif
 
 #						if defined(PBR_WATER)
-		// Wave self-shadowing: waves can cast shadows on other wave surfaces
-		float waveTimeSec = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
-		float waveDayPh = ComputeWaveDayPhase(GameTimeHours);
-		float2 waveWorldPosPS = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
-		float currentWaveHeight = input.UnifiedWaveInfo.z;
+		// Wave self-shadowing — skip far pixels (high frequency detail invisible; saves sin/cos in hot PS)
+		static const float kWaveSelfShadowMaxDistSq = 7000.0f * 7000.0f;
+		float waveSelfShadow = 1.0f;
+		if (dot(input.WPosition.xyz, input.WPosition.xyz) < kWaveSelfShadowMaxDistSq) {
+			float waveTimeSec = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
+			float waveDayPh = ComputeWaveDayPhase(GameTimeHours);
+			float2 waveWorldPosPS = input.WPosition.xy + FrameBuffer::CameraPosAdjust[eyeIndex].xy;
+			float currentWaveHeight = input.UnifiedWaveInfo.z;
 
-		float waveSelfShadow = CalculateWaveSelfShadow(
-			waveWorldPosPS,
-			currentWaveHeight,
-			SunDir.xyz,
-			WaveIntensity,
-			WaveAmplitude,
-			waveTimeSec,
-			waveDayPh
-		);
+			waveSelfShadow = CalculateWaveSelfShadow(
+				waveWorldPosPS,
+				currentWaveHeight,
+				SunDir.xyz,
+				WaveIntensity,
+				WaveAmplitude,
+				waveTimeSec,
+				waveDayPh
+			);
+		}
 		sunColor *= waveSelfShadow;
 #						endif
 	}

@@ -47,8 +47,7 @@ struct PBRWater : public Feature
 	struct TessellationSettings
 	{
 		bool EnableTessellation = true;
-		float TessellationMinDistance = 256.0f;
-		float TessellationMaxDistance = 6144.0f;
+		float TessellationMaxDistance = 5000.0f;
 		float TessellationMinFactor = 0.1f;
 		float TessellationMaxFactor = 12.0f;
 	};
@@ -57,7 +56,7 @@ struct PBRWater : public Feature
 	{
 		float WaveIntensity = 0.3f;
 		float WaveAmplitude = 0.7f;
-		float WaveSpeed = 0.025f;
+		float WaveSpeed = 0.5f;
 		float WaveSteepness = 5.0f;
 		float WaveFadeStart = 4096.0f;
 		float WaveFadeEnd = 8192.0f;
@@ -92,7 +91,7 @@ struct PBRWater : public Feature
 		float Wave6Steepness = 0.15f;
 		float Wave6AngleOffset = 1.22f;
 
-		// Shore wave crossfade
+		// Deprecated (kept for JSON load): shallow depth range is fixed in shader (meters)
 		float ShoreBlendStart = 50.0f;
 		float ShoreBlendEnd = 500.0f;
 		float ShoreWaveStrength = 1.0f;
@@ -315,7 +314,7 @@ struct PBRWater : public Feature
 		float FoamPad_c23y;
 		float FoamPad_c23z;
 
-		// Shore wave crossfade
+		// Legacy padding (shader ignores; shallow depth is fixed in GerstnerWaves.hlsli)
 		float ShallowWaveDepthMin;
 		float ShallowWaveDepthMax;
 		float ShoreWavePad0;
