@@ -199,6 +199,9 @@ namespace SIE
 		Vertex,
 		Pixel,
 		Compute,
+		Hull,
+		Domain,
+		Geometry,
 		Total,
 	};
 
@@ -405,6 +408,9 @@ namespace SIE
 			uint32_t descriptor);
 		RE::BSGraphics::ComputeShader* GetComputeShader(const RE::BSShader& shader,
 			uint32_t descriptor);
+		ID3DBlob* GetHullShaderBlob(const RE::BSShader& shader, uint32_t descriptor);
+		ID3DBlob* GetDomainShaderBlob(const RE::BSShader& shader, uint32_t descriptor);
+		ID3DBlob* GetGeometryShaderBlob(const RE::BSShader& shader, uint32_t descriptor);
 
 		RE::BSGraphics::VertexShader* MakeAndAddVertexShader(const RE::BSShader& shader,
 			uint32_t descriptor);

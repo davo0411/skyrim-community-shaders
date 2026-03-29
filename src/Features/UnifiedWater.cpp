@@ -1,4 +1,4 @@
-﻿#include "UnifiedWater.h"
+#include "UnifiedWater.h"
 
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
