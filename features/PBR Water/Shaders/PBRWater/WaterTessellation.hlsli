@@ -2,6 +2,7 @@
 #define __WATER_TESSELLATION_HLSLI__
 
 #include "PBRWater/WaterDepthEstimation.hlsli"
+#include "Common/FrameBuffer.hlsli"
 
 // ============================================================================
 // WATER TESSELLATION SYSTEM
@@ -9,9 +10,13 @@
 //
 // Pipeline: VS -> HS -> Tessellator -> DS -> PS
 //
-// SEAM PREVENTION: Edge factors use ONLY the two shared vertices.
-// No view-dependent or wave-dependent scaling on edges — guarantees matching
-// factors across draw call boundaries via IEEE 754 commutativity.
+// SEAM PREVENTION: Each outer level is a symmetric function of that edge’s two endpoints only
+// (same midpoint → same factor on both triangles). Wave-importance boost was removed — it made
+// outers depend on the third vertex’s hint and chased the camera.
+
+// Fixed tuning (not exposed to CPU). Wave boost on edges (from per-vertex VS hints) is removed —
+// it coupled tess to the third vertex of each triangle and moved with the camera.
+static const float kTessOffscreenScale = 0.55f;   // only used for degenerate / behind-camera clip
 
 cbuffer TessellationParams : register(b9)
 {
@@ -53,6 +58,23 @@ float CalculateDistanceTessellation(float distSq)
 }
 
 // ============================================================================
+// SCREEN-SPACE TESS SCALE (patch-level, uniform on all edges — seam-safe)
+// ============================================================================
+// Cheap frustum test in clip space. Does not sample the depth buffer (would
+// require HS resource binding); large savings come from off-screen water.
+
+float GetPatchScreenTessScale(float3 centerWorld, uint eyeIndex)
+{
+	float4 clip = mul(FrameBuffer::CameraViewProj[eyeIndex], float4(centerWorld, 1.0f));
+	// Only reduce tess for degenerate / behind-camera; do not use NDC margin — that made tessellation
+	// view-dependent in a way that crawled with camera motion and distorted shared patch edges.
+	if (clip.w <= 1e-4f) {
+		return kTessOffscreenScale;
+	}
+	return 1.0f;
+}
+
+// ============================================================================
 // EDGE TESSELLATION — DETERMINISTIC & SEAM-FREE
 // ============================================================================
 // Uses squared distances to avoid sqrt. Symmetric in (p0, p1).
@@ -63,6 +85,14 @@ float CalculateEdgeTessellation(float3 p0, float3 p1)
 	float distSq = dot(edgeMid, edgeMid);  // Camera-relative: length² = distance²
 
 	return CalculateDistanceTessellation(distSq);
+}
+
+float CombineEdgeTess(float distBased, float screenScale)
+{
+	float t = distBased * screenScale;
+	float lo = max(1.0f, TessellationMinFactor * screenScale);
+	t = max(t, lo);
+	return min(t, TessellationMaxFactor);
 }
 
 // ============================================================================
@@ -81,22 +111,27 @@ HS_CONSTANT_OUTPUT PatchConstantFunc(InputPatch<VS_OUTPUT, 3> patch, uint patchI
 	float centerDistSq = dot(patchCenter, patchCenter);
 	float maxDistSq = TessellationMaxDistance * TessellationMaxDistance;
 
+	const uint eyeIdx = 0u;
+	float screenScale = GetPatchScreenTessScale(patchCenter, eyeIdx);
+
 	// Distance-only cull: patches well beyond max distance get minimum factor
 	if (centerDistSq >= maxDistSq) {
-		output.EdgeTess[0] = TessellationMinFactor;
-		output.EdgeTess[1] = TessellationMinFactor;
-		output.EdgeTess[2] = TessellationMinFactor;
-		output.InsideTess = TessellationMinFactor;
+		float t = CombineEdgeTess(TessellationMinFactor, screenScale);
+		output.EdgeTess[0] = t;
+		output.EdgeTess[1] = t;
+		output.EdgeTess[2] = t;
+		output.InsideTess = t;
 		return output;
 	}
 
-	// Edge tessellation — purely distance-based, deterministic
 	// Edge 0 = vertices 1-2, Edge 1 = vertices 2-0, Edge 2 = vertices 0-1
-	output.EdgeTess[0] = CalculateEdgeTessellation(p1, p2);
-	output.EdgeTess[1] = CalculateEdgeTessellation(p2, p0);
-	output.EdgeTess[2] = CalculateEdgeTessellation(p0, p1);
+	float d0 = CalculateEdgeTessellation(p1, p2);
+	float d1 = CalculateEdgeTessellation(p2, p0);
+	float d2 = CalculateEdgeTessellation(p0, p1);
 
-	// Inside factor: average of edges (no curvature boost — saves 3× sincos per patch)
+	output.EdgeTess[0] = CombineEdgeTess(d0, screenScale);
+	output.EdgeTess[1] = CombineEdgeTess(d1, screenScale);
+	output.EdgeTess[2] = CombineEdgeTess(d2, screenScale);
 	output.InsideTess = (output.EdgeTess[0] + output.EdgeTess[1] + output.EdgeTess[2]) * 0.333333f;
 
 	return output;
@@ -106,7 +141,9 @@ HS_CONSTANT_OUTPUT PatchConstantFunc(InputPatch<VS_OUTPUT, 3> patch, uint patchI
 // DOMAIN SHADER IMPLEMENTATION
 // ============================================================================
 // Interpolates tessellated vertices and applies Gerstner wave displacement.
-// Distance LOD: skips depth estimation + shore waves for far vertices.
+// Depth / shore must run for every vertex: shallow water often extends far from the
+// camera along the shore (large horizontal distance) while still needing depthBlend
+// to attenuate cell waves — camera-distance LOD incorrectly treated that as deep water.
 
 VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const OutputPatch<VS_OUTPUT, 3> patch, uint eyeIndex)
 {
@@ -125,37 +162,25 @@ VS_OUTPUT DomainShaderImpl(HS_CONSTANT_OUTPUT patchConst, float3 bary, const Out
 	float waveTimeSeconds = ComputeWaveTimeSeconds(GameTimeHours, RealTimeSeconds);
 	float waveDayPhase = ComputeWaveDayPhase(GameTimeHours);
 
-	float cameraDistSq = dot(interpWPosition.xyz, interpWPosition.xyz);
-	float cameraDistDS = sqrt(cameraDistSq);
+	float cameraDistDS = length(interpWPosition.xyz);
 
-	// Distance LOD for depth estimation — skip terrain sampling for far vertices
-	float estimatedDepthDS = 1e5f;
+	float3 absoluteWorldPos = interpWPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
 	float2 shoreDirDS = float2(0.0f, 0.0f);
 	float shoreGradDS = 0.0f;
+	float estimatedDepthDS = ComputeShoreDirection(
+		absoluteWorldPos,
+		float2(TerrainScaleX, TerrainScaleY),
+		float2(TerrainOffsetX, TerrainOffsetY),
+		TerrainZRangeMin,
+		TerrainZRangeMax,
+		shoreDirDS,
+		shoreGradDS);
+
 	DepthEstimationDebug depthDebug;
-	depthDebug.depth = 1e5f;
-	depthDebug.debugCode = 0.0f;
-	depthDebug.terrainZ = 0.0f;
-	depthDebug.waterZ = 0.0f;
-
-	// Only sample terrain heightmap for near vertices (where shore detail matters)
-	float depthSampleMaxDist = TessellationMaxDistance * 0.5f;
-	if (cameraDistSq < depthSampleMaxDist * depthSampleMaxDist) {
-		float3 absoluteWorldPos = interpWPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
-		estimatedDepthDS = ComputeShoreDirection(
-			absoluteWorldPos,
-			float2(TerrainScaleX, TerrainScaleY),
-			float2(TerrainOffsetX, TerrainOffsetY),
-			TerrainZRangeMin,
-			TerrainZRangeMax,
-			shoreDirDS,
-			shoreGradDS);
-
-		depthDebug.depth = estimatedDepthDS;
-		depthDebug.debugCode = (estimatedDepthDS >= 1e4f) ? 1.0f : 0.0f;
-		depthDebug.terrainZ = absoluteWorldPos.z - estimatedDepthDS;
-		depthDebug.waterZ = absoluteWorldPos.z;
-	}
+	depthDebug.depth = estimatedDepthDS;
+	depthDebug.debugCode = (estimatedDepthDS >= 1e4f) ? 1.0f : 0.0f;
+	depthDebug.terrainZ = absoluteWorldPos.z - estimatedDepthDS;
+	depthDebug.waterZ = absoluteWorldPos.z;
 
 	WaveSample waveSample = CalculateWaterDisplacement(
 		waveWorldPos,

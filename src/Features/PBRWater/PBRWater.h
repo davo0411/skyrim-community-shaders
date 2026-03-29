@@ -50,7 +50,7 @@ struct PBRWater : public Feature
 		float TessellationMinDistance = 256.0f;
 		float TessellationMaxDistance = 6144.0f;
 		float TessellationMinFactor = 0.1f;
-		float TessellationMaxFactor = 16.0f;
+		float TessellationMaxFactor = 12.0f;
 	};
 
 	struct WaveSettings
@@ -92,10 +92,9 @@ struct PBRWater : public Feature
 		float Wave6Steepness = 0.15f;
 		float Wave6AngleOffset = 1.22f;
 
-		// Depth-based wave control
-		float ShallowWaveDepthMin = 50.0f;
-		float ShallowWaveDepthMax = 500.0f;
-		float ShoreWaveDepthThreshold = 300.0f;
+		// Shore wave crossfade
+		float ShoreBlendStart = 50.0f;
+		float ShoreBlendEnd = 500.0f;
 		float ShoreWaveStrength = 1.0f;
 	};
 
@@ -316,10 +315,10 @@ struct PBRWater : public Feature
 		float FoamPad_c23y;
 		float FoamPad_c23z;
 
-		// Depth-based wave control
+		// Shore wave crossfade
 		float ShallowWaveDepthMin;
 		float ShallowWaveDepthMax;
-		float ShoreWaveDepthThreshold;
+		float ShoreWavePad0;
 		float ShoreWaveStrength;
 
 		// Terrain heightmap parameters (for vertex shader depth estimation)

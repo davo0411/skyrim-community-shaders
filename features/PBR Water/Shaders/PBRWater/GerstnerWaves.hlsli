@@ -184,11 +184,11 @@ cbuffer UnifiedWaterPerFrame : register(b7)
 	float FoamPad_c23y : packoffset(c23.y);
 	float FoamPad_c23z : packoffset(c23.z);
 	
-	// Depth-based wave controls
-	float ShallowWaveDepthMin : packoffset(c23.w);      // Depth where waves start reducing (shallow end)
-	float ShallowWaveDepthMax : packoffset(c24.x);      // Depth where waves reach full strength (deep end)
-	float ShoreWaveDepthThreshold : packoffset(c24.y);  // Depth range for shore-directed waves
-	float ShoreWaveStrength : packoffset(c24.z);        // Strength of shore-directed wave influence (0-1)
+	// Shore wave crossfade
+	float ShallowWaveDepthMin : packoffset(c23.w);      // Shore blend start: shore waves at full, ocean waves at zero
+	float ShallowWaveDepthMax : packoffset(c24.x);      // Shore blend end: ocean waves at full, shore waves at zero
+	float ShoreWavePad0 : packoffset(c24.y);
+	float ShoreWaveStrength : packoffset(c24.z);        // Overall shore wave intensity multiplier
 	
 	// Terrain heightmap parameters (for vertex shader depth estimation)
 	float TerrainHeightmapEnabled : packoffset(c24.w);  // Is terrain heightmap available (0 or 1)
@@ -421,9 +421,10 @@ CellWaveData BlendCellWaves(
 // ============================================================================
 // SHORE WAVE GENERATION
 // ============================================================================
-// Generates simple shore-directed Gerstner waves that grow as water gets
-// shallower, replacing the deep-water cell waves which are attenuated.
-// Shore direction comes from terrain heightmap gradient sampling.
+// Generates simple shore-directed Gerstner waves that replace attenuated cell waves
+// in the shallow band. Beach shoaling (Green's law) applies only when terrain gradient
+// is meaningful; flat stream beds skip it so shallow-depth attenuation is not undone.
+// Direction comes from terrain gradient, else flow map, else the default cell diagonal.
 
 struct ShoreWaveResult
 {
@@ -434,12 +435,13 @@ struct ShoreWaveResult
 
 ShoreWaveResult EvaluateShoreWaves(
 	float2 worldPos,
-	float2 shoreDir,      // Normalized direction toward shore
-	float shoreInfluence,  // 0..1 (0 = deep, 1 = very shallow)
-	float depthGameUnits,  // Water depth in game units
+	float2 shoreDir,
+	float shoreInfluence,
+	float depthGameUnits,
 	float timeSeconds,
 	float amplitudeMult,
-	float steepnessMult
+	float steepnessMult,
+	float shoreGradientMag
 )
 {
 	ShoreWaveResult result;
@@ -447,23 +449,37 @@ ShoreWaveResult EvaluateShoreWaves(
 	result.tangentAccum = float3(0, 0, 0);
 	result.binormalAccum = float3(0, 0, 0);
 
-	if (shoreInfluence < 0.01f) {
+	if (shoreInfluence < 0.01f)
 		return result;
+
+	float depthM = depthGameUnits / M_TO_GAME_UNIT;
+
+	// Shoaling (beach / sloping shore): amplitude ~ depth^(-1/4). Not valid for flat stream
+	// beds where terrain gradient is ~0 — there we skip amplification so shallow-depth
+	// crossfade is not fought by artificial shoal gain.
+	static const float kShoreGradForShoaling = 0.001f;
+	float shoalFactor = 1.0f;
+	if (shoreGradientMag > kShoreGradForShoaling) {
+		shoalFactor = pow(max(depthM, 0.15f), -0.25f);
+		shoalFactor = min(shoalFactor, 2.5f);
 	}
 
-	// Shore wave parameters: 3 waves with decreasing wavelength
-	// Wavelengths shorten in shallow water (real physics: wavelength ~ sqrt(depth))
-	// Keep them modest to look like lapping shore waves
-	float depthM = depthGameUnits / M_TO_GAME_UNIT;
-	float depthFactor = saturate(depthM / 5.0f);  // 0 at shore, 1 at ~5m depth
-
-	// Shore waves: travel toward shore with slight angular spread
 	float baseAngle = atan2(shoreDir.y, shoreDir.x);
 	float gravityGame = UW_GRAVITY * M_TO_GAME_UNIT;
 
-	// 3 shore wave components with different scales
-	static const float wavelengthsM[3] = { 8.0f, 4.0f, 2.0f };
-	static const float amplitudesM[3] = { 0.15f, 0.08f, 0.03f };
+	// Shore wave components: wavelengths derived from user Wave1-3 settings
+	// scaled down for the shorter fetch near shore, amplitudes proportional
+	// to user settings so shore waves stay in proportion with open water.
+	float wavelengthsGame[3] = {
+		max(Wave1Wavelength * 0.6f, 4.0f) * M_TO_GAME_UNIT,
+		max(Wave2Wavelength * 0.5f, 2.0f) * M_TO_GAME_UNIT,
+		max(Wave3Wavelength * 0.4f, 1.0f) * M_TO_GAME_UNIT
+	};
+	float amplitudesGame[3] = {
+		Wave1Amplitude * 0.5f * M_TO_GAME_UNIT,
+		Wave2Amplitude * 0.4f * M_TO_GAME_UNIT,
+		Wave3Amplitude * 0.3f * M_TO_GAME_UNIT
+	};
 	static const float angleOffsets[3] = { 0.0f, 0.25f, -0.3f };
 
 	[unroll]
@@ -471,20 +487,16 @@ ShoreWaveResult EvaluateShoreWaves(
 		float angle = baseAngle + angleOffsets[w];
 		float2 dir = float2(cos(angle), sin(angle));
 
-		float wavelengthGame = wavelengthsM[w] * M_TO_GAME_UNIT;
-		// Amplitude grows as depth decreases (waves shoal)
-		// But cap at very shallow to avoid clipping through terrain
-		float shoalFactor = lerp(1.0f, 0.3f, depthFactor);  // Stronger near shore
-		float ampGame = amplitudesM[w] * M_TO_GAME_UNIT * amplitudeMult * shoalFactor * shoreInfluence;
+		float ampGame = amplitudesGame[w] * amplitudeMult * shoalFactor * shoreInfluence;
 
-		float k = UW_TWO_PI / wavelengthGame;
+		float k = UW_TWO_PI / wavelengthsGame[w];
 		float omega = sqrt(gravityGame * k);
 
 		float phase = k * dot(dir, worldPos) - omega * timeSeconds;
 		float sinP, cosP;
 		sincos(phase, sinP, cosP);
 
-		float steepness = 0.4f * steepnessMult;
+		float steepness = min(Wave1Steepness, 0.5f) * steepnessMult;
 		float QA = steepness * ampGame;
 
 		result.displacement.x += dir.x * QA * cosP;
@@ -510,6 +522,79 @@ ShoreWaveResult EvaluateShoreWaves(
 	}
 
 	return result;
+}
+
+// ============================================================================
+// TESSELLATION HINT (VS, no trig — matches octave LOD in CalculateWaterDisplacement)
+// ============================================================================
+// Per-vertex [0,1] score: higher where short wavelengths and large amplitudes need more mesh density.
+// Symmetric edge factors in the hull use max(hint0, hint1) so shared edges stay seam-free.
+
+float EstimateWaveTessellationHint(float cameraDistance)
+{
+	if (WaveIntensity <= 0.001f) {
+		return 0.0f;
+	}
+
+	float distanceFade = 1.0f;
+	if (cameraDistance > 0.0f && WaveFadeEnd > WaveFadeStart) {
+		distanceFade = 1.0f - saturate((cameraDistance - WaveFadeStart) / (WaveFadeEnd - WaveFadeStart));
+		distanceFade = distanceFade * distanceFade * (3.0f - 2.0f * distanceFade);
+		if (distanceFade <= 0.001f) {
+			return 0.0f;
+		}
+	}
+
+	float fadeRange = max(WaveFadeEnd - WaveFadeStart, 1.0f);
+	float lodNorm = saturate((cameraDistance - WaveFadeStart * 0.25f) * rcp(fadeRange));
+	bool octaveActive3 = (lodNorm < 0.6f);
+	bool octaveActive45 = (lodNorm < 0.3f);
+
+	float deepAmp = WaveIntensity * WaveAmplitude * distanceFade;
+
+	float wl[6] = {
+		max(Wave1Wavelength, 1.0f),
+		max(Wave2Wavelength, 0.5f),
+		max(Wave3Wavelength, 0.25f),
+		max(Wave4Wavelength, 0.1f),
+		max(Wave5Wavelength, 0.05f),
+		max(Wave6Wavelength, 0.025f)
+	};
+	float ampM[6] = {
+		max(Wave1Amplitude, 0.0f),
+		max(Wave2Amplitude, 0.0f),
+		max(Wave3Amplitude, 0.0f),
+		max(Wave4Amplitude, 0.0f),
+		max(Wave5Amplitude, 0.0f),
+		max(Wave6Amplitude, 0.0f)
+	};
+	float st[6] = {
+		saturate(Wave1Steepness),
+		saturate(Wave2Steepness),
+		saturate(Wave3Steepness),
+		saturate(Wave4Steepness),
+		saturate(Wave5Steepness),
+		saturate(Wave6Steepness)
+	};
+
+	float score = 0.0f;
+	[unroll]
+	for (int i = 0; i < 6; i++) {
+		if (ampM[i] < 1e-5f) {
+			continue;
+		}
+		if (i == 3 && !octaveActive3) {
+			continue;
+		}
+		if (i >= 4 && !octaveActive45) {
+			continue;
+		}
+		float wlGame = max(wl[i] * M_TO_GAME_UNIT, 1.0f);
+		float k = UW_TWO_PI / wlGame;
+		float ampGame = ampM[i] * M_TO_GAME_UNIT * deepAmp;
+		score += ampGame * k * st[i] * WaveSteepness;
+	}
+	return saturate(score * 0.0018f);
 }
 
 // ============================================================================
@@ -557,39 +642,43 @@ WaveSample CalculateWaterDisplacement(
 		}
 	}
 	
-	// DEPTH-BASED WAVE CROSSFADE SYSTEM
-	// Instead of killing waves in shallow water, crossfade from deep-water cell waves
-	// to simpler shore-directed waves. This ensures continuous wave coverage from
-	// deep water all the way to the shoreline.
-	//
-	// depthBlend: 0 = at shore (all shore waves), 1 = deep water (all cell waves)
-	// shoreInfluence: 1 - depthBlend, passed to PS for normal blend reduction
-	
+	// SHORE WAVE CROSSFADE
+	// Crossfade between open-water cell waves and shore-directed Gerstner waves:
+	//   depthBlend  = 0 at ShallowWaveDepthMin (shore) → 1 at ShallowWaveDepthMax (deep)
+	//   Cell waves  scale by depthBlend          → zero at shore, full in deep water
+	//   Shore waves scale by (1 - depthBlend)    → full at shore, zero in deep water
+	// shoreWaveInfluence is passed to the PS (as shoreInfluence) for foam/normal blending.
+
 	float depthBlend = 1.0f;
 	float shoreWaveInfluence = 0.0f;
 	bool hasShoreData = false;
-	
-	// Only apply depth crossfade if we have valid depth data
+	// Extra fade for long-wavelength cell octaves (0–2): deepWaveAmplitude already scales all octaves,
+	// but the three lowest still read as "full ocean" in streams; ramp them off faster toward shore.
+	float largeCellWaveFade = 1.0f;
+
 	if (waterDepth < 1e4f && ShallowWaveDepthMax > ShallowWaveDepthMin) {
-		// Map depth to [0,1] using min/max thresholds
-		// ShallowWaveDepthMin (~50 game units / ~0.7m): shore waves at full strength
-		// ShallowWaveDepthMax (~500 game units / ~7m): cell waves at full strength
-		float depthNormalized = (waterDepth - ShallowWaveDepthMin) / 
+		float depthNormalized = (waterDepth - ShallowWaveDepthMin) /
 		                        max(ShallowWaveDepthMax - ShallowWaveDepthMin, 1.0f);
 		depthBlend = saturate(depthNormalized);
-		depthBlend = depthBlend * depthBlend * (3.0f - 2.0f * depthBlend);  // smoothstep
-		
-		// Shore influence: high near shore, zero in deep water
+		depthBlend = depthBlend * depthBlend * (3.0f - 2.0f * depthBlend);
+
 		shoreWaveInfluence = (1.0f - depthBlend) * ShoreWaveStrength;
 		result.shoreInfluence = shoreWaveInfluence;
-		
-		// Check if we have valid shore direction from terrain gradient
-		hasShoreData = (shoreGradientMag > 0.001f && shoreWaveInfluence > 0.01f);
-		
-		// Early exit only if completely dry (negative depth / terrain above water)
-		if (waterDepth <= 0.0f) {
+
+		// Shore *waves* must run whenever we're in the shallow crossfade band — not only when
+		// terrain gradient is strong. Streams/rivers often have a flat channel (tiny gradient);
+		// the old gate left cell waves at depthBlend≈0 with no shore replacement (dead calm).
+		hasShoreData = (shoreWaveInfluence > 0.01f);
+
+		// 0 = at shore / ShallowWaveDepthMin, 1 = deep end of blend band — kill octaves 0–2 earlier
+		// than fine ripples (oct 3–5) so shallow water is not dominated by long wavelengths.
+		static const float kLargeCellFadeStart = 0.05f;
+		static const float kLargeCellFadeEnd = 0.48f;
+		largeCellWaveFade = saturate((depthBlend - kLargeCellFadeStart) /
+			max(kLargeCellFadeEnd - kLargeCellFadeStart, 0.001f));
+
+		if (waterDepth <= 0.0f)
 			return result;
-		}
 	}
 	
 	float deepWaveAmplitude = waveIntensity * amplitudeMult * distanceFade * depthBlend;
@@ -647,6 +736,9 @@ WaveSample CalculateWaterDisplacement(
 		float cellSizeGame = wavelengthM * M_TO_GAME_UNIT * 6.0f;
 		
 		float octaveAmp = userAmplitudes[oct] * deepWaveAmplitude;
+		if (oct < 3) {
+			octaveAmp *= largeCellWaveFade;
+		}
 		float octaveSteep = userSteepness[oct] * steepnessMult;
 		
 		CellWaveData cellData = BlendCellWaves(
@@ -670,17 +762,35 @@ WaveSample CalculateWaterDisplacement(
 		}
 	}
 	
-	// Blend in shore-directed waves when near shoreline
+	// Blend in shore-directed waves when near shoreline (or shallow flat water)
+	float2 shoreDirEff = shoreDirection;
+	float shoreDirLenSq = dot(shoreDirEff, shoreDirEff);
+	if (shoreGradientMag <= 0.001f || shoreDirLenSq < 1e-8f) {
+		// Prefer flow direction on rivers when terrain normal is ambiguous
+		float flowLenSq = dot(flowBiasDir, flowBiasDir);
+		if (flowBiasWeight > 0.01f && flowLenSq > 1e-8f)
+			shoreDirEff = flowBiasDir * rsqrt(flowLenSq);
+		else
+			shoreDirEff = normalize(float2(0.707f, 0.707f));
+	} else {
+		shoreDirEff = shoreDirEff * rsqrt(shoreDirLenSq);
+	}
+
 	if (hasShoreData) {
 		float shoreAmpMult = waveIntensity * amplitudeMult * distanceFade;
+		// Shore system uses three low-frequency components; keep them from staying at full strength
+		// when depthBlend is still low (same shallow band as large-cell fade).
+		float shoreShallowAmp = lerp(0.25f, 1.0f, saturate(depthBlend / 0.42f));
+		shoreAmpMult *= shoreShallowAmp;
 		ShoreWaveResult shoreWaves = EvaluateShoreWaves(
 			worldPos,
-			shoreDirection,
+			shoreDirEff,
 			shoreWaveInfluence,
 			waterDepth,
 			timeSeconds,
 			shoreAmpMult,
-			steepnessMult
+			steepnessMult,
+			shoreGradientMag
 		);
 
 		totalDisp += shoreWaves.displacement;
@@ -774,7 +884,17 @@ WaveSample CalculateWaterDisplacement(
 	result.displacement = totalDisp;
 	result.normal = waveNormal;
 	result.geometricNormal = geoNormal;
-	
+
+	// Update primary direction: in deep water use default NE diagonal;
+	// near shore, blend toward the terrain-derived shore direction so that
+	// foam patterns, noise scrolling, and rest-position anchoring align
+	// with the actual wave propagation toward land.
+	if (hasShoreData) {
+		float2 defaultDir = normalize(float2(0.707f, 0.707f));
+		float blendT = saturate(shoreWaveInfluence * 2.0f);
+		result.primaryDirection = normalize(lerp(defaultDir, shoreDirEff, blendT));
+	}
+
 	return result;
 }
 

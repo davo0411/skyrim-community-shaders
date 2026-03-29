@@ -55,9 +55,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Wave6Wavelength,
 	Wave6Steepness,
 	Wave6AngleOffset,
-	ShallowWaveDepthMin,
-	ShallowWaveDepthMax,
-	ShoreWaveDepthThreshold,
+	ShoreBlendStart,
+	ShoreBlendEnd,
 	ShoreWaveStrength)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
@@ -243,36 +242,37 @@ void PBRWater::DrawSettings()
 			ImGui::Separator();
 			ImGui::Spacing();
 
-			if (ImGui::TreeNodeEx("Depth-Based Wave Modulation", ImGuiTreeNodeFlags_DefaultOpen)) {
-				ImGui::Text("Shallow Water Effects");
+			if (ImGui::TreeNodeEx("Shore Waves", ImGuiTreeNodeFlags_DefaultOpen)) {
+				ImGui::Text("Crossfade between open-water and shore-directed waves.");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Reduces wave amplitude in shallow water for more realistic shoreline behavior.");
+					ImGui::Text(
+						"In shallow water, ocean Gerstner waves fade out and are\n"
+						"replaced by waves that propagate toward the shoreline.\n"
+						"The two ranges below control where this transition happens.");
 				}
 
-				ImGui::SliderFloat("Shallow Depth Min", &settings.waves.ShallowWaveDepthMin, 0.0f, 500.0f, "%.0f");
+				ImGui::SliderFloat("Shore Blend Start", &settings.waves.ShoreBlendStart, 0.0f, 500.0f, "%.0f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Depth (game units) where waves fully disappear.\n~70 units = 1 meter.\nDefault: 50 (~0.7m)");
+					ImGui::Text(
+						"Depth (game units) where shore waves are at full strength\n"
+						"and ocean waves are fully faded out.\n"
+						"~70 units = 1 metre.  Default: 50 (~0.7m)");
 				}
 
-				ImGui::SliderFloat("Shallow Depth Max", &settings.waves.ShallowWaveDepthMax, 50.0f, 2000.0f, "%.0f");
+				ImGui::SliderFloat("Shore Blend End", &settings.waves.ShoreBlendEnd, 50.0f, 2000.0f, "%.0f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Depth (game units) where waves reach full amplitude.\nDefault: 500 (~7m)");
-				}
-
-				ImGui::Spacing();
-				ImGui::Text("Shore-Directed Waves");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Creates waves that flow toward the shore in shallow water.");
-				}
-
-				ImGui::SliderFloat("Shore Depth Threshold", &settings.waves.ShoreWaveDepthThreshold, 50.0f, 1000.0f, "%.0f");
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Depth (game units) below which shore waves activate.\nDefault: 300 (~4.3m)");
+					ImGui::Text(
+						"Depth (game units) where ocean waves are at full strength\n"
+						"and shore waves have fully faded out.\n"
+						"Default: 500 (~7m)");
 				}
 
 				ImGui::SliderFloat("Shore Wave Strength", &settings.waves.ShoreWaveStrength, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("Intensity of shore-directed wave bias.\n0 = disabled, 1 = default, 2 = very strong");
+					ImGui::Text(
+						"Overall intensity of shore-directed waves.\n"
+						"0 = disabled (ocean waves everywhere),\n"
+						"1 = default, 2 = very strong shore waves.");
 				}
 
 				ImGui::TreePop();
@@ -409,9 +409,9 @@ void PBRWater::DrawSettings()
 					ImGui::Text("Foam density on flowing water (rivers, streams).\n0 = no foam, 1 = natural, 2 = heavy.");
 				}
 
-				ImGui::SliderFloat("Height Threshold", &settings.foam.FoamThreshold, 0.0f, 0.8f, "%.2f");
+				ImGui::SliderFloat("Concentration", &settings.foam.FoamThreshold, 0.0f, 0.8f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("How far down the wave foam extends.\n0 = foam on any raised water, 0.8 = only the very peak.");
+					ImGui::Text("Controls background foam density.\n0 = heavy foam across the whole surface,\n0.8 = foam mostly on crests and active areas.");
 				}
 
 				ImGui::SliderFloat("Edge Sharpness", &settings.foam.FoamSharpness, 0.5f, 4.0f, "%.2f");
@@ -769,9 +769,9 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		perFrameData.FoamPad_c23z = 0.0f;
 
 		// Depth-based wave control settings
-		perFrameData.ShallowWaveDepthMin = singleton.settings.waves.ShallowWaveDepthMin;
-		perFrameData.ShallowWaveDepthMax = singleton.settings.waves.ShallowWaveDepthMax;
-		perFrameData.ShoreWaveDepthThreshold = singleton.settings.waves.ShoreWaveDepthThreshold;
+		perFrameData.ShallowWaveDepthMin = singleton.settings.waves.ShoreBlendStart;
+		perFrameData.ShallowWaveDepthMax = singleton.settings.waves.ShoreBlendEnd;
+		perFrameData.ShoreWavePad0 = 0.0f;
 		perFrameData.ShoreWaveStrength = singleton.settings.waves.ShoreWaveStrength;
 
 		// Get terrain heightmap parameters from Terrain Shadows feature

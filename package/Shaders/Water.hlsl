@@ -296,8 +296,16 @@ VS_OUTPUT main(VS_INPUT input)
 	// Store debug info for pixel shader visualization
 	vsout.DepthDebug = float4(depthDebug.depth, depthDebug.debugCode, depthDebug.terrainZ, depthDebug.waterZ);
 
-	vsout.UnifiedWaveInfo = float4(wavePrimaryDir, waveDisplacement.z, shoreInfluence);
-	vsout.UnifiedWaveNormal = float4(waveNormal, horizontalDisplacement);
+	// Tessellation path: VS skips Gerstner; hull no longer uses UnifiedWaveInfo.z (wave-based edge
+	// boost caused asymmetric tess and camera-following smear). z stays 0.
+	// Non-tess path: full wave data for downstream (overwritten by DS when tess is on).
+	if (TessellationEnabled >= 0.5f) {
+		vsout.UnifiedWaveInfo = float4(0.0f, 0.0f, 0.0f, 0.0f);
+		vsout.UnifiedWaveNormal = float4(0.0f, 0.0f, 1.0f, 0.0f);
+	} else {
+		vsout.UnifiedWaveInfo = float4(wavePrimaryDir, waveDisplacement.z, shoreInfluence);
+		vsout.UnifiedWaveNormal = float4(waveNormal, horizontalDisplacement);
+	}
 
 	currentPosition.xyz += waveDisplacement;
 
@@ -1364,172 +1372,20 @@ struct DiffuseOutput
 	float3 waveSSS;                 // Wave edge subsurface scattering
 };
 
-// ============================================================================
-// PHYSICALLY-BASED WATER SCATTERING
-// Based on real water absorption/scattering coefficients
-// Reference: https://s.campbellsci.com/documents/es/technical-papers/obs_light_absorption.pdf
-// ============================================================================
 #if defined(PBR_WATER)
-
-// Henyey-Greenstein phase function for anisotropic scattering
-float PhaseHenyeyGreenstein(float cosTheta, float g)
-{
-	const float scale = 0.25f / Math::PI;
-	float g2 = g * g;
-	float num = 1.0f - g2;
-	float denom = pow(abs(1.0f + g2 - 2.0f * g * cosTheta), 1.5f);
-	return scale * num / max(denom, 0.0001f);
-}
-
-struct WaterScatteringResult
-{
-	float3 scatter;
-	float3 transmittance;
-};
-
-WaterScatteringResult CalculateWaterScattering(float3 startPosWS, float3 endPosWS, float3 sunDir, float3 sunColor, float occlusion, float cameraDistance)
-{
-	WaterScatteringResult result;
-	result.scatter = 0.0f;
-	result.transmittance = 1.0f;
-
-	float3 worldDir = endPosWS - startPosWS;
-	float dist = length(worldDir);
-	if (dist < 0.01f) {
-		return result;
-	}
-
-	worldDir = worldDir / dist;
-
-	// Water optical coefficients (per game unit, ~1.428 cm)
-	float3 hue = normalize(rcp(max(ShallowColor.xyz, 0.001f)));
-	const float3 scatterCoeff = hue * 0.002f * 2.0f * 1.428f;
-	const float3 absorpCoeff = hue * 0.0002f * 2.0f * 1.428f;
-	const float3 extinction = scatterCoeff + absorpCoeff;
-
-	float cosTheta = dot(sunDir, worldDir);
-	float phase = PhaseHenyeyGreenstein(cosTheta, 0.5f);
-
-	float distRatio = abs(sunDir.z / max(abs(worldDir.z), 0.001f));
-
-	const float cutoffTransmittance = 0.01f;
-	float maxExtinction = max(extinction.x, max(extinction.y, extinction.z));
-	float cutoffDist = -log(cutoffTransmittance) / ((1.0f + distRatio) * maxExtinction);
-
-	float marchDist = min(dist, cutoffDist);
-	float sunMarchDist = marchDist * distRatio;
-
-	// Distance-based LOD: reduce steps at distance for performance
-	// Smooth transition zones ensure no popping
-	uint nSteps = 8;
-	float lodFade = 1.0f;
-	
-	const float lod1Distance = 4096.0f;   // Medium distance threshold
-	const float lod2Distance = 8192.0f;   // Far distance threshold
-	
-	if (cameraDistance > lod2Distance) {
-		nSteps = 4;  // Minimal steps at far distance
-		float fadeStart = lod2Distance;
-		float fadeEnd = lod2Distance + 2048.0f;
-		lodFade = 1.0f - saturate((cameraDistance - fadeStart) / (fadeEnd - fadeStart));
-	} else if (cameraDistance > lod1Distance) {
-		nSteps = 6;  // Medium quality at medium distance
-		float fadeStart = lod1Distance;
-		float fadeEnd = lod1Distance + 2048.0f;
-		float blend = saturate((cameraDistance - fadeStart) / (fadeEnd - fadeStart));
-		nSteps = (uint)lerp(8, 6, blend);
-		lodFade = 1.0f - blend * 0.3f;  // Slight intensity reduction
-	}
-	
-	const float step = 1.0f / nSteps;
-
-
-	float3 scatter = 0.0f;
-	float3 transmittance = 1.0f;
-
-	[unroll]
-	for (uint i = 0; i < nSteps; ++i) {
-		float t = (i + 0.5f) * step;
-		float3 sampleTransmittance = exp(-step * marchDist * extinction);
-		transmittance *= sampleTransmittance;
-		float3 sunTransmittance = exp(-sunMarchDist * t * extinction);
-		float3 inScatter = scatterCoeff * phase * sunTransmittance;
-		scatter += inScatter * (1.0f - sampleTransmittance) / max(extinction, 0.0001f) * transmittance;
-	}
-
-	// Apply LOD fade to maintain scattering presence at distance without popping
-	result.scatter = scatter * sunColor * occlusion * 3.0f * lodFade;
-	result.transmittance = exp(-dist * (1.0f + distRatio) * extinction);
-
-	return result;
-}
-
-// ============================================================================
-// WAVE EDGE LIGHTING — Forward scatter, rim glow, subsurface transmission
-// ============================================================================
-//
-// Four terms:
-//   1. FORWARD SCATTER — Light transmitted through wave crests. Scales with
-//      raw wave height (game units) for amplitude-proportional intensity.
-//   2. RIM GLOW — Silhouette edge highlights at grazing view angles.
-//   3. AMBIENT SCATTER — Always-on view-dependent baseline that keeps
-//      the water surface alive even on gentle waves.
-//   4. WRAP DIFFUSE — Half-Lambert term that extends illumination around
-//      wave curvature, softening the transition into troughs.
-
-float3 CalculateWaveEdgeSSS(
-	float3 viewDirection,
-	float3 waveNormal,
-	float3 sunDir,
-	float3 sunColor,
-	float waveHeight,
-	float horizontalDisplacement,
-	float3 shallowColor,
-	float3 deepColor)
-{
-	float3 N = normalize(waveNormal);
-	float3 V = -viewDirection;
-	float3 L = sunDir;
-
-	float NdotL = dot(N, L);
-	float NdotV = saturate(dot(N, V));
-
-	float maxAmp = max(Wave1Amplitude * WaveAmplitude * M_TO_GAME_UNIT, 1.0f);
-	float normHeight = saturate(max(0.0f, waveHeight) / maxAmp);
-
-	float3 sssColor = lerp(deepColor, shallowColor, 0.65f);
-
-	// ── 1. FORWARD SCATTER ──────────────────────────────────────────────
-	float LdotV = saturate(dot(L, viewDirection));
-	float forwardPhase = pow(LdotV, 4.0f);
-
-	// Surfaces whose normal faces away from the sun transmit more light
-	float normalMask = pow(saturate(0.5f - 0.5f * NdotL), 2.0f);
-
-	// normHeight (0-1) drives intensity — no raw game unit blowout
-	float forwardTerm = forwardPhase * normalMask * normHeight * 0.8f;
-
-	// ── 2. RIM GLOW ─────────────────────────────────────────────────────
-	float rim = pow(1.0f - NdotV, 3.0f);
-	float wrapLit = saturate(NdotL * 0.4f + 0.6f);
-	float rimTerm = rim * wrapLit * normHeight * 0.35f;
-
-	// ── 3. AMBIENT SCATTER ──────────────────────────────────────────────
-	float ambientTerm = 0.08f * NdotV * NdotV;
-
-	// ── 4. WRAP DIFFUSE ─────────────────────────────────────────────────
-	float wrapDiffuse = saturate(NdotL * 0.5f + 0.5f);
-	float wrapTerm = wrapDiffuse * normHeight * 0.15f;
-
-	// ── COMBINE ─────────────────────────────────────────────────────────
-	return (forwardTerm + rimTerm + ambientTerm + wrapTerm) * sssColor * sunColor;
-}
-#endif  // PBR_WATER
+#	include "PBRWater/WaterWaveScattering.hlsli"
+#endif
 
 DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDirection, inout float4 distanceMul, float refractionsDepthFactor, float fresnel, uint eyeIndex, float3 viewPosition, float noise, float depth)
 {
 #			if defined(REFRACTIONS)
-	float4 refractionNormal = mul(transpose(TextureProj[eyeIndex]), float4((VarAmounts.w * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
+	float refractionDistortion = VarAmounts.w * refractionsDepthFactor;
+#				if defined(PBR_WATER)
+	if (EnableLightingOverrides > 0.5f) {
+		refractionDistortion *= RefractionStrength;
+	}
+#				endif
+	float4 refractionNormal = mul(transpose(TextureProj[eyeIndex]), float4(refractionDistortion * normal.xy + input.MPosition.xy, input.MPosition.z, 1));
 
 	float2 refractionUvRaw = float2(refractionNormal.x, refractionNormal.w - refractionNormal.y) / refractionNormal.ww;
 	refractionUvRaw = Stereo::ConvertToStereoUV(refractionUvRaw, eyeIndex);  // need to convert here for VR due to refractionNormal values
@@ -1612,7 +1468,8 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 			SunDir.xyz,
 			SunColor.xyz * SunDir.w,
 			scatterOcclusion,
-			camDist
+			camDist,
+			distanceMul.y
 		);
 	}
 
@@ -1651,6 +1508,7 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 		output.transmittance = 1.0f;
 	}
 
+	// Wave-edge SSS must use geometric wave normal (Gerstner); diffuse normal + sun can cancel in H = N+L → NaNs.
 	float3 rawWaveSSS = CalculateWaveEdgeSSS(
 		viewDirection,
 		input.UnifiedWaveNormal.xyz,
@@ -1659,7 +1517,19 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 		input.UnifiedWaveInfo.z,
 		input.UnifiedWaveNormal.w,
 		ShallowColor.xyz,
-		DeepColor.xyz
+		DeepColor.xyz,
+		distanceMul.y
+	);
+	// Directional sunlight diffusion in sun-facing wavelets (forward / facing-sun SSS), same SunDir & tint scale
+	rawWaveSSS += CalculateDirectionalSunlightWaveSSS(
+		viewDirection,
+		input.UnifiedWaveNormal.xyz,
+		SunDir.xyz,
+		SunColor.xyz * SunDir.w,
+		input.UnifiedWaveInfo.z,
+		ShallowColor.xyz,
+		DeepColor.xyz,
+		distanceMul.y
 	);
 
 	// Smooth distance fade for wave SSS
@@ -1854,6 +1724,7 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #		endif
 
+	float3 skyFresnelRim = 0.0.xxx;
 	float fresnel = GetFresnelValue(normal, viewDirection);
 
 #			if defined(SKYLIGHTING) && defined(PBR_WATER)
@@ -1867,17 +1738,39 @@ PS_OUTPUT main(PS_INPUT input)
 #				else
 		float3 positionMSSkylight = input.WPosition.xyz;
 #				endif
-		sh2 skylightingSH = Skylighting::sample(SharedData::skylightingSettings, Skylighting::SkylightingProbeArray, Skylighting::stbn_vec3_2Dx1D_128x128x64, input.HPosition.xy, positionMSSkylight, normal);
+		// Use diffuseNormal (not spec/wave normal): Skylighting::sample weights probes by tangentWeight =
+		// dot(cellDir, normalWS). Steep wave normals drive weights to ~0 → black patches on troughs/faces.
+		float3 skylightGeomNormal = diffuseNormal;
+		sh2 skylightingSH = Skylighting::sample(SharedData::skylightingSettings, Skylighting::SkylightingProbeArray, Skylighting::stbn_vec3_2Dx1D_128x128x64, input.HPosition.xy, positionMSSkylight, skylightGeomNormal);
 		skylightingDiffuse = SphericalHarmonics::FuncProductIntegral(skylightingSH, SphericalHarmonics::EvaluateCosineLobe(float3(0, 0, 1))) / Math::PI;
 		skylightingDiffuse = saturate(skylightingDiffuse);
 		skylightingDiffuse = lerp(1.0, skylightingDiffuse, Skylighting::getFadeOutFactor(input.WPosition.xyz));
 		skylightingDiffuse = Skylighting::mixDiffuse(SharedData::skylightingSettings, skylightingDiffuse);
+		skylightingDiffuse = max(skylightingDiffuse, 0.32f);
 
 		float waterRoughness = lerp(0.05, 0.15, saturate(WaveIntensity));
 		sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, waterRoughness);
 		skylightingSpecular = SphericalHarmonics::FuncProductIntegral(skylightingSH, specularLobe);
 		skylightingSpecular = lerp(1.0, skylightingSpecular, Skylighting::getFadeOutFactor(input.WPosition.xyz));
 		skylightingSpecular = Skylighting::mixSpecular(SharedData::skylightingSettings, skylightingSpecular);
+
+		// Fresnel-weighted skylight along the reflection direction: grazing angles and wave normals pick up
+		// varying sky directions → shimmering highlights on wavelets (separate from cubemap path).
+		float3 Vsky = -viewDirection;
+		float NdotVsky = saturate(dot(normal, Vsky));
+		float3 Rsky = normalize(reflect(viewDirection, normal));
+		float skyAlongR = max(0.0f, SphericalHarmonics::Unproject(skylightingSH, Rsky));
+		// Skylighting::sample returns scaledUnitSH outside the probe volume; Unproject() then explodes → white water.
+		// Use the same bounds test as Skylighting::sample (receiver bias only; skip blue-noise jitter).
+		float3 posBiasedSkylight = positionMSSkylight + skylightGeomNormal * Skylighting::CELL_SIZE - SharedData::skylightingSettings.PosOffset.xyz;
+		float3 uvwSkylightProbe = posBiasedSkylight / Skylighting::ARRAY_SIZE + 0.5f;
+		float skylightProbeValid = (all(uvwSkylightProbe >= 0.0f) && all(uvwSkylightProbe <= 1.0f)) ? 1.0f : 0.0f;
+		skyAlongR = min(skyAlongR, 1.35f) * skylightProbeValid;
+		float rimGracing = pow(saturate(1.0f - NdotVsky), 2.25f);
+		float skylightEdgeFade = Skylighting::getFadeOutFactor(positionMSSkylight);
+		// Shallow-tinted (fog lerp can be near-white and blow out distant water)
+		float3 skyHue = Color::Water(ShallowColor.xyz);
+		skyFresnelRim = skyHue * (skyAlongR * fresnel * rimGracing * skylightingSpecular * skylightEdgeFade * 0.42f);
 	}
 #			endif
 
@@ -2032,12 +1925,10 @@ PS_OUTPUT main(PS_INPUT input)
 #						else
 	float specularFraction = lerp(1, fresnel * diffuseOutput.refractionMul, distanceBlendFactor);
 #						endif
-	float3 finalColorPreFog = lerp(diffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
+	float3 transmittedColor = diffuseColor + diffuseOutput.scatter + diffuseOutput.waveSSS;
+	float3 finalColorPreFog = lerp(transmittedColor, specularColor, specularFraction) + sunColor * depthControl.w + skyFresnelRim * depthControl.w;
 
 #						if defined(PBR_WATER)
-	finalColorPreFog += diffuseOutput.scatter;
-	finalColorPreFog += diffuseOutput.waveSSS;
-
 	if (FoamEnabled > 0.5f) {
 		float intersectVC = 0.0f;
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
@@ -2077,8 +1968,14 @@ PS_OUTPUT main(PS_INPUT input)
 #						endif
 #						if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled) {
+		float3 vanillaFogBeforeEHF = fogColor;
 		float4 exponentialHeightFog = ExponentialHeightFog::GetExponentialHeightFog(input.WPosition.xyz, FrameBuffer::CameraPosAdjust[eyeIndex].xyz, fogColor);
+#							if defined(PBR_WATER)
+		// EHF adds strong directional inscattering; full lerp washes out ESP water tints (green/purple blowout).
+		fogColor = lerp(exponentialHeightFog.xyz, vanillaFogBeforeEHF, 0.55f);
+#							else
 		fogColor = exponentialHeightFog.xyz;
+#							endif
 		fogDistanceFactor = exponentialHeightFog.w;
 	} else
 #						endif
@@ -2101,12 +1998,10 @@ PS_OUTPUT main(PS_INPUT input)
 #						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 #						endif
-	float3 finalColorPreFog = lerp(diffuseOutput.refractionDiffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
+	float3 transmittedColor = diffuseOutput.refractionDiffuseColor + diffuseOutput.scatter + diffuseOutput.waveSSS;
+	float3 finalColorPreFog = lerp(transmittedColor, specularColor, specularFraction) + sunColor * depthControl.w + skyFresnelRim * depthControl.w;
 
 #						if defined(PBR_WATER)
-	finalColorPreFog += diffuseOutput.scatter;
-	finalColorPreFog += diffuseOutput.waveSSS;
-
 	if (FoamEnabled > 0.5f) {
 		float intersectFM = 0.0f;
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
@@ -2146,8 +2041,13 @@ PS_OUTPUT main(PS_INPUT input)
 #						endif
 #						if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled) {
+		float3 vanillaPreFogBeforeEHF = preFogColor;
 		float4 exponentialHeightFog = ExponentialHeightFog::GetExponentialHeightFog(input.WPosition.xyz, FrameBuffer::CameraPosAdjust[eyeIndex].xyz, preFogColor);
+#							if defined(PBR_WATER)
+		preFogColor = lerp(exponentialHeightFog.xyz, vanillaPreFogBeforeEHF, 0.55f);
+#							else
 		preFogColor = exponentialHeightFog.xyz;
+#							endif
 		fogDistanceFactor = exponentialHeightFog.w;
 	} else
 #						endif

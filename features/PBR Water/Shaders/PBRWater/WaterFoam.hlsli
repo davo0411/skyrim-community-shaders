@@ -107,30 +107,42 @@ FoamResult CalculateFoam(
 	// ── REST POSITION ───────────────────────────────────────────────────
 	float2 restPos = worldPos - wavePrimaryDir * horizontalDisp;
 
-	// ── COVERAGE: where foam appears ────────────────────────────────────
-	// FoamThreshold controls how far down the wave foam extends:
-	// 0 = everywhere with any positive height, 1 = only the peak.
+	// ── CONCENTRATION (0–1) ─────────────────────────────────────────────
+	// Three layers: (1) universal speckle — never height-only, breaks tiling;
+	// (2) wave-riding — stronger on crests, quieter in troughs;
+	// (3) shoreline / contact — independent of wave phase.
+	// FoamThreshold & intensityMult scale the lot.
 
 	float maxAmp = max(Wave1Amplitude * WaveAmplitude * 70.0f, 1.0f);
-	float normHeight = saturate(waveHeight / maxAmp);
+	float h = saturate(waveHeight / maxAmp);
 
-	float heightMask = smoothstep(FoamThreshold * 0.5f, FoamThreshold + 0.3f, normHeight);
+	float shoreBias = lerp(1.0f, 1.85f, shoreInfluence);
+	float baseSc = lerp(0.11f, 0.028f, FoamThreshold);
+	float crestSc = lerp(0.68f, 0.28f, FoamThreshold);
+
+	// Trough vs crest: soft curve — troughs keep ~22% of wave-riding foam, crests 100%
+	float crestPhase = pow(h, 0.4f);
+	float troughQuiet = lerp(0.22f, 1.0f, crestPhase);
 
 	float normalSteep = 1.0f - waveNormal.z;
-	float normalContrib = smoothstep(0.15f, 0.6f, normalSteep) * normHeight;
+	float steepAmt = smoothstep(0.08f, 0.5f, normalSteep) * 0.28f * shoreBias;
+	// Steep faces: partial trough fade (wave sides can be steep in troughs)
+	float steepFade = lerp(0.48f, 1.0f, crestPhase);
 
-	float crestCoverage = saturate(heightMask + normalContrib * 0.5f);
+	// (1) Universal: always some foam; spatial noise breaks uniformity (not crest-locked)
+	float uniVar = 0.72f + 0.38f * _foamValueNoise(restPos * 0.031f + float2(17.1f, 9.7f));
+	float universal = baseSc * 0.48f * shoreBias * uniVar;
 
-	// Shore foam
-	float shoreCoverage = shoreInfluence * shoreInfluence;
-	shoreCoverage = max(shoreCoverage, saturate(normHeight + 0.3f) * shoreInfluence);
+	// (2) Wave-riding: extra foam on crests & steep water; thins in troughs
+	float waveRiding = (h * h * crestSc * troughQuiet + steepAmt * steepFade) * shoreBias;
 
-	// Intersection foam: depth-buffer proximity to submerged geometry
-	// intersectionProximity is 0 in open water, 1 right at a rock/shore contact
-	float contactCoverage = intersectionProximity * intersectionProximity;
+	// (3) Shoreline & geometry — not tied to wave height
+	float shoreLine = shoreInfluence * shoreInfluence * 0.5f;
+	float contactFoam = intersectionProximity * intersectionProximity * 0.9f;
 
-	float coverage = saturate(crestCoverage + shoreCoverage + contactCoverage) * intensityMult;
-	if (coverage < 0.005f)
+	float raw = (universal + waveRiding + shoreLine + contactFoam) * intensityMult;
+	float concentration = saturate(raw);
+	if (concentration < 0.006f)
 		return result;
 
 	// ── FOAM TEXTURE (sampled at rest position) ─────────────────────────
@@ -149,6 +161,7 @@ FoamResult CalculateFoam(
 
 	float2 fbmUV = (restPos + flow * 0.2f) * FBM_SCALE;
 	float organic = _foamFBM(fbmUV);
+	float macroBreak = 0.88f + 0.24f * _foamFBM(restPos * 0.018f + flow * 0.04f);
 
 	float2 wavePerp = float2(-wavePrimaryDir.y, wavePrimaryDir.x);
 	float2 streakSamplePos = restPos + flow * 0.15f;
@@ -157,17 +170,26 @@ FoamResult CalculateFoam(
 	float streak = _foamValueNoise(float2(streakCoord, streakCoord * 0.7f + 50.0f));
 
 	// ── COMPOSITE FOAM MASK ─────────────────────────────────────────────
+	// Never push the Voronoi threshold into ~0 — that floods the whole
+	// surface.  Use a narrow band so clusters stay distinct; concentration
+	// only widens halos modestly and adds a separate density term for opacity.
 
-	float baseThreshold = lerp(0.55f, 0.08f, saturate(coverage * 1.3f));
-	float threshold = baseThreshold + (organic - 0.5f) * 0.18f;
-	threshold += (streak - 0.5f) * 0.08f;
+	// Slightly wider halos than the “too little” pass, still nowhere near 0.06 flood
+	float tWide = lerp(0.41f, 0.22f, pow(concentration, 0.82f)) * macroBreak;
+	float threshold = tWide + (organic - 0.5f) * 0.18f;
+	threshold += (streak - 0.5f) * 0.07f;
+	threshold = saturate(threshold);
 
-	float bubbles = 1.0f - smoothstep(max(threshold * 0.4f, 0.02f), threshold, cells);
+	float bubbles = 1.0f - smoothstep(max(threshold * 0.40f, 0.028f), threshold, cells);
 
 	float detail = _foamValueNoise((restPos + flow * 0.5f) * CELL_SCALE * 3.5f);
-	bubbles *= smoothstep(0.15f, 0.45f, detail);
+	bubbles *= smoothstep(0.12f, 0.42f, detail);
 
-	float foamAlpha = bubbles * coverage;
+	float blot = _foamValueNoise(restPos * 0.028f + flow * 0.08f);
+	bubbles *= lerp(0.62f, 1.0f, blot);
+
+	float density = pow(concentration, 0.52f);
+	float foamAlpha = bubbles * lerp(0.2f, 0.72f, density);
 
 	float sharpness = clamp(FoamSharpness, 0.5f, 4.0f);
 	foamAlpha = pow(max(foamAlpha, 0.001f), sharpness);
@@ -191,9 +213,9 @@ FoamResult CalculateFoam(
 
 	// ── COLOR ───────────────────────────────────────────────────────────
 
-	float3 foamWhite = float3(0.93f, 0.96f, 0.99f);
+	float3 foamWhite = float3(0.88f, 0.92f, 0.95f);
 	float3 foamThin = float3(0.55f, 0.68f, 0.76f);
-	float3 foamAlbedo = lerp(foamThin, foamWhite, saturate(foamAlpha * 2.0f));
+	float3 foamAlbedo = lerp(foamThin, foamWhite, saturate(foamAlpha * 1.25f + density * 0.15f));
 
 	// Subtle warm edge tint (subsurface through bubble films)
 	float edgeMask = smoothstep(0.02f, 0.15f, foamAlpha) * (1.0f - smoothstep(0.3f, 0.7f, foamAlpha));
