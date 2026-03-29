@@ -56,7 +56,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Wave6AngleOffset,
 	ShoreBlendStart,
 	ShoreBlendEnd,
-	ShoreWaveStrength)
+	ShoreWaveStrength,
+	UseFFTWaves,
+	FFTSwell,
+	FFTSpread,
+	FFTDetail,
+	FFTWaterDepth,
+	FFTWhitecap,
+	FFTFoamAmount)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PBRWater::LightingSettings,
@@ -179,6 +186,13 @@ void PBRWater::DrawSettings()
 		}
 
 		if (ImGui::BeginTabItem("Waves")) {
+			ImGui::Checkbox("Use FFT Waves", &settings.waves.UseFFTWaves);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(
+					"FFT ocean simulation: compute-shader pipeline generates displacement/normal textures once per frame.\n"
+					"Cost is fixed regardless of tessellation. Disable to fall back to legacy Gerstner wave synthesis.");
+
+			ImGui::Spacing();
 			ImGui::Text("Wave System");
 			ImGui::SliderFloat("Wave Enhancement", &settings.waves.WaveIntensity, 0.0f, 1.0f, "%.2f");
 			ImGui::SliderFloat("Wave Height", &settings.waves.WaveAmplitude, 0.1f, 10.0f, "%.2f");
@@ -240,16 +254,69 @@ void PBRWater::DrawSettings()
 
 			if (ImGui::TreeNodeEx("Shore Waves", ImGuiTreeNodeFlags_DefaultOpen)) {
 				ImGui::TextWrapped(
-					"Large ocean swells (waves 1–3) fade linearly with depth and stop below ~5 m; "
-					"detail waves 4–6 stay at full strength in shallow water and streams. "
+					"Large ocean waves (cascades 1-2 / waves 1-3) fade linearly with depth and stop below ~5 m; "
+					"detail waves stay at full strength in shallow water and streams. "
 					"Shore-directed swells blend in between ~5 m and ~30 m (shader constants).");
 				ImGui::Spacing();
 				ImGui::SliderFloat("Shore Wave Strength", &settings.waves.ShoreWaveStrength, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
 					ImGui::Text(
-						"Intensity of shore-directed Gerstner swells in the 5–30 m depth band.\n"
+						"Intensity of shore-directed swells in the 5-30 m depth band.\n"
 						"0 = disabled.");
 				}
+
+				ImGui::TreePop();
+			}
+
+			if (settings.waves.UseFFTWaves && ImGui::TreeNodeEx("FFT Ocean (Advanced)", ImGuiTreeNodeFlags_None)) {
+				ImGui::TextWrapped(
+					"Advanced FFT spectrum parameters. These control the physical properties of the "
+					"ocean simulation. The Wave 1-6 controls above still work (they map to cascade "
+					"wind speed, fetch, and direction automatically).");
+				ImGui::Spacing();
+
+				ImGui::SliderFloat("Swell", &settings.waves.FFTSwell, 0.0f, 2.0f, "%.2f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Wave elongation / swell factor.\n"
+						"Higher = more directionally aligned, parallel wave crests.\n"
+						"0 = isotropic, 1-2 = strong ocean swell.");
+
+				ImGui::SliderFloat("Spread", &settings.waves.FFTSpread, 0.0f, 1.0f, "%.2f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Directional spreading of wave energy.\n"
+						"0 = uniform in all directions (fully spread),\n"
+						"1 = tightly focused along wind direction.");
+
+				ImGui::SliderFloat("Detail", &settings.waves.FFTDetail, 0.0f, 1.0f, "%.2f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Small-wave suppression factor.\n"
+						"1 = full spectral detail,\n"
+						"0 = suppress high-frequency waves (smoother).");
+
+				ImGui::SliderFloat("Water Depth (m)", &settings.waves.FFTWaterDepth, 1.0f, 100.0f, "%.1f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Ocean depth for TMA spectrum attenuation.\n"
+						"Shallow water (1-5m) suppresses long waves.\n"
+						"Deep water (>50m) has no attenuation.");
+
+				ImGui::Spacing();
+				ImGui::Text("Foam Generation");
+
+				ImGui::SliderFloat("Whitecap Threshold", &settings.waves.FFTWhitecap, 0.0f, 2.0f, "%.2f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Jacobian threshold for whitecap generation.\n"
+						"Lower = more foam, Higher = foam only on extreme crests.");
+
+				ImGui::SliderFloat("Foam Amount", &settings.waves.FFTFoamAmount, 0.0f, 10.0f, "%.1f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Overall foam intensity from wave crest folding.\n"
+						"Controls both grow and decay rates of Jacobian-based foam.");
 
 				ImGui::TreePop();
 			}
@@ -458,9 +525,10 @@ void PBRWater::SetupResources()
 	perTile = new ConstantBuffer(ConstantBufferDesc<PerTile>());
 	tessellationParams = new ConstantBuffer(ConstantBufferDesc<TessellationParams>());
 	actorRippleBuffer = new ConstantBuffer(ConstantBufferDesc<ActorRippleBuffer>());
+	fftCB = new ConstantBuffer(ConstantBufferDesc<FFTConstantData>());
 
-	// Tessellation shaders will be compiled lazily on first water render
-	// This avoids needing to create a mock BSShader object during early init
+	CreateFFTResources();
+	CompileFFTShaders();
 }
 
 void PBRWater::Reset()
@@ -474,6 +542,12 @@ void PBRWater::Reset()
 	currentRealTimeSeconds = 0.0f;
 	currentTimeScale = 1.0f;
 	prevTileData.clear();
+
+	fftTime = 0.0f;
+	fftPrevTime = 0.0f;
+	fftNextCascade = 0;
+	for (auto& cascade : fftCascades)
+		cascade.spectrumDirty = true;
 }
 
 void PBRWater::ClearShaderCache()
@@ -482,7 +556,18 @@ void PBRWater::ClearShaderCache()
 	waterDomainShader = nullptr;
 	waterGeometryShader = nullptr;
 
-	// Shaders will be recompiled lazily on next water render
+	fftButterflyCS = nullptr;
+	spectrumComputeCS = nullptr;
+	spectrumModulateCS = nullptr;
+	fftComputeCS = nullptr;
+	transposeCS = nullptr;
+	fftUnpackCS = nullptr;
+	fftButterflyReady = false;
+
+	for (auto& cascade : fftCascades)
+		cascade.spectrumDirty = true;
+
+	CompileFFTShaders();
 }
 
 void PBRWater::PostPostLoad()
@@ -501,6 +586,387 @@ void PBRWater::PostPostLoad()
 	stl::detour_thunk<TES_DestroySkyCell>(REL::RelocationID(20029, 20463));
 
 	logger::info("[PBR Water] Installed hooks");
+}
+
+// ---- FFT Ocean Implementations ----
+
+float PBRWater::JONSWAPAlpha(float windSpeed, float fetchLength)
+{
+	return 0.076f * std::pow(windSpeed * windSpeed / (fetchLength * 9.81f), 0.22f);
+}
+
+float PBRWater::JONSWAPPeakFrequency(float windSpeed, float fetchLength)
+{
+	return 22.0f * std::pow(9.81f * 9.81f / (windSpeed * fetchLength), 1.0f / 3.0f);
+}
+
+void PBRWater::CompileFFTShaders()
+{
+	auto compile = [](const wchar_t* path) -> ID3D11ComputeShader* {
+		return static_cast<ID3D11ComputeShader*>(
+			Util::CompileShader(path, {}, "cs_5_0"));
+	};
+
+	if (!fftButterflyCS)
+		fftButterflyCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\FFTButterflyCS.hlsl"));
+	if (!spectrumComputeCS)
+		spectrumComputeCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\SpectrumComputeCS.hlsl"));
+	if (!spectrumModulateCS)
+		spectrumModulateCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\SpectrumModulateCS.hlsl"));
+	if (!fftComputeCS)
+		fftComputeCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\FFTComputeCS.hlsl"));
+	if (!transposeCS)
+		transposeCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\TransposeCS.hlsl"));
+	if (!fftUnpackCS)
+		fftUnpackCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\FFTUnpackCS.hlsl"));
+
+	if (fftButterflyCS && spectrumComputeCS && spectrumModulateCS &&
+	    fftComputeCS && transposeCS && fftUnpackCS) {
+		logger::info("[PBR Water] FFT compute shaders compiled successfully");
+	} else {
+		logger::warn("[PBR Water] Some FFT compute shaders failed to compile");
+	}
+}
+
+void PBRWater::CreateFFTResources()
+{
+	auto device = globals::d3d::device;
+	const uint32_t mapSize = FFT_MAP_SIZE;
+	const uint32_t numCascades = FFT_NUM_CASCADES;
+	const uint32_t numStages = static_cast<uint32_t>(std::log2(mapSize));
+
+	// Butterfly factors: numStages * mapSize float4 elements
+	{
+		D3D11_BUFFER_DESC desc{};
+		desc.ByteWidth = numStages * mapSize * sizeof(float) * 4;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		desc.StructureByteStride = sizeof(float) * 4;
+		DX::ThrowIfFailed(device->CreateBuffer(&desc, nullptr, butterflyBuffer.put()));
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		srvDesc.Buffer.NumElements = numStages * mapSize;
+		DX::ThrowIfFailed(device->CreateShaderResourceView(butterflyBuffer.get(), &srvDesc, butterflySRV.put()));
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+		uavDesc.Buffer.NumElements = numStages * mapSize;
+		DX::ThrowIfFailed(device->CreateUnorderedAccessView(butterflyBuffer.get(), &uavDesc, butterflyUAV.put()));
+	}
+
+	// FFT working buffer: numCascades * mapSize^2 * NUM_SPECTRA * 2 (ping-pong) float2 elements
+	{
+		uint32_t numElements = numCascades * mapSize * mapSize * FFT_NUM_SPECTRA * 2;
+		D3D11_BUFFER_DESC desc{};
+		desc.ByteWidth = numElements * sizeof(float) * 2;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		desc.StructureByteStride = sizeof(float) * 2;
+		DX::ThrowIfFailed(device->CreateBuffer(&desc, nullptr, fftDataBuffer.put()));
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		srvDesc.Buffer.NumElements = numElements;
+		DX::ThrowIfFailed(device->CreateShaderResourceView(fftDataBuffer.get(), &srvDesc, fftDataSRV.put()));
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+		uavDesc.Buffer.NumElements = numElements;
+		DX::ThrowIfFailed(device->CreateUnorderedAccessView(fftDataBuffer.get(), &uavDesc, fftDataUAV.put()));
+	}
+
+	// Spectrum texture: RGBA32F Texture2DArray (numCascades layers)
+	{
+		D3D11_TEXTURE2D_DESC texDesc{};
+		texDesc.Width = mapSize;
+		texDesc.Height = mapSize;
+		texDesc.MipLevels = 1;
+		texDesc.ArraySize = numCascades;
+		texDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		texDesc.SampleDesc.Count = 1;
+		texDesc.Usage = D3D11_USAGE_DEFAULT;
+		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, nullptr, spectrumTexture.put()));
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = texDesc.Format;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+		srvDesc.Texture2DArray.MipLevels = 1;
+		srvDesc.Texture2DArray.ArraySize = numCascades;
+		DX::ThrowIfFailed(device->CreateShaderResourceView(spectrumTexture.get(), &srvDesc, spectrumSRV.put()));
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = texDesc.Format;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+		uavDesc.Texture2DArray.ArraySize = numCascades;
+		DX::ThrowIfFailed(device->CreateUnorderedAccessView(spectrumTexture.get(), &uavDesc, spectrumUAV.put()));
+	}
+
+	// Displacement map: RGBA16F Texture2DArray
+	auto createTexArray = [&](winrt::com_ptr<ID3D11Texture2D>& tex,
+	                          winrt::com_ptr<ID3D11ShaderResourceView>& srv,
+	                          winrt::com_ptr<ID3D11UnorderedAccessView>& uav) {
+		D3D11_TEXTURE2D_DESC texDesc{};
+		texDesc.Width = mapSize;
+		texDesc.Height = mapSize;
+		texDesc.MipLevels = 1;
+		texDesc.ArraySize = numCascades;
+		texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		texDesc.SampleDesc.Count = 1;
+		texDesc.Usage = D3D11_USAGE_DEFAULT;
+		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, nullptr, tex.put()));
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = texDesc.Format;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+		srvDesc.Texture2DArray.MipLevels = 1;
+		srvDesc.Texture2DArray.ArraySize = numCascades;
+		DX::ThrowIfFailed(device->CreateShaderResourceView(tex.get(), &srvDesc, srv.put()));
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = texDesc.Format;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+		uavDesc.Texture2DArray.ArraySize = numCascades;
+		DX::ThrowIfFailed(device->CreateUnorderedAccessView(tex.get(), &uavDesc, uav.put()));
+	};
+
+	createTexArray(displacementTexture, displacementSRV, displacementUAV);
+	createTexArray(normalFoamTexture, normalFoamSRV, normalFoamUAV);
+	createTexArray(prevDisplacementTexture, prevDisplacementSRV, prevDisplacementUAV);
+
+	// Linear wrap sampler for FFT texture sampling in VS/DS/PS
+	{
+		D3D11_SAMPLER_DESC sampDesc{};
+		sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+		sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+		sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+		sampDesc.MaxAnisotropy = 1;
+		sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+		sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+		DX::ThrowIfFailed(device->CreateSamplerState(&sampDesc, fftLinearWrapSampler.put()));
+	}
+
+	fftInitialized = true;
+	logger::info("[PBR Water] FFT ocean resources created ({}x{}, {} cascades)", mapSize, mapSize, numCascades);
+}
+
+void PBRWater::UpdateCascadeParams()
+{
+	const float metersToGameUnits = 100.0f / 1.428f;
+
+	float userSwell = settings.waves.FFTSwell;
+	float userSpread = settings.waves.FFTSpread;
+	float userDetail = settings.waves.FFTDetail;
+	float userWhitecap = settings.waves.FFTWhitecap;
+	float userFoamAmount = settings.waves.FFTFoamAmount;
+
+	auto updateCascade = [&](FFTCascadeParams& c, float avgWL, float avgAmp, float windDir,
+	                         float tileMinM, float fetchMul, float fetchMinKm, float windSpeedMin,
+	                         float dispMul) {
+		float tileM = std::max(avgWL * 4.0f, tileMinM);
+		float newTileLenX = tileM * metersToGameUnits;
+		float newTileLenY = tileM * metersToGameUnits;
+
+		float windSpeed = std::max(4.0f * std::sqrt(avgAmp * std::max(avgWL, 0.5f)), windSpeedMin);
+		float fetchKm = std::max(avgWL * fetchMul, fetchMinKm);
+
+		if (c.tileLengthX != newTileLenX || c.tileLengthY != newTileLenY ||
+		    c.windSpeed != windSpeed || c.windDirection != windDir ||
+		    c.swell != userSwell || c.spread != userSpread || c.detail != userDetail)
+			c.spectrumDirty = true;
+
+		c.tileLengthX = newTileLenX;
+		c.tileLengthY = newTileLenY;
+		c.windSpeed = windSpeed;
+		c.windDirection = windDir;
+		c.fetchLength = fetchKm;
+		c.swell = userSwell;
+		c.detail = userDetail;
+		c.spread = userSpread;
+		c.whitecap = userWhitecap;
+		c.foamAmount = userFoamAmount;
+		c.displacementScale = settings.waves.WaveAmplitude * metersToGameUnits * dispMul;
+		c.normalScale = 1.0f;
+		c.choppiness = settings.waves.WaveSteepness;
+	};
+
+	// Cascade 0: Large swell from Wave1/Wave2
+	{
+		float avgWL = (settings.waves.Wave1Wavelength + settings.waves.Wave2Wavelength) * 0.5f;
+		float avgAmp = (settings.waves.Wave1Amplitude + settings.waves.Wave2Amplitude) * 0.5f;
+		float windDir = (settings.waves.Wave1AngleOffset + settings.waves.Wave2AngleOffset) * 0.5f;
+		updateCascade(fftCascades[0], avgWL, avgAmp, windDir, 50.0f, 10.0f, 100.0f, 3.0f, 1.0f);
+	}
+
+	// Cascade 1: Medium wind waves from Wave3/Wave4
+	{
+		float avgWL = (settings.waves.Wave3Wavelength + settings.waves.Wave4Wavelength) * 0.5f;
+		float avgAmp = (settings.waves.Wave3Amplitude + settings.waves.Wave4Amplitude) * 0.5f;
+		float windDir = (settings.waves.Wave3AngleOffset + settings.waves.Wave4AngleOffset) * 0.5f;
+		updateCascade(fftCascades[1], avgWL, avgAmp, windDir, 15.0f, 8.0f, 50.0f, 2.0f, 0.5f);
+	}
+
+	// Cascade 2: Fine detail/chop from Wave5/Wave6
+	{
+		float avgWL = (settings.waves.Wave5Wavelength + settings.waves.Wave6Wavelength) * 0.5f;
+		float avgAmp = (settings.waves.Wave5Amplitude + settings.waves.Wave6Amplitude) * 0.5f;
+		float windDir = (settings.waves.Wave5AngleOffset + settings.waves.Wave6AngleOffset) * 0.5f;
+		updateCascade(fftCascades[2], avgWL, avgAmp, windDir, 4.0f, 6.0f, 20.0f, 1.5f, 0.25f);
+	}
+}
+
+void PBRWater::DispatchFFT(float deltaTime)
+{
+	if (!fftInitialized || !fftButterflyCS || !spectrumComputeCS ||
+	    !spectrumModulateCS || !fftComputeCS || !transposeCS || !fftUnpackCS)
+		return;
+
+	auto context = globals::d3d::context;
+	const uint32_t mapSize = FFT_MAP_SIZE;
+	const uint32_t numStages = static_cast<uint32_t>(std::log2(mapSize));
+
+	// Copy current displacement to previous before updating
+	context->CopyResource(prevDisplacementTexture.get(), displacementTexture.get());
+
+	fftPrevTime = fftTime;
+	fftTime += deltaTime * settings.waves.WaveSpeed;
+
+	UpdateCascadeParams();
+
+	// Butterfly factors: one-time init
+	if (!fftButterflyReady) {
+		FFTConstantData cbData{};
+		cbData.MapSize = mapSize;
+		fftCB->Update(cbData);
+
+		ID3D11Buffer* cbs[] = { fftCB->CB() };
+		context->CSSetConstantBuffers(6, 1, cbs);
+
+		ID3D11UnorderedAccessView* uavs[] = { butterflyUAV.get() };
+		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+		context->CSSetShader(fftButterflyCS.get(), nullptr, 0);
+		context->Dispatch(mapSize / 2 / 64, numStages, 1);
+
+		ID3D11UnorderedAccessView* nullUAV[] = { nullptr };
+		context->CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);
+		context->CSSetShader(nullptr, nullptr, 0);
+
+		fftButterflyReady = true;
+	}
+
+	// Load-balance: update one cascade per frame
+	uint32_t cascadeIdx = fftNextCascade;
+	fftNextCascade = (fftNextCascade + 1) % FFT_NUM_CASCADES;
+
+	auto& cascade = fftCascades[cascadeIdx];
+	float fetchM = cascade.fetchLength * 1000.0f;
+	float alpha = JONSWAPAlpha(cascade.windSpeed, fetchM);
+	float peakFreq = JONSWAPPeakFrequency(cascade.windSpeed, fetchM);
+
+	FFTConstantData cbData{};
+	cbData.MapSize = mapSize;
+	cbData.CascadeIndex = cascadeIdx;
+	cbData.Time = fftTime;
+	cbData.DeltaTime = deltaTime;
+	cbData.TileLengthX = cascade.tileLengthX;
+	cbData.TileLengthY = cascade.tileLengthY;
+	cbData.Depth = settings.waves.FFTWaterDepth;
+	cbData.Alpha = alpha;
+	cbData.PeakFrequency = peakFreq;
+	cbData.WindSpeed = cascade.windSpeed;
+	cbData.WindDirection = cascade.windDirection;
+	cbData.Swell = cascade.swell;
+	cbData.Detail = cascade.detail;
+	cbData.Spread = cascade.spread;
+	cbData.Whitecap = cascade.whitecap;
+	cbData.FoamGrowRate = deltaTime * cascade.foamAmount * 7.5f;
+	cbData.FoamDecayRate = deltaTime * std::max(0.5f, 10.0f - cascade.foamAmount) * 1.15f;
+	cbData.Choppiness = cascade.choppiness;
+	cbData.DisplacementScale = cascade.displacementScale;
+	cbData.NormalScale = cascade.normalScale;
+	cbData.SpectrumSeedX = cascade.seedX;
+	cbData.SpectrumSeedY = cascade.seedY;
+
+	fftCB->Update(cbData);
+	ID3D11Buffer* cbs[] = { fftCB->CB() };
+	context->CSSetConstantBuffers(6, 1, cbs);
+
+	// Step 1: Regenerate spectrum if params changed
+	if (cascade.spectrumDirty) {
+		cascade.seedX = static_cast<int32_t>(cascadeIdx * 31337 + 12345);
+		cascade.seedY = static_cast<int32_t>(cascadeIdx * 7919 + 54321);
+		cbData.SpectrumSeedX = cascade.seedX;
+		cbData.SpectrumSeedY = cascade.seedY;
+		fftCB->Update(cbData);
+
+		ID3D11UnorderedAccessView* uavs[] = { spectrumUAV.get() };
+		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+		context->CSSetShader(spectrumComputeCS.get(), nullptr, 0);
+		context->Dispatch(mapSize / 16, mapSize / 16, 1);
+
+		cascade.spectrumDirty = false;
+	}
+
+	// Step 2: Modulate spectrum in time
+	{
+		ID3D11ShaderResourceView* srvs[] = { spectrumSRV.get() };
+		context->CSSetShaderResources(0, 1, srvs);
+
+		ID3D11UnorderedAccessView* uavs[] = { fftDataUAV.get() };
+		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+
+		context->CSSetShader(spectrumModulateCS.get(), nullptr, 0);
+		context->Dispatch(mapSize / 16, mapSize / 16, 1);
+	}
+
+	// Step 3: FFT row-wise pass
+	{
+		ID3D11ShaderResourceView* srvs[] = { butterflySRV.get() };
+		context->CSSetShaderResources(0, 1, srvs);
+
+		ID3D11UnorderedAccessView* uavs[] = { fftDataUAV.get() };
+		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+
+		context->CSSetShader(fftComputeCS.get(), nullptr, 0);
+		context->Dispatch(1, mapSize, FFT_NUM_SPECTRA);
+	}
+
+	// Step 4: Transpose
+	{
+		context->CSSetShader(transposeCS.get(), nullptr, 0);
+		context->Dispatch(mapSize / 32, mapSize / 32, FFT_NUM_SPECTRA);
+	}
+
+	// Step 5: FFT row-wise again (effectively column-wise)
+	{
+		context->CSSetShader(fftComputeCS.get(), nullptr, 0);
+		context->Dispatch(1, mapSize, FFT_NUM_SPECTRA);
+	}
+
+	// Step 6: Unpack to displacement + normal/foam maps
+	{
+		ID3D11UnorderedAccessView* uavs[] = { displacementUAV.get(), normalFoamUAV.get(), fftDataUAV.get() };
+		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+
+		context->CSSetShader(fftUnpackCS.get(), nullptr, 0);
+		context->Dispatch(mapSize / 16, mapSize / 16, 1);
+	}
+
+	// Clean up CS state
+	ID3D11ShaderResourceView* nullSRVs[1] = { nullptr };
+	ID3D11UnorderedAccessView* nullUAVs[3] = { nullptr, nullptr, nullptr };
+	context->CSSetShaderResources(0, 1, nullSRVs);
+	context->CSSetUnorderedAccessViews(0, 3, nullUAVs, nullptr);
+	context->CSSetShader(nullptr, nullptr, 0);
 }
 
 // ---- Hook Implementations ----
@@ -624,6 +1090,20 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	const bool tessellationActiveThisPass = singleton.settings.tessellation.EnableTessellation &&
 	                                        singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
 	                                        techniqueSupportsTessel;
+
+	// ---- FFT Ocean: dispatch compute shaders ----
+	{
+		float realTime = globals::state ? globals::state->timer : 0.0f;
+		static float lastFFTRealTime = 0.0f;
+		float dt = realTime - lastFFTRealTime;
+		if (dt < 0.0f || dt > 1.0f)
+			dt = 0.016f;
+		lastFFTRealTime = realTime;
+
+		if (singleton.settings.waves.UseFFTWaves && singleton.settings.waves.WaveIntensity > 0.001f) {
+			singleton.DispatchFFT(dt);
+		}
+	}
 
 	// ---- Fill and bind per-frame constant buffer ----
 	if (singleton.perFrame) {
@@ -760,7 +1240,25 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		perFrameData.TerrainOffsetY = terrainData.Offset.y;
 		perFrameData.TerrainZRangeMin = terrainData.ZRange.x;
 		perFrameData.TerrainZRangeMax = terrainData.ZRange.y;
-		perFrameData.TerrainPad0 = 0.0f;
+		perFrameData.FFTWavesEnabled = (singleton.fftInitialized && singleton.settings.waves.UseFFTWaves) ? 1.0f : 0.0f;
+
+		// FFT cascade parameters for surface shader sampling
+		perFrameData.FFTCascade0TileLenX = singleton.fftCascades[0].tileLengthX;
+		perFrameData.FFTCascade0TileLenY = singleton.fftCascades[0].tileLengthY;
+		perFrameData.FFTCascade0DispScale = singleton.fftCascades[0].displacementScale * singleton.settings.waves.WaveIntensity;
+		perFrameData.FFTCascade0NormScale = singleton.fftCascades[0].normalScale;
+		perFrameData.FFTCascade1TileLenX = singleton.fftCascades[1].tileLengthX;
+		perFrameData.FFTCascade1TileLenY = singleton.fftCascades[1].tileLengthY;
+		perFrameData.FFTCascade1DispScale = singleton.fftCascades[1].displacementScale * singleton.settings.waves.WaveIntensity;
+		perFrameData.FFTCascade1NormScale = singleton.fftCascades[1].normalScale;
+		perFrameData.FFTCascade2TileLenX = singleton.fftCascades[2].tileLengthX;
+		perFrameData.FFTCascade2TileLenY = singleton.fftCascades[2].tileLengthY;
+		perFrameData.FFTCascade2DispScale = singleton.fftCascades[2].displacementScale * singleton.settings.waves.WaveIntensity;
+		perFrameData.FFTCascade2NormScale = singleton.fftCascades[2].normalScale;
+		perFrameData.FFTChoppiness = singleton.settings.waves.WaveSteepness;
+		perFrameData.FFTNumCascades = static_cast<float>(FFT_NUM_CASCADES);
+		perFrameData.FFTPad0 = 0.0f;
+		perFrameData.FFTPad1 = 0.0f;
 
 		// Get timing data for player velocity calculation
 		float currentRealTime = globals::state ? globals::state->timer : 0.0f;
@@ -1040,6 +1538,25 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		context->VSSetSamplers(12, 1, terrainSampler);
 		context->DSSetSamplers(12, 1, terrainSampler);
 		terrainSampler[0]->Release();
+	}
+
+	// ---- Bind FFT displacement/normal textures to VS/HS/DS/PS ----
+	if (singleton.fftInitialized && singleton.displacementSRV && singleton.normalFoamSRV) {
+		ID3D11ShaderResourceView* fftSRVs[3] = {
+			singleton.displacementSRV.get(),
+			singleton.normalFoamSRV.get(),
+			singleton.prevDisplacementSRV.get()
+		};
+		context->VSSetShaderResources(61, 3, fftSRVs);
+		context->HSSetShaderResources(61, 3, fftSRVs);
+		context->DSSetShaderResources(61, 3, fftSRVs);
+		context->PSSetShaderResources(61, 3, fftSRVs);
+
+		ID3D11SamplerState* fftSamplers[1] = { singleton.fftLinearWrapSampler.get() };
+		context->VSSetSamplers(13, 1, fftSamplers);
+		context->HSSetSamplers(13, 1, fftSamplers);
+		context->DSSetSamplers(13, 1, fftSamplers);
+		context->PSSetSamplers(13, 1, fftSamplers);
 	}
 
 	// ---- Tessellation Setup ----

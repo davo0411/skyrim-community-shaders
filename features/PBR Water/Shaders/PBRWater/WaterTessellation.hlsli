@@ -105,14 +105,41 @@ float CombineEdgeTess(float distBased, float screenScale)
 }
 
 #if defined(HSHADER)
-// GerstnerWaves.hlsli must be included before this file (Water.hlsl hull). Cheap proxy for
-// primary swells only — matches crest/trough emphasis (|sin(phase)|), not full cell synthesis.
+// Determines tessellation factor multiplier based on local wave height.
+// With FFT: samples the displacement texture for a fast, accurate crest metric.
+// Without FFT: uses the original analytical swell proxy.
 float WaveTessEdgeDynamicMul(float2 worldXYAbs, float timeSeconds)
 {
 	if (WaveIntensity <= 0.001f) {
 		return kTessDynamicMulMin;
 	}
 
+	// FFT path: sample displacement map for fast crest detection
+	if (FFTWavesEnabled > 0.5f) {
+		float totalHeight = 0.0f;
+		float2 tileLens[3] = {
+			float2(FFTCascade0TileLenX, FFTCascade0TileLenY),
+			float2(FFTCascade1TileLenX, FFTCascade1TileLenY),
+			float2(FFTCascade2TileLenX, FFTCascade2TileLenY)
+		};
+		float dispScales[3] = { FFTCascade0DispScale, FFTCascade1DispScale, FFTCascade2DispScale };
+
+		uint numCascades = (uint)FFTNumCascades;
+		[unroll]
+		for (uint c = 0; c < 3; c++) {
+			if (c >= numCascades)
+				break;
+			float2 uv = worldXYAbs / max(tileLens[c], float2(1.0f, 1.0f));
+			float4 disp = FFTDisplacementMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
+			totalHeight += abs(disp.y) * dispScales[c];
+		}
+
+		float maxExpectedHeight = FFTCascade0DispScale * 2.0f;
+		float crestMetric = saturate(totalHeight / max(maxExpectedHeight, 0.01f));
+		return lerp(kTessDynamicMulMin, kTessDynamicMulMax, crestMetric);
+	}
+
+	// Legacy Gerstner analytical proxy
 	const float gGame = UW_GRAVITY * M_TO_GAME_UNIT;
 	float wi = WaveIntensity * WaveAmplitude;
 

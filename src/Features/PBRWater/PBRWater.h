@@ -2,6 +2,7 @@
 
 #include "Feature.h"
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <unordered_map>
 
@@ -95,6 +96,15 @@ struct PBRWater : public Feature
 		float ShoreBlendStart = 50.0f;
 		float ShoreBlendEnd = 500.0f;
 		float ShoreWaveStrength = 1.0f;
+
+		// FFT Ocean settings
+		bool UseFFTWaves = true;
+		float FFTSwell = 0.8f;
+		float FFTSpread = 0.2f;
+		float FFTDetail = 1.0f;
+		float FFTWaterDepth = 20.0f;
+		float FFTWhitecap = 0.5f;
+		float FFTFoamAmount = 5.0f;
 	};
 
 	struct LightingSettings
@@ -328,7 +338,25 @@ struct PBRWater : public Feature
 		float TerrainOffsetY;
 		float TerrainZRangeMin;
 		float TerrainZRangeMax;
-		float TerrainPad0;
+		float FFTWavesEnabled;
+
+		// FFT cascade parameters (tile lengths in game units, scales)
+		float FFTCascade0TileLenX;
+		float FFTCascade0TileLenY;
+		float FFTCascade0DispScale;
+		float FFTCascade0NormScale;
+		float FFTCascade1TileLenX;
+		float FFTCascade1TileLenY;
+		float FFTCascade1DispScale;
+		float FFTCascade1NormScale;
+		float FFTCascade2TileLenX;
+		float FFTCascade2TileLenY;
+		float FFTCascade2DispScale;
+		float FFTCascade2NormScale;
+		float FFTChoppiness;
+		float FFTNumCascades;
+		float FFTPad0;
+		float FFTPad1;
 	};
 
 	struct alignas(16) ActorRippleData
@@ -369,6 +397,65 @@ struct PBRWater : public Feature
 		float DetailHeightScale;
 	};
 
+	// ---- FFT Ocean Constants ----
+
+	static constexpr uint32_t FFT_MAP_SIZE = 256;
+	static constexpr uint32_t FFT_NUM_CASCADES = 3;
+	static constexpr uint32_t FFT_NUM_SPECTRA = 4;
+
+	struct alignas(16) FFTConstantData
+	{
+		uint32_t MapSize;
+		uint32_t CascadeIndex;
+		float Time;
+		float DeltaTime;
+
+		float TileLengthX;
+		float TileLengthY;
+		float Depth;
+		float Alpha;
+
+		float PeakFrequency;
+		float WindSpeed;
+		float WindDirection;
+		float Swell;
+
+		float Detail;
+		float Spread;
+		float Whitecap;
+		float FoamGrowRate;
+
+		float FoamDecayRate;
+		float Choppiness;
+		float DisplacementScale;
+		float NormalScale;
+
+		int32_t SpectrumSeedX;
+		int32_t SpectrumSeedY;
+		float Pad0;
+		float Pad1;
+	};
+
+	struct FFTCascadeParams
+	{
+		float tileLengthX = 200.0f;
+		float tileLengthY = 200.0f;
+		float windSpeed = 20.0f;
+		float windDirection = 0.0f;
+		float fetchLength = 550.0f;
+		float swell = 0.8f;
+		float detail = 1.0f;
+		float spread = 0.2f;
+		float whitecap = 0.5f;
+		float foamAmount = 5.0f;
+		float displacementScale = 1.0f;
+		float normalScale = 1.0f;
+		float choppiness = 1.0f;
+		int32_t seedX = 0;
+		int32_t seedY = 0;
+		bool spectrumDirty = true;
+	};
+
 	// ---- Member Data ----
 
 	Settings settings;
@@ -380,6 +467,58 @@ struct PBRWater : public Feature
 	winrt::com_ptr<ID3D11HullShader> waterHullShader;
 	winrt::com_ptr<ID3D11DomainShader> waterDomainShader;
 	winrt::com_ptr<ID3D11GeometryShader> waterGeometryShader;
+
+	// ---- FFT Ocean Resources ----
+
+	winrt::com_ptr<ID3D11ComputeShader> fftButterflyCS;
+	winrt::com_ptr<ID3D11ComputeShader> spectrumComputeCS;
+	winrt::com_ptr<ID3D11ComputeShader> spectrumModulateCS;
+	winrt::com_ptr<ID3D11ComputeShader> fftComputeCS;
+	winrt::com_ptr<ID3D11ComputeShader> transposeCS;
+	winrt::com_ptr<ID3D11ComputeShader> fftUnpackCS;
+
+	ConstantBuffer* fftCB = nullptr;
+
+	winrt::com_ptr<ID3D11Buffer> butterflyBuffer;
+	winrt::com_ptr<ID3D11ShaderResourceView> butterflySRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> butterflyUAV;
+
+	winrt::com_ptr<ID3D11Buffer> fftDataBuffer;
+	winrt::com_ptr<ID3D11ShaderResourceView> fftDataSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> fftDataUAV;
+
+	winrt::com_ptr<ID3D11Texture2D> spectrumTexture;
+	winrt::com_ptr<ID3D11ShaderResourceView> spectrumSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> spectrumUAV;
+
+	winrt::com_ptr<ID3D11Texture2D> displacementTexture;
+	winrt::com_ptr<ID3D11ShaderResourceView> displacementSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> displacementUAV;
+
+	winrt::com_ptr<ID3D11Texture2D> normalFoamTexture;
+	winrt::com_ptr<ID3D11ShaderResourceView> normalFoamSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> normalFoamUAV;
+
+	winrt::com_ptr<ID3D11Texture2D> prevDisplacementTexture;
+	winrt::com_ptr<ID3D11ShaderResourceView> prevDisplacementSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> prevDisplacementUAV;
+
+	winrt::com_ptr<ID3D11SamplerState> fftLinearWrapSampler;
+
+	FFTCascadeParams fftCascades[FFT_NUM_CASCADES];
+	bool fftInitialized = false;
+	bool fftButterflyReady = false;
+	uint32_t fftNextCascade = 0;
+	float fftTime = 0.0f;
+	float fftPrevTime = 0.0f;
+
+	void CompileFFTShaders();
+	void CreateFFTResources();
+	void DispatchFFT(float deltaTime);
+	void UpdateCascadeParams();
+
+	static float JONSWAPAlpha(float windSpeed, float fetchLength);
+	static float JONSWAPPeakFrequency(float windSpeed, float fetchLength);
 
 	ShaderBRDFSettings GetShaderBRDFSettings() const
 	{

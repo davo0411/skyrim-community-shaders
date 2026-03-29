@@ -198,7 +198,25 @@ cbuffer UnifiedWaterPerFrame : register(b7)
 	float TerrainOffsetY : packoffset(c25.w);           // Heightmap UV offset Y
 	float TerrainZRangeMin : packoffset(c26.x);         // Terrain Z range minimum
 	float TerrainZRangeMax : packoffset(c26.y);         // Terrain Z range maximum
-	float TerrainPad0 : packoffset(c26.z);
+	float FFTWavesEnabled : packoffset(c26.z);          // 1.0 = FFT waves active
+
+	// FFT cascade parameters (game units)
+	float FFTCascade0TileLenX : packoffset(c26.w);
+	float FFTCascade0TileLenY : packoffset(c27.x);
+	float FFTCascade0DispScale : packoffset(c27.y);
+	float FFTCascade0NormScale : packoffset(c27.z);
+	float FFTCascade1TileLenX : packoffset(c27.w);
+	float FFTCascade1TileLenY : packoffset(c28.x);
+	float FFTCascade1DispScale : packoffset(c28.y);
+	float FFTCascade1NormScale : packoffset(c28.z);
+	float FFTCascade2TileLenX : packoffset(c28.w);
+	float FFTCascade2TileLenY : packoffset(c29.x);
+	float FFTCascade2DispScale : packoffset(c29.y);
+	float FFTCascade2NormScale : packoffset(c29.z);
+	float FFTChoppiness : packoffset(c29.w);
+	float FFTNumCascades : packoffset(c30.x);
+	float FFTPad0 : packoffset(c30.y);
+	float FFTPad1 : packoffset(c30.z);
 }
 
 cbuffer UnifiedWaterPerTile : register(b8)
@@ -206,6 +224,12 @@ cbuffer UnifiedWaterPerTile : register(b8)
 	float4 PrevData : packoffset(c0);
 	float4 TileData : packoffset(c1);
 }
+
+// FFT ocean textures (bound from C++ at slots 61-63, sampler at 13)
+Texture2DArray<float4> FFTDisplacementMap : register(t61);
+Texture2DArray<float4> FFTNormalFoamMap : register(t62);
+Texture2DArray<float4> FFTPrevDisplacementMap : register(t63);
+SamplerState FFTLinearWrapSampler : register(s13);
 
 // ============================================================================
 // HIGH QUALITY HASH FUNCTIONS
@@ -598,7 +622,129 @@ float EstimateWaveTessellationHint(float cameraDistance)
 }
 
 // ============================================================================
-// MAIN WAVE CALCULATION - STATISTICAL SYNTHESIS
+// FFT WAVE SAMPLING — O(1) per vertex via texture lookups
+// ============================================================================
+
+WaveSample SampleFFTWaves(
+	float2 worldPos,
+	float waveIntensity,
+	float cameraDistance,
+	float waterDepth,
+	float2 shoreDirection,
+	float shoreGradientMag,
+	bool usePreviousFrame
+)
+{
+	WaveSample result;
+	result.displacement = float3(0.0f, 0.0f, 0.0f);
+	result.normal = float3(0.0f, 0.0f, 1.0f);
+	result.geometricNormal = float3(0.0f, 0.0f, 1.0f);
+	result.primaryDirection = normalize(float2(0.707f, 0.707f));
+	result.shoreInfluence = 0.0f;
+	result.shoreDistance = waterDepth;
+
+	if (waveIntensity <= 0.001f)
+		return result;
+
+	float distanceFade = 1.0f;
+	if (cameraDistance > 0.0f && WaveFadeEnd > WaveFadeStart) {
+		distanceFade = 1.0f - saturate((cameraDistance - WaveFadeStart) / (WaveFadeEnd - WaveFadeStart));
+		distanceFade = distanceFade * distanceFade * (3.0f - 2.0f * distanceFade);
+		if (distanceFade <= 0.001f)
+			return result;
+	}
+
+	// Shallow water attenuation for large cascades
+	float depthMeters = waterDepth / M_TO_GAME_UNIT;
+	float largeWaveBlend = 1.0f;
+	if (waterDepth < 1e4f) {
+		depthMeters = max(depthMeters, 0.06f);
+		largeWaveBlend = saturate((depthMeters - 5.0f) / max(30.0f - 5.0f, 0.001f));
+		result.shoreInfluence = saturate(1.0f - largeWaveBlend) * ShoreWaveStrength;
+	}
+	result.shoreDistance = depthMeters * M_TO_GAME_UNIT;
+
+	// Cascade tile lengths and scales (from cbuffer)
+	float2 tileLens[3] = {
+		float2(FFTCascade0TileLenX, FFTCascade0TileLenY),
+		float2(FFTCascade1TileLenX, FFTCascade1TileLenY),
+		float2(FFTCascade2TileLenX, FFTCascade2TileLenY)
+	};
+	float dispScales[3] = { FFTCascade0DispScale, FFTCascade1DispScale, FFTCascade2DispScale };
+	float normScales[3] = { FFTCascade0NormScale, FFTCascade1NormScale, FFTCascade2NormScale };
+
+	float3 totalDisp = float3(0, 0, 0);
+	float2 totalGrad = float2(0, 0);
+	float totalFoam = 0;
+
+	uint numCascades = (uint)FFTNumCascades;
+
+	[unroll]
+	for (uint c = 0; c < 3; c++) {
+		if (c >= numCascades)
+			break;
+
+		float2 uv = worldPos / max(tileLens[c], float2(1.0f, 1.0f));
+		float scale = dispScales[c] * distanceFade;
+
+		// Attenuate large cascades in shallow water
+		if (c == 0)
+			scale *= largeWaveBlend;
+
+		float4 disp;
+		if (usePreviousFrame)
+			disp = FFTPrevDisplacementMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
+		else
+			disp = FFTDisplacementMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
+
+		// disp.xyz = (hx, hy, hz) where hy is vertical
+		totalDisp.x += disp.x * scale * FFTChoppiness;
+		totalDisp.y += disp.z * scale * FFTChoppiness;
+		totalDisp.z += disp.y * scale;
+
+		float4 nf = FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
+		totalGrad += nf.xy * normScales[c] * distanceFade;
+		totalFoam += nf.w;
+	}
+
+	const float maxHorizDisp = 25.0f;
+	const float maxVertDisp = 100.0f;
+	totalDisp.xy = clamp(totalDisp.xy, -maxHorizDisp, maxHorizDisp);
+	totalDisp.z = clamp(totalDisp.z, -maxVertDisp, maxVertDisp);
+
+	result.displacement = totalDisp;
+
+	// Normal from gradient
+	float3 waveNormal = normalize(float3(-totalGrad.x, -totalGrad.y, 1.0f));
+	if (waveNormal.z < 0.0f)
+		waveNormal = -waveNormal;
+
+	// Clamp extreme slope
+	float2 nXY = waveNormal.xy;
+	float xyLen = length(nXY);
+	if (xyLen > 2.0f) {
+		nXY *= 2.0f / xyLen;
+		waveNormal = normalize(float3(nXY, sqrt(max(1.0f - dot(nXY, nXY), 0.05f))));
+	}
+
+	result.normal = waveNormal;
+	result.geometricNormal = waveNormal;
+
+	// Shore direction blending
+	float2 shoreDirEff = shoreDirection;
+	float shoreDirLenSq = dot(shoreDirEff, shoreDirEff);
+	if (shoreDirLenSq > 1e-8f && result.shoreInfluence > 0.01f) {
+		shoreDirEff *= rsqrt(shoreDirLenSq);
+		float blendT = saturate(result.shoreInfluence * 2.0f);
+		float2 defaultDir = normalize(float2(0.707f, 0.707f));
+		result.primaryDirection = normalize(lerp(defaultDir, shoreDirEff, blendT));
+	}
+
+	return result;
+}
+
+// ============================================================================
+// MAIN WAVE CALCULATION - STATISTICAL SYNTHESIS (Legacy Gerstner fallback)
 // ============================================================================
 
 WaveSample CalculateWaterDisplacement(
@@ -615,11 +761,25 @@ WaveSample CalculateWaterDisplacement(
 	float flowBiasWeight,
 	bool usePreviousFrame,
 	float cameraDistance = 0.0f,
-	float waterDepth = 1e5f,  // Water depth in game units (default = very deep)
-	float2 shoreDirection = float2(0.0f, 0.0f),  // Normalized dir toward shore from terrain gradient
-	float shoreGradientMag = 0.0f  // Magnitude of terrain gradient (0 = flat/no shore)
+	float waterDepth = 1e5f,
+	float2 shoreDirection = float2(0.0f, 0.0f),
+	float shoreGradientMag = 0.0f
 )
 {
+	// Use FFT path when available
+	if (FFTWavesEnabled > 0.5f) {
+		return SampleFFTWaves(
+			worldPos,
+			waveIntensity,
+			cameraDistance,
+			waterDepth,
+			shoreDirection,
+			shoreGradientMag,
+			usePreviousFrame
+		);
+	}
+
+	// Legacy Gerstner path (fallback)
 	WaveSample result;
 	result.displacement = float3(0.0f, 0.0f, 0.0f);
 	result.normal = float3(0.0f, 0.0f, 1.0f);
@@ -641,13 +801,9 @@ WaveSample CalculateWaterDisplacement(
 		}
 	}
 	
-	// Shallow water (meters): large cell octaves (0–2) and shore-directed waves fade linearly and
-	// stop below kLargeWaveShallowCutoffM. Detail octaves 3–5 (waves 4–6) keep full amplitude (after min-depth clamp).
 	static const float kLargeWaveShallowCutoffM = 5.0f;
 	static const float kLargeWaveFullDepthM = 30.0f;
-	// Terrain often reports 0 depth when the bed is slightly above the surface sample — would early-exit and kill all waves.
 	static const float kMinDepthForWavesM = 0.06f;
-	// Streams under ~1 m: always evaluate detail octaves even when camera-distance LOD would skip them (e.g. viewing from the bank).
 	static const float kStreamDetailDepthM = 1.25f;
 
 	float depthMeters = waterDepth / M_TO_GAME_UNIT;
@@ -660,11 +816,9 @@ WaveSample CalculateWaterDisplacement(
 		largeWaveBlend = saturate((depthMeters - kLargeWaveShallowCutoffM) /
 			max(kLargeWaveFullDepthM - kLargeWaveShallowCutoffM, 0.001f));
 
-		// Foam / lighting: stronger near shore (where large waves are fading)
 		shoreWaveInfluence = saturate(1.0f - largeWaveBlend) * ShoreWaveStrength;
 		result.shoreInfluence = shoreWaveInfluence;
 
-		// Shore-directed displacement only between ~5m and ~30m; ≤5m is waves 4–6 only
 		hasShoreData = (depthMeters > kLargeWaveShallowCutoffM) && (largeWaveBlend < 0.995f) &&
 		               (ShoreWaveStrength > 0.001f);
 	} else {
@@ -708,10 +862,8 @@ WaveSample CalculateWaterDisplacement(
 	float3 geoTangent = float3(0, 0, 0);
 	float3 geoBinormal = float3(0, 0, 0);
 	
-	// Distance LOD: skip fine octaves at distance (PS normal maps cover detail)
 	float fadeRange = max(WaveFadeEnd - WaveFadeStart, 1.0f);
 	float lodNorm = saturate((cameraDistance - WaveFadeStart * 0.25f) * rcp(fadeRange));
-	// octaveActive[i]: first 3 always on, 3=mid-range, 4-5=near only — unless very shallow stream (detail is primary).
 	bool forceShallowDetailOctaves = (waterDepth < 1e4f) && (depthMeters < kStreamDetailDepthM);
 	bool octaveActive3 = (lodNorm < 0.6f) || forceShallowDetailOctaves;
 	bool octaveActive45 = (lodNorm < 0.3f) || forceShallowDetailOctaves;
@@ -753,11 +905,9 @@ WaveSample CalculateWaterDisplacement(
 		geoBinormal += cellData.binormalAccum;
 	}
 	
-	// Blend in shore-directed waves when near shoreline (or shallow flat water)
 	float2 shoreDirEff = shoreDirection;
 	float shoreDirLenSq = dot(shoreDirEff, shoreDirEff);
 	if (shoreGradientMag <= 0.001f || shoreDirLenSq < 1e-8f) {
-		// Prefer flow direction on rivers when terrain normal is ambiguous
 		float flowLenSq = dot(flowBiasDir, flowBiasDir);
 		if (flowBiasWeight > 0.01f && flowLenSq > 1e-8f)
 			shoreDirEff = flowBiasDir * rsqrt(flowLenSq);
@@ -783,14 +933,11 @@ WaveSample CalculateWaterDisplacement(
 		totalDisp += shoreWaves.displacement;
 		totalTangent += shoreWaves.tangentAccum;
 		totalBinormal += shoreWaves.binormalAccum;
-		// Shore waves are low-frequency enough to contribute to geometric normal
 		geoTangent += shoreWaves.tangentAccum;
 		geoBinormal += shoreWaves.binormalAccum;
 	}
 
-	// Clamp tangent/binormal perturbations to prevent extreme deformation
-	// This prevents triangular artifacts on steep waves while preserving detail
-	const float maxTangentPerturbation = 0.8f;  // Allows up to 80% perturbation
+	const float maxTangentPerturbation = 0.8f;
 	totalTangent = clamp(totalTangent, -maxTangentPerturbation, maxTangentPerturbation);
 	totalBinormal = clamp(totalBinormal, -maxTangentPerturbation, maxTangentPerturbation);
 	geoTangent = clamp(geoTangent, -maxTangentPerturbation, maxTangentPerturbation);
@@ -799,7 +946,6 @@ WaveSample CalculateWaterDisplacement(
 	float3 tangent = float3(1.0f - totalTangent.x, -totalTangent.y, totalTangent.z);
 	float3 binormal = float3(-totalBinormal.x, 1.0f - totalBinormal.y, totalBinormal.z);
 	
-	// Ensure tangent and binormal are normalized to prevent scaling issues
 	tangent = normalize(tangent);
 	binormal = normalize(binormal);
 	
@@ -808,20 +954,16 @@ WaveSample CalculateWaterDisplacement(
 	
 	float3 waveNormal;
 	if (normalLen < 0.5f) {
-		// Degenerate case: blend toward up vector
 		waveNormal = normalize(lerp(float3(0, 0, 1), rawNormal / max(normalLen, 0.001f), normalLen * 2.0f));
 	} else {
 		waveNormal = rawNormal / normalLen;
 	}
 	
-	// Ensure normal points upward (prevent flipped triangles)
 	if (waveNormal.z < 0.0f) {
 		waveNormal = -waveNormal;
 	}
 	
-	// Clamp normal slope to prevent extreme angles
-	// Relaxed limit to avoid distortion at grazing viewing angles
-	const float maxSlope = 2.0f;  // ~63 degrees max tilt
+	const float maxSlope = 2.0f;
 	float2 normalXY = waveNormal.xy;
 	float xyLen = length(normalXY);
 	if (xyLen > maxSlope) {
@@ -834,7 +976,6 @@ WaveSample CalculateWaterDisplacement(
 	float3 geoTan = float3(1.0f - geoTangent.x, -geoTangent.y, geoTangent.z);
 	float3 geoBin = float3(-geoBinormal.x, 1.0f - geoBinormal.y, geoBinormal.z);
 	
-	// Normalize geometric tangent/binormal
 	geoTan = normalize(geoTan);
 	geoBin = normalize(geoBin);
 	
@@ -852,7 +993,6 @@ WaveSample CalculateWaterDisplacement(
 		geoNormal = -geoNormal;
 	}
 	
-	// Apply same relaxed slope limiting to geometric normal
 	float2 geoNormalXY = geoNormal.xy;
 	float geoXYLen = length(geoNormalXY);
 	if (geoXYLen > maxSlope) {
@@ -872,10 +1012,6 @@ WaveSample CalculateWaterDisplacement(
 	result.normal = waveNormal;
 	result.geometricNormal = geoNormal;
 
-	// Update primary direction: in deep water use default NE diagonal;
-	// near shore, blend toward the terrain-derived shore direction so that
-	// foam patterns, noise scrolling, and rest-position anchoring align
-	// with the actual wave propagation toward land.
 	if (hasShoreData) {
 		float2 defaultDir = normalize(float2(0.707f, 0.707f));
 		float blendT = saturate(shoreWaveInfluence * 2.0f);
@@ -902,6 +1038,10 @@ float CalculateWaveSelfShadow(
 	float dayPhase)
 {
 	if (waveIntensity <= 0.01f)
+		return 1.0f;
+
+	// FFT normals already encode all frequency content; skip expensive ray march
+	if (FFTWavesEnabled > 0.5f)
 		return 1.0f;
 
 	// Sun nearly overhead → no meaningful wave-to-wave occlusion
