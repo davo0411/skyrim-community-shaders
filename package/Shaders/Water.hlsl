@@ -1179,9 +1179,8 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 		// Filter reflections by upward-facing normals to prevent underwater elements reflecting on wave tops
 		float upwardFacingMask = saturate((normal.z - 0.3) * 2.5);
 
-		if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Cubemap) {
-#			if defined(DYNAMIC_CUBEMAPS)
-#				if defined(SKYLIGHTING)
+	float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
+	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
 
 			float3 dynamicCubemap;
 			float skylightingSpecular = 1.0;
@@ -1646,6 +1645,7 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	output.refractionDiffuseColor = output.refractionColor;
 	output.depth = 1;
 	output.refractionMul = 1;
+	output.refractedViewDirection = viewDirection;
 	output.scatter = 0.0f;
 	output.transmittance = 1.0f;
 	output.waveSSS = 0.0f;
@@ -1788,6 +1788,7 @@ PS_OUTPUT main(PS_INPUT input)
 	skylightingSpecular = saturate(skylightingSpecular);
 	skylightingSpecular = Skylighting::mixSpecular(SharedData::skylightingSettings, skylightingSpecular);
 #			endif
+
 #		if defined(PBR_WATER)
 	// Use the softer diffuse normal for diffuse lighting to prevent wave distortion
 	float3 diffuseNormal = waterData.diffuseNormal;
@@ -1954,6 +1955,7 @@ PS_OUTPUT main(PS_INPUT input)
 #					endif
 #				else
 
+	float3 sunColor = GetSunColor(normal, viewDirection, input.WPosition.xyz, eyeIndex) * surfaceShadow;
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior) && any(sunColor > 0.0)) {
 		sunColor *= ShadowSampling::GetWaterShadow(screenNoise, input.WPosition.xyz, eyeIndex) * surfaceShadow;
 #						if defined(SKYLIGHTING) && defined(PBR_WATER)

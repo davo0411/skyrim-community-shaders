@@ -259,6 +259,8 @@ namespace SharedData
 		float4 inscatteringTint;
 		float cubemapMipLevel;
 		float3 pad;
+};
+
 	struct PBRWaterSettings
 	{
 		uint EnableBRDFSpecular;
