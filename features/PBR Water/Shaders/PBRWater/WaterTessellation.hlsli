@@ -10,6 +10,10 @@
 //
 // Pipeline: VS -> HS -> Tessellator -> DS -> PS
 //
+// Note: GodotOceanWaves uses clipmap meshes + vertex displacement instead of GPU tessellation.
+// FFT spectrum / Stockham FFT / Jacobian foam match that project on the CPU/GPU compute side;
+// here tessellation is Skyrim’s way to add surface detail with the same FFT textures.
+//
 // SEAM PREVENTION: Each outer level is a symmetric function of that edge’s two endpoints only
 // (same midpoint → same factor on both triangles). Dynamic tess scales by a wave crest proxy
 // evaluated only at the edge midpoint (shared edge → identical midpoint → identical scale).
@@ -105,41 +109,25 @@ float CombineEdgeTess(float distBased, float screenScale)
 }
 
 #if defined(HSHADER)
-// Determines tessellation factor multiplier based on local wave height.
-// With FFT: samples the displacement texture for a fast, accurate crest metric.
-// Without FFT: uses the original analytical swell proxy.
+// Tessellation factor multiplier from a cheap crest proxy at each edge midpoint.
+// Called only from PatchConstantFunc. D3D11 does not allow texture sampling in the hull
+// patch-constant phase, so we never sample FFT displacement here — use the analytic proxy
+// for edge factors; the domain shader still applies FFT (CalculateWaterDisplacement).
 float WaveTessEdgeDynamicMul(float2 worldXYAbs, float timeSeconds)
 {
+	// FFT path: hull cannot sample textures; avoid Gerstner W1–6 (incompatible with spectrum ocean).
+	if (FFTWavesEnabled > 0.5f) {
+		if (FFTMasterIntensity <= 0.001f)
+			return kTessDynamicMulMin;
+		float t = saturate(FFTTessActivity);
+		return lerp(kTessDynamicMulMin, kTessDynamicMulMax, t);
+	}
+
 	if (WaveIntensity <= 0.001f) {
 		return kTessDynamicMulMin;
 	}
 
-	// FFT path: sample displacement map for fast crest detection
-	if (FFTWavesEnabled > 0.5f) {
-		float totalHeight = 0.0f;
-		float2 tileLens[3] = {
-			float2(FFTCascade0TileLenX, FFTCascade0TileLenY),
-			float2(FFTCascade1TileLenX, FFTCascade1TileLenY),
-			float2(FFTCascade2TileLenX, FFTCascade2TileLenY)
-		};
-		float dispScales[3] = { FFTCascade0DispScale, FFTCascade1DispScale, FFTCascade2DispScale };
-
-		uint numCascades = (uint)FFTNumCascades;
-		[unroll]
-		for (uint c = 0; c < 3; c++) {
-			if (c >= numCascades)
-				break;
-			float2 uv = worldXYAbs / max(tileLens[c], float2(1.0f, 1.0f));
-			float4 disp = FFTDisplacementMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
-			totalHeight += abs(disp.y) * dispScales[c];
-		}
-
-		float maxExpectedHeight = FFTCascade0DispScale * 2.0f;
-		float crestMetric = saturate(totalHeight / max(maxExpectedHeight, 0.01f));
-		return lerp(kTessDynamicMulMin, kTessDynamicMulMax, crestMetric);
-	}
-
-	// Legacy Gerstner analytical proxy
+	// Gerstner-only analytical crest proxy
 	const float gGame = UW_GRAVITY * M_TO_GAME_UNIT;
 	float wi = WaveIntensity * WaveAmplitude;
 
@@ -214,20 +202,13 @@ HS_CONSTANT_OUTPUT PatchConstantFunc(InputPatch<VS_OUTPUT, 3> patch, uint patchI
 	float screenScale = GetPatchScreenTessScale(patchCenter, eyeIdx);
 
 #if defined(HSHADER)
-	// Backface: discard patches facing away from the camera (camera at origin in cam-relative space).
+	// Degenerate patch only — do not cull “backfaces” here. Winding vs cross(e1,e2) does not match
+	// all water draw paths; forcing tess=0 on backfaces zeroed every patch (broken ocean / red debug).
 	float3 e1 = p1 - p0;
 	float3 e2 = p2 - p0;
 	float3 faceN = cross(e1, e2);
 	float faceNLen = length(faceN);
 	if (faceNLen < 1e-15f) {
-		output.EdgeTess[0] = output.EdgeTess[1] = output.EdgeTess[2] = 0.0f;
-		output.InsideTess = 0.0f;
-		return output;
-	}
-	faceN *= rcp(faceNLen);
-	float centerLenSq = max(centerDistSq, 1e-12f);
-	float3 viewTowardCamera = (-patchCenter) * rsqrt(centerLenSq);
-	if (dot(faceN, viewTowardCamera) <= 0.0f) {
 		output.EdgeTess[0] = output.EdgeTess[1] = output.EdgeTess[2] = 0.0f;
 		output.InsideTess = 0.0f;
 		return output;

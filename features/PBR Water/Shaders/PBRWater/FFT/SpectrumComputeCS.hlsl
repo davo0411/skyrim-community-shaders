@@ -98,6 +98,11 @@ float TMASpectrum(float w, float wPeak, float alpha)
 
 float2 GetSpectrumAmplitude(int2 id, int2 mapDims)
 {
+	// Zero-mean sea surface: DC bin blows up TMA/JONSWAP (~1/w^5) and adds a huge constant offset.
+	int2 halfDims = mapDims / 2;
+	if (id.x == halfDims.x && id.y == halfDims.y)
+		return float2(0.0f, 0.0f);
+
 	float2 dk = FFT_TWO_PI / FFTTileLength;
 	float2 kVec = (float2(id) - float2(mapDims) * 0.5f) * dk;
 	float k = length(kVec) + 1e-6f;

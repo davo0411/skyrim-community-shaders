@@ -412,6 +412,9 @@ namespace SIE
 		ID3DBlob* GetDomainShaderBlob(const RE::BSShader& shader, uint32_t descriptor);
 		ID3DBlob* GetGeometryShaderBlob(const RE::BSShader& shader, uint32_t descriptor);
 
+		/** For lazy bind paths: GetHull/Domain/GeometryShaderBlob returned null — logs cache status and source (same style as compile errors). */
+		void LogHullDomainGeometryBlobUnavailable(const RE::BSShader& shader, uint32_t descriptor, ShaderClass shaderClass);
+
 		RE::BSGraphics::VertexShader* MakeAndAddVertexShader(const RE::BSShader& shader,
 			uint32_t descriptor);
 		RE::BSGraphics::PixelShader* MakeAndAddPixelShader(const RE::BSShader& shader,

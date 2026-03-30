@@ -2019,6 +2019,43 @@ namespace SIE
 		}
 	}
 
+	void ShaderCache::LogHullDomainGeometryBlobUnavailable(const RE::BSShader& shader, uint32_t descriptor, ShaderClass shaderClass)
+	{
+		const auto type = shader.shaderType.get();
+		const auto key = SShaderCache::GetShaderString(shaderClass, shader, descriptor, true);
+		const auto st = GetShaderStatus(key);
+		const char* stMsg = "Pending (not in shader map — check enableCShaders, blocked shader, or async compile still queued)";
+		switch (st) {
+		case ShaderCompilationTask::Status::Failed:
+			stMsg = "Failed — find the matching 'Failed to compile' block above in this log (D3D compiler line/column)";
+			break;
+		case ShaderCompilationTask::Status::Completed:
+			stMsg = "Completed in map but blob null (unexpected)";
+			break;
+		default:
+			break;
+		}
+
+		const std::wstring wpath = SShaderCache::GetShaderPath(shader.fxpFilename);
+		const auto pathStr = Util::WStringToString(wpath);
+		const bool csEnabled = globals::state && globals::state->enableCShaders;
+
+		logger::error(
+			"{} shader {}::{:X} — no bytecode from Get{}ShaderBlob:\n"
+			"  {}\n"
+			"  cache key: {}\n"
+			"  source: {}\n"
+			"  enableCShaders: {}",
+			magic_enum::enum_name(shaderClass),
+			magic_enum::enum_name(type),
+			descriptor,
+			magic_enum::enum_name(shaderClass),
+			stMsg,
+			key,
+			pathStr,
+			csEnabled ? "true" : "false");
+	}
+
 	ID3DBlob* ShaderCache::GetGeometryShaderBlob(const RE::BSShader& shader, uint32_t descriptor)
 	{
 		auto state = globals::state;

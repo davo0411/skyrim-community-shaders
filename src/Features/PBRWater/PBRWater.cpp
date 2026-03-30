@@ -58,12 +58,28 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ShoreBlendEnd,
 	ShoreWaveStrength,
 	UseFFTWaves,
+	FFTSimulationTimeScale,
+	FFTMasterIntensity,
+	FFTPhysicalHeightScale,
+	FFTChoppiness,
+	FFTWindSpeedMps,
+	FFTWindDirectionRad,
+	FFTFetchKm,
+	FFTCascadeLength0M,
+	FFTCascadeLength1M,
+	FFTCascadeLength2M,
+	FFTFadeStart,
+	FFTFadeEnd,
+	FFTTessActivity,
 	FFTSwell,
 	FFTSpread,
 	FFTDetail,
 	FFTWaterDepth,
 	FFTWhitecap,
-	FFTFoamAmount)
+	FFTFoamAmount,
+	FFTDispFarStart,
+	FFTDispFarFalloff,
+	FFTBicubicNormals)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PBRWater::LightingSettings,
@@ -192,15 +208,24 @@ void PBRWater::DrawSettings()
 					"FFT ocean simulation: compute-shader pipeline generates displacement/normal textures once per frame.\n"
 					"Cost is fixed regardless of tessellation. Disable to fall back to legacy Gerstner wave synthesis.");
 
+			if (settings.waves.UseFFTWaves) {
+				ImGui::Spacing();
+				ImGui::TextWrapped(
+					"With FFT enabled, tune the ocean using \"FFT Ocean\" below. Wave 1–6, Wave Enhancement / Height / "
+					"Speed / Steepness, and Gerstner distance fade apply only when FFT is off.");
+			}
+
 			ImGui::Spacing();
-			ImGui::Text("Wave System");
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Legacy Gerstner (used when FFT is off)");
 			ImGui::SliderFloat("Wave Enhancement", &settings.waves.WaveIntensity, 0.0f, 1.0f, "%.2f");
 			ImGui::SliderFloat("Wave Height", &settings.waves.WaveAmplitude, 0.1f, 10.0f, "%.2f");
 			ImGui::SliderFloat("Wave Speed", &settings.waves.WaveSpeed, 0.01f, 1.0f, "%.3f");
 			ImGui::SliderFloat("Wave Steepness", &settings.waves.WaveSteepness, 0.1f, 10.0f, "%.2f");
 
 			ImGui::Spacing();
-			ImGui::Text("Wave Distance Fade");
+			ImGui::Text("Gerstner distance fade (FFT off only)");
 			ImGui::SliderFloat("Fade Start", &settings.waves.WaveFadeStart, 1024.0f, 16384.0f, "%.0f");
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Distance (game units) where waves start fading.\n4096 = ~58 meters.");
@@ -254,9 +279,9 @@ void PBRWater::DrawSettings()
 
 			if (ImGui::TreeNodeEx("Shore Waves", ImGuiTreeNodeFlags_DefaultOpen)) {
 				ImGui::TextWrapped(
-					"Large ocean waves (cascades 1-2 / waves 1-3) fade linearly with depth and stop below ~5 m; "
-					"detail waves stay at full strength in shallow water and streams. "
-					"Shore-directed swells blend in between ~5 m and ~30 m (shader constants).");
+					"Shallow-water attenuation in the shader: large-scale energy fades toward shore (~5 m cutoff, ~30 m blend); "
+					"fine detail stays stronger in shallow water. With FFT, cascade 0 is treated as the large-scale band. "
+					"Shore-directed swell blend uses the same depth bands (shader constants).");
 				ImGui::Spacing();
 				ImGui::SliderFloat("Shore Wave Strength", &settings.waves.ShoreWaveStrength, 0.0f, 2.0f, "%.2f");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -270,9 +295,47 @@ void PBRWater::DrawSettings()
 
 			if (settings.waves.UseFFTWaves && ImGui::TreeNodeEx("FFT Ocean (Advanced)", ImGuiTreeNodeFlags_None)) {
 				ImGui::TextWrapped(
-					"Advanced FFT spectrum parameters. These control the physical properties of the "
-					"ocean simulation. The Wave 1-6 controls above still work (they map to cascade "
-					"wind speed, fetch, and direction automatically).");
+					"FFT simulation and spectrum. These settings do not use the Gerstner Wave 1–6 sliders above.");
+
+				if (ImGui::TreeNodeEx("Simulation & sampling", ImGuiTreeNodeFlags_DefaultOpen)) {
+					ImGui::SliderFloat("Master intensity", &settings.waves.FFTMasterIntensity, 0.0f, 2.0f, "%.2f");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Scales FFT displacement on the GPU. Set to 0 to disable ocean updates cheaply.");
+					ImGui::SliderFloat("Time scale", &settings.waves.FFTSimulationTimeScale, 0.0f, 3.0f, "%.2f");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Multiplies simulation time advance (not Gerstner Wave Speed).");
+					ImGui::SliderFloat("Physical height scale", &settings.waves.FFTPhysicalHeightScale, 0.0f, 5.0f, "%.2f");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Base displacement scale for the spectrum (replaces Gerstner Wave Height for FFT).");
+					ImGui::SliderFloat("Horizontal chop", &settings.waves.FFTChoppiness, 0.1f, 5.0f, "%.2f");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Horizontal displacement multiplier (replaces Gerstner Wave Steepness for FFT).");
+
+					ImGui::SliderFloat("Wind speed (m/s)", &settings.waves.FFTWindSpeedMps, 1.0f, 40.0f, "%.1f");
+					ImGui::SliderAngle("Wind direction", &settings.waves.FFTWindDirectionRad, -180.0f, 180.0f);
+					ImGui::SliderFloat("Fetch (km)", &settings.waves.FFTFetchKm, 10.0f, 2000.0f, "%.0f");
+
+					ImGui::TextUnformatted("Cascade length scales (meters, sets tile size ~ 4x this)");
+					ImGui::SliderFloat("Cascade 0 (swell)", &settings.waves.FFTCascadeLength0M, 5.0f, 200.0f, "%.1f");
+					ImGui::SliderFloat("Cascade 1 (wind)", &settings.waves.FFTCascadeLength1M, 2.0f, 80.0f, "%.1f");
+					ImGui::SliderFloat("Cascade 2 (chop)", &settings.waves.FFTCascadeLength2M, 0.5f, 30.0f, "%.1f");
+
+					ImGui::TextUnformatted("FFT distance fade (optional override)");
+					ImGui::TextWrapped(
+						"Leave both at 0 to use the Gerstner \"Wave Distance Fade\" sliders above for FFT as well. "
+						"Set end > start > 0 only if you want a different fade range for FFT than for Gerstner.");
+					ImGui::SliderFloat("FFT fade start", &settings.waves.FFTFadeStart, 0.0f, 16384.0f, "%.0f");
+					ImGui::SliderFloat("FFT fade end", &settings.waves.FFTFadeEnd, 0.0f, 327680.0f, "%.0f");
+
+					ImGui::SliderFloat("Hull tess activity", &settings.waves.FFTTessActivity, 0.0f, 1.0f, "%.2f");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip(
+							"When FFT is on, hull dynamic tess does not use Gerstner phases. "
+							"This blends edge subdivision between min and max (0 = flatter mesh, 1 = more aggressive).");
+
+					ImGui::TreePop();
+				}
+
 				ImGui::Spacing();
 
 				ImGui::SliderFloat("Swell", &settings.waves.FFTSwell, 0.0f, 2.0f, "%.2f");
@@ -317,6 +380,21 @@ void PBRWater::DrawSettings()
 					ImGui::SetTooltip(
 						"Overall foam intensity from wave crest folding.\n"
 						"Controls both grow and decay rates of Jacobian-based foam.");
+
+				ImGui::Spacing();
+				ImGui::Text("Surface sampling (GodotOceanWaves-style)");
+				ImGui::SliderFloat("Far disp. falloff start", &settings.waves.FFTDispFarStart, 0.0f, 20000.0f, "%.0f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"0 = disabled. Beyond this camera distance (game units), FFT displacement decays as exp(-(dist-start)*rate), "
+						"like GodotOceanWaves vertex falloff (~150 m, rate ~0.007).");
+				ImGui::SliderFloat("Far disp. falloff rate", &settings.waves.FFTDispFarFalloff, 0.0f, 0.02f, "%.4f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Exponent per game unit past the start distance. Try ~0.007 to match Godot defaults.");
+				ImGui::SliderFloat("Bicubic FFT normals (PS)", &settings.waves.FFTBicubicNormals, 0.0f, 1.0f, "%.2f");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Pixel shader only: blend FFT normal/foam texture from bilinear toward bicubic (reduces aliasing when zoomed).");
 
 				ImGui::TreePop();
 			}
@@ -543,9 +621,14 @@ void PBRWater::Reset()
 	currentTimeScale = 1.0f;
 	prevTileData.clear();
 
+	tessellationDiagLoggedHull = false;
+	tessellationDiagLoggedDomain = false;
+	tessellationDiagLoggedGeometry = false;
+
 	fftTime = 0.0f;
 	fftPrevTime = 0.0f;
-	fftNextCascade = 0;
+	fftLastDispatchFrame = std::numeric_limits<std::uint32_t>::max();
+	fftLastRealTimeForDt = 0.0f;
 	for (auto& cascade : fftCascades)
 		cascade.spectrumDirty = true;
 }
@@ -555,6 +638,10 @@ void PBRWater::ClearShaderCache()
 	waterHullShader = nullptr;
 	waterDomainShader = nullptr;
 	waterGeometryShader = nullptr;
+
+	tessellationDiagLoggedHull = false;
+	tessellationDiagLoggedDomain = false;
+	tessellationDiagLoggedGeometry = false;
 
 	fftButterflyCS = nullptr;
 	spectrumComputeCS = nullptr;
@@ -620,11 +707,12 @@ void PBRWater::CompileFFTShaders()
 	if (!fftUnpackCS)
 		fftUnpackCS.attach(compile(L"Data\\Shaders\\PBRWater\\FFT\\FFTUnpackCS.hlsl"));
 
-	if (fftButterflyCS && spectrumComputeCS && spectrumModulateCS &&
-	    fftComputeCS && transposeCS && fftUnpackCS) {
+	fftInitialized = fftButterflyCS && spectrumComputeCS && spectrumModulateCS &&
+		fftComputeCS && transposeCS && fftUnpackCS;
+	if (fftInitialized) {
 		logger::info("[PBR Water] FFT compute shaders compiled successfully");
 	} else {
-		logger::warn("[PBR Water] Some FFT compute shaders failed to compile");
+		logger::warn("[PBR Water] Some FFT compute shaders failed to compile; FFT waves disabled until compile succeeds");
 	}
 }
 
@@ -742,6 +830,14 @@ void PBRWater::CreateFFTResources()
 	createTexArray(normalFoamTexture, normalFoamSRV, normalFoamUAV);
 	createTexArray(prevDisplacementTexture, prevDisplacementSRV, prevDisplacementUAV);
 
+	// Avoid sampling garbage before the first successful unpack (also gives a stable flat ocean).
+	if (auto context = globals::d3d::context) {
+		const float clearZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		context->ClearUnorderedAccessViewFloat(displacementUAV.get(), clearZero);
+		context->ClearUnorderedAccessViewFloat(normalFoamUAV.get(), clearZero);
+		context->ClearUnorderedAccessViewFloat(prevDisplacementUAV.get(), clearZero);
+	}
+
 	// Linear wrap sampler for FFT texture sampling in VS/DS/PS
 	{
 		D3D11_SAMPLER_DESC sampDesc{};
@@ -755,7 +851,6 @@ void PBRWater::CreateFFTResources()
 		DX::ThrowIfFailed(device->CreateSamplerState(&sampDesc, fftLinearWrapSampler.put()));
 	}
 
-	fftInitialized = true;
 	logger::info("[PBR Water] FFT ocean resources created ({}x{}, {} cascades)", mapSize, mapSize, numCascades);
 }
 
@@ -763,24 +858,30 @@ void PBRWater::UpdateCascadeParams()
 {
 	const float metersToGameUnits = 100.0f / 1.428f;
 
-	float userSwell = settings.waves.FFTSwell;
-	float userSpread = settings.waves.FFTSpread;
-	float userDetail = settings.waves.FFTDetail;
-	float userWhitecap = settings.waves.FFTWhitecap;
-	float userFoamAmount = settings.waves.FFTFoamAmount;
+	const float userSwell = settings.waves.FFTSwell;
+	const float userSpread = settings.waves.FFTSpread;
+	const float userDetail = settings.waves.FFTDetail;
+	const float userWhitecap = settings.waves.FFTWhitecap;
+	const float userFoamAmount = settings.waves.FFTFoamAmount;
 
-	auto updateCascade = [&](FFTCascadeParams& c, float avgWL, float avgAmp, float windDir,
-	                         float tileMinM, float fetchMul, float fetchMinKm, float windSpeedMin,
-	                         float dispMul) {
-		float tileM = std::max(avgWL * 4.0f, tileMinM);
-		float newTileLenX = tileM * metersToGameUnits;
-		float newTileLenY = tileM * metersToGameUnits;
+	const float windSpeedUser = std::max(settings.waves.FFTWindSpeedMps, 0.5f);
+	const float windDir = settings.waves.FFTWindDirectionRad;
+	const float fetchBaseKm = std::max(settings.waves.FFTFetchKm, 1.0f);
+	const float physScale = std::max(settings.waves.FFTPhysicalHeightScale, 0.0f);
+	const float fftChop = std::max(settings.waves.FFTChoppiness, 0.01f);
 
-		float windSpeed = std::max(4.0f * std::sqrt(avgAmp * std::max(avgWL, 0.5f)), windSpeedMin);
-		float fetchKm = std::max(avgWL * fetchMul, fetchMinKm);
+	auto updateCascade = [&](FFTCascadeParams& c, float dominantLenMeters, float tileMinM,
+	                         float fetchScale, float fetchMinKm, float windSpeedMin, float dispMul) {
+		const float tileM = std::max(dominantLenMeters * 4.0f, tileMinM);
+		const float newTileLenX = tileM * metersToGameUnits;
+		const float newTileLenY = tileM * metersToGameUnits;
+
+		const float windSpeed = std::max(windSpeedUser, windSpeedMin);
+		const float fetchKm = std::max(fetchBaseKm * fetchScale, fetchMinKm);
 
 		if (c.tileLengthX != newTileLenX || c.tileLengthY != newTileLenY ||
 		    c.windSpeed != windSpeed || c.windDirection != windDir ||
+		    c.fetchLength != fetchKm ||
 		    c.swell != userSwell || c.spread != userSpread || c.detail != userDetail)
 			c.spectrumDirty = true;
 
@@ -794,34 +895,18 @@ void PBRWater::UpdateCascadeParams()
 		c.spread = userSpread;
 		c.whitecap = userWhitecap;
 		c.foamAmount = userFoamAmount;
-		c.displacementScale = settings.waves.WaveAmplitude * metersToGameUnits * dispMul;
+		c.displacementScale = physScale * metersToGameUnits * dispMul;
 		c.normalScale = 1.0f;
-		c.choppiness = settings.waves.WaveSteepness;
+		c.choppiness = fftChop;
 	};
 
-	// Cascade 0: Large swell from Wave1/Wave2
-	{
-		float avgWL = (settings.waves.Wave1Wavelength + settings.waves.Wave2Wavelength) * 0.5f;
-		float avgAmp = (settings.waves.Wave1Amplitude + settings.waves.Wave2Amplitude) * 0.5f;
-		float windDir = (settings.waves.Wave1AngleOffset + settings.waves.Wave2AngleOffset) * 0.5f;
-		updateCascade(fftCascades[0], avgWL, avgAmp, windDir, 50.0f, 10.0f, 100.0f, 3.0f, 1.0f);
-	}
+	const float l0 = std::max(settings.waves.FFTCascadeLength0M, 0.5f);
+	const float l1 = std::max(settings.waves.FFTCascadeLength1M, 0.5f);
+	const float l2 = std::max(settings.waves.FFTCascadeLength2M, 0.5f);
 
-	// Cascade 1: Medium wind waves from Wave3/Wave4
-	{
-		float avgWL = (settings.waves.Wave3Wavelength + settings.waves.Wave4Wavelength) * 0.5f;
-		float avgAmp = (settings.waves.Wave3Amplitude + settings.waves.Wave4Amplitude) * 0.5f;
-		float windDir = (settings.waves.Wave3AngleOffset + settings.waves.Wave4AngleOffset) * 0.5f;
-		updateCascade(fftCascades[1], avgWL, avgAmp, windDir, 15.0f, 8.0f, 50.0f, 2.0f, 0.5f);
-	}
-
-	// Cascade 2: Fine detail/chop from Wave5/Wave6
-	{
-		float avgWL = (settings.waves.Wave5Wavelength + settings.waves.Wave6Wavelength) * 0.5f;
-		float avgAmp = (settings.waves.Wave5Amplitude + settings.waves.Wave6Amplitude) * 0.5f;
-		float windDir = (settings.waves.Wave5AngleOffset + settings.waves.Wave6AngleOffset) * 0.5f;
-		updateCascade(fftCascades[2], avgWL, avgAmp, windDir, 4.0f, 6.0f, 20.0f, 1.5f, 0.25f);
-	}
+	updateCascade(fftCascades[0], l0, 50.0f, 1.0f, 100.0f, 3.0f, 1.0f);
+	updateCascade(fftCascades[1], l1, 15.0f, 0.5f, 50.0f, 2.0f, 0.5f);
+	updateCascade(fftCascades[2], l2, 4.0f, 0.25f, 20.0f, 1.5f, 0.25f);
 }
 
 void PBRWater::DispatchFFT(float deltaTime)
@@ -838,7 +923,7 @@ void PBRWater::DispatchFFT(float deltaTime)
 	context->CopyResource(prevDisplacementTexture.get(), displacementTexture.get());
 
 	fftPrevTime = fftTime;
-	fftTime += deltaTime * settings.waves.WaveSpeed;
+	fftTime += deltaTime * settings.waves.FFTSimulationTimeScale;
 
 	UpdateCascadeParams();
 
@@ -863,102 +948,107 @@ void PBRWater::DispatchFFT(float deltaTime)
 		fftButterflyReady = true;
 	}
 
-	// Load-balance: update one cascade per frame
-	uint32_t cascadeIdx = fftNextCascade;
-	fftNextCascade = (fftNextCascade + 1) % FFT_NUM_CASCADES;
+	// Update every cascade each frame. Round-robin (one layer per frame) left two layers
+	// stale at different fftTime values; summing all three in the shader produced
+	// incoherent beat patterns (spiky “rocks”) and broken motion.
+	for (uint32_t cascadeIdx = 0; cascadeIdx < FFT_NUM_CASCADES; ++cascadeIdx) {
+		auto& cascade = fftCascades[cascadeIdx];
+		float fetchM = cascade.fetchLength * 1000.0f;
+		float alpha = JONSWAPAlpha(cascade.windSpeed, fetchM);
+		float peakFreq = JONSWAPPeakFrequency(cascade.windSpeed, fetchM);
 
-	auto& cascade = fftCascades[cascadeIdx];
-	float fetchM = cascade.fetchLength * 1000.0f;
-	float alpha = JONSWAPAlpha(cascade.windSpeed, fetchM);
-	float peakFreq = JONSWAPPeakFrequency(cascade.windSpeed, fetchM);
-
-	FFTConstantData cbData{};
-	cbData.MapSize = mapSize;
-	cbData.CascadeIndex = cascadeIdx;
-	cbData.Time = fftTime;
-	cbData.DeltaTime = deltaTime;
-	cbData.TileLengthX = cascade.tileLengthX;
-	cbData.TileLengthY = cascade.tileLengthY;
-	cbData.Depth = settings.waves.FFTWaterDepth;
-	cbData.Alpha = alpha;
-	cbData.PeakFrequency = peakFreq;
-	cbData.WindSpeed = cascade.windSpeed;
-	cbData.WindDirection = cascade.windDirection;
-	cbData.Swell = cascade.swell;
-	cbData.Detail = cascade.detail;
-	cbData.Spread = cascade.spread;
-	cbData.Whitecap = cascade.whitecap;
-	cbData.FoamGrowRate = deltaTime * cascade.foamAmount * 7.5f;
-	cbData.FoamDecayRate = deltaTime * std::max(0.5f, 10.0f - cascade.foamAmount) * 1.15f;
-	cbData.Choppiness = cascade.choppiness;
-	cbData.DisplacementScale = cascade.displacementScale;
-	cbData.NormalScale = cascade.normalScale;
-	cbData.SpectrumSeedX = cascade.seedX;
-	cbData.SpectrumSeedY = cascade.seedY;
-
-	fftCB->Update(cbData);
-	ID3D11Buffer* cbs[] = { fftCB->CB() };
-	context->CSSetConstantBuffers(6, 1, cbs);
-
-	// Step 1: Regenerate spectrum if params changed
-	if (cascade.spectrumDirty) {
-		cascade.seedX = static_cast<int32_t>(cascadeIdx * 31337 + 12345);
-		cascade.seedY = static_cast<int32_t>(cascadeIdx * 7919 + 54321);
+		FFTConstantData cbData{};
+		cbData.MapSize = mapSize;
+		cbData.CascadeIndex = cascadeIdx;
+		cbData.Time = fftTime;
+		cbData.DeltaTime = deltaTime;
+		cbData.TileLengthX = cascade.tileLengthX;
+		cbData.TileLengthY = cascade.tileLengthY;
+		cbData.Depth = settings.waves.FFTWaterDepth;
+		cbData.Alpha = alpha;
+		cbData.PeakFrequency = peakFreq;
+		cbData.WindSpeed = cascade.windSpeed;
+		cbData.WindDirection = cascade.windDirection;
+		cbData.Swell = cascade.swell;
+		cbData.Detail = cascade.detail;
+		cbData.Spread = cascade.spread;
+		cbData.Whitecap = cascade.whitecap;
+		cbData.FoamGrowRate = deltaTime * cascade.foamAmount * 7.5f;
+		cbData.FoamDecayRate = deltaTime * std::max(0.5f, 10.0f - cascade.foamAmount) * 1.15f;
+		cbData.Choppiness = cascade.choppiness;
+		cbData.DisplacementScale = cascade.displacementScale;
+		cbData.NormalScale = cascade.normalScale;
 		cbData.SpectrumSeedX = cascade.seedX;
 		cbData.SpectrumSeedY = cascade.seedY;
+
 		fftCB->Update(cbData);
+		ID3D11Buffer* cbs[] = { fftCB->CB() };
+		context->CSSetConstantBuffers(6, 1, cbs);
 
-		ID3D11UnorderedAccessView* uavs[] = { spectrumUAV.get() };
-		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
-		context->CSSetShader(spectrumComputeCS.get(), nullptr, 0);
-		context->Dispatch(mapSize / 16, mapSize / 16, 1);
+		// Step 1: Regenerate spectrum if params changed
+		if (cascade.spectrumDirty) {
+			cascade.seedX = static_cast<int32_t>(cascadeIdx * 31337 + 12345);
+			cascade.seedY = static_cast<int32_t>(cascadeIdx * 7919 + 54321);
+			cbData.SpectrumSeedX = cascade.seedX;
+			cbData.SpectrumSeedY = cascade.seedY;
+			fftCB->Update(cbData);
 
-		cascade.spectrumDirty = false;
-	}
+			ID3D11UnorderedAccessView* specUavs[] = { spectrumUAV.get() };
+			context->CSSetUnorderedAccessViews(0, 1, specUavs, nullptr);
+			context->CSSetShader(spectrumComputeCS.get(), nullptr, 0);
+			context->Dispatch(mapSize / 16, mapSize / 16, 1);
 
-	// Step 2: Modulate spectrum in time
-	{
-		ID3D11ShaderResourceView* srvs[] = { spectrumSRV.get() };
-		context->CSSetShaderResources(0, 1, srvs);
+			ID3D11UnorderedAccessView* nullSpecUav[] = { nullptr };
+			context->CSSetUnorderedAccessViews(0, 1, nullSpecUav, nullptr);
+			context->CSSetShader(nullptr, nullptr, 0);
 
-		ID3D11UnorderedAccessView* uavs[] = { fftDataUAV.get() };
-		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+			cascade.spectrumDirty = false;
+		}
 
-		context->CSSetShader(spectrumModulateCS.get(), nullptr, 0);
-		context->Dispatch(mapSize / 16, mapSize / 16, 1);
-	}
+		// Step 2: Modulate spectrum in time
+		{
+			ID3D11ShaderResourceView* srvs[] = { spectrumSRV.get() };
+			context->CSSetShaderResources(0, 1, srvs);
 
-	// Step 3: FFT row-wise pass
-	{
-		ID3D11ShaderResourceView* srvs[] = { butterflySRV.get() };
-		context->CSSetShaderResources(0, 1, srvs);
+			ID3D11UnorderedAccessView* uavs[] = { fftDataUAV.get() };
+			context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
-		ID3D11UnorderedAccessView* uavs[] = { fftDataUAV.get() };
-		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+			context->CSSetShader(spectrumModulateCS.get(), nullptr, 0);
+			context->Dispatch(mapSize / 16, mapSize / 16, 1);
+		}
 
-		context->CSSetShader(fftComputeCS.get(), nullptr, 0);
-		context->Dispatch(1, mapSize, FFT_NUM_SPECTRA);
-	}
+		// Step 3: FFT row-wise pass
+		{
+			ID3D11ShaderResourceView* srvs[] = { butterflySRV.get() };
+			context->CSSetShaderResources(0, 1, srvs);
 
-	// Step 4: Transpose
-	{
-		context->CSSetShader(transposeCS.get(), nullptr, 0);
-		context->Dispatch(mapSize / 32, mapSize / 32, FFT_NUM_SPECTRA);
-	}
+			ID3D11UnorderedAccessView* uavs[] = { fftDataUAV.get() };
+			context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
-	// Step 5: FFT row-wise again (effectively column-wise)
-	{
-		context->CSSetShader(fftComputeCS.get(), nullptr, 0);
-		context->Dispatch(1, mapSize, FFT_NUM_SPECTRA);
-	}
+			context->CSSetShader(fftComputeCS.get(), nullptr, 0);
+			context->Dispatch(1, mapSize, FFT_NUM_SPECTRA);
+		}
 
-	// Step 6: Unpack to displacement + normal/foam maps
-	{
-		ID3D11UnorderedAccessView* uavs[] = { displacementUAV.get(), normalFoamUAV.get(), fftDataUAV.get() };
-		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+		// Step 4: Transpose
+		{
+			context->CSSetShader(transposeCS.get(), nullptr, 0);
+			context->Dispatch(mapSize / 32, mapSize / 32, FFT_NUM_SPECTRA);
+		}
 
-		context->CSSetShader(fftUnpackCS.get(), nullptr, 0);
-		context->Dispatch(mapSize / 16, mapSize / 16, 1);
+		// Step 5: FFT row-wise again (effectively column-wise)
+		{
+			context->CSSetShader(fftComputeCS.get(), nullptr, 0);
+			context->Dispatch(1, mapSize, FFT_NUM_SPECTRA);
+		}
+
+		// Step 6: Unpack to displacement + normal/foam maps (one array slice per cascade)
+		{
+			ID3D11UnorderedAccessView* unpackUavs[] = { displacementUAV.get(), normalFoamUAV.get(), fftDataUAV.get() };
+			context->CSSetUnorderedAccessViews(0, 3, unpackUavs, nullptr);
+
+			context->CSSetShader(fftUnpackCS.get(), nullptr, 0);
+			context->Dispatch(mapSize / 16, mapSize / 16, 1);
+		}
 	}
 
 	// Clean up CS state
@@ -997,6 +1087,8 @@ void PBRWater::TES_SetWorldSpace::thunk(RE::TES* tes, RE::TESWorldSpace* worldSp
 	singleton.currentGameTimeHours = 0.0f;
 	singleton.currentRealTimeSeconds = 0.0f;
 	singleton.currentTimeScale = 1.0f;
+	singleton.fftLastDispatchFrame = std::numeric_limits<std::uint32_t>::max();
+	singleton.fftLastRealTimeForDt = 0.0f;
 }
 
 void PBRWater::TES_DestroySkyCell::thunk(RE::TES* tes)
@@ -1014,6 +1106,8 @@ void PBRWater::TES_DestroySkyCell::thunk(RE::TES* tes)
 	singleton.currentGameTimeHours = 0.0f;
 	singleton.currentRealTimeSeconds = 0.0f;
 	singleton.currentTimeScale = 1.0f;
+	singleton.fftLastDispatchFrame = std::numeric_limits<std::uint32_t>::max();
+	singleton.fftLastRealTimeForDt = 0.0f;
 }
 
 void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass)
@@ -1038,9 +1132,19 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 			if (auto* hullBlob = globals::shaderCache->GetHullShaderBlob(*waterShader, descriptor)) {
 				auto device = globals::d3d::device;
 				ID3D11HullShader* hullShader = nullptr;
-				if (SUCCEEDED(device->CreateHullShader(hullBlob->GetBufferPointer(), hullBlob->GetBufferSize(), nullptr, &hullShader))) {
+				const HRESULT hr = device->CreateHullShader(hullBlob->GetBufferPointer(), hullBlob->GetBufferSize(), nullptr, &hullShader);
+				if (SUCCEEDED(hr)) {
 					singleton.waterHullShader.attach(hullShader);
+				} else if (!singleton.tessellationDiagLoggedHull) {
+					singleton.tessellationDiagLoggedHull = true;
+					logger::error("Failed to create {} shader {}::{:X}",
+						magic_enum::enum_name(SIE::ShaderClass::Hull),
+						magic_enum::enum_name(waterShader->shaderType.get()),
+						descriptor);
 				}
+			} else if (!singleton.tessellationDiagLoggedHull) {
+				singleton.tessellationDiagLoggedHull = true;
+				globals::shaderCache->LogHullDomainGeometryBlobUnavailable(*waterShader, descriptor, SIE::ShaderClass::Hull);
 			}
 		}
 
@@ -1048,9 +1152,19 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 			if (auto* domainBlob = globals::shaderCache->GetDomainShaderBlob(*waterShader, descriptor)) {
 				auto device = globals::d3d::device;
 				ID3D11DomainShader* domainShader = nullptr;
-				if (SUCCEEDED(device->CreateDomainShader(domainBlob->GetBufferPointer(), domainBlob->GetBufferSize(), nullptr, &domainShader))) {
+				const HRESULT hr = device->CreateDomainShader(domainBlob->GetBufferPointer(), domainBlob->GetBufferSize(), nullptr, &domainShader);
+				if (SUCCEEDED(hr)) {
 					singleton.waterDomainShader.attach(domainShader);
+				} else if (!singleton.tessellationDiagLoggedDomain) {
+					singleton.tessellationDiagLoggedDomain = true;
+					logger::error("Failed to create {} shader {}::{:X}",
+						magic_enum::enum_name(SIE::ShaderClass::Domain),
+						magic_enum::enum_name(waterShader->shaderType.get()),
+						descriptor);
 				}
+			} else if (!singleton.tessellationDiagLoggedDomain) {
+				singleton.tessellationDiagLoggedDomain = true;
+				globals::shaderCache->LogHullDomainGeometryBlobUnavailable(*waterShader, descriptor, SIE::ShaderClass::Domain);
 			}
 		}
 
@@ -1058,9 +1172,19 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 			if (auto* geometryBlob = globals::shaderCache->GetGeometryShaderBlob(*waterShader, descriptor)) {
 				auto device = globals::d3d::device;
 				ID3D11GeometryShader* geometryShader = nullptr;
-				if (SUCCEEDED(device->CreateGeometryShader(geometryBlob->GetBufferPointer(), geometryBlob->GetBufferSize(), nullptr, &geometryShader))) {
+				const HRESULT hr = device->CreateGeometryShader(geometryBlob->GetBufferPointer(), geometryBlob->GetBufferSize(), nullptr, &geometryShader);
+				if (SUCCEEDED(hr)) {
 					singleton.waterGeometryShader.attach(geometryShader);
+				} else if (!singleton.tessellationDiagLoggedGeometry) {
+					singleton.tessellationDiagLoggedGeometry = true;
+					logger::error("Failed to create {} shader {}::{:X}",
+						magic_enum::enum_name(SIE::ShaderClass::Geometry),
+						magic_enum::enum_name(waterShader->shaderType.get()),
+						descriptor);
 				}
+			} else if (!singleton.tessellationDiagLoggedGeometry) {
+				singleton.tessellationDiagLoggedGeometry = true;
+				globals::shaderCache->LogHullDomainGeometryBlobUnavailable(*waterShader, descriptor, SIE::ShaderClass::Geometry);
 			}
 		}
 
@@ -1091,16 +1215,17 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 	                                        singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader &&
 	                                        techniqueSupportsTessel;
 
-	// ---- FFT Ocean: dispatch compute shaders ----
-	{
-		float realTime = globals::state ? globals::state->timer : 0.0f;
-		static float lastFFTRealTime = 0.0f;
-		float dt = realTime - lastFFTRealTime;
-		if (dt < 0.0f || dt > 1.0f)
-			dt = 0.016f;
-		lastFFTRealTime = realTime;
-
-		if (singleton.settings.waves.UseFFTWaves && singleton.settings.waves.WaveIntensity > 0.001f) {
+	// ---- FFT Ocean: dispatch compute shaders (once per frame; stable dt for animation) ----
+	if (singleton.settings.waves.UseFFTWaves && singleton.settings.waves.FFTMasterIntensity > 0.001f) {
+		const auto* st = globals::state;
+		const std::uint32_t frameIdx = st ? st->frameCount : 0u;
+		if (st && frameIdx != singleton.fftLastDispatchFrame) {
+			singleton.fftLastDispatchFrame = frameIdx;
+			const float realTime = st->timer;
+			float dt = realTime - singleton.fftLastRealTimeForDt;
+			if (dt < 0.0f || dt > 1.0f)
+				dt = 1.0f / 60.0f;
+			singleton.fftLastRealTimeForDt = realTime;
 			singleton.DispatchFFT(dt);
 		}
 	}
@@ -1245,20 +1370,25 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		// FFT cascade parameters for surface shader sampling
 		perFrameData.FFTCascade0TileLenX = singleton.fftCascades[0].tileLengthX;
 		perFrameData.FFTCascade0TileLenY = singleton.fftCascades[0].tileLengthY;
-		perFrameData.FFTCascade0DispScale = singleton.fftCascades[0].displacementScale * singleton.settings.waves.WaveIntensity;
+		perFrameData.FFTCascade0DispScale = singleton.fftCascades[0].displacementScale * singleton.settings.waves.FFTMasterIntensity;
 		perFrameData.FFTCascade0NormScale = singleton.fftCascades[0].normalScale;
 		perFrameData.FFTCascade1TileLenX = singleton.fftCascades[1].tileLengthX;
 		perFrameData.FFTCascade1TileLenY = singleton.fftCascades[1].tileLengthY;
-		perFrameData.FFTCascade1DispScale = singleton.fftCascades[1].displacementScale * singleton.settings.waves.WaveIntensity;
+		perFrameData.FFTCascade1DispScale = singleton.fftCascades[1].displacementScale * singleton.settings.waves.FFTMasterIntensity;
 		perFrameData.FFTCascade1NormScale = singleton.fftCascades[1].normalScale;
 		perFrameData.FFTCascade2TileLenX = singleton.fftCascades[2].tileLengthX;
 		perFrameData.FFTCascade2TileLenY = singleton.fftCascades[2].tileLengthY;
-		perFrameData.FFTCascade2DispScale = singleton.fftCascades[2].displacementScale * singleton.settings.waves.WaveIntensity;
+		perFrameData.FFTCascade2DispScale = singleton.fftCascades[2].displacementScale * singleton.settings.waves.FFTMasterIntensity;
 		perFrameData.FFTCascade2NormScale = singleton.fftCascades[2].normalScale;
-		perFrameData.FFTChoppiness = singleton.settings.waves.WaveSteepness;
+		perFrameData.FFTChoppiness = singleton.settings.waves.FFTChoppiness;
 		perFrameData.FFTNumCascades = static_cast<float>(FFT_NUM_CASCADES);
-		perFrameData.FFTPad0 = 0.0f;
-		perFrameData.FFTPad1 = 0.0f;
+		perFrameData.FFTDispFarStart = singleton.settings.waves.FFTDispFarStart;
+		perFrameData.FFTDispFarFalloff = singleton.settings.waves.FFTDispFarFalloff;
+		perFrameData.FFTBicubicNormals = singleton.settings.waves.FFTBicubicNormals;
+		perFrameData.FFTMasterIntensity = singleton.settings.waves.FFTMasterIntensity;
+		perFrameData.FFTFadeStart = singleton.settings.waves.FFTFadeStart;
+		perFrameData.FFTFadeEnd = singleton.settings.waves.FFTFadeEnd;
+		perFrameData.FFTTessActivity = singleton.settings.waves.FFTTessActivity;
 
 		// Get timing data for player velocity calculation
 		float currentRealTime = globals::state ? globals::state->timer : 0.0f;
@@ -1646,7 +1776,7 @@ void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE:
 		tessellationActiveForPass = true;
 	} else if (!loggedTessSetup && singleton.settings.tessellation.EnableTessellation && techniqueSupportsTessel &&
 	           !(singleton.waterHullShader && singleton.waterDomainShader && singleton.waterGeometryShader)) {
-		logger::warn("[PBR Water] Tessellation enabled but hull/domain/geometry shaders failed to compile");
+		logger::warn("Water pass: tessellation enabled but hull, domain, or geometry shader is unavailable; check earlier shader log lines.");
 		loggedTessSetup = true;
 	}
 }

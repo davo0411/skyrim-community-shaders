@@ -97,14 +97,35 @@ struct PBRWater : public Feature
 		float ShoreBlendEnd = 500.0f;
 		float ShoreWaveStrength = 1.0f;
 
-		// FFT Ocean settings
+		// FFT Ocean settings (spectrum / sim — independent of Gerstner Wave 1–6)
 		bool UseFFTWaves = true;
+		float FFTSimulationTimeScale = 1.0f;
+		float FFTMasterIntensity = 1.0f;
+		// Chosen to match prior FFT coupling to Wave Height (~0.7) for similar default amplitude.
+		float FFTPhysicalHeightScale = 0.7f;
+		float FFTChoppiness = 1.0f;
+		float FFTWindSpeedMps = 20.0f;
+		float FFTWindDirectionRad = 0.0f;
+		float FFTFetchKm = 550.0f;
+		float FFTCascadeLength0M = 50.0f;
+		float FFTCascadeLength1M = 15.0f;
+		float FFTCascadeLength2M = 4.0f;
+		// 0 / 0 = use Gerstner "Wave Distance Fade" sliders for FFT as well (recommended).
+		// Set both > 0 with End > Start to override with FFT-specific fade only.
+		float FFTFadeStart = 0.0f;
+		float FFTFadeEnd = 0.0f;
+		float FFTTessActivity = 0.45f;
 		float FFTSwell = 0.8f;
 		float FFTSpread = 0.2f;
 		float FFTDetail = 1.0f;
 		float FFTWaterDepth = 20.0f;
 		float FFTWhitecap = 0.5f;
 		float FFTFoamAmount = 5.0f;
+		// GodotOceanWaves-style: exp falloff of FFT displacement past this camera distance (game units). 0 = off.
+		float FFTDispFarStart = 0.0f;
+		float FFTDispFarFalloff = 0.007f;
+		// Pixel shader: 0 = bilinear FFT normals, 1 = full bicubic (GPU Gems 2 / Godot water.gdshader).
+		float FFTBicubicNormals = 0.0f;
 	};
 
 	struct LightingSettings
@@ -355,8 +376,13 @@ struct PBRWater : public Feature
 		float FFTCascade2NormScale;
 		float FFTChoppiness;
 		float FFTNumCascades;
-		float FFTPad0;
-		float FFTPad1;
+		float FFTDispFarStart;
+		float FFTDispFarFalloff;
+		float FFTBicubicNormals;
+		float FFTMasterIntensity;
+		float FFTFadeStart;
+		float FFTFadeEnd;
+		float FFTTessActivity;
 	};
 
 	struct alignas(16) ActorRippleData
@@ -468,6 +494,11 @@ struct PBRWater : public Feature
 	winrt::com_ptr<ID3D11DomainShader> waterDomainShader;
 	winrt::com_ptr<ID3D11GeometryShader> waterGeometryShader;
 
+	/** Reset in Reset() / ClearShaderCache() so tessellation diagnostics can log again after a fix. */
+	bool tessellationDiagLoggedHull = false;
+	bool tessellationDiagLoggedDomain = false;
+	bool tessellationDiagLoggedGeometry = false;
+
 	// ---- FFT Ocean Resources ----
 
 	winrt::com_ptr<ID3D11ComputeShader> fftButterflyCS;
@@ -508,9 +539,11 @@ struct PBRWater : public Feature
 	FFTCascadeParams fftCascades[FFT_NUM_CASCADES];
 	bool fftInitialized = false;
 	bool fftButterflyReady = false;
-	uint32_t fftNextCascade = 0;
 	float fftTime = 0.0f;
 	float fftPrevTime = 0.0f;
+	/** DispatchFFT runs once per frame; dt from timer delta between frames (not per water pass). */
+	std::uint32_t fftLastDispatchFrame = std::numeric_limits<std::uint32_t>::max();
+	float fftLastRealTimeForDt = 0.0f;
 
 	void CompileFFTShaders();
 	void CreateFFTResources();

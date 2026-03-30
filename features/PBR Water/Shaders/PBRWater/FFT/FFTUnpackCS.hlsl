@@ -27,8 +27,9 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 DTid : SV_DispatchThreadID)
 {
 	uint3 id = uint3(DTid.xy, FFTCascadeIndex);
 
-	// ifftshift: multiply by (-1)^(x+y) to center the spectrum
-	float signShift = -2.0f * float((id.x & 1u) ^ (id.y & 1u)) + 1.0f;
+	// Do not apply spatial (-1)^(x+y) here: vertex shaders sample this map with bilinear
+	// filtering, which averages neighboring texels and almost cancels a checkerboard at
+	// Nyquist — waves look flat. FFT output order matches wrap tiling without this shift.
 
 	[unroll]
 	for (uint s = 0; s < FFT_NUM_SPECTRA; ++s)
@@ -36,19 +37,23 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 DTid : SV_DispatchThreadID)
 
 	GroupMemoryBarrierWithGroupSync();
 
-	// Displacement: hx, hy, hz (packed as real parts of paired signals)
+	// Do not apply an extra 1/N² here: the spectrum already uses discrete factors (dk_x·dk_y
+	// ∝ 1/N² in the variance) so another rcp(N²) kills the signal → flat ocean. Raw IFFT
+	// magnitudes are handled by FFTPhysicalHeightScale / master intensity on the sample side.
+
+	// Displacement: hx, hy, hz (IFFT real/imag from packed spectra)
 	float hx = localTile[0][GTid.y][GTid.x].x;
 	float hy = localTile[0][GTid.y][GTid.x].y;
 	float hz = localTile[1][GTid.y][GTid.x].x;
 
-	DisplacementMap[id] = float4(hx, hy, hz, 0.0f) * signShift;
+	DisplacementMap[id] = float4(hx, hy, hz, 0.0f);
 
 	// Gradient / Jacobian terms
-	float dhyDx = localTile[1][GTid.y][GTid.x].y * signShift;
-	float dhyDz = localTile[2][GTid.y][GTid.x].x * signShift;
-	float dhxDx = localTile[2][GTid.y][GTid.x].y * signShift;
-	float dhzDz = localTile[3][GTid.y][GTid.x].x * signShift;
-	float dhzDx = localTile[3][GTid.y][GTid.x].y * signShift;
+	float dhyDx = localTile[1][GTid.y][GTid.x].y;
+	float dhyDz = localTile[2][GTid.y][GTid.x].x;
+	float dhxDx = localTile[2][GTid.y][GTid.x].y;
+	float dhzDz = localTile[3][GTid.y][GTid.x].x;
+	float dhzDx = localTile[3][GTid.y][GTid.x].y;
 
 	// Jacobian determinant of the horizontal displacement field
 	float jacobian = (1.0f + dhxDx) * (1.0f + dhzDz) - dhzDx * dhzDx;

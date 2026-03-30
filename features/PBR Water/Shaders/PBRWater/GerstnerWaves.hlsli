@@ -215,8 +215,17 @@ cbuffer UnifiedWaterPerFrame : register(b7)
 	float FFTCascade2NormScale : packoffset(c29.z);
 	float FFTChoppiness : packoffset(c29.w);
 	float FFTNumCascades : packoffset(c30.x);
-	float FFTPad0 : packoffset(c30.y);
-	float FFTPad1 : packoffset(c30.z);
+	// GodotOceanWaves-style far falloff: displacement *= min(exp(-(camDist - start)*rate), 1). start<=0 disables.
+	float FFTDispFarStart : packoffset(c30.y);
+	float FFTDispFarFalloff : packoffset(c30.z);
+	// Pixel shader only: blend toward bicubic normal/foam fetch (0=bilinear SampleLevel, 1=full bicubic).
+	float FFTBicubicNormals : packoffset(c30.w);
+
+	// FFT-only (Gerstner WaveIntensity / WaveFade / WaveSteepness not used when FFTWavesEnabled)
+	float FFTMasterIntensity : packoffset(c31.x);
+	float FFTFadeStart : packoffset(c31.y);
+	float FFTFadeEnd : packoffset(c31.z);
+	float FFTTessActivity : packoffset(c31.w);
 }
 
 cbuffer UnifiedWaterPerTile : register(b8)
@@ -625,6 +634,44 @@ float EstimateWaveTessellationHint(float cameraDistance)
 // FFT WAVE SAMPLING — O(1) per vertex via texture lookups
 // ============================================================================
 
+#if defined(PSHADER)
+// Bicubic B-spline filtering (GPU Gems 2 ch. 20), matching GodotOceanWaves water.gdshader.
+float4 FFTCubicWeights(float a)
+{
+	float a2 = a * a;
+	float a3 = a2 * a;
+	float w0 = -a3 + a2 * 3.0f - a * 3.0f + 1.0f;
+	float w1 = a3 * 3.0f - a2 * 6.0f + 4.0f;
+	float w2 = -a3 * 3.0f + a2 * 3.0f + a * 3.0f + 1.0f;
+	float w3 = a3;
+	return float4(w0, w1, w2, w3) * (1.0f / 6.0f);
+}
+
+float4 SampleFFTNormalFoamBicubic(float2 uvTile, float layerIdx)
+{
+	const float dim = 256.0f; // must match FFT_MAP_SIZE / ocean texture resolution
+	float2 dims = float2(dim, dim);
+	float2 dimsInv = 1.0f / dims;
+	float3 uvw = float3(uvTile * dims + 0.5f, layerIdx);
+	float2 fuv = frac(uvw.xy);
+	float4 wx = FFTCubicWeights(fuv.x);
+	float4 wy = FFTCubicWeights(fuv.y);
+	float4 g = float4(wx.xz + wx.yw, wy.xz + wy.yw);
+	float4 h = (float4(wx.yw, wy.yw) / g + float4(-1.5f, 0.5f, -1.5f, 0.5f) + floor(uvw.xy).xyxy) * float4(dimsInv.x, dimsInv.y, dimsInv.x, dimsInv.y);
+	float2 wMix = g.xz / (g.xz + g.yw);
+	float4 s0 = lerp(
+		FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(h.yw, layerIdx), 0),
+		FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(h.xw, layerIdx), 0),
+		wMix.x);
+	float4 s1 = lerp(
+		FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(h.yz, layerIdx), 0),
+		FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(h.xz, layerIdx), 0),
+		wMix.x);
+	return lerp(s0, s1, wMix.y);
+}
+#endif
+
+// waveIntensity argument kept for call-site compatibility; FFT path uses FFTMasterIntensity from b7.
 WaveSample SampleFFTWaves(
 	float2 worldPos,
 	float waveIntensity,
@@ -643,16 +690,28 @@ WaveSample SampleFFTWaves(
 	result.shoreInfluence = 0.0f;
 	result.shoreDistance = waterDepth;
 
-	if (waveIntensity <= 0.001f)
+	if (FFTMasterIntensity <= 0.001f)
 		return result;
 
+	// Distance fade: FFTFadeEnd > FFTFadeStart uses FFT-only sliders; otherwise use Wave fade (same as Gerstner path).
+	// Prevents "flat ocean" when Wave fade was widened in presets but FFT fade stayed at old tight defaults.
+	float fadeStart = (FFTFadeEnd > FFTFadeStart) ? FFTFadeStart : WaveFadeStart;
+	float fadeEnd = (FFTFadeEnd > FFTFadeStart) ? FFTFadeEnd : WaveFadeEnd;
+
 	float distanceFade = 1.0f;
-	if (cameraDistance > 0.0f && WaveFadeEnd > WaveFadeStart) {
-		distanceFade = 1.0f - saturate((cameraDistance - WaveFadeStart) / (WaveFadeEnd - WaveFadeStart));
+	if (cameraDistance > 0.0f && fadeEnd > fadeStart) {
+		distanceFade = 1.0f - saturate((cameraDistance - fadeStart) / (fadeEnd - fadeStart));
 		distanceFade = distanceFade * distanceFade * (3.0f - 2.0f * distanceFade);
 		if (distanceFade <= 0.001f)
 			return result;
 	}
+
+	// GodotOceanWaves vertex shader: min(exp(-(horizontalDist - 150)*0.007), 1). We use cameraDistance (radial).
+	float farDispFalloff = 1.0f;
+	if (FFTDispFarStart > 0.0f && cameraDistance > 0.0f && FFTDispFarFalloff > 0.0f)
+		farDispFalloff = min(exp(-(cameraDistance - FFTDispFarStart) * FFTDispFarFalloff), 1.0f);
+
+	const float sampleFade = distanceFade * farDispFalloff;
 
 	// Shallow water attenuation for large cascades
 	float depthMeters = waterDepth / M_TO_GAME_UNIT;
@@ -685,11 +744,12 @@ WaveSample SampleFFTWaves(
 			break;
 
 		float2 uv = worldPos / max(tileLens[c], float2(1.0f, 1.0f));
-		float scale = dispScales[c] * distanceFade;
+		float scale = dispScales[c] * sampleFade;
 
-		// Attenuate large cascades in shallow water
+		// Attenuate large cascades in shallow water (Gerstner: kill swell in very shallow).
+		// FFT: never zero cascade 0 — only short tiles remain → dense spiky noise (“rocks”).
 		if (c == 0)
-			scale *= largeWaveBlend;
+			scale *= max(largeWaveBlend, 0.35f);
 
 		float4 disp;
 		if (usePreviousFrame)
@@ -702,15 +762,27 @@ WaveSample SampleFFTWaves(
 		totalDisp.y += disp.z * scale * FFTChoppiness;
 		totalDisp.z += disp.y * scale;
 
-		float4 nf = FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
-		totalGrad += nf.xy * normScales[c] * distanceFade;
+		float4 nfLin = FFTNormalFoamMap.SampleLevel(FFTLinearWrapSampler, float3(uv, float(c)), 0);
+#if defined(PSHADER)
+		float4 nf = nfLin;
+		if (FFTBicubicNormals > 0.001f) {
+			float4 nfB = SampleFFTNormalFoamBicubic(uv, float(c));
+			nf = lerp(nfLin, nfB, saturate(FFTBicubicNormals));
+		}
+#else
+		float4 nf = nfLin;
+#endif
+		totalGrad += nf.xy * normScales[c] * sampleFade;
 		totalFoam += nf.w;
 	}
 
-	const float maxHorizDisp = 25.0f;
-	const float maxVertDisp = 100.0f;
-	totalDisp.xy = clamp(totalDisp.xy, -maxHorizDisp, maxHorizDisp);
-	totalDisp.z = clamp(totalDisp.z, -maxVertDisp, maxVertDisp);
+	// FFT-only path: Gerstner uses tight caps (±25 / ±100 game units). Ocean chop + three
+	// cascades can exceed that without being “wrong”; saturating every vertex caused the
+	// jagged rock mesh. Keep a generous safety bound instead.
+	const float maxHorizDispFFT = 400.0f;
+	const float maxVertDispFFT = 400.0f;
+	totalDisp.xy = clamp(totalDisp.xy, -maxHorizDispFFT, maxHorizDispFFT);
+	totalDisp.z = clamp(totalDisp.z, -maxVertDispFFT, maxVertDispFFT);
 
 	result.displacement = totalDisp;
 

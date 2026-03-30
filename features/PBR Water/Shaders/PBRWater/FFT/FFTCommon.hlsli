@@ -1,6 +1,10 @@
 #ifndef __FFT_COMMON_HLSLI__
 #define __FFT_COMMON_HLSLI__
 
+// Ocean FFT pipeline aligned with Tessendorf + Horvath TMA/JONSWAP + Stockham FFT,
+// same overall structure as GodotOceanWaves (compute spectrum → modulate → 2D FFT → unpack).
+// Reference: https://github.com/2Retr0/GodotOceanWaves
+
 #define FFT_PI 3.14159265358979323846f
 #define FFT_TWO_PI 6.28318530717958647692f
 #define FFT_GRAVITY 9.81f
