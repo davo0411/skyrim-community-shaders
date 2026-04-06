@@ -4,6 +4,7 @@
 
 #include "../EditorWindow.h"
 #include "FeatureIssues.h"
+#include "Menu/ThemeManager.h"
 #include "State.h"
 #include "Utils/UI.h"
 #include "WeatherManager.h"
@@ -65,42 +66,24 @@ void WeatherWidget::DrawWidget()
 			UpdateSearchResults();
 		}
 
-		// Show search results dropdown
+		// Show search results dropdown (shared styling with Community Shaders feature list search)
 		if (searchBuffer[0] != '\0' && !searchResults.empty()) {
-			// Find the search input position for dropdown placement
-			ImGui::SetNextWindowPos(ImVec2(ImGui::GetCursorScreenPos().x, ImGui::GetCursorScreenPos().y));
-			ImGui::SetNextWindowSize(ImVec2(300.0f * Util::GetUIScale(), 0));
-			ImGui::SetNextWindowFocus();
-			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
-			ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.16f, 0.16f, 0.16f, 1.0f));
-			if (ImGui::Begin("##SearchDropdown", nullptr,
-					ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-						ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
-				for (size_t i = 0; i < std::min(size_t(5), searchResults.size()); ++i) {
-					const auto& result = searchResults[i];
-					std::string label = std::format("{} ({})", result.displayName, result.tabName);
-
-					if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_NoAutoClosePopups)) {
-						NavigateToSetting(result);
-						searchBuffer[0] = '\0';
-						searchResults.clear();
-					}
-				}
-
-				if (searchResults.size() > 5) {
-					ImGui::Separator();
-					ImGui::TextDisabled("... %zu more results", searchResults.size() - 5);
-				}
-
-				// Close dropdown if clicking outside or pressing Escape
-				if (!ImGui::IsWindowFocused() || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-					searchBuffer[0] = '\0';
-					searchResults.clear();
-				}
+			std::vector<Util::SettingsSearchDropdownRow> rows;
+			rows.reserve(searchResults.size());
+			for (const auto& result : searchResults) {
+				rows.push_back({
+					result.displayName,
+					result.tabName,
+					[this, result]() { NavigateToSetting(result); },
+				});
 			}
-			ImGui::End();
-			ImGui::PopStyleColor();
-			ImGui::PopStyleVar();
+			const ImVec2 pos(ImGui::GetCursorScreenPos().x, ImGui::GetCursorScreenPos().y);
+			const float w = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX * scale;
+			if (Util::DrawSettingsSearchResultsDropdown("##SearchDropdown", pos, w, rows) ==
+				Util::SettingsSearchDropdownOutcome::Dismissed) {
+				searchBuffer[0] = '\0';
+				searchResults.clear();
+			}
 		}
 
 		auto editorWindow = EditorWindow::GetSingleton();

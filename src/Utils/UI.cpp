@@ -25,6 +25,7 @@
 #include "../Feature.h"
 #include "../Features/VR.h"
 #include "../Globals.h"
+#include "../State.h"
 #include "../Menu.h"
 #include "FileSystem.h"
 #include "VRUtils.h"
@@ -1170,51 +1171,208 @@ namespace Util
 		state.needsFocus = true;
 	}
 
+	namespace
+	{
+		size_t ComputeFeatureSettingsSearchSignature()
+		{
+			size_t h = 0;
+			if (globals::state) {
+				h ^= static_cast<size_t>(globals::state->IsDeveloperMode()) << 3;
+			}
+			for (auto* f : Feature::GetFeatureList()) {
+				const size_t piece = std::hash<void*>{}(f) ^ (static_cast<size_t>(f->loaded) << 1);
+				h ^= piece + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+			}
+			return h;
+		}
+	}
+
+	SettingsSearchDropdownOutcome DrawSettingsSearchResultsDropdown(
+		const char* windowName,
+		ImVec2 position,
+		float windowWidth,
+		const std::vector<SettingsSearchDropdownRow>& matches)
+	{
+		if (matches.empty()) {
+			return SettingsSearchDropdownOutcome::None;
+		}
+
+		const float scale = Util::GetUIScale();
+		const float minW = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX * scale;
+		const float w = std::max(windowWidth, minW);
+
+		ImGui::SetNextWindowPos(position);
+		ImGui::SetNextWindowSize(ImVec2(w, 0.0f));
+		ImGui::SetNextWindowFocus();
+
+		const ImVec4 baseBg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+		const float t = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BG_LERP_TO_BLACK;
+		const float ab = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BG_ALPHA_BLEND;
+		const ImVec4 winBg(
+			ImLerp(baseBg.x, 0.0f, t),
+			ImLerp(baseBg.y, 0.0f, t),
+			ImLerp(baseBg.z, 0.0f, t),
+			(std::min)(1.0f, ImLerp(baseBg.w, 1.0f, t * ab)));
+
+		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, winBg);
+
+		const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+
+		auto outcome = SettingsSearchDropdownOutcome::None;
+
+		if (ImGui::Begin(windowName, nullptr, flags)) {
+			const size_t maxVis = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_MAX_VISIBLE;
+			const size_t showCount = (std::min)(maxVis, matches.size());
+
+			for (size_t i = 0; i < showCount; ++i) {
+				const auto& row = matches[i];
+				const std::string text = row.secondary.empty() ?
+                                             row.primary :
+                                             std::format("{} ({})", row.primary, row.secondary);
+				const std::string selectableId = std::format("{}##UtilSearchRow{}", text, i);
+
+				if (ImGui::Selectable(selectableId.c_str(), false, ImGuiSelectableFlags_NoAutoClosePopups)) {
+					if (row.onActivate) {
+						row.onActivate();
+					}
+					outcome = SettingsSearchDropdownOutcome::Dismissed;
+				}
+			}
+
+			if (matches.size() > maxVis) {
+				ImGui::Separator();
+				ImGui::TextDisabled("... %zu more results", matches.size() - maxVis);
+			}
+
+			if (!ImGui::IsWindowFocused() || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+				outcome = SettingsSearchDropdownOutcome::Dismissed;
+			}
+		}
+		ImGui::End();
+
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
+
+		return outcome;
+	}
+
 	void DrawFeatureSearchBar(std::string& searchString, float availableWidth)
 	{
+		static std::vector<Feature::SettingSearchEntry> s_settingsIndex;
+		static size_t s_indexSignature = 0;
+		static bool s_suppressSettingsDropdown = false;
+		static std::string s_prevSearchForDropdown;
+
+		const size_t sig = ComputeFeatureSettingsSearchSignature();
+		if (sig != s_indexSignature) {
+			s_prevSearchForDropdown.clear();
+			s_suppressSettingsDropdown = false;
+			s_indexSignature = sig;
+			s_settingsIndex.clear();
+			for (auto* feat : Feature::GetFeatureList()) {
+				if (!feat->loaded || !feat->IsInMenu()) {
+					continue;
+				}
+				for (auto&& e : feat->EnumerateSettingsSearchEntries()) {
+					s_settingsIndex.push_back(std::move(e));
+				}
+			}
+		}
+
+		if (searchString != s_prevSearchForDropdown) {
+			s_suppressSettingsDropdown = false;
+			s_prevSearchForDropdown = searchString;
+		}
+
 		ImGui::PushID("FeatureSearchBar");
 
-		float iconSize = 20.0f;
-		float iconSpace = iconSize + 14.0f;
+		const float iconSize = ThemeManager::Constants::FEATURE_LIST_SEARCH_ICON_SIZE_PX;
+		const float iconSpace = iconSize + ThemeManager::Constants::FEATURE_LIST_SEARCH_ICON_TRAILING_PAD_PX;
 
-		// Get the current cursor position and available width
 		ImVec2 cursorPos = ImGui::GetCursorScreenPos();
 		if (availableWidth <= 0.0f) {
 			availableWidth = ImGui::GetContentRegionAvail().x;
 		}
-		float frameHeight = ImGui::GetFrameHeight();
+		const float frameHeight = ImGui::GetFrameHeight();
 
-		// Custom style - always transparent background to avoid click blocking
-		ImVec4 bgColor = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-		ImVec4 bgColorActive = ImVec4(0.3f, 0.3f, 0.3f, 0.9f);
-		// Use theme text color instead of hardcoded color
+		ImVec4 frameBg = ImGui::GetStyleColorVec4(ImGuiCol_FrameBg);
+		ImVec4 frameHovered = ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered);
+		ImVec4 frameActive = ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive);
+		const float alphaScale = ThemeManager::Constants::FEATURE_LIST_SEARCH_FRAME_BG_ALPHA_SCALE;
+		frameBg.w *= alphaScale;
+		frameHovered.w *= alphaScale;
+		frameActive.w = std::min(1.0f, frameActive.w * std::max(alphaScale, 0.95f));
+
 		auto& palette = globals::menu->GetTheme().Palette;
 		ImVec4 textColor = palette.Text;
 
-		ImGui::PushStyleColor(ImGuiCol_FrameBg, bgColor);
-		ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, bgColor);
-		ImGui::PushStyleColor(ImGuiCol_FrameBgActive, bgColorActive);
-		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, frameBg);
+		ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frameHovered);
+		ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frameActive);
+		ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_Border));
 		ImGui::PushStyleColor(ImGuiCol_Text, textColor);
-		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(iconSpace, 6.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, ImGui::GetStyle().FrameBorderSize);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+			ImVec2(iconSpace, ImGui::GetStyle().FramePadding.y));
 
-		// Draw the input field
 		ImGui::SetNextItemWidth(availableWidth);
 		char buffer[256];
 		strncpy_s(buffer, searchString.c_str(), sizeof(buffer) - 1);
 		buffer[sizeof(buffer) - 1] = '\0';
 
-		if (ImGui::InputTextWithHint("##feature_search", "Search Features...", buffer, sizeof(buffer))) {
+		if (ImGui::InputTextWithHint("##feature_search", "Search Settings/Features", buffer, sizeof(buffer))) {
 			searchString = buffer;
 		}
 
-		// Draw search icon using the reusable function
-		ImVec2 iconPos = ImVec2(cursorPos.x + 8.0f, cursorPos.y + (frameHeight - iconSize) * 0.5f);
-		DrawSearchIcon(iconPos, iconSize, 0.7f);
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+			ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+			ImGui::SetKeyboardFocusHere(-1);
+		}
+
+		const float iconPosX = cursorPos.x + ThemeManager::Constants::FEATURE_LIST_SEARCH_ICON_OFFSET_X;
+		const float iconPosY = cursorPos.y + (frameHeight - iconSize) * 0.5f;
+		DrawSearchIcon(ImVec2(iconPosX, iconPosY), iconSize,
+			ThemeManager::Constants::FEATURE_LIST_SEARCH_ICON_ALPHA);
 
 		ImGui::PopStyleVar(2);
 		ImGui::PopStyleColor(5);
+
+		std::vector<SettingsSearchDropdownRow> settingRows;
+		if (!searchString.empty() && !s_suppressSettingsDropdown && globals::menu) {
+			settingRows.reserve(16);
+			for (const auto& entry : s_settingsIndex) {
+				if (!Util::StringMatchesSearch(entry.label, searchString) &&
+					!Util::StringMatchesSearch(entry.description, searchString) &&
+					!Util::StringMatchesSearch(entry.featureName, searchString)) {
+					continue;
+				}
+				SettingsSearchDropdownRow row;
+				row.primary = entry.label;
+				row.secondary = entry.featureName;
+				row.onActivate = entry.focusCallback;
+				settingRows.push_back(std::move(row));
+			}
+		}
+
+		if (!settingRows.empty()) {
+			const ImVec2 dropdownPos(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y);
+			const float dropdownW = (std::max)(ImGui::GetItemRectSize().x,
+				ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX * Util::GetUIScale());
+
+			const auto outcome = DrawSettingsSearchResultsDropdown(
+				"##FeatureSettingsSearchDropdown",
+				dropdownPos,
+				dropdownW,
+				settingRows);
+
+			if (outcome == SettingsSearchDropdownOutcome::Dismissed) {
+				s_suppressSettingsDropdown = true;
+			}
+		}
+
 		ImGui::PopID();
 	}
 

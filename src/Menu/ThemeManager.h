@@ -205,6 +205,22 @@ public:
 		static constexpr float COMBO_SEARCH_ICON_OFFSET_X = 5.0f;  // Icon horizontal offset from input edge
 		static constexpr float COMBO_SEARCH_PADDING_LEFT = 24.0f;  // Left padding to make room for icon
 
+		// Shared settings search dropdown (Weather Editor widgets, feature list search)
+		static constexpr size_t SETTINGS_SEARCH_DROPDOWN_MAX_VISIBLE = 5;
+		static constexpr float SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX = 300.0f;  // Matches legacy weather search popup width
+		/** Lerp factor toward black for dropdown WindowBg (stronger panel over blur). */
+		static constexpr float SETTINGS_SEARCH_DROPDOWN_BG_LERP_TO_BLACK = 0.45f;
+		/** Multiply style alpha toward 1.0 when darkening dropdown background. */
+		static constexpr float SETTINGS_SEARCH_DROPDOWN_BG_ALPHA_BLEND = 0.5f;
+
+		// Feature list search field (left pane)
+		static constexpr float FEATURE_LIST_SEARCH_ICON_SIZE_PX = 20.0f;
+		static constexpr float FEATURE_LIST_SEARCH_ICON_TRAILING_PAD_PX = 14.0f;
+		static constexpr float FEATURE_LIST_SEARCH_ICON_OFFSET_X = 8.0f;
+		static constexpr float FEATURE_LIST_SEARCH_ICON_ALPHA = 0.7f;
+		/** Multiplier on themed ImGuiCol_FrameBg alpha for the feature list search field. */
+		static constexpr float FEATURE_LIST_SEARCH_FRAME_BG_ALPHA_SCALE = 0.88f;
+
 		// Window overlap readability constants
 		static constexpr float OVERLAP_MIN_ALPHA = 0.85f;       // Background alpha when windows overlap
 		static constexpr float OVERLAP_FADEIN_SPEED = 8.0f;     // Fade-in speed (units/sec)

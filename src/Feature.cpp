@@ -396,3 +396,85 @@ bool Feature::IsFeatureKnown(const std::string& shortName, REL::Version* outVers
 
 	return false;
 }
+
+namespace
+{
+	void FlattenJsonSettingsKeys(const json& j, const std::string& prefix, std::vector<std::string>& out)
+	{
+		if (j.is_null()) {
+			return;
+		}
+		if (j.is_primitive()) {
+			if (!prefix.empty()) {
+				out.push_back(prefix);
+			}
+			return;
+		}
+		if (j.is_array()) {
+			std::size_t i = 0;
+			for (const auto& el : j) {
+				FlattenJsonSettingsKeys(el, prefix + "[" + std::to_string(i) + "]", out);
+				++i;
+			}
+			return;
+		}
+		if (j.is_object()) {
+			for (auto it = j.begin(); it != j.end(); ++it) {
+				const std::string& k = it.key();
+				const std::string next = prefix.empty() ? k : (prefix + " / " + k);
+				const auto& v = it.value();
+				if (v.is_object() || v.is_array()) {
+					FlattenJsonSettingsKeys(v, next, out);
+				} else if (!v.is_null()) {
+					out.push_back(next);
+				}
+			}
+		}
+	}
+}
+
+std::vector<Feature::SettingSearchEntry> Feature::EnumerateSettingsSearchEntries()
+{
+	auto entries = GetSettingsSearchEntries();
+	if (!entries.empty()) {
+		const std::string shortName = GetShortName();
+		for (auto& e : entries) {
+			if (e.featureName.empty()) {
+				e.featureName = GetName();
+			}
+			if (!e.focusCallback) {
+				e.focusCallback = [shortName]() {
+					if (auto* menu = Menu::GetSingleton()) {
+						menu->SelectFeatureMenu(shortName);
+					}
+				};
+			}
+		}
+		return entries;
+	}
+
+	std::vector<SettingSearchEntry> out;
+	json j;
+	SaveSettings(j);
+
+	std::vector<std::string> keys;
+	FlattenJsonSettingsKeys(j, "", keys);
+
+	const std::string shortName = GetShortName();
+	const std::string displayName = GetName();
+
+	for (const auto& k : keys) {
+		SettingSearchEntry e;
+		e.label = k;
+		e.description = "";
+		e.featureName = displayName;
+		e.focusCallback = [shortName]() {
+			if (auto* menu = Menu::GetSingleton()) {
+				menu->SelectFeatureMenu(shortName);
+			}
+		};
+		out.push_back(std::move(e));
+	}
+
+	return out;
+}

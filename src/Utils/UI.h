@@ -815,6 +815,34 @@ namespace Util
 	ImVec4 GetPulsingColor(const ImVec4& baseColor, float speed = 4.0f, float minBrightness = 0.7f, float maxBrightness = 1.0f);
 
 	/**
+	 * @brief One row in the settings search dropdown (matches Weather Editor: primary + "(context)").
+	 */
+	struct SettingsSearchDropdownRow {
+		std::string primary;
+		std::string secondary;
+		std::function<void()> onActivate;
+	};
+
+	enum class SettingsSearchDropdownOutcome {
+		None,
+		Dismissed,
+	};
+
+	/**
+	 * @brief Floating results list shared with Weather Editor widget search (theme-aware).
+	 * @param windowName Unique ImGui window name (e.g. "##WeatherSearchDropdown").
+	 * @param position Top-left in screen space (typically below the search field).
+	 * @param windowWidth Requested width (clamped to at least SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX * UIScale).
+	 * @param matches All matching rows; at most SETTINGS_SEARCH_DROPDOWN_MAX_VISIBLE are shown.
+	 * @return Dismissed after item activation, Escape, or loss of focus (caller clears local state).
+	 */
+	SettingsSearchDropdownOutcome DrawSettingsSearchResultsDropdown(
+		const char* windowName,
+		ImVec2 position,
+		float windowWidth,
+		const std::vector<SettingsSearchDropdownRow>& matches);
+
+	/**
 	 * @brief Draws the feature search bar with magnifying glass icon.
 	 * @param searchString Reference to the search string to modify
 	 * @param availableWidth The available width for the search bar

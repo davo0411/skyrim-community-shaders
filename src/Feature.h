@@ -20,6 +20,12 @@ struct Feature
 	// Override in features to expose settings for search
 	virtual std::vector<SettingSearchEntry> GetSettingsSearchEntries() { return {}; }
 
+	/**
+	 * @brief Settings entries for menu search: uses GetSettingsSearchEntries() when non-empty,
+	 *        otherwise derives human-browsable keys from SaveSettings(json).
+	 */
+	std::vector<SettingSearchEntry> EnumerateSettingsSearchEntries();
+
 	// Nexus Mods base URL for Skyrim Special Edition
 	static constexpr std::string_view NEXUS_BASE_URL = "https://www.nexusmods.com/skyrimspecialedition/mods/";
 	bool loaded = false;
