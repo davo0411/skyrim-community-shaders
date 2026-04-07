@@ -825,6 +825,7 @@ namespace Util
 
 	enum class SettingsSearchDropdownOutcome {
 		None,
+		ItemActivated,
 		Dismissed,
 	};
 
@@ -840,7 +841,10 @@ namespace Util
 		const char* windowName,
 		ImVec2 position,
 		float windowWidth,
-		const std::vector<SettingsSearchDropdownRow>& matches);
+		const std::vector<SettingsSearchDropdownRow>& matches,
+		bool stealKeyboardFocus = true,
+		bool dismissWhenDropdownUnfocused = true,
+		bool* outDropdownInteracting = nullptr);
 
 	/**
 	 * @brief Draws the feature search bar with magnifying glass icon.

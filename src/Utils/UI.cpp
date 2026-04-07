@@ -1191,9 +1191,15 @@ namespace Util
 		const char* windowName,
 		ImVec2 position,
 		float windowWidth,
-		const std::vector<SettingsSearchDropdownRow>& matches)
+		const std::vector<SettingsSearchDropdownRow>& matches,
+		bool stealKeyboardFocus,
+		bool dismissWhenDropdownUnfocused,
+		bool* outDropdownInteracting)
 	{
 		if (matches.empty()) {
+			if (outDropdownInteracting) {
+				*outDropdownInteracting = false;
+			}
 			return SettingsSearchDropdownOutcome::None;
 		}
 
@@ -1203,16 +1209,17 @@ namespace Util
 
 		ImGui::SetNextWindowPos(position);
 		ImGui::SetNextWindowSize(ImVec2(w, 0.0f));
-		ImGui::SetNextWindowFocus();
+		if (stealKeyboardFocus) {
+			ImGui::SetNextWindowFocus();
+		}
 
 		const ImVec4 baseBg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
-		const float t = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BG_LERP_TO_BLACK;
 		const float ab = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BG_ALPHA_BLEND;
 		const ImVec4 winBg(
-			ImLerp(baseBg.x, 0.0f, t),
-			ImLerp(baseBg.y, 0.0f, t),
-			ImLerp(baseBg.z, 0.0f, t),
-			(std::min)(1.0f, ImLerp(baseBg.w, 1.0f, t * ab)));
+			baseBg.x,
+			baseBg.y,
+			baseBg.z,
+			(std::min)(1.0f, ImLerp(baseBg.w, 1.0f, ab)));
 
 		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
 		ImGui::PushStyleColor(ImGuiCol_WindowBg, winBg);
@@ -1222,6 +1229,7 @@ namespace Util
 			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
 
 		auto outcome = SettingsSearchDropdownOutcome::None;
+		bool dropdownInteracting = false;
 
 		if (ImGui::Begin(windowName, nullptr, flags)) {
 			const size_t maxVis = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_MAX_VISIBLE;
@@ -1238,7 +1246,7 @@ namespace Util
 					if (row.onActivate) {
 						row.onActivate();
 					}
-					outcome = SettingsSearchDropdownOutcome::Dismissed;
+					outcome = SettingsSearchDropdownOutcome::ItemActivated;
 				}
 			}
 
@@ -1247,7 +1255,11 @@ namespace Util
 				ImGui::TextDisabled("... %zu more results", matches.size() - maxVis);
 			}
 
-			if (!ImGui::IsWindowFocused() || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+			dropdownInteracting = ImGui::IsWindowFocused() || ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+
+			if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+				outcome = SettingsSearchDropdownOutcome::Dismissed;
+			} else if (dismissWhenDropdownUnfocused && !ImGui::IsWindowFocused()) {
 				outcome = SettingsSearchDropdownOutcome::Dismissed;
 			}
 		}
@@ -1255,6 +1267,9 @@ namespace Util
 
 		ImGui::PopStyleColor();
 		ImGui::PopStyleVar();
+		if (outDropdownInteracting) {
+			*outDropdownInteracting = dropdownInteracting;
+		}
 
 		return outcome;
 	}
@@ -1263,13 +1278,10 @@ namespace Util
 	{
 		static std::vector<Feature::SettingSearchEntry> s_settingsIndex;
 		static size_t s_indexSignature = 0;
-		static bool s_suppressSettingsDropdown = false;
-		static std::string s_prevSearchForDropdown;
+		static float s_dropdownSlidePx = 0.0f;
 
 		const size_t sig = ComputeFeatureSettingsSearchSignature();
 		if (sig != s_indexSignature) {
-			s_prevSearchForDropdown.clear();
-			s_suppressSettingsDropdown = false;
 			s_indexSignature = sig;
 			s_settingsIndex.clear();
 			for (auto* feat : Feature::GetFeatureList()) {
@@ -1280,11 +1292,6 @@ namespace Util
 					s_settingsIndex.push_back(std::move(e));
 				}
 			}
-		}
-
-		if (searchString != s_prevSearchForDropdown) {
-			s_suppressSettingsDropdown = false;
-			s_prevSearchForDropdown = searchString;
 		}
 
 		ImGui::PushID("FeatureSearchBar");
@@ -1302,9 +1309,24 @@ namespace Util
 		ImVec4 frameHovered = ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered);
 		ImVec4 frameActive = ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive);
 		const float alphaScale = ThemeManager::Constants::FEATURE_LIST_SEARCH_FRAME_BG_ALPHA_SCALE;
+		const float opaqueBlend = ThemeManager::Constants::FEATURE_LIST_SEARCH_FRAME_BG_OPAQUE_BLEND;
+		const ImVec4 themeBg = globals::menu->GetTheme().Palette.Background;
+		const float themeMix = 0.65f;
+		frameBg.x = ImLerp(frameBg.x, themeBg.x, themeMix);
+		frameBg.y = ImLerp(frameBg.y, themeBg.y, themeMix);
+		frameBg.z = ImLerp(frameBg.z, themeBg.z, themeMix);
+		frameHovered.x = ImLerp(frameHovered.x, themeBg.x, themeMix * 0.85f);
+		frameHovered.y = ImLerp(frameHovered.y, themeBg.y, themeMix * 0.85f);
+		frameHovered.z = ImLerp(frameHovered.z, themeBg.z, themeMix * 0.85f);
+		frameActive.x = ImLerp(frameActive.x, themeBg.x, themeMix * 0.75f);
+		frameActive.y = ImLerp(frameActive.y, themeBg.y, themeMix * 0.75f);
+		frameActive.z = ImLerp(frameActive.z, themeBg.z, themeMix * 0.75f);
 		frameBg.w *= alphaScale;
 		frameHovered.w *= alphaScale;
 		frameActive.w = std::min(1.0f, frameActive.w * std::max(alphaScale, 0.95f));
+		frameBg.w = ImLerp(frameBg.w, 1.0f, opaqueBlend);
+		frameHovered.w = ImLerp(frameHovered.w, 1.0f, opaqueBlend);
+		frameActive.w = ImLerp(frameActive.w, 1.0f, opaqueBlend);
 
 		auto& palette = globals::menu->GetTheme().Palette;
 		ImVec4 textColor = palette.Text;
@@ -1318,6 +1340,15 @@ namespace Util
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
 			ImVec2(iconSpace, ImGui::GetStyle().FramePadding.y));
 
+		const bool requestSearchFocus =
+			ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+			ImGui::GetIO().KeyCtrl &&
+			ImGui::IsKeyPressed(ImGuiKey_F, false);
+
+		if (requestSearchFocus) {
+			ImGui::SetKeyboardFocusHere();
+		}
+
 		ImGui::SetNextItemWidth(availableWidth);
 		char buffer[256];
 		strncpy_s(buffer, searchString.c_str(), sizeof(buffer) - 1);
@@ -1325,11 +1356,6 @@ namespace Util
 
 		if (ImGui::InputTextWithHint("##feature_search", "Search Settings/Features", buffer, sizeof(buffer))) {
 			searchString = buffer;
-		}
-
-		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-			ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
-			ImGui::SetKeyboardFocusHere(-1);
 		}
 
 		const float iconPosX = cursorPos.x + ThemeManager::Constants::FEATURE_LIST_SEARCH_ICON_OFFSET_X;
@@ -1341,7 +1367,7 @@ namespace Util
 		ImGui::PopStyleColor(5);
 
 		std::vector<SettingsSearchDropdownRow> settingRows;
-		if (!searchString.empty() && !s_suppressSettingsDropdown && globals::menu) {
+		if (!searchString.empty() && globals::menu) {
 			settingRows.reserve(16);
 			for (const auto& entry : s_settingsIndex) {
 				if (!Util::StringMatchesSearch(entry.label, searchString) &&
@@ -1352,11 +1378,19 @@ namespace Util
 				SettingsSearchDropdownRow row;
 				row.primary = entry.label;
 				row.secondary = entry.featureName;
-				row.onActivate = entry.focusCallback;
+				row.onActivate = [entry]() {
+					if (auto* menu = Menu::GetSingleton()) {
+						menu->SelectFeatureMenuFromSettingSearch(entry.featureShortName, entry.label);
+					}
+					if (entry.focusCallback) {
+						entry.focusCallback();
+					}
+				};
 				settingRows.push_back(std::move(row));
 			}
 		}
 
+		float targetSlidePx = 0.0f;
 		if (!settingRows.empty()) {
 			const ImVec2 dropdownPos(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y);
 			const float dropdownW = (std::max)(ImGui::GetItemRectSize().x,
@@ -1366,11 +1400,32 @@ namespace Util
 				"##FeatureSettingsSearchDropdown",
 				dropdownPos,
 				dropdownW,
-				settingRows);
-
-			if (outcome == SettingsSearchDropdownOutcome::Dismissed) {
-				s_suppressSettingsDropdown = true;
+				settingRows,
+				false,
+				true);
+			if (outcome == SettingsSearchDropdownOutcome::ItemActivated ||
+				outcome == SettingsSearchDropdownOutcome::Dismissed) {
+				searchString.clear();
 			}
+
+			const auto& style = ImGui::GetStyle();
+			const size_t maxVis = ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_MAX_VISIBLE;
+			const size_t visibleRows = (std::min)(maxVis, settingRows.size());
+			const float rowHeight = ImGui::GetFrameHeightWithSpacing();
+			const bool hasOverflowLine = settingRows.size() > maxVis;
+			const float overflowLineHeight = hasOverflowLine ? (ImGui::GetTextLineHeightWithSpacing() + style.ItemSpacing.y) : 0.0f;
+			targetSlidePx =
+				style.WindowPadding.y * 2.0f +
+				static_cast<float>(visibleRows) * rowHeight +
+				overflowLineHeight +
+				ThemeManager::Constants::FEATURE_LIST_SEARCH_SLIDE_EXTRA_GAP_PX;
+		}
+
+		const float dt = ImGui::GetIO().DeltaTime;
+		const float t = 1.0f - std::exp(-ThemeManager::Constants::FEATURE_LIST_SEARCH_SLIDE_SPEED * dt);
+		s_dropdownSlidePx = ImLerp(s_dropdownSlidePx, targetSlidePx, t);
+		if (s_dropdownSlidePx > 0.5f) {
+			ImGui::Dummy(ImVec2(0.0f, s_dropdownSlidePx));
 		}
 
 		ImGui::PopID();

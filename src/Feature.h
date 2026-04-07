@@ -16,6 +16,7 @@ struct Feature
 		std::string description;
 		std::function<void()> focusCallback;  // Called to focus/highlight this setting in the UI
 		std::string featureName;              // For display context
+		std::string featureShortName;         // Internal short name for feature navigation
 	};
 	// Override in features to expose settings for search
 	virtual std::vector<SettingSearchEntry> GetSettingsSearchEntries() { return {}; }

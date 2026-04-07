@@ -1149,6 +1149,26 @@ void Menu::SelectFeatureMenu(const std::string& featureName)
 	logger::info("Queued navigation to {} feature menu", featureName);
 }
 
+void Menu::SelectFeatureMenuFromSettingSearch(const std::string& featureName, const std::string& settingLabel)
+{
+	pendingFeatureSelection = featureName;
+	pendingFeatureSettingHighlightFeature = featureName;
+	pendingFeatureSettingHighlightLabel = settingLabel;
+	pendingFeatureSettingHighlightStartTime = static_cast<float>(ImGui::GetTime());
+	logger::info("Queued navigation from setting search to {} ({})", featureName, settingLabel);
+}
+
+bool Menu::GetFeatureSearchHighlight(const std::string& featureName, std::string& outLabel, float& outAgeSeconds) const
+{
+	if (pendingFeatureSettingHighlightFeature != featureName || pendingFeatureSettingHighlightLabel.empty()) {
+		return false;
+	}
+
+	outLabel = pendingFeatureSettingHighlightLabel;
+	outAgeSeconds = static_cast<float>(ImGui::GetTime()) - pendingFeatureSettingHighlightStartTime;
+	return true;
+}
+
 /**
  * @brief Renders the standalone weather details window when enabled
  *

@@ -270,10 +270,26 @@ std::vector<FeatureListRenderer::MenuFuncInfo> FeatureListRenderer::BuildMenuLis
 		return a->GetName() < b->GetName();
 	});
 
-	// Filter features by search string
+	// Filter features by search string (feature name OR setting metadata)
 	if (!featureSearch.empty()) {
 		auto it = std::remove_if(sortedFeatureList.begin(), sortedFeatureList.end(),
-			[&featureSearch](Feature* feat) { return !Util::FeatureMatchesSearch(feat, featureSearch); });
+			[&featureSearch](Feature* feat) {
+				if (Util::FeatureMatchesSearch(feat, featureSearch)) {
+					return false;
+				}
+
+				// Fall back to setting-level search so "settings search" still surfaces
+				// the owning feature in the left panel.
+				for (const auto& entry : feat->EnumerateSettingsSearchEntries()) {
+					if (Util::StringMatchesSearch(entry.label, featureSearch) ||
+						Util::StringMatchesSearch(entry.description, featureSearch) ||
+						Util::StringMatchesSearch(entry.featureName, featureSearch)) {
+						return false;
+					}
+				}
+
+				return true;
+			});
 		sortedFeatureList.erase(it, sortedFeatureList.end());
 	}
 
@@ -577,6 +593,16 @@ void FeatureListRenderer::DrawMenuVisitor::operator()(Feature* feat)
 
 		// Render feature header with integrated action buttons
 		RenderFeatureHeader(feat, isDisabled, isLoaded, sceneControlled);
+
+		// Brief breathing cue when arriving from the search bar setting results.
+		std::string highlightLabel;
+		float highlightAge = 0.0f;
+		if (globals::menu && globals::menu->GetFeatureSearchHighlight(featureName, highlightLabel, highlightAge) && highlightAge < 4.0f) {
+			ImGui::PushStyleColor(ImGuiCol_Text, globals::menu->GetTheme().StatusPalette.InfoColor);
+			Util::DrawBreathingText(std::format("Jumped from search: {}", highlightLabel).c_str(), 3.0f, 0.55f, 1.0f);
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+		}
 
 		// Render feature settings content
 		RenderFeatureSettings(feat, isDisabled, isLoaded, hasFailedMessage, sceneControlled);

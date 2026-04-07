@@ -418,6 +418,8 @@ public:
 	ImFont* GetFont(FontRole role) const { return loadedFontRoles[static_cast<size_t>(role)]; }
 
 	void SelectFeatureMenu(const std::string& featureName);
+	void SelectFeatureMenuFromSettingSearch(const std::string& featureName, const std::string& settingLabel);
+	bool GetFeatureSearchHighlight(const std::string& featureName, std::string& outLabel, float& outAgeSeconds) const;
 	static std::unordered_map<std::string, int> categoryCounts;  // Number of features in each feature category
 
 	bool overlayVisible = false;
@@ -482,6 +484,9 @@ private:
 
 	// Menu navigation
 	std::string pendingFeatureSelection;  // Feature to select on next frame
+	std::string pendingFeatureSettingHighlightFeature;
+	std::string pendingFeatureSettingHighlightLabel;
+	float pendingFeatureSettingHighlightStartTime = 0.0f;
 
 	// Input event handling
 	std::vector<KeyEvent> _keyEventQueue;

@@ -43,6 +43,9 @@
 
 #include "State.h"
 
+#include <cctype>
+#include <string_view>
+
 void Feature::Load(json& o_json)
 {
 	// Convert string to wstring
@@ -399,6 +402,60 @@ bool Feature::IsFeatureKnown(const std::string& shortName, REL::Version* outVers
 
 namespace
 {
+	std::string HumanizeSettingLabel(std::string_view raw)
+	{
+		std::string out;
+		out.reserve(raw.size() * 2);
+
+		const auto pushSpace = [&out]() {
+			if (!out.empty() && out.back() != ' ') {
+				out.push_back(' ');
+			}
+		};
+
+		char prev = '\0';
+		for (const char c : raw) {
+			if (c == '_' || c == '-') {
+				pushSpace();
+				prev = c;
+				continue;
+			}
+			if (c == '/') {
+				pushSpace();
+				out.push_back('/');
+				out.push_back(' ');
+				prev = c;
+				continue;
+			}
+			if (std::isupper(static_cast<unsigned char>(c)) &&
+				std::islower(static_cast<unsigned char>(prev))) {
+				pushSpace();
+			}
+			out.push_back(c);
+			prev = c;
+		}
+
+		// Collapse duplicate spaces and trim.
+		std::string trimmed;
+		trimmed.reserve(out.size());
+		bool lastSpace = true;
+		for (char c : out) {
+			if (c == ' ') {
+				if (!lastSpace) {
+					trimmed.push_back(c);
+				}
+				lastSpace = true;
+			} else {
+				trimmed.push_back(c);
+				lastSpace = false;
+			}
+		}
+		while (!trimmed.empty() && trimmed.back() == ' ') {
+			trimmed.pop_back();
+		}
+		return trimmed;
+	}
+
 	void FlattenJsonSettingsKeys(const json& j, const std::string& prefix, std::vector<std::string>& out)
 	{
 		if (j.is_null()) {
@@ -442,6 +499,9 @@ std::vector<Feature::SettingSearchEntry> Feature::EnumerateSettingsSearchEntries
 			if (e.featureName.empty()) {
 				e.featureName = GetName();
 			}
+			if (e.featureShortName.empty()) {
+				e.featureShortName = shortName;
+			}
 			if (!e.focusCallback) {
 				e.focusCallback = [shortName]() {
 					if (auto* menu = Menu::GetSingleton()) {
@@ -465,9 +525,10 @@ std::vector<Feature::SettingSearchEntry> Feature::EnumerateSettingsSearchEntries
 
 	for (const auto& k : keys) {
 		SettingSearchEntry e;
-		e.label = k;
+		e.label = HumanizeSettingLabel(k);
 		e.description = "";
 		e.featureName = displayName;
+		e.featureShortName = shortName;
 		e.focusCallback = [shortName]() {
 			if (auto* menu = Menu::GetSingleton()) {
 				menu->SelectFeatureMenu(shortName);

@@ -208,10 +208,8 @@ public:
 		// Shared settings search dropdown (Weather Editor widgets, feature list search)
 		static constexpr size_t SETTINGS_SEARCH_DROPDOWN_MAX_VISIBLE = 5;
 		static constexpr float SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX = 300.0f;  // Matches legacy weather search popup width
-		/** Lerp factor toward black for dropdown WindowBg (stronger panel over blur). */
-		static constexpr float SETTINGS_SEARCH_DROPDOWN_BG_LERP_TO_BLACK = 0.45f;
-		/** Multiply style alpha toward 1.0 when darkening dropdown background. */
-		static constexpr float SETTINGS_SEARCH_DROPDOWN_BG_ALPHA_BLEND = 0.5f;
+		/** Blend dropdown background alpha toward fully opaque while preserving theme color. */
+		static constexpr float SETTINGS_SEARCH_DROPDOWN_BG_ALPHA_BLEND = 0.95f;
 
 		// Feature list search field (left pane)
 		static constexpr float FEATURE_LIST_SEARCH_ICON_SIZE_PX = 20.0f;
@@ -220,6 +218,12 @@ public:
 		static constexpr float FEATURE_LIST_SEARCH_ICON_ALPHA = 0.7f;
 		/** Multiplier on themed ImGuiCol_FrameBg alpha for the feature list search field. */
 		static constexpr float FEATURE_LIST_SEARCH_FRAME_BG_ALPHA_SCALE = 0.88f;
+		/** Blend factor to push feature search field alpha toward fully opaque. */
+		static constexpr float FEATURE_LIST_SEARCH_FRAME_BG_OPAQUE_BLEND = 0.92f;
+		/** Extra gap under feature search dropdown before list items start. */
+		static constexpr float FEATURE_LIST_SEARCH_SLIDE_EXTRA_GAP_PX = 6.0f;
+		/** Slide responsiveness (higher = faster settle). */
+		static constexpr float FEATURE_LIST_SEARCH_SLIDE_SPEED = 14.0f;
 
 		// Window overlap readability constants
 		static constexpr float OVERLAP_MIN_ALPHA = 0.85f;       // Background alpha when windows overlap

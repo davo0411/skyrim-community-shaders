@@ -66,7 +66,7 @@ void WeatherWidget::DrawWidget()
 			UpdateSearchResults();
 		}
 
-		// Show search results dropdown (shared styling with Community Shaders feature list search)
+		// Show search results dropdown
 		if (searchBuffer[0] != '\0' && !searchResults.empty()) {
 			std::vector<Util::SettingsSearchDropdownRow> rows;
 			rows.reserve(searchResults.size());
