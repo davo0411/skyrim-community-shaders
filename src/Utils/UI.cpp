@@ -1357,6 +1357,8 @@ namespace Util
 		if (ImGui::InputTextWithHint("##feature_search", "Search Settings/Features", buffer, sizeof(buffer))) {
 			searchString = buffer;
 		}
+		const bool searchFieldInteracting = ImGui::IsItemFocused() || ImGui::IsItemActive() ||
+			ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
 		const float iconPosX = cursorPos.x + ThemeManager::Constants::FEATURE_LIST_SEARCH_ICON_OFFSET_X;
 		const float iconPosY = cursorPos.y + (frameHeight - iconSize) * 0.5f;
@@ -1396,15 +1398,20 @@ namespace Util
 			const float dropdownW = (std::max)(ImGui::GetItemRectSize().x,
 				ThemeManager::Constants::SETTINGS_SEARCH_DROPDOWN_BASE_WIDTH_PX * Util::GetUIScale());
 
+			bool dropdownInteractingNow = false;
 			const auto outcome = DrawSettingsSearchResultsDropdown(
 				"##FeatureSettingsSearchDropdown",
 				dropdownPos,
 				dropdownW,
 				settingRows,
 				false,
-				true);
-			if (outcome == SettingsSearchDropdownOutcome::ItemActivated ||
-				outcome == SettingsSearchDropdownOutcome::Dismissed) {
+				false,
+				&dropdownInteractingNow);
+			if (outcome == SettingsSearchDropdownOutcome::ItemActivated) {
+				searchString.clear();
+			} else if (outcome == SettingsSearchDropdownOutcome::Dismissed ||
+					   ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+					   (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !searchFieldInteracting && !dropdownInteractingNow)) {
 				searchString.clear();
 			}
 
