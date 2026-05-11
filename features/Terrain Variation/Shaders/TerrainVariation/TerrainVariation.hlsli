@@ -104,7 +104,8 @@ inline StochasticOffsets ComputeStochasticOffsets(float2 landscapeUV)
 
 inline StochasticOffsets ComputeStochasticOffsetsLOD(float2 landscapeUV)
 {
-	if (!SharedData::terrainVariationSettings.enableLODTerrainTilingFix)
+	if (!SharedData::terrainVariationSettings.enableTerrainVariation ||
+		!SharedData::terrainVariationSettings.enableLODTerrainTilingFix)
 		return (StochasticOffsets)0;
 
 	float2 cellID = floor(landscapeUV * 255437.0);
@@ -141,9 +142,13 @@ inline float StochasticContrastWeight(float weight)
 }
 
 // LOD terrain stochastic sampling — 2 SampleBias, fixed blend (pass jitter from StochasticSampleLODJitter(screenNoise)).
+// Falls back to a single SampleBias when either the master TV switch or the LOD subtoggle is off.
 inline float4 StochasticSampleLOD(float2 jitter, Texture2D tex, SamplerState samp, float2 uv, StochasticOffsets offsetsLOD)
 {
-	float lodOn = SharedData::terrainVariationSettings.enableLODTerrainTilingFix ? 1.0 : 0.0;
+	float lodOn = (SharedData::terrainVariationSettings.enableTerrainVariation &&
+					  SharedData::terrainVariationSettings.enableLODTerrainTilingFix) ?
+	                  1.0 :
+	                  0.0;
 	float2 j1 = (offsetsLOD.offset1 + jitter) * 0.01;
 	float2 j2 = (offsetsLOD.offset2 + float2(jitter.y, -jitter.x)) * 0.01;
 	float4 s1 = tex.SampleBias(samp, uv + j1 * lodOn, SharedData::MipBias);
@@ -208,9 +213,13 @@ inline float4 StochasticEffectParallax(Texture2D tex, SamplerState samp, float2 
 	return blended;
 }
 
+// Unified entry point used by Lighting / LightingLandscape macros. Branches at runtime so a single
+// LANDSCAPE shader permutation services both the stochastic and vanilla-bias sampling paths.
 inline float4 SampleTerrain(Texture2D tex, SamplerState samp, float2 uv, StochasticOffsets offsets, float extraLandMipBias)
 {
-	return StochasticEffect(tex, samp, uv, offsets, extraLandMipBias);
+	[branch] if (SharedData::terrainVariationSettings.enableTerrainVariation)
+		return StochasticEffect(tex, samp, uv, offsets, extraLandMipBias);
+	return tex.SampleBias(samp, uv, SharedData::MipBias + extraLandMipBias);
 }
 
 #endif  // TERRAIN_VARIATION_HLSLI

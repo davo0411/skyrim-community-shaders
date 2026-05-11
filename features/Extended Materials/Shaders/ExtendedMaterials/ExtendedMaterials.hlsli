@@ -12,7 +12,8 @@
 #define EXTENDED_MATERIALS_HLSLI
 
 // Terrain variation: optional feature pack — include only when macro + headers ship together.
-// When absent, stub `StochasticOffsets` so EMAT terrain APIs stay unified (offsets ignored on SampleLevel path).
+// When absent, stub `StochasticOffsets`, `SampleTerrain`, and `ComputeStochasticOffsets` so the
+// LANDSCAPE pixel path compiles to a single permutation that mirrors the vanilla sampling behaviour.
 #	if defined(LANDSCAPE)
 #		if defined(TERRAIN_VARIATION)
 #			include "TerrainVariation/TerrainVariation.hlsli"
@@ -24,6 +25,11 @@ struct StochasticOffsets
 	float2 offset3;
 	float3 weights;
 };
+inline StochasticOffsets ComputeStochasticOffsets(float2 landscapeUV) { return (StochasticOffsets)0; }
+inline float4 SampleTerrain(Texture2D tex, SamplerState samp, float2 uv, StochasticOffsets offsets, float extraLandMipBias)
+{
+	return tex.SampleBias(samp, uv, SharedData::MipBias + extraLandMipBias);
+}
 #		endif
 #	endif
 

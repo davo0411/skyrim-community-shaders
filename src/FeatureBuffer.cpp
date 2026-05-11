@@ -46,7 +46,7 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::cloudShadows.settings,
 		globals::features::lodBlending.settings,
 		globals::features::hairSpecular.settings,
-		globals::features::terrainVariation.settings,
+		globals::features::terrainVariation.GetCommonBufferData(),
 		globals::features::ibl.GetCommonBufferData(),
 		globals::features::extendedTranslucency.GetCommonBufferData(),
 		globals::features::linearLighting.GetCommonBufferData(),

@@ -13,14 +13,16 @@
 		mipLevels[5] = GetMipLevel(coords, TexLandColor6Sampler);
 	}
 
-	// Offsets are ignored when TERRAIN_VARIATION is unset (SampleLevel path).
+	// Offsets are zero-initialised when the TerrainVariation feature isn't installed (no TERRAIN_VARIATION
+	// include) and the runtime branch is also pruned in that build. When the feature is installed, the
+	// branch picks between stochastic and vanilla sampling without recompiling.
 	inline float4 TerrainParallaxTexSample(Texture2D tex, float2 uv, float mipLevel, StochasticOffsets sharedOffset)
 	{
 #	if defined(TERRAIN_VARIATION)
-		return StochasticEffectParallax(tex, SampTerrainParallaxSampler, uv, mipLevel, sharedOffset);
-#	else
-		return tex.SampleLevel(SampTerrainParallaxSampler, uv, mipLevel);
+		[branch] if (SharedData::terrainVariationSettings.enableTerrainVariation)
+			return StochasticEffectParallax(tex, SampTerrainParallaxSampler, uv, mipLevel, sharedOffset);
 #	endif
+		return tex.SampleLevel(SampTerrainParallaxSampler, uv, mipLevel);
 	}
 
 #	define HEIGHT_POWER 2
