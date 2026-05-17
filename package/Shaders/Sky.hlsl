@@ -201,6 +201,11 @@ Texture2D<float> TexDepthSampler : register(t17);
 PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
+#	ifdef HDR_OUTPUT
+	// Computed from unboosted sun color; applied after depth/cloud occlusion (see end of main).
+	float hdrSunGain = 1.0f;
+	bool applyHdrSunBoost = false;
+#	endif
 	// Color::Sky is float3->float3 (per-channel sky gamma). PParams.yyy broadcasts the packed
 	// scalar in PParams.y to RGB; float3 matches output .xyz where skyScale is added.
 	float3 skyScale = Color::Sky(PParams.yyy);
@@ -226,25 +231,13 @@ PS_OUTPUT main(PS_INPUT input)
 #		endif
 
 #		ifdef HDR_OUTPUT
-	float hdrSunGain = HDRSun::GetHdrSunGain(
-		input.TexCoord0.xy,
-		baseColor);
-	baseColor.xyz *= hdrSunGain;
 	if (HDRSun::IsHdrSunActive()) {
-		// Dither bright output to reduce banding in high-boost sun path.
-		// Same baseColor/skyScale treatment for DITHER and non-DITHER; DITHER adds noiseGrad later.
-		baseColor.xyz += (Random::InterleavedGradientNoise(input.Position.xy) - 0.5f) *
-		                 (saturate(hdrSunGain - 1.0f) / 255.0f);
+		hdrSunGain = HDRSun::GetHdrSunGain(
+			input.TexCoord0.xy,
+			baseColor);
+		applyHdrSunBoost = true;
 		skyScale = 0.0f;
 	}
-
-#			if defined(CLOUD_SHADOWS)
-	if (HDRSun::IsHdrSunActive()) {
-		float cloudMult = CloudShadows::GetCloudShadowMult(input.WorldPosition.xyz, SampBaseSampler);
-		baseColor.xyz *= cloudMult;
-		baseColor.w *= cloudMult;
-	}
-#			endif
 #		endif
 
 #		if defined(DITHER)
@@ -301,6 +294,22 @@ PS_OUTPUT main(PS_INPUT input)
 		float depth = TexDepthSampler.Load(int3(input.Position.xy, 0));
 		if (depth < input.Position.z)
 			psout.Color.w = 0;
+	}
+#	endif
+
+#	ifdef HDR_OUTPUT
+	// Match SDR occlusion: build sun at scene brightness, mask by depth/clouds, then boost.
+	if (applyHdrSunBoost) {
+#		if defined(CLOUD_SHADOWS)
+		{
+			float cloudMult = CloudShadows::GetCloudShadowMult(input.WorldPosition.xyz, SampBaseSampler);
+			psout.Color.xyz *= cloudMult;
+			psout.Color.w *= cloudMult;
+		}
+#		endif
+		psout.Color.xyz *= hdrSunGain;
+		psout.Color.xyz += (Random::InterleavedGradientNoise(input.Position.xy) - 0.5f) *
+		                 (saturate(hdrSunGain - 1.0f) / 255.0f);
 	}
 #	endif
 
