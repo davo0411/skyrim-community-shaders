@@ -104,6 +104,52 @@ namespace ExtendedMaterials
 		return floor(mipLevel);
 	}
 
+	// SSDM seed (Lobel 2008, §2.2): project the displacement into screen space as a duv vector.
+	// POM-style tangent step (Vt.xy / |Vt.z|) -> world-space offset -> screen UV delta. The forward
+	// Lighting pass writes this into the SSDM displacement RT; it is metadata for the screen-space
+	// silhouette extrusion ONLY and never feeds the texture-space POM lookup (no double-apply).
+	// Callers pass surface -> camera (Lighting `viewDirection`).
+	void ComputeDisplacementDuvAndOffsetVS(float3 viewPosVS, float3 viewDirWorld, float3 tbnTr0, float3 tbnTr1, float3 tbnTr2,
+		float height, float displacementScale, uint eyeIndex, out float2 duv)
+	{
+		float h = height;
+
+		float3 Tw = normalize(tbnTr0);
+		float3 Bw = normalize(tbnTr1);
+		float3 Nw = normalize(tbnTr2);
+		float3 Vw = -normalize(viewDirWorld);
+
+		float3 Vt;
+		Vt.x = dot(Vw, Tw);
+		Vt.y = dot(Vw, Bw);
+		Vt.z = dot(Vw, Nw);
+
+		// Use |Vt.z| so parallaxDir does not flip sign when the view passes below the tangent plane (Vt.z < 0).
+		float zn = max(abs(Vt.z), 1e-5);
+		float2 parallaxDir = Vt.xy / zn;
+
+		static const float kLegacyNormalPush = 32.0;
+		static const float kDefaultDisplacementScale = 0.05;
+		static const float kTangentParallaxAmpScale = 0.22;
+		float amp = h * displacementScale * (kLegacyNormalPush / kDefaultDisplacementScale) * kTangentParallaxAmpScale;
+		// Keep SSDM apparent height stable across dynamic resolution tiers (DLAA -> DLSS perf).
+		// Without this, lower internal resolution over-amplifies the screen-space displacement footprint.
+		float drScale = saturate(sqrt(FrameBuffer::DynamicResolutionParams1.x * FrameBuffer::DynamicResolutionParams1.y));
+		amp *= drScale;
+
+		float3 worldOff = -(Tw * parallaxDir.x + Bw * parallaxDir.y) * amp;
+		float3 offsetFull = FrameBuffer::WorldToView(worldOff, false, eyeIndex);
+		duv = FrameBuffer::ViewToUV(viewPosVS + offsetFull, true, eyeIndex) - FrameBuffer::ViewToUV(viewPosVS, true, eyeIndex);
+	}
+
+	float2 ComputeDisplacementVector(float3 viewPosVS, float3 viewDirWorld, float3 tbnTr0, float3 tbnTr1, float3 tbnTr2,
+		float height, float displacementScale, uint eyeIndex)
+	{
+		float2 duv;
+		ComputeDisplacementDuvAndOffsetVS(viewPosVS, viewDirWorld, tbnTr0, tbnTr1, tbnTr2, height, displacementScale, eyeIndex, duv);
+		return duv;
+	}
+
 #	if defined(LANDSCAPE)
 #		include "ExtendedMaterials/ExtendedMaterialsTerrain.hlsli"
 #	endif

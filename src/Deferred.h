@@ -11,6 +11,9 @@
 #define NORMALROUGHNESS RE::RENDER_TARGETS::kRAWINDIRECT_DOWNSCALED
 #define MASKS RE::RENDER_TARGETS::kRAWINDIRECT_PREVIOUS
 #define MASKS2 RE::RENDER_TARGETS::kRAWINDIRECT_PREVIOUS_DOWNSCALED
+// SSDM seed RT: reuse the scratch swap slot (deferred MRT slot 7) for the per-pixel displacement (duv)
+// the silhouette pass consumes. Free in the flat non-SNOW deferred path; VR/SNOW keep slot 7 for their own use.
+#define SSDM_DISPLACEMENT RE::RENDER_TARGETS::kRAWINDIRECT_SWAP
 
 class Deferred
 {
@@ -68,6 +71,10 @@ public:
 
 	ID3D11SamplerState* linearSampler = nullptr;
 	ID3D11SamplerState* pointSampler = nullptr;
+
+	// Snapshot of kMAIN taken before the composite when silhouette extrusion is on, so the remap can
+	// read already-lit color at the displaced source without reading+writing kMAIN in place.
+	eastl::unique_ptr<Texture2D> texMainCopy;
 
 private:
 	template <typename T>

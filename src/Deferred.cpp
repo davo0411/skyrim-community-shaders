@@ -7,6 +7,7 @@
 #include "Utils/D3D.h"
 
 #include "Features/DynamicCubemaps.h"
+#include "Features/ExtendedMaterials.h"
 #include "Features/IBL.h"
 #include "Features/ScreenSpaceGI.h"
 #include "Features/Skylighting.h"
@@ -110,9 +111,26 @@ void Deferred::SetupResources()
 		// Masks
 		SetupRenderTarget(MASKS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
 
+		// SSDM displacement seed (deferred MRT slot 7). ExtendedMaterials::RegisterDisplacementRT()
+		// repoints this slot at its own mip-chained texture each frame; this just initialises the slot.
+		SetupRenderTarget(SSDM_DISPLACEMENT, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+
 		// TAA Water Buffers
 		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_1, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
 		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_2, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+	}
+
+	{
+		auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+		D3D11_TEXTURE2D_DESC texDesc{};
+		main.texture->GetDesc(&texDesc);
+		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+		texMainCopy = eastl::make_unique<Texture2D>(texDesc);
+		texMainCopy->CreateSRV(D3D11_SHADER_RESOURCE_VIEW_DESC{
+			.Format = texDesc.Format,
+			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
+			.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 } });
 	}
 
 	{
@@ -235,6 +253,13 @@ void Deferred::StartDeferred()
 		forwardRenderTargets[i] = renderTargets[i];
 	}
 
+	auto& extendedMaterials = globals::features::extendedMaterials;
+	const bool ssdmActive = extendedMaterials.loaded && extendedMaterials.SilhouetteActive();
+	if (ssdmActive)
+		extendedMaterials.RegisterDisplacementRT();
+
+	// Slot 7 is the SSDM displacement seed only when silhouette extrusion is enabled (flat path);
+	// otherwise it stays kNONE so SNOW (SV_Target7 = Parameters) and VR (u7 = PomOffset) are untouched.
 	RE::RENDER_TARGET targets[8]{
 		RE::RENDER_TARGET::kMAIN,
 		RE::RENDER_TARGET::kMOTION_VECTOR,
@@ -243,7 +268,7 @@ void Deferred::StartDeferred()
 		SPECULAR,
 		REFLECTANCE,
 		MASKS,
-		RE::RENDER_TARGET::kNONE
+		ssdmActive ? SSDM_DISPLACEMENT : RE::RENDER_TARGET::kNONE
 	};
 
 	for (uint i = 2; i < 8; i++) {
@@ -261,6 +286,10 @@ void Deferred::StartDeferred()
 		// Clear POM offset texture to -1.0 sentinel so pixels the Lighting PS never touches read "no POM"
 		if (globals::features::vr.stereoOpt.loaded)
 			globals::features::vr.stereoOpt.ClearPomOffsetTexture();
+
+		// Clear the SSDM seed to 0 (no displacement) so pixels the Lighting PS never touches read "no extrusion".
+		if (ssdmActive)
+			extendedMaterials.ClearDisplacementTexture();
 
 		ID3D11Buffer* buffers[1] = { *globals::game::perFrame.get() };
 
@@ -347,6 +376,9 @@ void Deferred::DeferredPasses()
 
 	auto& ibl = globals::features::ibl;
 
+	auto& extendedMaterials = globals::features::extendedMaterials;
+	extendedMaterials.DrawSSDM();
+
 	// Deferred Composite
 	{
 		TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
@@ -383,6 +415,20 @@ void Deferred::DeferredPasses()
 		ID3D11ShaderResourceView* modeSRV = stereoCullingReady ? vrStereoOpt.GetModeTextureSRV() : nullptr;
 		context->CSSetShaderResources(16, 1, &modeSRV);
 
+		// SSDM silhouette: solved fetch-UV (t17) + a snapshot of already-lit kMAIN (t18) so the remap
+		// reads lit color at the displaced source. Only bound (and only compiled into the shader) when active.
+		ID3D11ShaderResourceView* ssdmSRV = extendedMaterials.GetSSDMOffsetSRV();
+		context->CSSetShaderResources(17, 1, &ssdmSRV);
+
+		ID3D11ShaderResourceView* displacementSeedSRV = extendedMaterials.GetDisplacementSeedSRV();
+		context->CSSetShaderResources(19, 1, &displacementSeedSRV);
+
+		if (extendedMaterials.loaded && extendedMaterials.SilhouetteActive() && texMainCopy) {
+			context->CopyResource(texMainCopy->resource.get(), main.texture);
+			ID3D11ShaderResourceView* mainCopySRV = texMainCopy->srv.get();
+			context->CSSetShaderResources(18, 1, &mainCopySRV);
+		}
+
 		ID3D11UnorderedAccessView* uavs[3]{ main.UAV, normals.UAV, motionVectors.UAV };
 		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
@@ -396,9 +442,9 @@ void Deferred::DeferredPasses()
 			globals::profiler->EndPass();
 		}
 
-		// Unbind mode texture SRV
-		ID3D11ShaderResourceView* nullSRV = nullptr;
-		context->CSSetShaderResources(16, 1, &nullSRV);
+		// Unbind mode + SSDM SRVs (16..19)
+		ID3D11ShaderResourceView* nullSRVs[4]{ nullptr, nullptr, nullptr, nullptr };
+		context->CSSetShaderResources(16, 4, nullSRVs);
 	}
 
 	// VR: Deactivate stencil culling now that geometry rendering is complete.
@@ -514,6 +560,10 @@ void Deferred::OverrideBlendStates()
 								blendDesc.RenderTarget[i].BlendOpAlpha = D3D11_BLEND_OP_ADD;
 								blendDesc.RenderTarget[i].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 							}
+
+							// SSDM displacement seed (RT7) must overwrite, never blend, or the duv field is corrupted.
+							blendDesc.RenderTarget[7].BlendEnable = FALSE;
+							blendDesc.RenderTarget[7].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 
 							DX::ThrowIfFailed(device->CreateBlendState(&blendDesc, &deferredBlendStates[a][b][c][d]));
 						} else {
@@ -646,6 +696,9 @@ ID3D11ComputeShader* Deferred::GetComputeMainComposite()
 		if (globals::features::terrainBlending.loaded)
 			defines.push_back({ "TERRAIN_BLENDING", nullptr });
 
+		if (globals::features::extendedMaterials.loaded && globals::features::extendedMaterials.SilhouetteActive())
+			defines.push_back({ "SSDM", nullptr });
+
 		mainCompositeCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\DeferredCompositeCS.hlsl", defines, "cs_5_0"));
 	}
 	return mainCompositeCS;
@@ -678,6 +731,9 @@ ID3D11ComputeShader* Deferred::GetComputeMainCompositeInterior()
 		// (R24_UNORM_X8_TYPELESS game depth) to `Texture2D<float>` (R32_FLOAT blendedDepth).
 		if (globals::features::terrainBlending.loaded)
 			defines.push_back({ "TERRAIN_BLENDING", nullptr });
+
+		if (globals::features::extendedMaterials.loaded && globals::features::extendedMaterials.SilhouetteActive())
+			defines.push_back({ "SSDM", nullptr });
 
 		mainCompositeInteriorCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\DeferredCompositeCS.hlsl", defines, "cs_5_0"));
 	}

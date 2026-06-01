@@ -346,6 +346,12 @@ struct PS_OUTPUT
 	float4 Masks: SV_Target6;
 #	if defined(SNOW)
 	float4 Parameters: SV_Target7;
+	// Mirror the EMAT condition from the PSHADER body (EMAT is #defined later, after this struct, so it
+	// cannot be tested here). Must stay in sync or psout.SSDMDisplacement is an invalid subscript.
+#	elif defined(EXTENDED_MATERIALS) && !defined(LOD) && (defined(PARALLAX) || defined(LANDSCAPE) || defined(ENVMAP) || defined(TRUE_PBR))
+	// SSDM silhouette seed: RG = screen-space duv, B = coverage. Slot 7 is only bound when silhouette
+	// extrusion is active (flat, non-SNOW); otherwise the write is discarded.
+	float4 SSDMDisplacement: SV_Target7;
 #	endif
 };
 #else
@@ -1026,6 +1032,23 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	if defined(EMAT)
 	float parallaxShadowQuality = viewPosition.z < ExtendedMaterials::ParallaxCheapDistance ? ExtendedMaterials::ParallaxNearShadowQuality : ExtendedMaterials::ParallaxFarShadowQuality;
 	float terrainDirectionalShadowQuality = parallaxShadowQuality;
+	// SSDM seed state: amplitude follows material data (ParallaxOccData, PBRParams1.y, terrain HeightScale).
+	float3 ssdmViewDir = viewDirection;
+	float ssdmHeight = 0.0;
+	float ssdmDispScale = 0.0;
+	bool ssdmActive = false;
+	static const float kEmatAuthoredDispRef = 0.05;
+	float ematDispMult = max(SharedData::extendedMaterialSettings.SilhouetteScale, 0.01);
+#		if defined(LANDSCAPE)
+	float ematTerrainDispMag = kEmatAuthoredDispRef * ematDispMult;
+#		endif
+#		if !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
+#			if !defined(TRUE_PBR)
+	float ematMeshDispMag = kEmatAuthoredDispRef * ematDispMult * max(ParallaxOccData.x, 1e-4);
+#			else
+	float ematMeshDispMag = kEmatAuthoredDispRef * ematDispMult;
+#			endif
+#		endif
 #		if defined(LANDSCAPE)
 	terrainDirectionalShadowQuality = ExtendedMaterials::ParallaxNearShadowQuality;
 #		endif
@@ -1060,9 +1083,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif  // LANDSCAPE
 	float sh0 = 0;
 	float pixelOffset = 0;
-#	if defined(VR_STEREO_OPT) && !defined(SNOW)
+	// hasPOM: did the parallax march actually run for this pixel? Used by the VR stereo POM-offset
+	// write and by the SSDM silhouette seed; declared unconditionally so both consumers compile.
 	bool hasPOM = false;
-#	endif
 
 #	if defined(EMAT)
 #		if defined(LANDSCAPE)
@@ -1123,12 +1146,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		if defined(PARALLAX) && (defined(SKINNED) || !defined(MODELSPACENORMALS))
 	if (SharedData::extendedMaterialSettings.EnableParallax) {
 		mipLevel = ExtendedMaterials::GetMipLevel(uv, TexParallaxSampler);
-		uv = ExtendedMaterials::GetParallaxCoords(uv, mipLevel, viewDirection, tbnTr, screenNoise, TexParallaxSampler, SampParallaxSampler, 0, displacementParams, pixelOffset
-#			if defined(VR_STEREO_OPT) && !defined(SNOW)
-			,
-			hasPOM
+#			if !defined(TRUE_PBR)
+		// Vanilla parallax height lives in alpha; pixelOffset is the ray-march t, not relief height.
+		float height = TexParallaxSampler.SampleLevel(SampParallaxSampler, uv, mipLevel).w;
+		height = ExtendedMaterials::AdjustDisplacementNormalized(height, displacementParams);
+		ssdmActive = true;
+		ssdmHeight = height - 0.5;
+		ssdmDispScale = ematMeshDispMag;
 #			endif
-		);
+		uv = ExtendedMaterials::GetParallaxCoords(uv, mipLevel, viewDirection, tbnTr, screenNoise, TexParallaxSampler, SampParallaxSampler, 0, displacementParams, pixelOffset,
+			hasPOM);
 		if (SharedData::extendedMaterialSettings.EnableShadows && parallaxShadowQuality > 0.0)
 			sh0 = TexParallaxSampler.SampleLevel(SampParallaxSampler, uv, mipLevel).x;
 	}
@@ -1156,12 +1183,17 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			if (envMaskSample.w > kMaskEpsilon && envMaskSample.w < (1.0 - kMaskEpsilon)) {
 				complexMaterialParallax = true;
 				mipLevel = ExtendedMaterials::GetMipLevel(uv, TexEnvMaskSampler);
-				uv = ExtendedMaterials::GetParallaxCoords(uv, mipLevel, viewDirection, tbnTr, screenNoise, TexEnvMaskSampler, SampTerrainParallaxSampler, 3, displacementParams, pixelOffset
-#			if defined(VR_STEREO_OPT) && !defined(SNOW)
-					,
-					hasPOM
-#			endif
-				);
+				float cmHeight = TexEnvMaskSampler.SampleLevel(SampEnvMaskSampler, uv, mipLevel).w;
+				cmHeight = ExtendedMaterials::AdjustDisplacementNormalized(cmHeight, displacementParams);
+				ssdmActive = true;
+				ssdmHeight = cmHeight - 0.5;
+#				if defined(LANDSCAPE)
+				ssdmDispScale = ematTerrainDispMag;
+#				else
+				ssdmDispScale = ematMeshDispMag;
+#				endif
+				uv = ExtendedMaterials::GetParallaxCoords(uv, mipLevel, viewDirection, tbnTr, screenNoise, TexEnvMaskSampler, SampTerrainParallaxSampler, 3, displacementParams, pixelOffset,
+					hasPOM);
 				if (SharedData::extendedMaterialSettings.EnableShadows && parallaxShadowQuality > 0.0)
 					sh0 = TexEnvMaskSampler.SampleLevel(SampEnvMaskSampler, uv, mipLevel).w;
 				complexMaterialColor = TexEnvMaskSampler.Sample(SampEnvMaskSampler, uv);
@@ -1208,12 +1240,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			displacementParams.HeightScale *= PBRParams1.y;
 		}
 		mipLevel = ExtendedMaterials::GetMipLevel(uv, TexParallaxSampler);
-		uv = ExtendedMaterials::GetParallaxCoords(uv, mipLevel, refractedViewDirection, tbnTr, screenNoise, TexParallaxSampler, SampParallaxSampler, 0, displacementParams, pixelOffset
-#				if defined(VR_STEREO_OPT) && !defined(SNOW)
-			,
-			hasPOM
-#				endif
-		);
+		float pbrHeight = TexParallaxSampler.SampleLevel(SampParallaxSampler, uv, mipLevel).x;
+		pbrHeight = ExtendedMaterials::AdjustDisplacementNormalized(pbrHeight, displacementParams);
+		const float pbrRelief = (pbrHeight - 0.5) * PBRParams1.y;
+		ssdmActive = true;
+		ssdmViewDir = refractedViewDirection;
+		ssdmHeight = pbrRelief;
+		ssdmDispScale = ematMeshDispMag;
+		uv = ExtendedMaterials::GetParallaxCoords(uv, mipLevel, refractedViewDirection, tbnTr, screenNoise, TexParallaxSampler, SampParallaxSampler, 0, displacementParams, pixelOffset,
+			hasPOM);
 		if (SharedData::extendedMaterialSettings.EnableShadows && parallaxShadowQuality > 0.0)
 			sh0 = TexParallaxSampler.SampleLevel(SampParallaxSampler, uv, mipLevel).x;
 	}
@@ -1285,9 +1320,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		// Initialize weights array
 		weights[0] = weights[1] = weights[2] = weights[3] = weights[4] = weights[5] = 0.0;
 		uv = ExtendedMaterials::GetParallaxCoords(input, uv, mipLevels, viewDirection, tbnTr, screenNoise, displacementParams, sharedOffset, pixelOffset,
-#				if defined(VR_STEREO_OPT) && !defined(SNOW)
 			hasPOM,
-#				endif
 			weights);
 		if (SharedData::extendedMaterialSettings.EnableHeightBlending) {
 			input.LandBlendWeights1.x = weights[0];
@@ -1296,6 +1329,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			input.LandBlendWeights1.w = weights[3];
 			input.LandBlendWeights2.x = weights[4];
 			input.LandBlendWeights2.y = weights[5];
+		}
+		{
+			float terrainHeight = ExtendedMaterials::GetTerrainHeight(screenNoise, input, uv, mipLevels, displacementParams, 1.0, input.LandBlendWeights1, input.LandBlendWeights2.xy, sharedOffset, weights);
+			ssdmActive = true;
+			ssdmHeight = terrainHeight;
+			ssdmDispScale = ematTerrainDispMag;
 		}
 		if (SharedData::extendedMaterialSettings.EnableShadows && terrainDirectionalShadowQuality > 0.0) {
 			float3 dirLightDirectionTS = mul(DirLightDirection, tbn).xyz;
@@ -2821,6 +2860,17 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.Parameters.x = Color::RGBToLuminanceAlternative(lightsSpecularColor);
 #			endif
 	psout.Parameters.w = psout.Diffuse.w;
+#		elif defined(EMAT)
+	// SSDM seed: project the POM displacement into a screen-space duv for the silhouette pass.
+	// This is metadata ONLY - it never feeds the texture-space POM UV lookup, so the parallax interior
+	// is byte-for-byte unchanged and the two-sample blend is untouched. Coverage (B) gates the solve.
+	float4 ssdmPack = float4(0, 0, 0, 0);
+	[branch] if (ssdmActive && SharedData::extendedMaterialSettings.EnableSilhouette) {
+		float2 duv = ExtendedMaterials::ComputeDisplacementVector(
+			viewPosition, ssdmViewDir, tbnTr[0], tbnTr[1], tbnTr[2], ssdmHeight, ssdmDispScale, eyeIndex);
+		ssdmPack = float4(duv, 1.0, 0.0);
+	}
+	psout.SSDMDisplacement = ssdmPack;
 #		endif
 
 	float masksZ = Color::RGBToYCoCg(directionalAmbientColor).x;

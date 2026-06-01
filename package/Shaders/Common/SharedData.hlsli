@@ -53,7 +53,8 @@ namespace SharedData
 		bool EnableHeightBlending;
 		bool EnableShadows;
 		bool EnableParallaxWarpingFix;
-		uint2 pad0;
+		bool EnableSilhouette;   // SSDM screen-space silhouette extrusion
+		float SilhouetteScale;   // x authored displacement height for the extruded skirt
 	};
 
 	struct CubemapCreatorSettings

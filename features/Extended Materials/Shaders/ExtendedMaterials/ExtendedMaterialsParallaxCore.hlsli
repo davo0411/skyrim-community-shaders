@@ -7,23 +7,15 @@
 	float2 GetParallaxCoords(PS_INPUT input, float2 coords, float mipLevels[6], float3 viewDir, float3x3 tbn, float noise, DisplacementParams params[6],
 		StochasticOffsets sharedOffset,
 		out float pixelOffset,
-#	if defined(VR_STEREO_OPT)
 		out bool hasPOM,
-#	endif
 		out float weights[6])
 #else
-	float2 GetParallaxCoords(float2 coords, float mipLevel, float3 viewDir, float3x3 tbn, float noise, Texture2D<float4> tex, SamplerState texSampler, uint channel, DisplacementParams params, out float pixelOffset
-#	if defined(VR_STEREO_OPT)
-		,
-		out bool hasPOM
-#	endif
-	)
+	float2 GetParallaxCoords(float2 coords, float mipLevel, float3 viewDir, float3x3 tbn, float noise, Texture2D<float4> tex, SamplerState texSampler, uint channel, DisplacementParams params, out float pixelOffset,
+		out bool hasPOM)
 #endif
 	{
 		pixelOffset = 0.0;
-#if defined(VR_STEREO_OPT)
 		hasPOM = false;
-#endif
 		float3 viewDirTS = normalize(mul(tbn, viewDir));
 #if defined(LANDSCAPE)
 		viewDirTS.xy /= viewDirTS.z * 0.7 + 0.3 + params[0].FlattenAmount;  // Fix for objects at extreme viewing angles
@@ -113,7 +105,7 @@
 			uint numSteps = max(minSteps, (uint)(scale * baseMaxSteps * angleStepMul * distStepScale));
 			numSteps = min(numSteps, maxStepsCap);
 			numSteps = (numSteps + 2) & ~3;
-
+	
 			// 5 secant iterations near camera, down to ~3 at distance (matches step ramp).
 			uint secantIters = (uint)(lerp(2.0, 5.0, distStepScale) + 0.5);
 
@@ -237,9 +229,7 @@
 
 			float offset = (1.0 - parallaxAmount) * -maxHeight + minHeight;
 			pixelOffset = saturate(parallaxAmount);
-#if defined(VR_STEREO_OPT)
 			hasPOM = true;
-#endif
 			return viewDirTS.xy * offset + coords.xy;
 		}
 	}

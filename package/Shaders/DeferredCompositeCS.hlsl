@@ -31,6 +31,15 @@ Texture2D<unorm float> DepthTexture : register(t4);
 Texture2D<uint> StereoOptModeTexture : register(t16);
 #endif
 
+#if defined(SSDM)
+// SSDM solve output: RG = absolute source fetch-UV, Z = valid, W = source coverage.
+Texture2D<float4> SSDMOffsetTexture : register(t17);
+// Snapshot of already-lit kMAIN, so the silhouette skirt reads lit color at the displaced source.
+Texture2D<float4> MainCopyTexture : register(t18);
+// Mip0 seed from Lighting: RG = duv, B = coverage. Dest coverage==0 => skirt target (sky/background).
+Texture2D<float4> DisplacementSeedTexture : register(t19);
+#endif
+
 #if defined(DYNAMIC_CUBEMAPS)
 Texture2D<float3> ReflectanceTexture : register(t5);
 TextureCube<float3> EnvTexture : register(t6);
@@ -113,19 +122,95 @@ void SampleSSGISpecular(uint2 pixCoord, sh2 lobe, inout float ao, out float3 il,
 
 	uv = Stereo::ConvertFromStereoUV(uv, eyeIndex);
 
-	float3 normalGlossiness = NormalRoughnessTexture[dispatchID.xy];
+	float depth = DepthTexture[dispatchID.xy];
+
+	uint2 gbufferCoord = dispatchID.xy;
+#if defined(SSDM)
+	bool ssdmRemapped = false;
+	uint2 ssdmRemapCoord = dispatchID.xy;
+	// Option B (Lobel SSDM, silhouette-only): the texture-space POM already shaded the interior at
+	// dispatchID.xy. Here we ONLY remap a pixel to a foreground source when that source is a NEARER
+	// surface overtaking this one (a true silhouette skirt). Interior pixels resolve to a same-surface
+	// texel at ~equal depth -> gate fails -> POM kept, so flat surfaces are never screen-space resampled
+	// (no swimming) and there is no double-apply (interior=POM, skirt=SSDM are disjoint pixel sets).
+	// Sky is a valid destination: validity/coverage come from the solved SOURCE, and the source-nearer
+	// test is trivially true against the far plane, so ridges extrude over open sky.
+	{
+		float2 uvBuf = (float2(dispatchID.xy) + 0.5) * SharedData::BufferDim.zw;
+		float4 ssdmSample = SSDMOffsetTexture[dispatchID.xy];
+		float2 sourceUV = ssdmSample.xy;
+		float ssdmValid = ssdmSample.z;
+		float ssdmCoverage = ssdmSample.w;
+		// Border guard from the actual remap reach (+1px for the bilinear footprint).
+		float2 remapPx = ceil(abs((sourceUV - uvBuf) * SharedData::BufferDim.xy));
+		float2 guardPx = max(remapPx, 1.0.xx);
+		float2 guardUV = guardPx * SharedData::BufferDim.zw;
+		bool dstInsideGuard = all(uvBuf > guardUV && uvBuf < (1.0 - guardUV));
+		bool srcInsideGuard = all(sourceUV > guardUV && sourceUV < (1.0 - guardUV));
+		// Skirt targets: sky, empty seed (gap/background), or any pixel the solve pulls to a meaningfully
+		// different source. Block only interior POM texels (dest wrote a seed) where source depth matches
+		// dest — same-surface resampling that caused swimming / brick-over-brick bleed.
+		float destSeedCoverage = DisplacementSeedTexture[dispatchID.xy].z;
+		bool destHasSeed = destSeedCoverage > 0.5;
+		bool destIsSky = depth >= (1.0 - 1e-5);
+		float2 remapDeltaPx = abs(sourceUV - uvBuf) * SharedData::BufferDim.xy;
+		bool nonTrivialRemap = dot(remapDeltaPx, remapDeltaPx) > 0.01;  // >~0.1 px (reject identity only)
+		bool allowRemap = ssdmValid > 0.5 && ssdmCoverage > 0.0 && nonTrivialRemap && dstInsideGuard && srcInsideGuard;
+		if (allowRemap) {
+			uint2 remapCoord = uint2(clamp(sourceUV.xy * SharedData::BufferDim.xy, float2(0, 0), SharedData::BufferDim.xy - 1.0));
+			float depthRemap = DepthTexture[remapCoord];
+			bool srcValid = depthRemap < 1.0 && depthRemap > 1e-5;
+			bool passDepthGate = false;
+			if (destIsSky) {
+				passDepthGate = srcValid;
+			} else if (destHasSeed) {
+				// Interior POM contributor: only allow if source is clearly nearer (true overhang), not a lateral same-depth tap.
+				float destLin = SharedData::GetScreenDepth(depth);
+				float srcLin = SharedData::GetScreenDepth(depthRemap);
+				passDepthGate = srcValid && (srcLin < destLin * 0.97);
+			} else {
+				// Background with no parallax seed (gap, flat wall behind extrusion, etc.)
+				float destLin = SharedData::GetScreenDepth(depth);
+				float srcLin = SharedData::GetScreenDepth(depthRemap);
+				passDepthGate = srcValid && (srcLin <= destLin * 1.002);
+			}
+			if (passDepthGate) {
+				gbufferCoord = remapCoord;
+				ssdmRemapped = true;
+				ssdmRemapCoord = remapCoord;
+			}
+		}
+	}
+#endif
+
+	float3 normalGlossiness = NormalRoughnessTexture[gbufferCoord];
 	float3 normalVS = GBuffer::DecodeNormal(normalGlossiness.xy);
 
-	float3 diffuseColor = MainRW[dispatchID.xy].xyz;
-	float3 specularColor = SpecularTexture[dispatchID.xy];
-	float3 albedo = AlbedoTexture[dispatchID.xy];
+#if defined(SSDM)
+	// MainCopy is a pre-composite snapshot of kMAIN; only needed when we remap to a source texel (that
+	// coord may be updated in-place in MainRW during this dispatch). Non-remapped pixels read MainRW
+	// directly so turning parallax off (SilhouetteActive false, no MainCopy bind) does not grey the world
+	// if a stale SSDM composite shader is still cached.
+	float3 diffuseColor = ssdmRemapped ? MainCopyTexture[gbufferCoord].xyz : MainRW[gbufferCoord].xyz;
+#else
+	float3 diffuseColor = MainRW[gbufferCoord].xyz;
+#endif
+	float3 specularColor = SpecularTexture[gbufferCoord];
+	float3 albedo = AlbedoTexture[gbufferCoord];
 
-	float depth = DepthTexture[dispatchID.xy];
 	float4 positionWS = float4(2 * float2(uv.x, -uv.y + 1) - 1, depth, 1);
 	positionWS = mul(FrameBuffer::CameraViewProjInverse[eyeIndex], positionWS);
 	positionWS.xyz = positionWS.xyz / positionWS.w;
 
-	if (depth == 1.0)
+#if defined(SSDM)
+	if (ssdmRemapped) {
+		// The skirt now shows the foreground silhouette; reproject it with the foreground's motion vector
+		// (already written by the geometry pass) instead of this pixel's sky/background motion, so TAA does
+		// not smear the moving edge. ssdmRemapCoord is a real surface (gated above), never a sky pixel.
+		MotionVectorsRW[dispatchID.xy] = MotionVectorsRW[ssdmRemapCoord];
+	} else
+#endif
+		if (depth == 1.0)
 		MotionVectorsRW[dispatchID.xy] = MotionBlur::GetSSMotionVector(positionWS, positionWS, eyeIndex);  // Apply sky motion vectors
 
 	float glossiness = normalGlossiness.z;
@@ -162,7 +247,7 @@ void SampleSSGISpecular(uint2 pixCoord, sh2 lobe, inout float ao, out float3 il,
 #		endif
 
 		directionalAmbientColor = Color::RGBToYCoCg(directionalAmbientColor);
-		directionalAmbientColor.x = MasksTexture[dispatchID.xy].z;
+		directionalAmbientColor.x = MasksTexture[gbufferCoord].z;
 		directionalAmbientColor = Color::YCoCgToRGB(directionalAmbientColor);
 		directionalAmbientColor = max(0, directionalAmbientColor);
 	} else
@@ -172,7 +257,7 @@ void SampleSSGISpecular(uint2 pixCoord, sh2 lobe, inout float ao, out float3 il,
 		directionalAmbientColor *= albedo;
 
 		directionalAmbientColor = Color::RGBToYCoCg(directionalAmbientColor);
-		directionalAmbientColor.x = MasksTexture[dispatchID.xy].z;
+		directionalAmbientColor.x = MasksTexture[gbufferCoord].z;
 		directionalAmbientColor = Color::YCoCgToRGB(directionalAmbientColor);
 		directionalAmbientColor = max(0, directionalAmbientColor);
 	}
@@ -202,7 +287,7 @@ void SampleSSGISpecular(uint2 pixCoord, sh2 lobe, inout float ao, out float3 il,
 
 #if defined(DYNAMIC_CUBEMAPS)
 
-	float3 reflectance = ReflectanceTexture[dispatchID.xy];
+	float3 reflectance = ReflectanceTexture[gbufferCoord];
 
 	if (any(reflectance > 0.0)) {
 		float3 V = -normalize(positionWS.xyz);
