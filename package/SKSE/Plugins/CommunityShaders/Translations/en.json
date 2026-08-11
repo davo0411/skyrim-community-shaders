@@ -1373,6 +1373,7 @@
     "feature.terrain_shadows.debug": "Debug",
     "feature.terrain_shadows.description": "Adds realistic shadow casting from terrain features using heightmap data to create accurate terrain shadows that enhance depth perception and visual realism.",
     "feature.terrain_shadows.enable_terrain_shadow": "Enable Terrain Shadow",
+    "feature.terrain_shadows.enable_verbose_heightmap_logging": "Enable verbose heightmap logging",
     "feature.terrain_shadows.key_feature_1": "Heightmap-based terrain shadow calculation",
     "feature.terrain_shadows.key_feature_2": "Dynamic shadow updates based on sun position",
     "feature.terrain_shadows.key_feature_3": "Support for custom heightmap files",

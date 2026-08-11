@@ -31,6 +31,9 @@ public:
 		bool EnableTerrainShadow = true;
 	} settings;
 
+	/** @brief When true, logs each heightmap file path during discovery. Off by default. */
+	bool enableVerboseHeightmapLogging = false;
+
 	bool needPrecompute = false;
 	uint shadowUpdateIdx = 0;
 
@@ -85,8 +88,9 @@ public:
 	 * @brief Parses a heightmap DDS filename to extract worldspace metadata.
 	 * @param p The filesystem path to the DDS file.
 	 * @param xlodgen_style Whether the filename follows xLODGen naming conventions.
+	 * @param anyFailed Set to true if a heightmap candidate fails to parse.
 	 */
-	void ParseHeightmapPath(std::filesystem::path p, bool xlodgen_style);
+	void ParseHeightmapPath(std::filesystem::path p, bool xlodgen_style, bool& anyFailed);
 
 	/** @brief Compiles the shadow update compute shader from HLSL source. */
 	void CompileComputeShaders();
@@ -109,7 +113,7 @@ public:
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 
-	virtual inline void RestoreDefaultSettings() override { settings = {}; }
+	virtual void RestoreDefaultSettings() override;
 	/** @brief Releases the cached shadow update compute shader and recompiles it. */
 	virtual void ClearShaderCache() override;
 	virtual bool IsCore() const override { return true; };

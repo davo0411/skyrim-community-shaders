@@ -1236,6 +1236,7 @@
     "feature.terrain_shadows.debug": "调试",
     "feature.terrain_shadows.description": "使用高度图数据为地形特征添加逼真的阴影投射，创造准确的地形阴影，增强深度感知和视觉真实感。",
     "feature.terrain_shadows.enable_terrain_shadow": "启用地形阴影",
+    "feature.terrain_shadows.enable_verbose_heightmap_logging": "启用详细高度图日志",
     "feature.terrain_shadows.key_feature_1": "基于高度图的地形阴影计算",
     "feature.terrain_shadows.key_feature_2": "基于太阳位置的动态阴影更新",
     "feature.terrain_shadows.key_feature_3": "支持自定义高度图文件",

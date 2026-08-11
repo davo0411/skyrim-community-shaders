@@ -16,11 +16,19 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 void TerrainShadows::LoadSettings(json& o_json)
 {
 	settings = o_json;
+	enableVerboseHeightmapLogging = o_json.value("EnableVerboseHeightmapLogging", false);
 }
 
 void TerrainShadows::SaveSettings(json& o_json)
 {
 	o_json = settings;
+	o_json["EnableVerboseHeightmapLogging"] = enableVerboseHeightmapLogging;
+}
+
+void TerrainShadows::RestoreDefaultSettings()
+{
+	settings = {};
+	enableVerboseHeightmapLogging = false;
 }
 
 void TerrainShadows::DrawSettings()
@@ -28,6 +36,8 @@ void TerrainShadows::DrawSettings()
 	ImGui::Checkbox(T(TKEY("enable_terrain_shadow"), "Enable Terrain Shadow"), &settings.EnableTerrainShadow);
 
 	if (ImGui::CollapsingHeader(T(TKEY("debug"), "Debug"))) {
+		ImGui::Checkbox(T(TKEY("enable_verbose_heightmap_logging"), "Enable verbose heightmap logging"), &enableVerboseHeightmapLogging);
+
 		std::string curr_worldspace = "N/A";
 		std::string curr_worldspace_name = "N/A";
 		auto tes = RE::TES::GetSingleton();
@@ -75,7 +85,7 @@ void TerrainShadows::ClearShaderCache()
 	CompileComputeShaders();
 }
 
-void TerrainShadows::ParseHeightmapPath(std::filesystem::path p, bool xlodgen_style)
+void TerrainShadows::ParseHeightmapPath(std::filesystem::path p, bool xlodgen_style, bool& anyFailed)
 {
 	auto filename = p.filename();
 	if (filename.extension() != ".dds")
@@ -114,7 +124,8 @@ void TerrainShadows::ParseHeightmapPath(std::filesystem::path p, bool xlodgen_st
 				metadata.zRange.y = std::stoi(splitstr[9]) * 8.f;
 			}
 		} catch (std::exception& e) {
-			logger::debug("Failed to parse {}. Error: {}", filename.string(), e.what());
+			logger::error("[TerrainShadows] failed to parse {} : {}", filename.string(), e.what());
+			anyFailed = true;
 			return;
 		}
 
@@ -125,13 +136,17 @@ void TerrainShadows::ParseHeightmapPath(std::filesystem::path p, bool xlodgen_st
 			logger::warn("{} has more than one height maps!", metadata.worldspace);
 		heightmaps[metadata.worldspace] = metadata;
 
-		logger::info("{} loaded.", filename.string());
+		if (enableVerboseHeightmapLogging) {
+			logger::info("{} loaded.", filename.string());
+		}
 	} else
 		logger::debug("{} has unknown type ({})", filename.string(), splitstr[1]);
 }
 
 void TerrainShadows::SetupResources()
 {
+	bool anyFailed = false;
+
 	logger::debug("Listing xLODGen height maps...");
 	{
 		std::filesystem::path texture_dir{ L"Data\\textures\\Terrain\\" };
@@ -142,7 +157,7 @@ void TerrainShadows::SetupResources()
 				continue;
 
 			for (auto const& sub_dir_entry : std::filesystem::directory_iterator{ dir_path })
-				ParseHeightmapPath(sub_dir_entry.path(), true);
+				ParseHeightmapPath(sub_dir_entry.path(), true, anyFailed);
 		}
 	}
 
@@ -151,7 +166,11 @@ void TerrainShadows::SetupResources()
 		std::filesystem::path texture_dir{ L"Data\\textures\\heightmaps\\" };
 		std::error_code ec;
 		for (auto const& dir_entry : std::filesystem::directory_iterator{ texture_dir, ec })
-			ParseHeightmapPath(dir_entry.path(), false);
+			ParseHeightmapPath(dir_entry.path(), false, anyFailed);
+	}
+
+	if (!enableVerboseHeightmapLogging && !anyFailed) {
+		logger::info("[TerrainShadows] All heightmaps loaded successfully.");
 	}
 
 	logger::debug("Creating constant buffers...");
