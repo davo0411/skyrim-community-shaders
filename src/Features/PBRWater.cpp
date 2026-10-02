@@ -322,7 +322,7 @@ void PBRWater::UpdateFetchTexture()
 	std::array<D3D11_SUBRESOURCE_DATA, FetchField::Directions> init{};
 	for (uint32_t d = 0; d < FetchField::Directions; ++d) {
 		init[d].pSysMem = &halfData[static_cast<size_t>(d) * field->width * field->height];
-		init[d].SysMemPitch = field->width * sizeof(uint16_t);
+		init[d].SysMemPitch = static_cast<UINT>(field->width * sizeof(uint16_t));
 	}
 
 	winrt::com_ptr<ID3D11Texture2D> texture;

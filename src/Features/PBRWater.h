@@ -115,7 +115,7 @@ struct PBRWater : Feature
 	bool GetWaveHeight(const RE::NiPoint3& position, float flatWaterZ, float& height) const;
 
 	// ---- GPU constants, must match PBRWaterData in PBRWater.hlsli ----
-	struct alignas(16) GpuData
+	struct GpuData
 	{
 		float4 WaveDirK[PBRWaterModel::MaxWaves];
 		float4 WaveAmp[PBRWaterModel::MaxWaves];
@@ -197,7 +197,6 @@ private:
 	float smoothedWindSpeed = -1.0f;
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;
-	float lastFrameDelta = 0.0f;
 	std::atomic<std::shared_ptr<const PBRWaterModel::WaveSnapshot>> snapshot;
 	std::atomic<float> renderDelta{ 0.0f };
 
