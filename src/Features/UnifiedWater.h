@@ -78,7 +78,7 @@ struct UnifiedWater : OverlayFeature
 	/** @brief Hook that sets up per-geometry water shader data during rendering. */
 	struct BSWaterShader_SetupGeometry
 	{
-		static void thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass);
+		static void thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass, uint32_t renderFlags);
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
@@ -115,6 +115,9 @@ struct UnifiedWater : OverlayFeature
 
 	/** @brief Installs engine hooks for water mesh replacement and worldspace handling. */
 	virtual void PostPostLoad() override;
+
+	/** @brief The water placement cache, or nullptr before DataLoaded or after a failed load. */
+	WaterCache* GetWaterCache() const { return waterCache; }
 
 private:
 	RE::NiPointer<RE::BSTriShape> waterMesh;

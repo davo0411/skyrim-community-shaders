@@ -61,6 +61,24 @@ public:
 	 */
 	InstructionResult GetInstructions(const RE::TESWorldSpace* worldSpace, uint32_t lodLevel, uint32_t x, uint32_t y);
 
+	/** @brief Cell-resolution water coverage of a worldspace (1 = the cell has water). */
+	struct Coverage
+	{
+		int32_t minX{};
+		int32_t minY{};
+		uint32_t width{};
+		uint32_t height{};
+		std::vector<uint8_t> water;
+	};
+
+	/**
+	 * @brief Builds the water coverage of a worldspace from the finest cached LOD level.
+	 * @param worldSpace The worldspace to query (resolved to its water parent like GetInstructions).
+	 * @param out Receives the coverage grid.
+	 * @return False if no runtime cache exists for the worldspace.
+	 */
+	bool GetCoverage(const RE::TESWorldSpace* worldSpace, Coverage& out);
+
 	/** @brief Generates precache height data for Tamriel using extended data sets. */
 	static void GenerateTamrielPrecache();
 	/** @brief Loads caches from disk, or generates them if not found. */
