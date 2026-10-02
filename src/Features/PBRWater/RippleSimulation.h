@@ -25,7 +25,6 @@ public:
 		float y = 0.0f;
 		float radius = 0.0f;  ///< units
 		float depth = 0.0f;   ///< how far the body pushes the surface down (simulation units)
-		float foam = 0.0f;
 	};
 
 	struct Settings
@@ -71,8 +70,7 @@ private:
 		float2 position;
 		float radius;
 		float depth;
-		float foam;
-		float3 pad;
+		float pad[4];
 	};
 	static_assert(sizeof(GpuSource) == 32);
 

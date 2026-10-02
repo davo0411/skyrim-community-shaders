@@ -134,7 +134,6 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 			continue;
 		g.radius = std::max(s.radius / texelSize, 0.75f);
 		g.depth = s.depth;
-		g.foam = s.foam;
 		++numSources;
 	}
 	sourceBuffer->Update(gpuSources.data(), sizeof(gpuSources));

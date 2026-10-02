@@ -397,7 +397,9 @@ namespace PBRWater
 		float hR = RippleDisplayed(uv + float2(t, 0));
 		float hD = RippleDisplayed(uv - float2(0, t));
 		float hU = RippleDisplayed(uv + float2(0, t));
-		float foam = RippleTexture.SampleLevel(LinearClampSampler, uv, 0).z;
+		// Show foam on the crests only: it thins away as the ripple passes and the surface drops.
+		float crest = saturate(RippleDisplayed(uv) * 6.0 + 0.15);
+		float foam = RippleTexture.SampleLevel(LinearClampSampler, uv, 0).z * crest;
 		float texelUnits = t / Ripple0.z;
 		float2 grad = float2(hR - hL, hU - hD) / (2.0 * texelUnits) * Ripple1.x * Ripple1.y * RippleDepthFade(depth);
 		return float3(grad, foam) * RippleEdgeFade(uv);

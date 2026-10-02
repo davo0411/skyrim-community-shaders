@@ -5,7 +5,8 @@
 //     h(t+1) = 2 h(t) - h(t-1) + C^2 * laplacian(h(t)),   C = c dt / dx  (stable for C^2 <= 0.5)
 // Bodies in the water (actor limbs, loose Havok objects) act as moving constraints that hold
 // the surface down under their footprint, which produces bow waves, wakes and rings without any
-// hand-authored ripple shapes. A third channel accumulates foam where the surface is churned.
+// hand-authored ripple shapes. A third channel accumulates foam on the ripple crests, where the
+// raised water spills over, so foam rides the rings and wakes instead of pooling under the body.
 //
 // The grid scrolls with the camera in whole texels; `Shift` re-addresses the previous state so the
 // simulation stays fixed in world space.
@@ -18,8 +19,7 @@ struct RippleSource
 	float2 Position;  // texel coordinates in the current grid
 	float Radius;     // texels
 	float Depth;      // target surface depression (simulation units, > 0 pushes down)
-	float Foam;       // foam added per step at the centre
-	float3 Pad;
+	float4 Pad;
 };
 
 cbuffer RippleSimCB : register(b0)
@@ -74,9 +74,10 @@ float4 LoadState(int2 p)
 		float w = exp(-2.0 * r2);
 		// Constraint: the body pushes the surface down to its depression, it never pulls it up.
 		hNext = lerp(hNext, min(hNext, -s.Depth), w);
-		foam += s.Foam * w;
 	}
 
-	foam += saturate(abs(hNext - h) * FoamFromMotion);
+	// Foam only where the surface is pushed up into a crest and still rising or breaking over.
+	float crest = saturate((hNext - 0.08) * 4.0);
+	foam += crest * saturate(abs(hNext - h) * FoamFromMotion);
 	CurrentState[id.xy] = float4(hNext, h, saturate(foam), 0.0);
 }

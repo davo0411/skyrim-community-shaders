@@ -20,7 +20,7 @@ namespace
 		std::filesystem::path path;
 		float3 pos0;
 		float3 pos1;
-		float2 zRange;
+		float2 heightRange;  ///< pos0.z..pos1.z: what the normalised texels decode to
 	};
 
 	std::optional<HeightmapRequest> FindHeightmap(const RE::TESWorldSpace* worldSpace)
@@ -44,7 +44,7 @@ namespace
 		request.path = std::filesystem::path(it->second.dir) / it->second.filename;
 		request.pos0 = it->second.pos0;
 		request.pos1 = it->second.pos1;
-		request.zRange = it->second.zRange;
+		request.heightRange = { it->second.pos0.z, it->second.pos1.z };
 		return request;
 	}
 
@@ -88,7 +88,7 @@ namespace
 			const auto* row = reinterpret_cast<const float*>(src->pixels + static_cast<size_t>(y * BathymetryDownsample) * src->rowPitch);
 			for (uint32_t x = 0; x < bathymetry->width; ++x) {
 				const float normalised = row[x * BathymetryDownsample];
-				bathymetry->heights[static_cast<size_t>(y) * bathymetry->width + x] = request.zRange.x + (request.zRange.y - request.zRange.x) * normalised;
+				bathymetry->heights[static_cast<size_t>(y) * bathymetry->width + x] = request.heightRange.x + (request.heightRange.y - request.heightRange.x) * normalised;
 			}
 		}
 		return bathymetry;

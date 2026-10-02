@@ -129,7 +129,7 @@ namespace PBRWater
 
 	/// Distance to the nearest bubble centre, normalised by that bubble's radius and merged with a
 	/// smooth minimum: 0 at a bubble centre, ~1 at its rim, with rounded walls between bubbles.
-	float BubbleField(float2 p)
+	float BubbleField(float2 p, float time)
 	{
 		float2 cell = floor(p);
 		float2 f = frac(p);
@@ -140,8 +140,13 @@ namespace PBRWater
 			[unroll] for (int x = -1; x <= 1; x++)
 			{
 				float2 o = float2(x, y);
-				float2 centre = o + 0.15 + 0.7 * Hash22(cell + o);
-				float radius = 0.55 + 0.45 * Hash12(cell + o + 17.17);
+				// Each bubble drifts on its own small orbit and breathes, so the lace keeps churning.
+				float2 h = Hash22(cell + o);
+				float phase = Hash12(cell + o + 5.31) * 6.2831853;
+				float speed = 0.6 + 0.8 * h.x;
+				float2 orbit = float2(sin(time * speed + phase), cos(time * speed * 0.83 + phase * 1.7));
+				float2 centre = o + 0.5 + (h - 0.5) * 0.6 + orbit * 0.18;
+				float radius = (0.55 + 0.45 * Hash12(cell + o + 17.17)) * (0.9 + 0.1 * sin(time * 1.3 * speed + phase));
 				float d = length(centre - f) / radius;
 				// Exponential smooth minimum: neighbouring bubbles merge softly instead of meeting at an edge.
 				float w = exp2(-8.0 * d);
@@ -170,12 +175,12 @@ namespace PBRWater
 		if (coverage <= 0.002)
 			return 0.0;
 
-		// Domain warp bends the bubble walls into organic, curved filaments.
-		float2 warp = float2(Fbm(q * 0.6 + time * 0.03), Fbm(q * 0.6 + 31.7 - time * 0.025)) - 0.5;
+		// Domain warp bends the bubble walls into organic, curved filaments; it flows over time.
+		float2 warp = float2(Fbm(q * 0.6 + float2(time * 0.17, time * 0.05)), Fbm(q * 0.6 + 31.7 - float2(time * 0.06, time * 0.15))) - 0.5;
 		float2 w = q + warp * 1.6;
 
-		float large = BubbleField(w);
-		float small = BubbleField(w * 2.7 + 9.3);
+		float large = BubbleField(w, time);
+		float small = BubbleField(w * 2.7 + 9.3, time * 1.7);
 
 		// Bubbles grow as coverage falls; at zero coverage they swallow everything.
 		float radius = lerp(1.45, 0.05, sqrt(coverage));
@@ -193,7 +198,7 @@ namespace PBRWater
 	float FoamBubbles(float2 p, float coverage, float time)
 	{
 		float2 q = p / max(Foam0.w * 1.7, 1.0);
-		return saturate(coverage * 1.5) * (0.4 + 0.6 * Fbm(q + time * 0.02));
+		return saturate(coverage * 1.5) * (0.4 + 0.6 * Fbm(q + float2(time * 0.09, -time * 0.07)));
 	}
 
 	/// Crest foam coverage from surface folding (Jacobian below the threshold) and the wind's

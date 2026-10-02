@@ -359,7 +359,7 @@ void PBRWater::Prepass()
 		rippleSettings.extent = settings.RippleExtent * UnitsPerMetre;
 		rippleSettings.waveSpeed = settings.RippleSpeed;
 		rippleSettings.halfLife = settings.RippleHalfLife;
-		rippleSettings.foamHalfLife = settings.RippleHalfLife * 2.0f;
+		rippleSettings.foamHalfLife = settings.RippleHalfLife * 0.5f;
 		ripples.Update(cameraPos.x, cameraPos.y, renderDelta.load(std::memory_order_acquire), rippleSettings);
 	}
 
@@ -410,7 +410,10 @@ void PBRWater::UpdateFrameConstants()
 		const auto terrain = terrainShadows.GetCommonBufferData();
 		d.Terrain0 = { terrain.Scale.x, terrain.Scale.y, terrain.Offset.x, terrain.Offset.y };
 		const float texel = std::abs(1.0f / terrain.Scale.x) / static_cast<float>(terrainShadows.texHeightMap->desc.Width);
-		d.Terrain1 = { terrain.ZRange.x, terrain.ZRange.y, 1.0f, std::max(texel, 1.0f) };
+		// The heightmap texels decode with the heightmap's own z range (pos0.z..pos1.z, Terrain Shadows'
+		// PosRange); ZRange only normalises its shadow-height texture.
+		const auto* heightmap = terrainShadows.cachedHeightmap;
+		d.Terrain1 = { heightmap->pos0.z, heightmap->pos1.z, 1.0f, std::max(texel, 1.0f) };
 	}
 
 	// Tessellation: on-screen size uses the internal render resolution, so it scales with upscalers.
@@ -710,7 +713,7 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		return true;
 	};
 
-	auto addSource = [&](const RE::NiPoint3& center, float radius, float surfaceZ, float speed) {
+	auto addSource = [&](const RE::NiPoint3& center, float radius, float surfaceZ) {
 		if (!wantRipples || sources.size() >= RippleSimulation::MaxSources)
 			return;
 		const float offset = center.z - surfaceZ;
@@ -724,7 +727,6 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		s.y = center.y;
 		s.radius = footprint;
 		s.depth = submerged * std::clamp(footprint / 24.0f, 0.25f, 1.0f);
-		s.foam = std::clamp(speed / 600.0f, 0.0f, 1.0f) * 0.05f;
 		sources.push_back(s);
 	};
 
@@ -742,12 +744,11 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 			auto root = actor->Get3D(false);
 			if (!root)
 				return;
-			const float speed = actor->AsActorState()->DoGetMovementSpeed();
 			RE::BSVisit::TraverseScenegraphCollision(root, [&](RE::bhkNiCollisionObject* object) -> RE::BSVisit::BSVisitControl {
 				RE::NiPoint3 center;
 				float radius;
 				if (Util::GetShapeBound(object, center, radius))
-					addSource(center, radius, surfaceZ, speed);
+					addSource(center, radius, surfaceZ);
 				return sources.size() < RippleSimulation::MaxSources ? RE::BSVisit::BSVisitControl::kContinue : RE::BSVisit::BSVisitControl::kStop;
 			});
 		};
@@ -793,10 +794,9 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 			float velocity[4];
 			_mm_storeu_ps(velocity, body->motion.linearVelocity.quad);
 			const float worldScaleInv = RE::bhkWorld::GetWorldScaleInverse();
-			const float speed = std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]) * worldScaleInv;
 
 			if (wantRipples && settings.PhysicsObjectRipples)
-				addSource(center, radius, surfaceZ, speed);
+				addSource(center, radius, surfaceZ);
 
 			if (wantBuoyancy && dt > 0.0f) {
 				// The engine floats objects on the flat plane; add a spring towards the displaced
