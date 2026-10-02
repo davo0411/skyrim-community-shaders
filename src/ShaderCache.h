@@ -147,6 +147,9 @@ namespace SIE
 		Vertex,
 		Pixel,
 		Compute,
+		Hull,
+		Domain,
+		Geometry,
 		Total,
 	};
 
@@ -323,7 +326,7 @@ namespace SIE
 		ID3DBlob* blob;
 		ShaderCompilationTask::Status status;
 		system_clock::time_point compileTime = system_clock::now();
-		bool loadedFromDisk = false;  /**< true when the shader blob was read from the disk cache rather than compiled */
+		bool loadedFromDisk = false; /**< true when the shader blob was read from the disk cache rather than compiled */
 	};
 
 	class UpdateListener;
@@ -479,6 +482,32 @@ namespace SIE
 			uint32_t descriptor);
 		RE::BSGraphics::ComputeShader* MakeAndAddComputeShader(const RE::BSShader& shader,
 			uint32_t descriptor);
+
+		/**
+		 * @brief Returns the hull shader compiled from `shader`'s source with `descriptor`'s defines.
+		 *
+		 * Hull, domain and geometry shaders are not part of the vanilla BSShader technique system, so
+		 * they are owned entirely by the cache. Callers that splice them into a vanilla draw must pair
+		 * them with the vertex/pixel shader of the *same* descriptor: the stage signatures are generated
+		 * from the same permutation defines, and mixing descriptors yields a signature mismatch.
+		 *
+		 * @return The shader, or nullptr while an async compile is pending or after a failed compile.
+		 */
+		ID3D11HullShader* GetHullShader(const RE::BSShader& shader, uint32_t descriptor);
+		/** @brief Domain shader counterpart of GetHullShader(). */
+		ID3D11DomainShader* GetDomainShader(const RE::BSShader& shader, uint32_t descriptor);
+		/** @brief Geometry shader counterpart of GetHullShader(). */
+		ID3D11GeometryShader* GetGeometryShader(const RE::BSShader& shader, uint32_t descriptor);
+
+		/** @brief Compiles and caches a hull, domain or geometry shader. Called by compilation tasks. */
+		ID3D11DeviceChild* MakeAndAddStageShader(ShaderClass shaderClass, const RE::BSShader& shader,
+			uint32_t descriptor);
+
+		/** @brief Returns true for the shader classes stored by GetHullShader() and friends. */
+		static constexpr bool IsStageShaderClass(ShaderClass shaderClass)
+		{
+			return shaderClass == ShaderClass::Hull || shaderClass == ShaderClass::Domain || shaderClass == ShaderClass::Geometry;
+		}
 
 		static std::string GetDefinesString(const RE::BSShader& shader, uint32_t descriptor);
 
@@ -797,6 +826,19 @@ namespace SIE
 		ShaderMapArray<RE::BSGraphics::VertexShader> vertexShaders;
 		ShaderMapArray<RE::BSGraphics::PixelShader> pixelShaders;
 		ShaderMapArray<RE::BSGraphics::ComputeShader> computeShaders;
+
+		/** Hull/domain/geometry shaders, indexed by [ShaderClass - Hull][BSShader::Type][descriptor]. */
+		using StageShaderMap = std::array<
+			ankerl::unordered_dense::map<uint32_t, winrt::com_ptr<ID3D11DeviceChild>>,
+			RE::BSShader::Type::Total>;
+		std::array<StageShaderMap, 3> stageShaders;
+		std::mutex stageShadersMutex;
+
+		ID3D11DeviceChild* GetStageShader(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor);
+		StageShaderMap& GetStageShaderMap(ShaderClass shaderClass)
+		{
+			return stageShaders[static_cast<size_t>(shaderClass) - static_cast<size_t>(ShaderClass::Hull)];
+		}
 
 		bool isEnabled = true;
 		bool isDiskCache = true;

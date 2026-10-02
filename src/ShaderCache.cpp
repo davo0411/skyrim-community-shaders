@@ -109,6 +109,9 @@ namespace SIE
 		constexpr const char* VertexShaderProfile = "vs_5_0";
 		constexpr const char* PixelShaderProfile = "ps_5_0";
 		constexpr const char* ComputeShaderProfile = "cs_5_0";
+		constexpr const char* HullShaderProfile = "hs_5_0";
+		constexpr const char* DomainShaderProfile = "ds_5_0";
+		constexpr const char* GeometryShaderProfile = "gs_5_0";
 
 		static std::wstring GetShaderPath(const std::string_view& name)
 		{
@@ -124,6 +127,14 @@ namespace SIE
 				return PixelShaderProfile;
 			case ShaderClass::Compute:
 				return ComputeShaderProfile;
+			case ShaderClass::Hull:
+				return HullShaderProfile;
+			case ShaderClass::Domain:
+				return DomainShaderProfile;
+			case ShaderClass::Geometry:
+				return GeometryShaderProfile;
+			default:
+				break;
 			}
 			return nullptr;
 		}
@@ -1328,6 +1339,14 @@ namespace SIE
 				return std::format(L"Data/ShaderCache/{}/{:X}{}.vso", wname, descriptor, suffix);
 			case ShaderClass::Compute:
 				return std::format(L"Data/ShaderCache/{}/{:X}{}.cso", wname, descriptor, suffix);
+			case ShaderClass::Hull:
+				return std::format(L"Data/ShaderCache/{}/{:X}{}.hso", wname, descriptor, suffix);
+			case ShaderClass::Domain:
+				return std::format(L"Data/ShaderCache/{}/{:X}{}.dso", wname, descriptor, suffix);
+			case ShaderClass::Geometry:
+				return std::format(L"Data/ShaderCache/{}/{:X}{}.gso", wname, descriptor, suffix);
+			default:
+				break;
 			}
 			return {};
 		}
@@ -1450,6 +1469,12 @@ namespace SIE
 				defines[lastIndex++] = { "PSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Compute) {
 				defines[lastIndex++] = { "CSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Hull) {
+				defines[lastIndex++] = { "HSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Domain) {
+				defines[lastIndex++] = { "DSHADER", nullptr };
+			} else if (shaderClass == ShaderClass::Geometry) {
+				defines[lastIndex++] = { "GSHADER", nullptr };
 			}
 			if (globals::state->IsDeveloperMode()) {
 				defines[lastIndex++] = { "D3DCOMPILE_SKIP_OPTIMIZATION", nullptr };
@@ -2004,6 +2029,110 @@ namespace SIE
 		return nullptr;
 	}
 
+	ID3D11DeviceChild* ShaderCache::GetStageShader(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor)
+	{
+		auto state = globals::state;
+		// Stage shaders only ever extend a vertex shader of the same descriptor, so they share its gating.
+		if (!((ShaderCache::IsSupportedShader(shader) || state->IsDeveloperMode() && state->IsShaderEnabled(shader)) && state->enableVShaders)) {
+			return nullptr;
+		}
+
+		if (!SShaderCache::ResolveImageSpaceDescriptor(shader, descriptor)) {
+			return nullptr;
+		}
+
+		if (state->IsDeveloperMode()) {
+			TrackActiveShader(shaderClass, shader, descriptor);
+
+			auto key = SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true);
+			if (blockedKeyIndex != -1 && !blockedKey.empty() && key == blockedKey) {
+				if (std::find(blockedIDs.begin(), blockedIDs.end(), descriptor) == blockedIDs.end()) {
+					blockedIDs.push_back(descriptor);
+					logger::debug("Skipping blocked shader {:X}:{} total: {}", descriptor, blockedKey, blockedIDs.size());
+				}
+				return nullptr;
+			}
+		}
+
+		{
+			std::lock_guard lockGuard(stageShadersMutex);
+			auto& typeCache = GetStageShaderMap(shaderClass)[static_cast<size_t>(shader.shaderType.underlying())];
+			auto it = typeCache.find(descriptor);
+			if (it != typeCache.end()) {
+				return it->second.get();
+			}
+		}
+
+		if (IsAsync()) {
+			compilationSet.Add({ shaderClass, shader, descriptor });
+			return nullptr;
+		}
+		return MakeAndAddStageShader(shaderClass, shader, descriptor);
+	}
+
+	ID3D11HullShader* ShaderCache::GetHullShader(const RE::BSShader& shader, uint32_t descriptor)
+	{
+		return static_cast<ID3D11HullShader*>(GetStageShader(ShaderClass::Hull, shader, descriptor));
+	}
+
+	ID3D11DomainShader* ShaderCache::GetDomainShader(const RE::BSShader& shader, uint32_t descriptor)
+	{
+		return static_cast<ID3D11DomainShader*>(GetStageShader(ShaderClass::Domain, shader, descriptor));
+	}
+
+	ID3D11GeometryShader* ShaderCache::GetGeometryShader(const RE::BSShader& shader, uint32_t descriptor)
+	{
+		return static_cast<ID3D11GeometryShader*>(GetStageShader(ShaderClass::Geometry, shader, descriptor));
+	}
+
+	ID3D11DeviceChild* ShaderCache::MakeAndAddStageShader(ShaderClass shaderClass, const RE::BSShader& shader,
+		uint32_t descriptor)
+	{
+		if (!IsStageShaderClass(shaderClass)) {
+			return nullptr;
+		}
+
+		const auto shaderBlob = SShaderCache::CompileShader(shaderClass, shader, descriptor, isDiskCache, dependencyTracker.get());
+		if (!shaderBlob) {
+			return nullptr;
+		}
+
+		auto device = globals::d3d::device;
+		winrt::com_ptr<ID3D11DeviceChild> newShader;
+		HRESULT result = E_FAIL;
+		switch (shaderClass) {
+		case ShaderClass::Hull:
+			result = device->CreateHullShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
+				reinterpret_cast<ID3D11HullShader**>(newShader.put()));
+			break;
+		case ShaderClass::Domain:
+			result = device->CreateDomainShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
+				reinterpret_cast<ID3D11DomainShader**>(newShader.put()));
+			break;
+		case ShaderClass::Geometry:
+			result = device->CreateGeometryShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
+				reinterpret_cast<ID3D11GeometryShader**>(newShader.put()));
+			break;
+		default:
+			break;
+		}
+
+		if (FAILED(result) || !newShader) {
+			logger::error("Failed to create {} shader {}::{:X}",
+				magic_enum::enum_name(shaderClass), magic_enum::enum_name(shader.shaderType.get()), descriptor);
+			return nullptr;
+		}
+
+		const auto debugName = std::format("{}::{}Shader {:X}",
+			magic_enum::enum_name(shader.shaderType.get()), magic_enum::enum_name(shaderClass), descriptor);
+		Util::SetResourceName(newShader.get(), "%s", debugName.c_str());
+
+		std::lock_guard lockGuard(stageShadersMutex);
+		return GetStageShaderMap(shaderClass)[static_cast<size_t>(shader.shaderType.get())]
+		    .insert_or_assign(descriptor, std::move(newShader))
+		    .first->second.get();
+	}
+
 	ShaderCache::~ShaderCache()
 	{
 		Clear();
@@ -2048,6 +2177,14 @@ namespace SIE
 					shader->shader->Release();
 				}
 				shaders.clear();
+			}
+		}
+		{
+			std::lock_guard lockGuardS(stageShadersMutex);
+			for (auto& classShaders : stageShaders) {
+				for (auto& shaders : classShaders) {
+					shaders.clear();
+				}
 			}
 		}
 		{
@@ -2122,6 +2259,14 @@ namespace SIE
 			case SIE::ShaderClass::Compute:
 				ReleaseShader(computeShaders, computeShadersMutex, entry.type, entry.descriptor);
 				break;
+			case SIE::ShaderClass::Hull:
+			case SIE::ShaderClass::Domain:
+			case SIE::ShaderClass::Geometry:
+				{
+					std::lock_guard lockGuardS(stageShadersMutex);
+					GetStageShaderMap(entry.shaderClass)[static_cast<size_t>(entry.type)].erase(entry.descriptor);
+				}
+				break;
 			default:
 				logger::warn("Unexpected shader class: {}", static_cast<int>(entry.shaderClass));
 				break;
@@ -2174,6 +2319,12 @@ namespace SIE
 				shader->shader->Release();
 			}
 			computeShaders[static_cast<size_t>(a_type)].clear();
+		}
+		{
+			std::lock_guard lockGuardS(stageShadersMutex);
+			for (auto& classShaders : stageShaders) {
+				classShaders[static_cast<size_t>(a_type)].clear();
+			}
 		}
 		ClearShaderMap(a_type);
 		compilationSet.Clear();
@@ -3023,7 +3174,7 @@ namespace SIE
 		// still reads high briefly, which would otherwise underflow uint64_t (logs as ~2^64-1).
 		const uint64_t total = compilationSet.totalTasks.load(std::memory_order_relaxed);
 		const uint64_t done = compilationSet.completedTasks.load(std::memory_order_relaxed) +
-		                     compilationSet.failedTasks.load(std::memory_order_relaxed);
+		                      compilationSet.failedTasks.load(std::memory_order_relaxed);
 		// This task has already finished running, but Complete(task) has not yet updated the counters.
 		// Include the current task in the local progress snapshot so the logged remaining count is accurate.
 		const uint64_t doneIncludingCurrent = (done < total) ? (done + 1) : total;
@@ -3098,6 +3249,8 @@ namespace SIE
 			ShaderCache::Instance().MakeAndAddPixelShader(shader, descriptor);
 		} else if (shaderClass == ShaderClass::Compute) {
 			ShaderCache::Instance().MakeAndAddComputeShader(shader, descriptor);
+		} else if (ShaderCache::IsStageShaderClass(shaderClass)) {
+			ShaderCache::Instance().MakeAndAddStageShader(shaderClass, shader, descriptor);
 		}
 	}
 
