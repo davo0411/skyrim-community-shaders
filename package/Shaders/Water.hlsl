@@ -998,7 +998,13 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #			if !defined(LOD) && NUM_SPECULAR_LIGHTS == 0
 	float pointingDirection = dot(viewDirection, R) * 0.5 + 0.5;
 	float pointingAlignment = dot(reflect(viewDirection, float3(0, 0, 1)), R) * 0.5 + 0.5;
+#				if defined(PBR_WATER)
+	// The reflection normal is a blend, not unit length, so the dots can dip just below -1 and the
+	// sqrt would return NaN.
+	float ssrAmount = sqrt(max(min(pointingAlignment, pointingDirection), 0.0));
+#				else
 	float ssrAmount = sqrt(min(pointingAlignment, pointingDirection));
+#				endif
 	float2 ssrReflectionUv = ((FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy) * SSRParams.zw) + 0.05 * normal.xy;
 	float2 ssrReflectionUvDR = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(ssrReflectionUv);
 	float4 ssrReflectionColorBlurred = SSRReflectionTex.Sample(SSRReflectionSampler, ssrReflectionUvDR);
@@ -1127,7 +1133,7 @@ float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition, fl
 		return 0.0.xxx;
 
 #				if defined(PBR_WATER)
-	float reflectionMul = PBRWater::SpecularGGX(normal, -viewDirection, SunDir.xyz, roughness, 1.0 / PBRWater::WaterIOR) * PBRWater::Light0.w;
+	float reflectionMul = PBRWater::SpecularGGX(normal, -viewDirection, SunDir.xyz, roughness, 1.0 / PBRWater::WaterIOR, PBRWater::SunAngularRadius) * PBRWater::Light0.w;
 #				else
 	float3 reflectionDirection = reflect(viewDirection, normal);
 	float reflectionMul = exp2(VarAmounts.x * log2(saturate(dot(reflectionDirection, SunDir.xyz))));
@@ -1277,8 +1283,11 @@ PS_OUTPUT main(PS_INPUT input)
 		float lightFade = saturate(length(lightVector) / LightPos[lightIndex].w);
 		float lightColorMul = (1 - lightFade * lightFade);
 #					if defined(PBR_WATER)
+		float pbrLightDistance = length(lightVector);
 		float3 lightColor = Color::PointLight(LightColor[lightIndex].xyz) * lightColorMul *
-		                    PBRWater::SpecularGGX(normal, -viewDirection, normalize(lightVector), pbrRoughness, 1.0 / PBRWater::WaterIOR) * PBRWater::Light1.w;
+		                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightVector, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
+								PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius, pbrLightDistance)) *
+		                    PBRWater::Light1.w;
 #					else
 		float LdotN = saturate(dot(lightDirection, normal));
 		float3 lightColor = (Color::PointLight(LightColor[lightIndex].xyz) * pow(LdotN, FresnelRI.z)) * lightColorMul;
@@ -1362,7 +1371,9 @@ PS_OUTPUT main(PS_INPUT input)
 			const bool isPointLightLinear = light.lightFlags & LightLimitFix::LightFlags::Linear;
 #					if defined(PBR_WATER)
 			float3 lightColor = Color::PointLight(light.color.xyz, isPointLightLinear) * light.fade *
-			                    PBRWater::SpecularGGX(normal, -viewDirection, normalizedLightDirection, pbrRoughness, 1.0 / PBRWater::WaterIOR) * PBRWater::Light1.w;
+			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
+									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius, lightDist)) *
+			                    PBRWater::Light1.w;
 #					else
 			float3 H = normalize(normalizedLightDirection - viewDirection);
 			float HdotN = saturate(dot(H, normal));

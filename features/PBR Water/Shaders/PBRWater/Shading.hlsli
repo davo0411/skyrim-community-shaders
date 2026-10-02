@@ -46,15 +46,41 @@ namespace PBRWater
 		return saturate(sqrt(alpha));
 	}
 
-	/// GGX specular lobe for a punctual light, Fresnel included. `toEye`/`toLight` point away from the surface.
-	float SpecularGGX(float3 N, float3 toEye, float3 toLight, float roughness, float eta)
+	/// Angular radius of the sun disc (rad).
+	static const float SunAngularRadius = 0.00465;
+	/// Physical radius given to point lights (units, ~a torch flame): Skyrim lights have no emitter size.
+	static const float PointLightEmitterRadius = 8.0;
+
+	/// Angular radius (tangent) of a spherical emitter at `distance`; never more than 45 degrees.
+	float EmitterAngularRadius(float radius, float distance)
 	{
-		float3 H = normalize(toEye + toLight);
+		return radius / max(distance, radius);
+	}
+
+	/**
+	 * GGX specular lobe for a light of finite angular size, Fresnel included. `toEye`/`toLight` point
+	 * away from the surface.
+	 *
+	 * A light of angular radius theta reflected in a mirror covers a cone of half vectors of radius
+	 * theta / (2 sqrt(N.V)), so its spread adds to the microfacet variance (the sphere-light idea of
+	 * Karis 2013, "Real Shading in Unreal Engine 4"). Treating the sun as a true point instead makes
+	 * GGX divide by alpha^2 -> 0 on calm water and by N.V -> 0 at grazing angles, which overflows to
+	 * inf and turns into NaN further down the frame. With the source size the lobe peak is bounded
+	 * by 1 / (pi theta^2), the radiance of the source itself, and every denominator stays positive.
+	 */
+	float SpecularGGX(float3 N, float3 toEye, float3 toLight, float roughness, float eta, float sourceAngularRadius)
+	{
 		float NdotL = saturate(dot(N, toLight));
 		float NdotV = saturate(abs(dot(N, toEye)) + 1e-4);
+		float3 H = SafeNormalize(toEye + toLight, N);
 		float NdotH = saturate(dot(N, H));
 		float VdotH = saturate(dot(toEye, H));
-		float D = BRDF::D_GGX(roughness, NdotH);
+
+		float alpha = roughness * roughness;
+		float a2 = alpha * alpha + sourceAngularRadius * sourceAngularRadius / (4.0 * NdotV);
+		float d = NdotH * NdotH * (a2 - 1.0) + 1.0;  // >= a2 > 0
+		float D = a2 / (Math::PI * d * d);
+
 		float Vis = BRDF::Vis_SmithJointApprox(roughness, NdotV, NdotL);
 		return D * Vis * FresnelDielectric(VdotH, eta) * NdotL;
 	}

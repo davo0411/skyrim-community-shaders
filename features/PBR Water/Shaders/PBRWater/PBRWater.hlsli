@@ -65,6 +65,13 @@ namespace PBRWater
 	static const float UnitsPerMetre = METRES_TO_UNITS;
 	static const float MetresPerUnit = 1.0 / METRES_TO_UNITS;
 
+	/// Normalises `v`, or returns `fallback` for a zero-length vector (normalize() would return NaN).
+	float3 SafeNormalize(float3 v, float3 fallback)
+	{
+		float lengthSq = dot(v, v);
+		return lengthSq > 1e-20 ? v * rsqrt(lengthSq) : fallback;
+	}
+
 	uint WaveCount() { return min((uint)Params0.x, PBRW_MAX_WAVES); }
 	float Gravity() { return Params0.w; }
 	float WaveTime() { return RefCamPos.w; }
@@ -323,7 +330,8 @@ namespace PBRWater
 		// Normal of the parametric surface P(x, y) = (x + Dx, y + Dy, Dz)
 		float3 tx = float3(1.0 + dxdx, dxdy, dzdx);
 		float3 ty = float3(dxdy, 1.0 + dydy, dzdy);
-		o.normal = normalize(cross(tx, ty));
+		// tx and ty become parallel where the surface folds over itself; keep the normal defined there.
+		o.normal = SafeNormalize(cross(tx, ty), float3(0, 0, 1));
 		o.jacobian = (1.0 + dxdx) * (1.0 + dydy) - dxdy * dxdy;
 		return o;
 	}
