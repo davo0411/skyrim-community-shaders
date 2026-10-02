@@ -106,6 +106,54 @@ namespace
 void PBRWater::LoadSettings(json& o_json)
 {
 	settings = o_json;
+	SanitizeSettings();
+}
+
+void PBRWater::SanitizeSettings()
+{
+	auto& s = settings;
+	auto clamp = [](float& value, float lo, float hi, float fallback) {
+		value = std::isfinite(value) ? std::clamp(value, lo, hi) : fallback;
+	};
+	const Settings d{};
+	clamp(s.TessellationTriangleSize, 4.0f, 40.0f, d.TessellationTriangleSize);
+	clamp(s.TessellationMaxFactor, 1.0f, 64.0f, d.TessellationMaxFactor);
+	clamp(s.DisplacementFadeStart, 2048.0f, 65536.0f, d.DisplacementFadeStart);
+	clamp(s.DisplacementFadeEnd, 4096.0f, 131072.0f, d.DisplacementFadeEnd);
+	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
+	clamp(s.WindSpeedCalm, 0.0f, 10.0f, d.WindSpeedCalm);
+	clamp(s.WindSpeedStorm, 1.0f, 40.0f, d.WindSpeedStorm);
+	clamp(s.WaveHeight, 0.0f, 3.0f, d.WaveHeight);
+	clamp(s.Choppiness, 0.0f, 0.95f, d.Choppiness);
+	clamp(s.DirectionalSpread, 0.0f, 1.0f, d.DirectionalSpread);
+	clamp(s.RiverWaveDamping, 0.0f, 1.0f, d.RiverWaveDamping);
+	clamp(s.ShoreWaveHeight, 0.0f, 2.0f, d.ShoreWaveHeight);
+	clamp(s.ShoreSlope, 0.01f, 0.2f, d.ShoreSlope);
+	clamp(s.ShoreSteepness, 0.0f, 1.0f, d.ShoreSteepness);
+	clamp(s.ShoreOnsetDepth, 1.0f, 20.0f, d.ShoreOnsetDepth);
+	clamp(s.Roughness, 0.02f, 0.5f, d.Roughness);
+	clamp(s.SunSpecular, 0.0f, 4.0f, d.SunSpecular);
+	clamp(s.PointLightSpecular, 0.0f, 4.0f, d.PointLightSpecular);
+	clamp(s.Subsurface, 0.0f, 4.0f, d.Subsurface);
+	clamp(s.VanillaFresnel, 0.0f, 1.0f, d.VanillaFresnel);
+	clamp(s.Visibility, 0.05f, 5.0f, d.Visibility);
+	clamp(s.RefractionDistortion, 0.0f, 2.0f, d.RefractionDistortion);
+	clamp(s.FoamAmount, 0.0f, 3.0f, d.FoamAmount);
+	clamp(s.ShoreFoamWidth, 0.0f, 5.0f, d.ShoreFoamWidth);
+	clamp(s.FoamPersistence, 0.0f, 5.0f, d.FoamPersistence);
+	clamp(s.CrestFoamThreshold, 0.0f, 1.0f, d.CrestFoamThreshold);
+	clamp(s.FoamScale, 0.2f, 5.0f, d.FoamScale);
+	clamp(s.BreakingFoam, 0.0f, 3.0f, d.BreakingFoam);
+	clamp(s.WakeFoam, 0.0f, 3.0f, d.WakeFoam);
+	clamp(s.FoamAlbedo, 0.1f, 1.0f, d.FoamAlbedo);
+	clamp(s.RippleExtent, 16.0f, 160.0f, d.RippleExtent);
+	clamp(s.RippleHeight, 0.0f, 0.5f, d.RippleHeight);
+	clamp(s.RippleNormalStrength, 0.0f, 4.0f, d.RippleNormalStrength);
+	clamp(s.RippleSpeed, 0.2f, 4.0f, d.RippleSpeed);
+	clamp(s.RippleHalfLife, 0.2f, 6.0f, d.RippleHalfLife);
+	clamp(s.BuoyancyStrength, 0.0f, 3.0f, d.BuoyancyStrength);
+	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
+	s.DebugView = std::clamp(s.DebugView, 0, 7);
 }
 
 void PBRWater::SaveSettings(json& o_json)
@@ -236,7 +284,6 @@ void PBRWater::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("tessellation_max_factor"), "Max Subdivision"), &settings.TessellationMaxFactor, 1.0f, 64.0f, "%.0f");
 		ImGui::SliderFloat(T(TKEY("displacement_fade_start"), "Wave Geometry Fade Start"), &settings.DisplacementFadeStart, 2048.0f, 65536.0f, "%.0f");
 		ImGui::SliderFloat(T(TKEY("displacement_fade_end"), "Wave Geometry Fade End"), &settings.DisplacementFadeEnd, 4096.0f, 131072.0f, "%.0f");
-		settings.DisplacementFadeEnd = std::max(settings.DisplacementFadeEnd, settings.DisplacementFadeStart + 1.0f);
 		ImGui::TreePop();
 	}
 
@@ -612,6 +659,9 @@ void PBRWater::MainThreadUpdate()
 	auto tes = globals::game::tes;
 	if (!player || !tes)
 		return;
+
+	// Weather blends and typed-in values write straight into the settings; keep them in range.
+	SanitizeSettings();
 
 	const auto ui = RE::UI::GetSingleton();
 	const float dt = (ui && ui->GameIsPaused()) ? 0.0f : std::clamp(RE::GetSecondsSinceLastFrame(), 0.0f, 0.25f);

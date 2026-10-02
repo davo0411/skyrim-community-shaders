@@ -103,6 +103,13 @@ struct PBRWater : Feature
 	virtual void RestoreDefaultSettings() override;
 	virtual void RegisterWeatherVariables() override;
 
+	/**
+	 * @brief Clamps every setting to its UI range. Saved files, Ctrl+click typed values and weather
+	 * blends can all push values outside it, and an out-of-range wave or ripple height displaces the
+	 * mesh by kilometres.
+	 */
+	void SanitizeSettings();
+
 	virtual void SetupResources() override;
 	virtual void ClearShaderCache() override;
 	virtual void Reset() override;

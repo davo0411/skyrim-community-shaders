@@ -165,6 +165,13 @@ namespace PBRWater
 		return 1.0 - smoothstep(Params1.z, max(Params1.w, Params1.z + 1.0), distance);
 	}
 
+	/// tanh for x >= 0 that cannot overflow. FXC lowers the intrinsic to (e^2x - 1) / (e^2x + 1),
+	/// which is inf / inf = NaN once kh exceeds ~44, i.e. for any deep water.
+	float SafeTanh(float x)
+	{
+		return 1.0 - 2.0 / (exp(2.0 * min(max(x, 0.0), 20.0)) + 1.0);
+	}
+
 	/// Amplitude multiplier for one spectral component at this location.
 	float WaveWeight(uint i, WaveContext ctx)
 	{
@@ -179,7 +186,7 @@ namespace PBRWater
 		w *= saturate(rLocal / max(WaveExtra[i].x, 1e-4));
 
 		// Depth: orbital motion is limited by the bottom (tanh(kh) from linear wave theory).
-		w *= tanh(k * ctx.depth);
+		w *= SafeTanh(k * ctx.depth);
 
 		// Nyquist: never displace geometry with waves the vertex grid cannot represent.
 		if (ctx.spacing > 0.0)
@@ -431,6 +438,13 @@ namespace PBRWater
 		float rippleFade = damping * RippleDepthFade(ctx.depth);
 		o.current = now.displacement + float3(0, 0, RippleHeight(positionWS, false) * rippleFade);
 		o.previous = prev.displacement + float3(0, 0, RippleHeight(positionWS, true) * rippleFade);
+
+		// Hard bound: waves stay within their amplitude sum (doubled for shoaling) and the ripple sim stays within a few
+		// times its scale. Clamping also flushes NaN (D3D min/max return the non-NaN operand), so a
+		// bad input can never throw the mesh off-screen.
+		float limit = 2.0 * max(Params2.z, 0.0) + 4.0 * max(Ripple1.x, 0.0) + 1.0;
+		o.current = clamp(o.current, -limit, limit);
+		o.previous = clamp(o.previous, -limit, limit);
 		o.waveNormal = now.normal;
 		o.jacobian = now.jacobian;
 		o.shoreBreak = now.shoreBreak;
