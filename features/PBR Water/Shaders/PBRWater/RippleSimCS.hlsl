@@ -1,0 +1,82 @@
+// ============================================================================
+// PBR Water - interactive ripple simulation.
+//
+// A camera-centred heightfield integrated with the 2D wave equation (explicit leapfrog):
+//     h(t+1) = 2 h(t) - h(t-1) + C^2 * laplacian(h(t)),   C = c dt / dx  (stable for C^2 <= 0.5)
+// Bodies in the water (actor limbs, loose Havok objects) act as moving constraints that hold
+// the surface down under their footprint, which produces bow waves, wakes and rings without any
+// hand-authored ripple shapes. A third channel accumulates foam where the surface is churned.
+//
+// The grid scrolls with the camera in whole texels; `Shift` re-addresses the previous state so the
+// simulation stays fixed in world space.
+//
+// Output: x height, y previous height, z foam, w unused.
+// ============================================================================
+
+struct RippleSource
+{
+	float2 Position;  // texel coordinates in the current grid
+	float Radius;     // texels
+	float Depth;      // target surface depression (simulation units, > 0 pushes down)
+	float Foam;       // foam added per step at the centre
+	float3 Pad;
+};
+
+cbuffer RippleSimCB : register(b0)
+{
+	int2 Shift;  // texel offset of the new grid origin relative to the previous one
+	uint NumSources;
+	uint GridSize;
+	float Damping;     // amplitude retained per step
+	float FoamDecay;   // foam retained per step
+	float WaveSpeed2;  // C^2
+	float FoamFromMotion;
+};
+
+Texture2D<float4> PreviousState : register(t0);
+StructuredBuffer<RippleSource> Sources : register(t1);
+RWTexture2D<float4> CurrentState : register(u0);
+
+float4 LoadState(int2 p)
+{
+	if (any(p < 0) || any(p >= (int)GridSize))
+		return 0.0;
+	return PreviousState.Load(int3(p, 0));
+}
+
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	if (any(id.xy >= GridSize))
+		return;
+
+	int2 p = int2(id.xy) + Shift;
+	float4 centre = LoadState(p);
+	float h = centre.x;
+	float hPrev = centre.y;
+
+	float sum = LoadState(p + int2(1, 0)).x + LoadState(p - int2(1, 0)).x +
+	            LoadState(p + int2(0, 1)).x + LoadState(p - int2(0, 1)).x;
+
+	float hNext = (2.0 * h - hPrev + WaveSpeed2 * (sum - 4.0 * h)) * Damping;
+	float foam = centre.z * FoamDecay;
+
+	// Absorb waves at the border so nothing reflects off the edge of the simulated area.
+	float2 border = min(float2(id.xy), float(GridSize - 1) - float2(id.xy));
+	hNext *= saturate(min(border.x, border.y) / 8.0);
+
+	float2 texel = float2(id.xy) + 0.5;
+	[loop] for (uint i = 0; i < NumSources; i++)
+	{
+		RippleSource s = Sources[i];
+		float2 d = texel - s.Position;
+		float r2 = dot(d, d) / max(s.Radius * s.Radius, 1e-3);
+		if (r2 > 4.0)
+			continue;
+		float w = exp(-2.0 * r2);
+		// Constraint: the body pushes the surface down to its depression, it never pulls it up.
+		hNext = lerp(hNext, min(hNext, -s.Depth), w);
+		foam += s.Foam * w;
+	}
+
+	foam += saturate(abs(hNext - h) * FoamFromMotion);
+	CurrentState[id.xy] = float4(hNext, h, saturate(foam), 0.0);
+}

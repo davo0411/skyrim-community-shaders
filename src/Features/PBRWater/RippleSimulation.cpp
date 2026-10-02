@@ -1,0 +1,179 @@
+#include "RippleSimulation.h"
+
+#include "Utils/D3D.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace
+{
+	constexpr float FixedStep = 1.0f / 60.0f;
+	constexpr uint32_t MaxStepsPerFrame = 4;
+}
+
+void RippleSimulation::SetupResources()
+{
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = GridSize;
+	desc.Height = GridSize;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	srvDesc.Format = desc.Format;
+	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+	uavDesc.Format = desc.Format;
+	uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+
+	for (uint32_t i = 0; i < 2; ++i) {
+		state[i] = std::make_unique<Texture2D>(desc, i == 0 ? "PBRWater::RippleState0" : "PBRWater::RippleState1");
+		state[i]->CreateSRV(srvDesc);
+		state[i]->CreateUAV(uavDesc);
+	}
+
+	sourceBuffer = std::make_unique<StructuredBuffer>(StructuredBufferDesc<GpuSource>(MaxSources, true), MaxSources, "PBRWater::RippleSources");
+	sourceBuffer->CreateSRV();
+	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::RippleSimCB");
+
+	ClearShaderCache();
+	Reset();
+}
+
+void RippleSimulation::ClearShaderCache()
+{
+	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\RippleSimCS.hlsl", {}, "cs_5_0")));
+	ready = simCS && state[0] && state[1];
+}
+
+void RippleSimulation::Reset()
+{
+	hasOrigin = false;
+	accumulator = 0.0f;
+	if (!state[0] || !state[1])
+		return;
+	const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	auto context = globals::d3d::context;
+	context->ClearUnorderedAccessViewFloat(state[0]->uav.get(), zero);
+	context->ClearUnorderedAccessViewFloat(state[1]->uav.get(), zero);
+}
+
+void RippleSimulation::SubmitSources(std::vector<Source>&& sources)
+{
+	std::scoped_lock lock(sourcesMutex);
+	pendingSources = std::move(sources);
+}
+
+ID3D11ShaderResourceView* RippleSimulation::GetSRV() const
+{
+	return state[current] ? state[current]->srv.get() : nullptr;
+}
+
+void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings)
+{
+	if (!ready)
+		return;
+
+	texelSize = std::max(settings.extent, 256.0f) / GridSize;
+
+	// Snap the grid to whole texels so scrolling never resamples (and never smears) the state.
+	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / texelSize)) - GridSize / 2;
+	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / texelSize)) - GridSize / 2;
+	int64_t shiftX = hasOrigin ? newOriginX - originTexelX : 0;
+	int64_t shiftY = hasOrigin ? newOriginY - originTexelY : 0;
+	if (!hasOrigin || std::abs(shiftX) >= GridSize || std::abs(shiftY) >= GridSize) {
+		// Teleport or first frame: nothing of the old state is still in range.
+		Reset();
+		shiftX = shiftY = 0;
+		hasOrigin = true;
+	}
+	originTexelX = newOriginX;
+	originTexelY = newOriginY;
+
+	std::vector<Source> sources;
+	{
+		std::scoped_lock lock(sourcesMutex);
+		sources = pendingSources;
+	}
+
+	std::array<GpuSource, MaxSources> gpuSources{};
+	uint32_t numSources = 0;
+	const float originX = GetOriginX();
+	const float originY = GetOriginY();
+	for (const auto& s : sources) {
+		if (numSources >= MaxSources)
+			break;
+		GpuSource& g = gpuSources[numSources];
+		g.position = { (s.x - originX) / texelSize, (s.y - originY) / texelSize };
+		if (g.position.x < -8.0f || g.position.y < -8.0f || g.position.x > GridSize + 8.0f || g.position.y > GridSize + 8.0f)
+			continue;
+		g.radius = std::max(s.radius / texelSize, 0.75f);
+		g.depth = s.depth;
+		g.foam = s.foam;
+		++numSources;
+	}
+	sourceBuffer->Update(gpuSources.data(), sizeof(gpuSources));
+
+	// Fixed time step for a stable explicit integrator; C^2 = (c dt / dx)^2 must stay <= 0.5 in 2D.
+	const float speedUnits = settings.waveSpeed * 70.0f;
+	SimCB base{};
+	base.gridSize = GridSize;
+	base.waveSpeed2 = std::min(std::pow(speedUnits * FixedStep / texelSize, 2.0f), 0.45f);
+	base.damping = std::pow(0.5f, FixedStep / std::max(settings.halfLife, 0.05f));
+	base.foamDecay = std::pow(0.5f, FixedStep / std::max(settings.foamHalfLife, 0.05f));
+	base.foamFromMotion = settings.foamFromMotion;
+
+	accumulator = std::min(accumulator + std::max(dt, 0.0f), FixedStep * MaxStepsPerFrame);
+	bool shifted = false;
+	while (accumulator >= FixedStep) {
+		accumulator -= FixedStep;
+		Step(shifted ? 0 : static_cast<int32_t>(shiftX), shifted ? 0 : static_cast<int32_t>(shiftY), numSources, base);
+		shifted = true;
+	}
+	if (!shifted && (shiftX != 0 || shiftY != 0)) {
+		// Paused but the camera moved (free camera): still keep the state anchored in world space.
+		SimCB frozen = base;
+		frozen.damping = 1.0f;
+		frozen.foamDecay = 1.0f;
+		frozen.waveSpeed2 = 0.0f;
+		Step(static_cast<int32_t>(shiftX), static_cast<int32_t>(shiftY), 0, frozen);
+	}
+}
+
+void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base)
+{
+	auto context = globals::d3d::context;
+
+	SimCB cb = base;
+	cb.shiftX = shiftX;
+	cb.shiftY = shiftY;
+	cb.numSources = numSources;
+	simCB->Update(cb);
+
+	const uint32_t next = current ^ 1;
+	ID3D11ShaderResourceView* srvs[2] = { state[current]->srv.get(), sourceBuffer->SRV(0) };
+	ID3D11UnorderedAccessView* uav = state[next]->uav.get();
+	ID3D11Buffer* cbs[1] = { simCB->CB() };
+
+	context->CSSetShader(simCS.get(), nullptr, 0);
+	context->CSSetShaderResources(0, 2, srvs);
+	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+	context->CSSetConstantBuffers(0, 1, cbs);
+	context->Dispatch(GridSize / 8, GridSize / 8, 1);
+
+	ID3D11ShaderResourceView* nullSrvs[2] = { nullptr, nullptr };
+	ID3D11UnorderedAccessView* nullUav = nullptr;
+	ID3D11Buffer* nullCb = nullptr;
+	context->CSSetShaderResources(0, 2, nullSrvs);
+	context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+	context->CSSetConstantBuffers(0, 1, &nullCb);
+	context->CSSetShader(nullptr, nullptr, 0);
+
+	current = next;
+}
