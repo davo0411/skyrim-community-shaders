@@ -97,15 +97,24 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
     length measured from the depth buffer to the _displaced_ surface. Reflections no longer vanish in
     shallow water.
 -   Wave subsurface scattering (Atlas, GDC 2019).
--   Foam: shore and object intersections (depth buffer), folding crests (Gerstner Jacobian, scaled by the
-    Monahan whitecap coverage for the wind), breaking shoreline waves, and wakes from the ripple
-    simulation. The foam pattern is procedural (no texture assets) and lives in Lagrangian coordinates so
-    it rides the wave orbits.
+-   Foam is a _coverage_ field turned into a pattern by a soft threshold (the approach used by Crest and
+    Sea of Thieves): as coverage drops, the bubbles in the foam grow and merge, so dense foam thins into
+    lace and then specks instead of fading uniformly. Coverage sources:
+    -   contact: an exponential band where the water meets anything (shore, rocks, piers, legs), measured
+        from the depth buffer and surging as each shore wave runs up;
+    -   crests: surface folding (Gerstner Jacobian) scaled by the Monahan whitecap coverage for the wind,
+        sampled at two earlier instants as well so foam trails behind the crest and thins out;
+    -   breaking shoreline waves, and wakes from the ripple simulation.
+-   The pattern is procedural (no texture assets): round bubbles of random size on a jittered grid,
+    merged with a smooth minimum, with walls bent by an fBm domain warp and density varied by large-scale
+    clumping noise. A blurred "bubbles" layer lightens the water under the foam. The pattern lives in
+    Lagrangian coordinates so it rides the wave orbits, and fades to its average when sub-pixel.
 
 ## Interaction
 
 -   **Ripples** (`RippleSimulation`, `RippleSimCS.hlsl`): a 512^2 camera-centred heightfield integrated with the
-    2D wave equation. Every actor collision shape (each leg, the torso, ...), and loose Havok object
+    2D wave equation at a fixed 60 Hz, interpolated between steps to the render time. A copy of the
+    previous frame's state provides correct motion vectors for the ripples. Every actor collision shape (each leg, the torso, ...), and loose Havok object
     crossing the surface acts as a moving constraint, which produces bow waves, wakes and rings.
     It replaces the vanilla wading displacement mesh, which is disabled because it is a second surface
     that cannot follow the waves.
@@ -116,7 +125,7 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
 ## Debugging
 
 -   Settings > PBR Water > Debug: wireframe overlay / wireframe only, and debug views (normals, foam,
-    depth/shore, crest compression, roughness, wave height), plus live spectrum values.
+    depth/shore, crest compression, roughness, wave height, fetch), plus live spectrum values.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
 
 ## Validation outside the game
@@ -150,5 +159,7 @@ bit-identical bytecode to `dev` for all permutations.
 -   GPU Gems ch. 1, _Effective Water Simulation from Physical Models_
 -   Olano & Baker, _LEAN Mapping_ (2010)
 -   Ang, _The Technical Art of Sea of Thieves_ (SIGGRAPH 2018 Talks) - foam and scattering breakdown
+-   Crest Ocean System (wave-harmonic/crest, MIT) - coverage-threshold foam with feathering and a bubble layer
+-   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Pleasant & Ross, _Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas_ (GDC 2019) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement

@@ -44,6 +44,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	RefractionDistortion,
 	FoamAmount,
 	ShoreFoamWidth,
+	FoamPersistence,
 	CrestFoamThreshold,
 	FoamScale,
 	BreakingFoam,
@@ -194,6 +195,9 @@ void PBRWater::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("crest_foam_threshold"), "Crest Foam Threshold"), &settings.CrestFoamThreshold, 0.0f, 1.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("crest_foam_threshold_tooltip"), "Surface compression at which crests start to foam. Higher values give more crest foam."));
+		ImGui::SliderFloat(T(TKEY("foam_persistence"), "Crest Foam Trail"), &settings.FoamPersistence, 0.0f, 5.0f, "%.1f s");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("foam_persistence_tooltip"), "How long foam from a breaking crest lingers and thins out behind the wave."));
 		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Foam"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("foam_scale"), "Foam Pattern Size"), &settings.FoamScale, 0.2f, 5.0f, "%.2f m");
@@ -247,6 +251,7 @@ void PBRWater::DrawSettings()
 			T(TKEY("debug_jacobian"), "Crest Compression"),
 			T(TKEY("debug_roughness"), "Roughness"),
 			T(TKEY("debug_height"), "Wave Height"),
+			T(TKEY("debug_fetch"), "Fetch"),
 		};
 		ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &settings.DebugView, views, IM_ARRAYSIZE(views));
 
@@ -418,15 +423,15 @@ void PBRWater::UpdateFrameConstants()
 
 	if (settings.EnableRipples && ripples.IsReady()) {
 		d.Ripple0 = { ripples.GetOriginX(), ripples.GetOriginY(), 1.0f / ripples.GetExtent(), 1.0f };
-		d.Ripple1 = { settings.RippleHeight * UnitsPerMetre, settings.RippleNormalStrength, 1.0f, 1.0f / RippleSimulation::GridSize };
+		d.Ripple1 = { settings.RippleHeight * UnitsPerMetre, settings.RippleNormalStrength, 0.0f, 1.0f / RippleSimulation::GridSize };
+		d.Ripple2 = { ripples.GetPreviousOriginX(), ripples.GetPreviousOriginY(), ripples.GetStepAlpha(), ripples.GetPreviousStepAlpha() };
 	}
 
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, settings.FoamAlbedo, settings.RefractionDistortion, settings.PointLightSpecular };
 	d.Foam0 = { settings.ShoreFoamWidth * UnitsPerMetre, settings.CrestFoamThreshold, settings.FoamAmount, settings.FoamScale * UnitsPerMetre };
-	// Foam cells animate with sin(0.6 t): wrap time at a whole number of periods so it stays continuous.
-	constexpr float foamPeriod = 100.0f * TwoPi / 0.6f;
-	d.Foam1 = { 0.0f, std::fmod(globals::state->timer, foamPeriod), settings.WakeFoam, settings.RiverWaveDamping };
+	// The foam animation only drifts noise slowly; wrapping once an hour keeps float precision.
+	d.Foam1 = { settings.FoamPersistence, std::fmod(globals::state->timer, 3600.0f), settings.WakeFoam, settings.RiverWaveDamping };
 
 	frameData = d;
 }
@@ -488,7 +493,6 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 				spacing = pass->geometry->worldBound.radius * 1.41421356f / std::max(std::sqrt(triangles * 0.5f), 1.0f);
 		}
 		d.Draw0.x = spacing;
-		d.Draw0.w = pass->geometry->world.translate.z;
 	}
 	gpuBuffer->Update(d);
 
@@ -497,14 +501,15 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	context->VSSetConstantBuffers(7, 1, &cb);
 	context->PSSetConstantBuffers(7, 1, &cb);
 
-	ID3D11ShaderResourceView* srvs[3] = {
+	ID3D11ShaderResourceView* srvs[4] = {
 		settings.EnableRipples ? ripples.GetSRV() : nullptr,
 		fetchTexture ? fetchTexture->srv.get() : nullptr,
-		(d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr
+		(d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr,
+		settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr
 	};
 	ID3D11SamplerState* sampler = linearClampSampler.get();
-	context->VSSetShaderResources(110, 3, srvs);
-	context->PSSetShaderResources(110, 3, srvs);
+	context->VSSetShaderResources(110, 4, srvs);
+	context->PSSetShaderResources(110, 4, srvs);
 	context->VSSetSamplers(12, 1, &sampler);
 	context->PSSetSamplers(12, 1, &sampler);
 
@@ -531,7 +536,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->DSSetConstantBuffers(0, 3, vsBuffers);
 		context->DSSetConstantBuffers(7, 1, &cb);
 		context->DSSetConstantBuffers(12, 1, &frameBuffer);
-		context->DSSetShaderResources(110, 3, srvs);
+		context->DSSetShaderResources(110, 4, srvs);
 		context->DSSetSamplers(12, 1, &sampler);
 		context->DSSetShaderResources(8, 1, &flowmap);
 		context->DSSetSamplers(8, 1, &flowmapSampler);

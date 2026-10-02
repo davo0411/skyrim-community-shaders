@@ -37,6 +37,9 @@ void RippleSimulation::SetupResources()
 		state[i]->CreateSRV(srvDesc);
 		state[i]->CreateUAV(uavDesc);
 	}
+	previousFrame = std::make_unique<Texture2D>(desc, "PBRWater::RipplePreviousFrame");
+	previousFrame->CreateSRV(srvDesc);
+	previousFrame->CreateUAV(uavDesc);
 
 	sourceBuffer = std::make_unique<StructuredBuffer>(StructuredBufferDesc<GpuSource>(MaxSources, true), MaxSources, "PBRWater::RippleSources");
 	sourceBuffer->CreateSRV();
@@ -49,19 +52,21 @@ void RippleSimulation::SetupResources()
 void RippleSimulation::ClearShaderCache()
 {
 	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\RippleSimCS.hlsl", {}, "cs_5_0")));
-	ready = simCS && state[0] && state[1];
+	ready = simCS && state[0] && state[1] && previousFrame;
 }
 
 void RippleSimulation::Reset()
 {
 	hasOrigin = false;
 	accumulator = 0.0f;
-	if (!state[0] || !state[1])
+	stepAlpha = previousStepAlpha = 0.0f;
+	if (!state[0] || !state[1] || !previousFrame)
 		return;
 	const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	auto context = globals::d3d::context;
 	context->ClearUnorderedAccessViewFloat(state[0]->uav.get(), zero);
 	context->ClearUnorderedAccessViewFloat(state[1]->uav.get(), zero);
+	context->ClearUnorderedAccessViewFloat(previousFrame->uav.get(), zero);
 }
 
 void RippleSimulation::SubmitSources(std::vector<Source>&& sources)
@@ -75,26 +80,39 @@ ID3D11ShaderResourceView* RippleSimulation::GetSRV() const
 	return state[current] ? state[current]->srv.get() : nullptr;
 }
 
+ID3D11ShaderResourceView* RippleSimulation::GetPreviousSRV() const
+{
+	return previousFrame ? previousFrame->srv.get() : nullptr;
+}
+
 void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings)
 {
 	if (!ready)
 		return;
 
-	texelSize = std::max(settings.extent, 256.0f) / GridSize;
+	const float newTexelSize = std::max(settings.extent, 256.0f) / GridSize;
+	if (newTexelSize != texelSize) {
+		// A different simulated area means a different grid; the old state no longer maps onto it.
+		texelSize = newTexelSize;
+		hasOrigin = false;
+	}
+
+	// What was displayed last frame becomes the motion-vector reference for this frame.
+	globals::d3d::context->CopyResource(previousFrame->resource.get(), state[current]->resource.get());
+	previousOriginTexelX = originTexelX;
+	previousOriginTexelY = originTexelY;
+	previousStepAlpha = stepAlpha;
 
 	// Snap the grid to whole texels so scrolling never resamples (and never smears) the state.
 	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / texelSize)) - GridSize / 2;
 	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / texelSize)) - GridSize / 2;
-	int64_t shiftX = hasOrigin ? newOriginX - originTexelX : 0;
-	int64_t shiftY = hasOrigin ? newOriginY - originTexelY : 0;
-	if (!hasOrigin || std::abs(shiftX) >= GridSize || std::abs(shiftY) >= GridSize) {
-		// Teleport or first frame: nothing of the old state is still in range.
+	if (!hasOrigin || std::abs(newOriginX - originTexelX) >= GridSize || std::abs(newOriginY - originTexelY) >= GridSize) {
+		// First frame or teleport: nothing of the old state is still in range.
 		Reset();
-		shiftX = shiftY = 0;
+		originTexelX = previousOriginTexelX = newOriginX;
+		originTexelY = previousOriginTexelY = newOriginY;
 		hasOrigin = true;
 	}
-	originTexelX = newOriginX;
-	originTexelY = newOriginY;
 
 	std::vector<Source> sources;
 	{
@@ -102,10 +120,11 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 		sources = pendingSources;
 	}
 
+	// Sources are placed in the grid the next step writes, i.e. at the new origin.
 	std::array<GpuSource, MaxSources> gpuSources{};
 	uint32_t numSources = 0;
-	const float originX = GetOriginX();
-	const float originY = GetOriginY();
+	const float originX = static_cast<float>(newOriginX) * texelSize;
+	const float originY = static_cast<float>(newOriginY) * texelSize;
 	for (const auto& s : sources) {
 		if (numSources >= MaxSources)
 			break;
@@ -130,20 +149,23 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	base.foamFromMotion = settings.foamFromMotion;
 
 	accumulator = std::min(accumulator + std::max(dt, 0.0f), FixedStep * MaxStepsPerFrame);
-	bool shifted = false;
+	bool first = true;
 	while (accumulator >= FixedStep) {
 		accumulator -= FixedStep;
-		Step(shifted ? 0 : static_cast<int32_t>(shiftX), shifted ? 0 : static_cast<int32_t>(shiftY), numSources, base);
-		shifted = true;
+		// The grid only scrolls together with a real step; between steps (high frame rates, pause)
+		// it keeps its origin, so the stored state is never re-integrated without time passing.
+		const int32_t shiftX = first ? static_cast<int32_t>(newOriginX - originTexelX) : 0;
+		const int32_t shiftY = first ? static_cast<int32_t>(newOriginY - originTexelY) : 0;
+		Step(shiftX, shiftY, numSources, base);
+		first = false;
 	}
-	if (!shifted && (shiftX != 0 || shiftY != 0)) {
-		// Paused but the camera moved (free camera): still keep the state anchored in world space.
-		SimCB frozen = base;
-		frozen.damping = 1.0f;
-		frozen.foamDecay = 1.0f;
-		frozen.waveSpeed2 = 0.0f;
-		Step(static_cast<int32_t>(shiftX), static_cast<int32_t>(shiftY), 0, frozen);
+	if (!first) {
+		originTexelX = newOriginX;
+		originTexelY = newOriginY;
 	}
+
+	// Shaders interpolate between the last two steps to the current time.
+	stepAlpha = accumulator / FixedStep;
 }
 
 void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base)

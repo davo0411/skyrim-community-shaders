@@ -51,9 +51,17 @@ public:
 	void Update(float cameraX, float cameraY, float dt, const Settings& settings);
 
 	ID3D11ShaderResourceView* GetSRV() const;
+	/** @brief The state as it was displayed last frame, for motion vectors. */
+	ID3D11ShaderResourceView* GetPreviousSRV() const;
 	/** @brief Absolute world position of the grid's (0, 0) corner. */
 	float GetOriginX() const { return static_cast<float>(originTexelX) * texelSize; }
 	float GetOriginY() const { return static_cast<float>(originTexelY) * texelSize; }
+	/** @brief Grid origin of the previous frame's state. */
+	float GetPreviousOriginX() const { return static_cast<float>(previousOriginTexelX) * texelSize; }
+	float GetPreviousOriginY() const { return static_cast<float>(previousOriginTexelY) * texelSize; }
+	/** @brief Interpolation between the last two simulation steps for the render time (and last frame's). */
+	float GetStepAlpha() const { return stepAlpha; }
+	float GetPreviousStepAlpha() const { return previousStepAlpha; }
 	float GetExtent() const { return texelSize * GridSize; }
 	bool IsReady() const { return ready; }
 
@@ -84,6 +92,7 @@ private:
 	void Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base);
 
 	std::unique_ptr<Texture2D> state[2];
+	std::unique_ptr<Texture2D> previousFrame;
 	std::unique_ptr<StructuredBuffer> sourceBuffer;
 	std::unique_ptr<ConstantBuffer> simCB;
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
@@ -91,6 +100,10 @@ private:
 
 	int64_t originTexelX = 0;
 	int64_t originTexelY = 0;
+	int64_t previousOriginTexelX = 0;
+	int64_t previousOriginTexelY = 0;
+	float stepAlpha = 0.0f;
+	float previousStepAlpha = 0.0f;
 	float texelSize = 8.0f;
 	float accumulator = 0.0f;
 	bool hasOrigin = false;

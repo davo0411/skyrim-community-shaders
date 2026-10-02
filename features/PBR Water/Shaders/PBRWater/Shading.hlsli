@@ -80,54 +80,127 @@ namespace PBRWater
 
 	// ------------------------------------------------------------------------
 	// Foam
+	//
+	// Foam is a coverage field (how much of the surface is aerated) turned into a pattern with a
+	// soft threshold, as in Crest (wave-harmonic/crest, MIT) and Sea of Thieves: as coverage drops
+	// the bubbles in the foam grow and merge, so dense foam thins into lace and then into specks
+	// instead of fading uniformly. The pattern is procedural: round bubbles of random size on a
+	// jittered grid, with walls bent by a domain warp so no straight cell edges survive.
 	// ------------------------------------------------------------------------
-	float2 FoamHash2(float2 p)
+
+	// Hash without Sine, Dave Hoskins (MIT): stable across GPUs, unlike sin-based hashes.
+	float Hash12(float2 p)
 	{
-		p = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
-		return frac(sin(p) * 43758.5453);
+		float3 p3 = frac(float3(p.xyx) * 0.1031);
+		p3 += dot(p3, p3.yzx + 33.33);
+		return frac((p3.x + p3.y) * p3.z);
 	}
 
-	/// Distance to the nearest cell border of a jittered grid: bright filaments around dark bubbles.
-	float CellularFoam(float2 p, float time)
+	float2 Hash22(float2 p)
+	{
+		float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+		p3 += dot(p3, p3.yzx + 33.33);
+		return frac((p3.xx + p3.yz) * p3.zy);
+	}
+
+	float ValueNoise(float2 p)
+	{
+		float2 i = floor(p);
+		float2 f = frac(p);
+		float2 u = f * f * (3.0 - 2.0 * f);
+		return lerp(lerp(Hash12(i), Hash12(i + float2(1, 0)), u.x),
+			lerp(Hash12(i + float2(0, 1)), Hash12(i + float2(1, 1)), u.x), u.y);
+	}
+
+	/// Three-octave fBm with rotated octaves (no grid-aligned artefacts), in [0, 1].
+	float Fbm(float2 p)
+	{
+		const float2x2 rotation = float2x2(0.8, 0.6, -0.6, 0.8);
+		float sum = 0.0;
+		float amplitude = 0.5;
+		[unroll] for (int i = 0; i < 3; i++)
+		{
+			sum += amplitude * ValueNoise(p);
+			p = mul(rotation, p) * 2.03 + 7.1;
+			amplitude *= 0.5;
+		}
+		return sum / 0.875;
+	}
+
+	/// Distance to the nearest bubble centre, normalised by that bubble's radius and merged with a
+	/// smooth minimum: 0 at a bubble centre, ~1 at its rim, with rounded walls between bubbles.
+	float BubbleField(float2 p)
 	{
 		float2 cell = floor(p);
 		float2 f = frac(p);
-		float d1 = 8.0, d2 = 8.0;
+		float result = 0.0;
+		float weightSum = 0.0;
 		[unroll] for (int y = -1; y <= 1; y++)
 		{
 			[unroll] for (int x = -1; x <= 1; x++)
 			{
 				float2 o = float2(x, y);
-				float2 h = FoamHash2(cell + o);
-				h = 0.5 + 0.4 * sin(time * 0.6 + Math::TAU * h);
-				float d = length(o + h - f);
-				if (d < d1) {
-					d2 = d1;
-					d1 = d;
-				} else if (d < d2) {
-					d2 = d;
-				}
+				float2 centre = o + 0.15 + 0.7 * Hash22(cell + o);
+				float radius = 0.55 + 0.45 * Hash12(cell + o + 17.17);
+				float d = length(centre - f) / radius;
+				// Exponential smooth minimum: neighbouring bubbles merge softly instead of meeting at an edge.
+				float w = exp2(-8.0 * d);
+				result += w * d;
+				weightSum += w;
 			}
 		}
-		return saturate(1.0 - (d2 - d1) * 2.5);
+		return result / max(weightSum, 1e-6);
 	}
 
-	/// Foam pattern in [0, 1]. `p` is a Lagrangian (undisplaced) position, so the foam rides the wave
-	/// orbits instead of sliding over the surface; the cells themselves slowly churn over time.
-	float FoamPattern(float2 p, float time)
+	/**
+	 * Surface foam in [0, 1] for a local coverage.
+	 * @param p         Lagrangian (undisplaced) absolute position, so foam rides the wave orbits
+	 * @param coverage  fraction of the surface that is foam, 0..1
+	 * @param footprint world size of a pixel (anti-aliasing)
+	 * @param time      animation time (bubbles slowly churn and pop)
+	 */
+	float FoamLace(float2 p, float coverage, float footprint, float time)
 	{
 		float scale = max(Foam0.w, 1.0);
-		float a = CellularFoam(p / scale, time);
-		float b = CellularFoam(p / (scale * 0.37) + 17.3, time * 1.3);
-		return saturate(a * 0.65 + b * 0.45);
+		float2 q = p / scale;
+
+		// Large-scale density variation: foam gathers in clumps and streaks.
+		float clumps = Fbm(q * 0.21 + float2(time * 0.011, -time * 0.007));
+		coverage = saturate(coverage * (0.45 + 1.1 * clumps));
+		if (coverage <= 0.002)
+			return 0.0;
+
+		// Domain warp bends the bubble walls into organic, curved filaments.
+		float2 warp = float2(Fbm(q * 0.6 + time * 0.03), Fbm(q * 0.6 + 31.7 - time * 0.025)) - 0.5;
+		float2 w = q + warp * 1.6;
+
+		float large = BubbleField(w);
+		float small = BubbleField(w * 2.7 + 9.3);
+
+		// Bubbles grow as coverage falls; at zero coverage they swallow everything.
+		float radius = lerp(1.45, 0.05, sqrt(coverage));
+		float pixelCells = footprint / scale;
+		float feather = 0.12 + pixelCells * 2.0;
+		float lace = smoothstep(radius - feather, radius + feather, large);
+		lace *= smoothstep(radius * 0.85 - feather * 2.7, radius * 0.85 + feather * 2.7, small);
+
+		// Far away the pattern is sub-pixel: converge to its average instead of shimmering.
+		float distanceBlend = saturate(pixelCells * 4.0 - 0.5);
+		return lerp(lace, coverage * coverage, distanceBlend);
 	}
 
-	/// Turns a coverage in [0, 1] into a foam mask using the pattern as a threshold, so sparse foam
-	/// breaks into filaments and dense foam becomes solid.
-	float FoamMask(float coverage, float pattern)
+	/// Soft, out-of-focus aeration under the foam (bubbles carried below the surface).
+	float FoamBubbles(float2 p, float coverage, float time)
 	{
-		coverage = saturate(coverage * Foam0.z);
-		return saturate((pattern - (1.0 - coverage)) * 4.0) * saturate(coverage * 3.0);
+		float2 q = p / max(Foam0.w * 1.7, 1.0);
+		return saturate(coverage * 1.5) * (0.4 + 0.6 * Fbm(q + time * 0.02));
+	}
+
+	/// Crest foam coverage from surface folding (Jacobian below the threshold) and the wind's
+	/// whitecap coverage (Monahan & O'Muircheartaigh 1980).
+	float CrestCoverage(float jacobian)
+	{
+		return saturate((Foam0.y - jacobian) * 2.5) * saturate(Params2.y * 8.0 + 0.25);
 	}
 
 	// ------------------------------------------------------------------------
@@ -138,10 +211,14 @@ namespace PBRWater
 		float3 normal;
 		float roughness;
 		float jacobian;
+		float crestFoam;  // crest foam coverage including its decaying trail
 		float shoreBreak;
 		float shoreMask;
+		float shoreCrest;
 		float rippleFoam;
 		float depth;
+		float fetchMetres;
+		float footprint;
 	};
 
 	/**
@@ -159,7 +236,7 @@ namespace PBRWater
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w, 0.0);
 		WaveResult waves = EvaluateWaves(waveParam.xyz, ctx, false, footprint);
-		float3 ripple = RippleSlopeFoam(waveParam.xyz);
+		float3 ripple = RippleSlopeFoam(waveParam.xyz, ctx.depth);
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
 		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05);
@@ -169,10 +246,23 @@ namespace PBRWater
 
 		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance);
 		o.jacobian = waves.jacobian;
+
+		// Crest foam with a trail: where this water was folding a moment ago, thinner the older it is.
+		o.crestFoam = CrestCoverage(waves.jacobian);
+		[branch] if (Foam1.x > 0.0 && Foam0.z > 0.0)
+		{
+			float older = CrestCoverage(WaveJacobian(waveParam.xyz, ctx, Foam1.x * 0.4, footprint));
+			float oldest = CrestCoverage(WaveJacobian(waveParam.xyz, ctx, Foam1.x, footprint));
+			o.crestFoam = max(o.crestFoam, max(older * 0.6, oldest * 0.3));
+		}
+
 		o.shoreBreak = waves.shoreBreak;
 		o.shoreMask = waves.shoreMask;
+		o.shoreCrest = waves.shoreCrest;
 		o.rippleFoam = ripple.z;
 		o.depth = ctx.depth;
+		o.fetchMetres = SampleFetchMetres(waveParam.xy + FrameBuffer::CameraPosAdjust.xy);
+		o.footprint = footprint;
 		return o;
 	}
 
@@ -180,11 +270,11 @@ namespace PBRWater
 	/// the surface (shores, rocks, piers, wading legs ...); pass a large value when unknown.
 	float FoamCoverage(SurfaceShading s, float waterThickness)
 	{
-		float shore = 1.0 - saturate(waterThickness / max(Foam0.x, 1.0));
-		shore *= shore;
-		float crest = saturate((Foam0.y - s.jacobian) * 2.0) * saturate(Params2.y * 8.0 + 0.25);
-		float breaking = s.shoreBreak * Shore1.y;
-		return saturate(shore + crest + breaking + s.rippleFoam * Foam1.z);
+		// A thin band where the water meets anything, surging as each shore wave runs up.
+		float contact = exp(-waterThickness / max(Foam0.x, 1.0));
+		float surge = 0.6 + 0.4 * s.shoreCrest;
+		float breaking = s.shoreBreak * Shore1.y * (0.5 + 0.5 * s.shoreCrest);
+		return saturate((contact * surge + s.crestFoam + breaking + s.rippleFoam * Foam1.z) * Foam0.z);
 	}
 
 	float3 DebugView(uint mode, SurfaceShading s, float foam, float4 waveState)
@@ -202,6 +292,9 @@ namespace PBRWater
 			return s.roughness.xxx;
 		case 6:
 			return float3(saturate(waveState.x / max(Params2.z, 1.0)) * 0.5 + 0.5, saturate(-waveState.x / max(Params2.z, 1.0)), 0.0);
+		case 7:
+			// Fetch on a log scale: black ~10 m (pond), white ~100 km (open sea).
+			return saturate(log10(max(s.fetchMetres, 10.0)) / 4.0 - 0.25).xxx;
 		default:
 			return 0.0;
 		}

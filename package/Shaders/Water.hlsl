@@ -1474,13 +1474,17 @@ PS_OUTPUT main(PS_INPUT input)
 	pbrThickness = pbrPathLength * abs(viewDirection.z);
 #							endif
 	float pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
-	float pbrFoam = PBRWater::FoamMask(pbrFoamCoverage, PBRWater::FoamPattern(input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy, PBRWater::Foam1.y));
+	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy;
+	float pbrFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage, pbrSurface.footprint, PBRWater::Foam1.y);
+	float pbrBubbles = PBRWater::FoamBubbles(pbrFoamPosition, pbrFoamCoverage, PBRWater::Foam1.y);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)
 	pbrFoamAmbient = Color::IrradianceToGamma(Color::IrradianceToLinear(pbrFoamAmbient) * skylightingDiffuse);
 #							endif
 	float3 pbrFoamColor = pbrFoamDir * dirShadow * saturate(dot(normal, SunDir.xyz) * 0.5 + 0.5) + pbrFoamAmbient;
+	// Aerated water under the foam scatters light back up: a milky, out-of-focus layer below the lace.
+	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.55, pbrBubbles * 0.35);
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);

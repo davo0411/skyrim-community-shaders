@@ -43,9 +43,9 @@ struct PBRWater : Feature
 		float DisplacementFadeEnd = 32768.0f;
 
 		// Waves
-		float WindSpeedCalm = 2.0f;    ///< m/s when the weather has no wind
+		float WindSpeedCalm = 3.0f;    ///< m/s when the weather has no wind
 		float WindSpeedStorm = 22.0f;  ///< m/s at the strongest weather wind
-		float WaveHeight = 0.5f;
+		float WaveHeight = 1.0f;
 		float Choppiness = 0.75f;
 		float DirectionalSpread = 0.6f;
 		bool UseFetch = true;
@@ -69,7 +69,8 @@ struct PBRWater : Feature
 
 		// Foam
 		float FoamAmount = 1.0f;
-		float ShoreFoamWidth = 1.0f;  ///< metres
+		float ShoreFoamWidth = 0.35f;  ///< metres
+		float FoamPersistence = 1.5f;  ///< seconds a crest's foam trail lasts
 		float CrestFoamThreshold = 0.55f;
 		float FoamScale = 1.2f;  ///< metres
 		float BreakingFoam = 1.0f;
@@ -134,6 +135,7 @@ struct PBRWater : Feature
 		float4 Shore1;
 		float4 Ripple0;
 		float4 Ripple1;
+		float4 Ripple2;
 		float4 Light0;
 		float4 Light1;
 		float4 Foam0;

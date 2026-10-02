@@ -40,7 +40,7 @@ namespace PBRWater
 		float4 Params2;                    // x choppiness, y whitecap coverage, z amplitude sum (units), w shortest displaced wavelength (units)
 		float4 RefCamPos;                  // xyz camera position the phase offsets are relative to, w wave time (s)
 		float4 Tess0;                      // x tessellation active for this draw, y target triangle size (px), z max factor, w pixels per unit at distance 1
-		float4 Draw0;                      // x vertex spacing of this draw (units), y wireframe mode, z debug view, w water surface height (absolute z)
+		float4 Draw0;                      // x vertex spacing of this draw (units), y wireframe mode, z debug view, w unused
 		float4 Fetch0;                     // xy grid origin (absolute world units), zw 1 / grid extent (units)
 		float4 Fetch1;                     // x enabled, y direction count, z wind slice coordinate, w fetch outside the grid (m)
 		float4 Terrain0;                   // xy heightmap uv scale, zw heightmap uv offset
@@ -48,16 +48,18 @@ namespace PBRWater
 		float4 Shore0;                     // x amplitude (units), y angular frequency (rad/s), z nominal beach slope, w onset depth (units)
 		float4 Shore1;                     // x steepness, y foam strength, z phase (now), w phase (previous frame)
 		float4 Ripple0;                    // xy simulation origin (absolute world units), z 1 / simulation extent (units), w enabled
-		float4 Ripple1;                    // x displacement scale (units), y normal strength, z foam strength, w texel size (uv)
+		float4 Ripple1;                    // x displacement scale (units), y normal strength, z unused, w texel size (uv)
+		float4 Ripple2;                    // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                     // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
 		float4 Light1;                     // x visibility scale, y foam albedo, z refraction distortion scale, w point light specular intensity
 		float4 Foam0;                      // x shore foam width (units), y crest foam threshold, z foam amount, w foam pattern scale (units)
-		float4 Foam1;                      // x unused, y foam animation time (s, wrapped), z wake foam strength, w flow wave damping
+		float4 Foam1;                      // x crest foam persistence (s), y foam animation time (s, wrapped), z wake foam strength, w flow wave damping
 	}
 
-	Texture2D<float4> RippleTexture : register(t110);     // x height, y previous height, z foam, w unused
+	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w unused
 	Texture2DArray<float> FetchTexture : register(t111);  // fetch in km, one slice per upwind direction
 	Texture2D<float> TerrainHeightTexture : register(t112);
+	Texture2D<float4> RipplePreviousTexture : register(t113);  // the ripple state as displayed last frame (motion vectors)
 	SamplerState LinearClampSampler : register(s12);
 
 	static const float UnitsPerMetre = METRES_TO_UNITS;
@@ -148,7 +150,8 @@ namespace PBRWater
 			float z0 = SampleTerrainZ(absPos.xy);
 			float zx = SampleTerrainZ(absPos.xy + float2(texel, 0));
 			float zy = SampleTerrainZ(absPos.xy + float2(0, texel));
-			ctx.depth = max(Draw0.w - z0, 0.0);
+			// The undisplaced surface point is the water plane: its own z is the water height.
+			ctx.depth = max(absPos.z - z0, 0.0);
 			ctx.terrainGrad = float2(zx - z0, zy - z0) / texel;
 			ctx.hasTerrain = 1.0;
 		}
@@ -193,6 +196,7 @@ namespace PBRWater
 		float slopeVariance;  // filtered-out slope variance (for roughness)
 		float shoreBreak;     // 0..1 breaking intensity of the shore waves
 		float shoreMask;      // 0..1 presence of the shore waves
+		float shoreCrest;     // 0..1 how close this point is to a shore wave crest (swash foam)
 	};
 
 	/// Nominal shoaling travel time from depth h to the shoreline on a beach of slope s:
@@ -217,6 +221,7 @@ namespace PBRWater
 		o.slopeVariance = 0.0;
 		o.shoreBreak = 0.0;
 		o.shoreMask = 0.0;
+		o.shoreCrest = 0.0;
 
 		// Camera-relative position re-based on the phase reference camera. For the main camera this
 		// offset is zero; other cameras (local map, cubemaps) still get correct, if less precise, waves.
@@ -285,6 +290,7 @@ namespace PBRWater
 				float theta = -omega * ShoreTravelTime(h) - (previous ? Shore1.w : Shore1.z);
 				float s, c;
 				sincos(theta, s, c);
+				o.shoreCrest = envelope * saturate(s);
 
 				// d(theta)/dx: theta' (h) * dh/dx, with dh/dx = -terrainGrad
 				float hm = max(h * MetresPerUnit, 0.02);
@@ -315,47 +321,86 @@ namespace PBRWater
 		return o;
 	}
 
+	/**
+	 * Jacobian of the open-sea waves `pastSeconds` ago at undisplaced position `positionWS`. Because the
+	 * position is Lagrangian, this is where the water at this point was folding a moment earlier:
+	 * sampling a few past instants lets crest foam linger and thin out behind the crest instead of popping.
+	 */
+	float WaveJacobian(float3 positionWS, WaveContext ctx, float pastSeconds, float filterSize)
+	{
+		float2 p = positionWS.xy + (FrameBuffer::CameraPosAdjust.xy - RefCamPos.xy);
+		float dxdx = 0.0, dydy = 0.0, dxdy = 0.0;
+		uint count = WaveCount();
+		[loop] for (uint i = 0; i < count; i++)
+		{
+			float4 dk = WaveDirK[i];
+			float4 amp = WaveAmp[i];
+			float weight = WaveWeight(i, ctx) * saturate(WaveExtra[i].y / max(filterSize, 1e-4) * 0.5 - 1.0);
+			float QWA = amp.y * dk.z * amp.x * weight;
+			if (QWA <= 0.0)
+				continue;
+			// Going back in time advances the phase by omega * dt.
+			float s = sin(dk.z * dot(dk.xy, p) + amp.z + dk.w * pastSeconds);
+			dxdx -= dk.x * dk.x * QWA * s;
+			dydy -= dk.y * dk.y * QWA * s;
+			dxdy -= dk.x * dk.y * QWA * s;
+		}
+		return (1.0 + dxdx) * (1.0 + dydy) - dxdy * dxdy;
+	}
+
 	// ------------------------------------------------------------------------
 	// Interactive ripples (GPU wave-equation simulation centred on the camera)
 	// ------------------------------------------------------------------------
-	float2 RippleUV(float2 absXY)
-	{
-		return (absXY - Ripple0.xy) * Ripple0.z;
-	}
-
 	float RippleEdgeFade(float2 uv)
 	{
 		float2 e = saturate(min(uv, 1.0 - uv) * 10.0);
 		return e.x * e.y;
 	}
 
-	float RippleHeight(float3 positionWS)
+	/// Displayed ripple height. The simulation runs at a fixed rate, so the two stored steps are
+	/// interpolated to the render time; `previous` samples last frame's copy for motion vectors.
+	float RippleHeight(float3 positionWS, bool previous)
 	{
 		if (Ripple0.w < 0.5)
 			return 0.0;
-		float2 uv = RippleUV(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
+		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+		float2 uv = (absXY - (previous ? Ripple2.xy : Ripple0.xy)) * Ripple0.z;
 		if (any(uv <= 0.0) || any(uv >= 1.0))
 			return 0.0;
-		return RippleTexture.SampleLevel(LinearClampSampler, uv, 0).x * Ripple1.x * RippleEdgeFade(uv);
+		float2 steps = previous ? RipplePreviousTexture.SampleLevel(LinearClampSampler, uv, 0).xy :
+		                          RippleTexture.SampleLevel(LinearClampSampler, uv, 0).xy;
+		return lerp(steps.y, steps.x, previous ? Ripple2.w : Ripple2.z) * Ripple1.x * RippleEdgeFade(uv);
+	}
+
+	float RippleDisplayed(float2 uv)
+	{
+		float2 steps = RippleTexture.SampleLevel(LinearClampSampler, uv, 0).xy;
+		return lerp(steps.y, steps.x, Ripple2.z);
+	}
+
+	/// Ripples cannot be taller than the water is deep; keeps them from dipping below the shore.
+	float RippleDepthFade(float depth)
+	{
+		return saturate(depth / max(3.0 * Ripple1.x, 1.0));
 	}
 
 	/// xy = height gradient (units/unit), z = foam
-	float3 RippleSlopeFoam(float3 positionWS)
+	float3 RippleSlopeFoam(float3 positionWS, float depth)
 	{
 		if (Ripple0.w < 0.5)
 			return 0.0;
-		float2 uv = RippleUV(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
+		float2 uv = (positionWS.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
 		if (any(uv <= 0.0) || any(uv >= 1.0))
 			return 0.0;
 		float t = Ripple1.w;
-		float hL = RippleTexture.SampleLevel(LinearClampSampler, uv - float2(t, 0), 0).x;
-		float hR = RippleTexture.SampleLevel(LinearClampSampler, uv + float2(t, 0), 0).x;
-		float hD = RippleTexture.SampleLevel(LinearClampSampler, uv - float2(0, t), 0).x;
-		float hU = RippleTexture.SampleLevel(LinearClampSampler, uv + float2(0, t), 0).x;
+		float hL = RippleDisplayed(uv - float2(t, 0));
+		float hR = RippleDisplayed(uv + float2(t, 0));
+		float hD = RippleDisplayed(uv - float2(0, t));
+		float hU = RippleDisplayed(uv + float2(0, t));
 		float foam = RippleTexture.SampleLevel(LinearClampSampler, uv, 0).z;
 		float texelUnits = t / Ripple0.z;
-		float2 grad = float2(hR - hL, hU - hD) / (2.0 * texelUnits) * Ripple1.x * Ripple1.y;
-		return float3(grad, foam * Ripple1.z) * RippleEdgeFade(uv);
+		float2 grad = float2(hR - hL, hU - hD) / (2.0 * texelUnits) * Ripple1.x * Ripple1.y * RippleDepthFade(depth);
+		return float3(grad, foam) * RippleEdgeFade(uv);
 	}
 
 	// ------------------------------------------------------------------------
@@ -381,9 +426,9 @@ namespace PBRWater
 		WaveResult now = EvaluateWaves(positionWS, ctx, false, 0.0);
 		WaveResult prev = EvaluateWaves(positionWS, ctx, true, 0.0);
 
-		float ripple = RippleHeight(positionWS) * damping;
-		o.current = now.displacement + float3(0, 0, ripple);
-		o.previous = prev.displacement + float3(0, 0, ripple);
+		float rippleFade = damping * RippleDepthFade(ctx.depth);
+		o.current = now.displacement + float3(0, 0, RippleHeight(positionWS, false) * rippleFade);
+		o.previous = prev.displacement + float3(0, 0, RippleHeight(positionWS, true) * rippleFade);
 		o.waveNormal = now.normal;
 		o.jacobian = now.jacobian;
 		o.shoreBreak = now.shoreBreak;
