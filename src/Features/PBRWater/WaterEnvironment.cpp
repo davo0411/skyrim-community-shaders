@@ -182,6 +182,94 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 	return field;
 }
 
+void WaterEnvironment::UpdateLoadedLand(bool exterior)
+{
+	struct LoadedCell
+	{
+		int32_t x, y;
+		const RE::TESObjectLAND::LoadedLandData* data;
+	};
+	std::vector<LoadedCell> cells;
+	uint64_t signature = 1469598103934665603ull;
+	if (auto tes = RE::TES::GetSingleton(); tes && exterior) {
+		tes->ForEachCell([&](RE::TESObjectCELL* cell) {
+			if (!cell || !cell->IsExteriorCell() || !cell->IsAttached())
+				return;
+			const auto* coords = cell->GetCoordinates();
+			const auto* landRecord = cell->GetRuntimeData().cellLand;
+			if (!coords || !landRecord || !landRecord->loadedData)
+				return;
+			cells.push_back({ coords->cellX, coords->cellY, landRecord->loadedData });
+			signature = (signature ^ (static_cast<uint64_t>(static_cast<uint32_t>(coords->cellX)) << 32 | static_cast<uint32_t>(coords->cellY))) * 1099511628211ull;
+			signature = (signature ^ reinterpret_cast<uintptr_t>(landRecord->loadedData)) * 1099511628211ull;
+		});
+	}
+	if (signature == landSignature)
+		return;
+	landSignature = signature;
+
+	if (cells.empty()) {
+		land.store(nullptr, std::memory_order_release);
+		landGeneration.fetch_add(1, std::memory_order_acq_rel);
+		return;
+	}
+
+	// 32 quads per cell (two 16-quad quadrants per side); neighbouring cells share their edge vertices.
+	constexpr int32_t QuadsPerCell = 32;
+	constexpr float VertexSpacing = CellSize / QuadsPerCell;
+	int32_t minX = INT32_MAX, minY = INT32_MAX, maxX = INT32_MIN, maxY = INT32_MIN;
+	for (const auto& c : cells) {
+		minX = std::min(minX, c.x);
+		minY = std::min(minY, c.y);
+		maxX = std::max(maxX, c.x);
+		maxY = std::max(maxY, c.y);
+	}
+
+	auto grid = std::make_shared<PBRWaterModel::Bathymetry>();
+	grid->width = static_cast<uint32_t>((maxX - minX + 1) * QuadsPerCell + 1);
+	grid->height = static_cast<uint32_t>((maxY - minY + 1) * QuadsPerCell + 1);
+	grid->minX = minX * CellSize;
+	grid->minY = minY * CellSize;
+	grid->stepX = grid->stepY = VertexSpacing;
+
+	// Cells inside the rectangle that are not loaded fall back to the coarse heightmap, else deep water.
+	const auto coarse = bathymetry.load(std::memory_order_acquire);
+	grid->heights.resize(static_cast<size_t>(grid->width) * grid->height);
+	for (uint32_t y = 0; y < grid->height; ++y) {
+		for (uint32_t x = 0; x < grid->width; ++x) {
+			const float wx = grid->minX + x * VertexSpacing;
+			const float wy = grid->minY + y * VertexSpacing;
+			grid->heights[static_cast<size_t>(y) * grid->width + x] = (coarse && coarse->Valid()) ? coarse->Sample(wx, wy) : -1.0e5f;
+		}
+	}
+
+	// Quadrants: 0 south-west, 1 south-east, 2 north-west, 3 north-east; 17 x 17 vertices each, row-major from the south.
+	// The streamed heights are relative to a per-cell base; heightExtents holds the cell's absolute
+	// min / max, which recovers that base.
+	for (const auto& c : cells) {
+		const auto [minH, maxH] = std::minmax_element(&c.data->heights[0][0], &c.data->heights[0][0] + 4 * 289);
+		const float base = 0.5f * ((c.data->heightExtents.x - *minH) + (c.data->heightExtents.y - *maxH));
+		const uint32_t baseX = static_cast<uint32_t>((c.x - minX) * QuadsPerCell);
+		const uint32_t baseY = static_cast<uint32_t>((c.y - minY) * QuadsPerCell);
+		for (uint32_t quad = 0; quad < 4; ++quad) {
+			const uint32_t qx = baseX + (quad & 1) * 16;
+			const uint32_t qy = baseY + (quad >> 1) * 16;
+			for (uint32_t vy = 0; vy < 17; ++vy) {
+				for (uint32_t vx = 0; vx < 17; ++vx) {
+					const float h = c.data->heights[quad][vy * 17 + vx];
+					if (std::isfinite(h))
+						grid->heights[static_cast<size_t>(qy + vy) * grid->width + qx + vx] = base + h;
+				}
+			}
+		}
+	}
+
+	const auto [lo, hi] = std::minmax_element(grid->heights.begin(), grid->heights.end());
+	logger::info("[PBR Water] Loaded terrain grid {}x{} cells at ({}, {}), z {:.0f}..{:.0f}", maxX - minX + 1, maxY - minY + 1, minX, minY, *lo, *hi);
+	land.store(std::move(grid), std::memory_order_release);
+	landGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void WaterEnvironment::Update(const RE::TESWorldSpace* worldSpace)
 {
 	if (worldSpace == currentWorldSpace)

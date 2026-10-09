@@ -81,7 +81,10 @@ namespace PBRWaterModel
 		double variance = 0.0;
 
 		for (uint32_t i = 0; i < MaxWaves; ++i) {
-			const double omega = omegaMin * std::pow(ratio, i);
+			// One component per log-spaced band, placed at a random point inside its band: equal
+			// spacing makes every component a harmonic of the same ratio, and the sum visibly tiles.
+			const double jitter = 0.45 * Hash(i + 37);
+			const double omega = omegaMin * std::pow(ratio, i + jitter);
 			const double bandwidth = omega * (std::sqrt(ratio) - 1.0 / std::sqrt(ratio));
 			const double density = Jonswap(omega, peak);
 			const double amplitudeMetres = std::sqrt(2.0 * density * bandwidth) * params.heightScale;
@@ -95,10 +98,13 @@ namespace PBRWaterModel
 			w.wavelength = static_cast<float>(TwoPi / kMetres * UnitsPerMetre);
 			w.pmWeightOpenSea = static_cast<float>(std::exp(-1.25 * std::pow(peak / omega, 4.0)));
 
-			// Short waves follow the wind less closely than the dominant swell.
-			const float t = static_cast<float>(i) / (MaxWaves - 1);
-			const float spread = params.spread * (0.35f + 0.65f * t) * (Pi * 0.5f);
-			const float angle = params.windDirection + Hash(i) * spread;
+			// Directional spreading: narrowest at the spectral peak and widening away from it in both
+			// directions (Mitsuyasu / Hasselmann). Components alternate sides of the wind so the field
+			// is a crossing sea rather than parallel crests marching one way.
+			const float detune = std::min(static_cast<float>(std::abs(std::log(omega / peak))), 1.2f);
+			const float spreadAngle = (0.25f + params.spread) * (0.5f + 0.8f * detune);
+			const float side = (i & 1) ? -1.0f : 1.0f;
+			const float angle = params.windDirection + side * spreadAngle * (0.3f + 0.7f * std::abs(Hash(i)));
 			w.dirX = std::cos(angle);
 			w.dirY = std::sin(angle);
 
@@ -125,6 +131,15 @@ namespace PBRWaterModel
 		s.significantHeight = static_cast<float>(4.0 * std::sqrt(variance) * params.heightScale * UnitsPerMetre);
 		s.whitecapCoverage = std::clamp(3.84e-6f * std::pow(static_cast<float>(U), 3.41f), 0.0f, 1.0f);
 		return s;
+	}
+
+	bool Bathymetry::Contains(float x, float y) const
+	{
+		if (!Valid())
+			return false;
+		const float fx = (x - minX) / stepX;
+		const float fy = (y - minY) / stepY;
+		return fx >= 0.0f && fy >= 0.0f && fx <= static_cast<float>(width - 1) && fy <= static_cast<float>(height - 1);
 	}
 
 	float Bathymetry::Sample(float x, float y) const
@@ -186,14 +201,15 @@ namespace PBRWaterModel
 		ctx.depth = 1e6f;
 		ctx.hasTerrain = false;
 
-		if (bathymetry && bathymetry->Valid()) {
-			const float fx = static_cast<float>(x);
-			const float fy = static_cast<float>(y);
-			const float step = std::abs(bathymetry->stepX);
-			const float z0 = bathymetry->Sample(fx, fy);
+		const float fx = static_cast<float>(x);
+		const float fy = static_cast<float>(y);
+		const Bathymetry* bed = (land && land->Contains(fx, fy)) ? land.get() : ((bathymetry && bathymetry->Valid()) ? bathymetry.get() : nullptr);
+		if (bed) {
+			const float step = std::abs(bed->stepX);
+			const float z0 = bed->Sample(fx, fy);
 			ctx.depth = std::max(waterZ - z0, 0.0f);
-			ctx.gradX = (bathymetry->Sample(fx + step, fy) - z0) / step;
-			ctx.gradY = (bathymetry->Sample(fx, fy + step) - z0) / step;
+			ctx.gradX = (bed->Sample(fx + step, fy) - z0) / step;
+			ctx.gradY = (bed->Sample(fx, fy + step) - z0) / step;
 			ctx.hasTerrain = true;
 		}
 

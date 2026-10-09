@@ -16,51 +16,169 @@
 
 #define I18N_KEY_PREFIX "feature.pbr_water."
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-	PBRWater::Settings,
-	EnableTessellation,
-	TessellationTriangleSize,
-	TessellationMaxFactor,
-	DisplacementFadeStart,
-	DisplacementFadeEnd,
-	WindSpeedCalm,
-	WindSpeedStorm,
-	WaveHeight,
-	Choppiness,
-	DirectionalSpread,
-	UseFetch,
-	UseBathymetry,
-	RiverWaveDamping,
-	ShoreWaveHeight,
-	ShoreSlope,
-	ShoreSteepness,
-	ShoreOnsetDepth,
-	Roughness,
-	SunSpecular,
-	PointLightSpecular,
-	Subsurface,
-	VanillaFresnel,
-	Visibility,
-	RefractionDistortion,
-	FoamAmount,
-	ShoreFoamWidth,
-	FoamPersistence,
-	CrestFoamThreshold,
-	FoamScale,
-	BreakingFoam,
-	WakeFoam,
-	FoamAlbedo,
-	EnableRipples,
-	PhysicsObjectRipples,
-	RippleExtent,
-	RippleHeight,
-	RippleNormalStrength,
-	RippleSpeed,
-	RippleHalfLife,
-	GameplayWaves,
-	BuoyancyStrength,
-	WireframeMode,
-	DebugView)
+// Two NLOHMANN_JSON_PASTE runs: the field count exceeds the single-macro limit of 63.
+void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann_json_t)
+{
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(
+		NLOHMANN_JSON_TO,
+		EnableTessellation,
+		TessellationTriangleSize,
+		TessellationMaxFactor,
+		DisplacementFadeStart,
+		DisplacementFadeEnd,
+		WindSpeedCalm,
+		WindSpeedStorm,
+		WaveHeight,
+		Choppiness,
+		DirectionalSpread,
+		UseFetch,
+		UseBathymetry,
+		RiverWaveDamping,
+		ShoreWaveHeight,
+		ShoreSlope,
+		ShoreSteepness,
+		ShoreOnsetDepth,
+		Roughness,
+		SunSpecular,
+		PointLightSpecular,
+		Subsurface,
+		VanillaFresnel,
+		Visibility,
+		RefractionDistortion,
+		ScatteringAnisotropy,
+		DownwellingAttenuation,
+		WindRoughness,
+		Gusts,
+		GustSize,
+		Bioluminescence,
+		BioluminescenceColor,
+		WindStreaks,
+		Turbidity,
+		TurbidityPatchiness))
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(
+		NLOHMANN_JSON_TO,
+		TurbidityPatchSize,
+		SedimentDensity,
+		SedimentColor,
+		ShoreResuspension,
+		RiverTurbidity,
+		StormTurbidity,
+		WadingSilt,
+		SedimentLayerHeight,
+		EnableUnderwater,
+		UnderwaterVisibility,
+		LightShafts,
+		LightShaftDepth,
+		SunGlow,
+		Meniscus,
+		UnderwaterSamples,
+		FoamAmount,
+		ShoreFoamWidth,
+		FoamPersistence,
+		CrestFoamThreshold,
+		FoamScale,
+		BreakingFoam,
+		WakeFoam,
+		FoamAlbedo,
+		FoamDrift,
+		WhitecapAmount,
+		WhitecapScale,
+		WhitecapStreak,
+		BubbleAmount,
+		EnableRipples,
+		PhysicsObjectRipples,
+		RippleExtent,
+		RippleHeight,
+		RippleNormalStrength,
+		RippleSpeed,
+		RippleHalfLife,
+		GameplayWaves,
+		BuoyancyStrength,
+		WireframeMode,
+		DebugView))
+}
+
+void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohmann_json_t)
+{
+	const PBRWater::Settings nlohmann_json_default_obj{};
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(
+		NLOHMANN_JSON_FROM_WITH_DEFAULT,
+		EnableTessellation,
+		TessellationTriangleSize,
+		TessellationMaxFactor,
+		DisplacementFadeStart,
+		DisplacementFadeEnd,
+		WindSpeedCalm,
+		WindSpeedStorm,
+		WaveHeight,
+		Choppiness,
+		DirectionalSpread,
+		UseFetch,
+		UseBathymetry,
+		RiverWaveDamping,
+		ShoreWaveHeight,
+		ShoreSlope,
+		ShoreSteepness,
+		ShoreOnsetDepth,
+		Roughness,
+		SunSpecular,
+		PointLightSpecular,
+		Subsurface,
+		VanillaFresnel,
+		Visibility,
+		RefractionDistortion,
+		ScatteringAnisotropy,
+		DownwellingAttenuation,
+		WindRoughness,
+		Gusts,
+		GustSize,
+		Bioluminescence,
+		BioluminescenceColor,
+		WindStreaks,
+		Turbidity,
+		TurbidityPatchiness))
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(
+		NLOHMANN_JSON_FROM_WITH_DEFAULT,
+		TurbidityPatchSize,
+		SedimentDensity,
+		SedimentColor,
+		ShoreResuspension,
+		RiverTurbidity,
+		StormTurbidity,
+		WadingSilt,
+		SedimentLayerHeight,
+		EnableUnderwater,
+		UnderwaterVisibility,
+		LightShafts,
+		LightShaftDepth,
+		SunGlow,
+		Meniscus,
+		UnderwaterSamples,
+		FoamAmount,
+		ShoreFoamWidth,
+		FoamPersistence,
+		CrestFoamThreshold,
+		FoamScale,
+		BreakingFoam,
+		WakeFoam,
+		FoamAlbedo,
+		FoamDrift,
+		WhitecapAmount,
+		WhitecapScale,
+		WhitecapStreak,
+		BubbleAmount,
+		EnableRipples,
+		PhysicsObjectRipples,
+		RippleExtent,
+		RippleHeight,
+		RippleNormalStrength,
+		RippleSpeed,
+		RippleHalfLife,
+		GameplayWaves,
+		BuoyancyStrength,
+		WireframeMode,
+		DebugView))
+}
 
 namespace
 {
@@ -138,6 +256,34 @@ void PBRWater::SanitizeSettings()
 	clamp(s.VanillaFresnel, 0.0f, 1.0f, d.VanillaFresnel);
 	clamp(s.Visibility, 0.05f, 5.0f, d.Visibility);
 	clamp(s.RefractionDistortion, 0.0f, 2.0f, d.RefractionDistortion);
+	clamp(s.ScatteringAnisotropy, 0.0f, 0.9f, d.ScatteringAnisotropy);
+	clamp(s.DownwellingAttenuation, 0.0f, 3.0f, d.DownwellingAttenuation);
+	clamp(s.WindRoughness, 0.0f, 3.0f, d.WindRoughness);
+	clamp(s.Gusts, 0.0f, 1.0f, d.Gusts);
+	clamp(s.GustSize, 10.0f, 300.0f, d.GustSize);
+	clamp(s.Bioluminescence, 0.0f, 3.0f, d.Bioluminescence);
+	clamp(s.BioluminescenceColor.x, 0.0f, 1.0f, d.BioluminescenceColor.x);
+	clamp(s.BioluminescenceColor.y, 0.0f, 1.0f, d.BioluminescenceColor.y);
+	clamp(s.BioluminescenceColor.z, 0.0f, 1.0f, d.BioluminescenceColor.z);
+	clamp(s.WindStreaks, 0.0f, 3.0f, d.WindStreaks);
+	clamp(s.Turbidity, 0.0f, 5.0f, d.Turbidity);
+	clamp(s.TurbidityPatchiness, 0.0f, 1.0f, d.TurbidityPatchiness);
+	clamp(s.TurbidityPatchSize, 10.0f, 1000.0f, d.TurbidityPatchSize);
+	clamp(s.SedimentDensity, 0.0f, 3.0f, d.SedimentDensity);
+	clamp(s.SedimentColor.x, 0.0f, 1.0f, d.SedimentColor.x);
+	clamp(s.SedimentColor.y, 0.0f, 1.0f, d.SedimentColor.y);
+	clamp(s.SedimentColor.z, 0.0f, 1.0f, d.SedimentColor.z);
+	clamp(s.ShoreResuspension, 0.0f, 3.0f, d.ShoreResuspension);
+	clamp(s.RiverTurbidity, 0.0f, 3.0f, d.RiverTurbidity);
+	clamp(s.StormTurbidity, 0.0f, 3.0f, d.StormTurbidity);
+	clamp(s.WadingSilt, 0.0f, 3.0f, d.WadingSilt);
+	clamp(s.SedimentLayerHeight, 0.2f, 10.0f, d.SedimentLayerHeight);
+	clamp(s.UnderwaterVisibility, 0.1f, 10.0f, d.UnderwaterVisibility);
+	clamp(s.LightShafts, 0.0f, 3.0f, d.LightShafts);
+	clamp(s.LightShaftDepth, 1.0f, 60.0f, d.LightShaftDepth);
+	clamp(s.SunGlow, 0.0f, 1.0f, d.SunGlow);
+	clamp(s.Meniscus, 0.0f, 1.0f, d.Meniscus);
+	s.UnderwaterSamples = std::clamp(s.UnderwaterSamples, 4, 32);
 	clamp(s.FoamAmount, 0.0f, 3.0f, d.FoamAmount);
 	clamp(s.ShoreFoamWidth, 0.0f, 5.0f, d.ShoreFoamWidth);
 	clamp(s.FoamPersistence, 0.0f, 5.0f, d.FoamPersistence);
@@ -146,6 +292,11 @@ void PBRWater::SanitizeSettings()
 	clamp(s.BreakingFoam, 0.0f, 3.0f, d.BreakingFoam);
 	clamp(s.WakeFoam, 0.0f, 3.0f, d.WakeFoam);
 	clamp(s.FoamAlbedo, 0.1f, 1.0f, d.FoamAlbedo);
+	clamp(s.FoamDrift, 0.0f, 4.0f, d.FoamDrift);
+	clamp(s.WhitecapAmount, 0.0f, 3.0f, d.WhitecapAmount);
+	clamp(s.WhitecapScale, 0.5f, 10.0f, d.WhitecapScale);
+	clamp(s.WhitecapStreak, 1.0f, 8.0f, d.WhitecapStreak);
+	clamp(s.BubbleAmount, 0.0f, 3.0f, d.BubbleAmount);
 	clamp(s.RippleExtent, 16.0f, 160.0f, d.RippleExtent);
 	clamp(s.RippleHeight, 0.0f, 0.5f, d.RippleHeight);
 	clamp(s.RippleNormalStrength, 0.0f, 4.0f, d.RippleNormalStrength);
@@ -153,7 +304,7 @@ void PBRWater::SanitizeSettings()
 	clamp(s.RippleHalfLife, 0.2f, 6.0f, d.RippleHalfLife);
 	clamp(s.BuoyancyStrength, 0.0f, 3.0f, d.BuoyancyStrength);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
-	s.DebugView = std::clamp(s.DebugView, 0, 7);
+	s.DebugView = std::clamp(s.DebugView, 0, 9);
 }
 
 void PBRWater::SaveSettings(json& o_json)
@@ -184,6 +335,13 @@ void PBRWater::RegisterWeatherVariables()
 	addFloat("Visibility", "Water Visibility", "Scales how far light travels through the water before it is absorbed", &settings.Visibility, defaults.Visibility, 0.05f, 5.0f);
 	addFloat("Subsurface", "Subsurface Scattering", "Light glowing through backlit wave crests", &settings.Subsurface, defaults.Subsurface, 0.0f, 4.0f);
 	addFloat("Roughness", "Surface Roughness", "Micro-roughness of the water surface below the wave detail", &settings.Roughness, defaults.Roughness, 0.02f, 0.5f);
+	addFloat("Turbidity", "Turbidity", "Suspended sediment in the water: higher is murkier", &settings.Turbidity, defaults.Turbidity, 0.0f, 5.0f);
+	addFloat("StormTurbidity", "Storm Turbidity", "Extra sediment stirred up by strong wind and rain", &settings.StormTurbidity, defaults.StormTurbidity, 0.0f, 3.0f);
+	addFloat("UnderwaterVisibility", "Underwater Visibility", "Scales how far you can see under water", &settings.UnderwaterVisibility, defaults.UnderwaterVisibility, 0.1f, 10.0f);
+	addFloat("LightShafts", "Underwater Light Shafts", "Strength of the sun shafts under water", &settings.LightShafts, defaults.LightShafts, 0.0f, 3.0f);
+	addFloat("Gusts", "Gusts", "How strongly gusts vary the wind over the water", &settings.Gusts, defaults.Gusts, 0.0f, 1.0f);
+	addFloat("Bioluminescence", "Bioluminescence", "Plankton glow in churned water at night", &settings.Bioluminescence, defaults.Bioluminescence, 0.0f, 3.0f);
+	registry->RegisterVariable(std::make_shared<WeatherVariables::Float3Variable>("SedimentColor", "Sediment Colour", "Colour of murky water", &settings.SedimentColor, defaults.SedimentColor));
 }
 
 void PBRWater::DrawSettings()
@@ -227,29 +385,119 @@ void PBRWater::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("sun_specular"), "Sun Specular"), &settings.SunSpecular, 0.0f, 4.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("point_light_specular"), "Light Specular"), &settings.PointLightSpecular, 0.0f, 4.0f, "%.2f");
 		Util::WeatherUI::SliderFloat(T(TKEY("subsurface"), "Subsurface Scattering"), this, "Subsurface", &settings.Subsurface, 0.0f, 4.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("subsurface_tooltip"), "Sunlight shining through thin, backlit wave crests. Its colour comes from the water: clear water glows green-blue, murky water dimly."));
 		Util::WeatherUI::SliderFloat(T(TKEY("visibility"), "Water Visibility"), this, "Visibility", &settings.Visibility, 0.05f, 5.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("visibility_tooltip"), "Scales the water form's visibility distance. Absorption colour comes from the water form's shallow colour."));
 		ImGui::SliderFloat(T(TKEY("refraction_distortion"), "Refraction Distortion"), &settings.RefractionDistortion, 0.0f, 2.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("scattering_anisotropy"), "Forward Scattering"), &settings.ScatteringAnisotropy, 0.0f, 0.9f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("scattering_anisotropy_tooltip"), "How strongly particles in the water scatter light forwards. Higher values make the water glow more when looking towards the sun."));
+		ImGui::SliderFloat(T(TKEY("downwelling_attenuation"), "Depth Light Falloff"), &settings.DownwellingAttenuation, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("downwelling_attenuation_tooltip"), "How quickly sunlight fades on its way down, darkening deep bottoms and everything under water."));
+		ImGui::SliderFloat(T(TKEY("wind_roughness"), "Wind Roughness"), &settings.WindRoughness, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("wind_roughness_tooltip"), "Tiny ripples raised by the local wind blur the reflections and spread the sun's glitter. Calm water is glassy, rain roughens it."));
+		Util::WeatherUI::SliderFloat(T(TKEY("gusts"), "Gusts"), this, "Gusts", &settings.Gusts, 0.0f, 1.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("gusts_tooltip"), "Gusts sweep across the water as darker, rougher patches (cat's paws). Water in the lee of the upwind shore stays calm."));
+		ImGui::SliderFloat(T(TKEY("gust_size"), "Gust Size"), &settings.GustSize, 10.0f, 300.0f, "%.0f m");
 		ImGui::SliderFloat(T(TKEY("vanilla_fresnel"), "Vanilla Fresnel Blend"), &settings.VanillaFresnel, 0.0f, 1.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("vanilla_fresnel_tooltip"), "0 uses the physical air/water Fresnel; 1 uses the water form's own Fresnel amount."));
 		ImGui::TreePop();
 	}
 
-	if (ImGui::TreeNodeEx(T(TKEY("foam"), "Foam"), ImGuiTreeNodeFlags_DefaultOpen)) {
+	if (ImGui::TreeNodeEx(T(TKEY("clarity"), "Water Clarity"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		Util::WeatherUI::SliderFloat(T(TKEY("turbidity"), "Turbidity"), this, "Turbidity", &settings.Turbidity, 0.0f, 5.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("turbidity_tooltip"), "Sediment suspended everywhere in the water. 0 keeps the water form's own clarity."));
+		ImGui::SliderFloat(T(TKEY("turbidity_patchiness"), "Patchiness"), &settings.TurbidityPatchiness, 0.0f, 1.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("turbidity_patchiness_tooltip"), "How unevenly the sediment is spread. Water clears and clouds in slowly drifting patches."));
+		ImGui::SliderFloat(T(TKEY("turbidity_patch_size"), "Patch Size"), &settings.TurbidityPatchSize, 10.0f, 1000.0f, "%.0f m");
+		ImGui::SliderFloat(T(TKEY("sediment_density"), "Sediment Density"), &settings.SedimentDensity, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("sediment_density_tooltip"), "How much each unit of turbidity clouds the water."));
+		Util::WeatherUI::ColorEdit3(T(TKEY("sediment_color"), "Sediment Colour"), this, "SedimentColor", reinterpret_cast<float*>(&settings.SedimentColor));
+		ImGui::SliderFloat(T(TKEY("shore_resuspension"), "Wave-Stirred Shallows"), &settings.ShoreResuspension, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("shore_resuspension_tooltip"), "Sediment lifted off the bottom by the waves' motion, strongest in the surf zone and in rough weather."));
+		ImGui::SliderFloat(T(TKEY("river_turbidity"), "River Silt"), &settings.RiverTurbidity, 0.0f, 3.0f, "%.2f");
+		Util::WeatherUI::SliderFloat(T(TKEY("storm_turbidity"), "Storm Turbidity"), this, "StormTurbidity", &settings.StormTurbidity, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("storm_turbidity_tooltip"), "Extra sediment in strong wind and rain. Builds up and clears over a few minutes."));
+		ImGui::SliderFloat(T(TKEY("wading_silt"), "Wading Silt"), &settings.WadingSilt, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("wading_silt_tooltip"), "Silt clouds kicked up by anyone walking through shallow water. Needs Interactive Ripples."));
+		ImGui::SliderFloat(T(TKEY("sediment_layer_height"), "Sediment Layer Height"), &settings.SedimentLayerHeight, 0.2f, 10.0f, "%.1f m");
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx(T(TKEY("underwater"), "Underwater"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Checkbox(T(TKEY("enable_underwater"), "Volumetric Underwater"), &settings.EnableUnderwater);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("enable_underwater_tooltip"), "Replaces the vanilla underwater fog with light travelling through the water: depth darkening, sun glow, light shafts, murky patches and the waterline across the lens."));
+		if (settings.EnableUnderwater) {
+			Util::WeatherUI::SliderFloat(T(TKEY("underwater_visibility"), "Underwater Visibility"), this, "UnderwaterVisibility", &settings.UnderwaterVisibility, 0.1f, 10.0f, "%.2f");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("underwater_visibility_tooltip"), "Scales the water form's underwater fog distance."));
+			Util::WeatherUI::SliderFloat(T(TKEY("light_shafts"), "Light Shafts"), this, "LightShafts", &settings.LightShafts, 0.0f, 3.0f, "%.2f");
+			ImGui::SliderFloat(T(TKEY("light_shaft_depth"), "Light Shaft Depth"), &settings.LightShaftDepth, 1.0f, 60.0f, "%.0f m");
+			ImGui::SliderFloat(T(TKEY("sun_glow"), "Sun Glow"), &settings.SunGlow, 0.0f, 1.0f, "%.2f");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("sun_glow_tooltip"), "Brightening of the water towards the sun from forward scattering."));
+			ImGui::SliderFloat(T(TKEY("meniscus"), "Waterline Meniscus"), &settings.Meniscus, 0.0f, 1.0f, "%.2f");
+			ImGui::SliderInt(T(TKEY("underwater_samples"), "Underwater Quality"), &settings.UnderwaterSamples, 4, 32);
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("underwater_samples_tooltip"), "Samples along each view ray under water. Higher values resolve light shafts and silt clouds better at a higher GPU cost."));
+		}
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx(T(TKEY("foam"), "Surface Foam"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		Util::WeatherUI::SliderFloat(T(TKEY("foam_amount"), "Foam Amount"), this, "FoamAmount", &settings.FoamAmount, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("foam_amount_tooltip"), "Settled foam along shores, around objects, in wakes and where shore waves break."));
 		ImGui::SliderFloat(T(TKEY("shore_foam_width"), "Shore Foam Width"), &settings.ShoreFoamWidth, 0.0f, 5.0f, "%.2f m");
+		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Foam"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("wind_streaks"), "Wind Streaks"), &settings.WindStreaks, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("wind_streaks_tooltip"), "Lines along the wind (windrows): old foam gathers into streaks in a strong wind, and smooth, glassy slicks form in a light breeze."));
+		ImGui::SliderFloat(T(TKEY("foam_scale"), "Foam Pattern Size"), &settings.FoamScale, 0.2f, 5.0f, "%.2f m");
+		ImGui::SliderFloat(T(TKEY("foam_albedo"), "Foam Brightness"), &settings.FoamAlbedo, 0.1f, 1.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("foam_drift"), "Foam Drift"), &settings.FoamDrift, 0.0f, 4.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("foam_drift_tooltip"), "How fast foam and bubbles are carried downwind by the surface drift."));
+		ImGui::SliderFloat(T(TKEY("bubble_amount"), "Bubbles"), &settings.BubbleAmount, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("bubble_amount_tooltip"), "Drifting bubbles and milky aerated water under foam, whitecaps and wakes."));
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx(T(TKEY("whitecaps"), "Whitecaps"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::SliderFloat(T(TKEY("whitecap_amount"), "Whitecap Amount"), &settings.WhitecapAmount, 0.0f, 3.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("crest_foam_threshold"), "Crest Foam Threshold"), &settings.CrestFoamThreshold, 0.0f, 1.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("crest_foam_threshold_tooltip"), "Surface compression at which crests start to foam. Higher values give more crest foam."));
 		ImGui::SliderFloat(T(TKEY("foam_persistence"), "Crest Foam Trail"), &settings.FoamPersistence, 0.0f, 5.0f, "%.1f s");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("foam_persistence_tooltip"), "How long foam from a breaking crest lingers and thins out behind the wave."));
-		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
-		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Foam"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
-		ImGui::SliderFloat(T(TKEY("foam_scale"), "Foam Pattern Size"), &settings.FoamScale, 0.2f, 5.0f, "%.2f m");
-		ImGui::SliderFloat(T(TKEY("foam_albedo"), "Foam Brightness"), &settings.FoamAlbedo, 0.1f, 1.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("whitecap_scale"), "Whitecap Pattern Size"), &settings.WhitecapScale, 0.5f, 10.0f, "%.1f m");
+		ImGui::SliderFloat(T(TKEY("whitecap_streak"), "Whitecap Streaks"), &settings.WhitecapStreak, 1.0f, 8.0f, "%.1f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("whitecap_streak_tooltip"), "How strongly whitecap foam is torn into streaks along the wind."));
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx(T(TKEY("bioluminescence_section"), "Bioluminescence"), ImGuiTreeNodeFlags_None)) {
+		Util::WeatherUI::SliderFloat(T(TKEY("bioluminescence"), "Bioluminescence"), this, "Bioluminescence", &settings.Bioluminescence, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("bioluminescence_tooltip"), "Plankton that flash when the water is disturbed: breaking waves, wakes and splashes glow in the dark."));
+		ImGui::ColorEdit3(T(TKEY("bioluminescence_color"), "Glow Colour"), reinterpret_cast<float*>(&settings.BioluminescenceColor));
 		ImGui::TreePop();
 	}
 
@@ -299,6 +547,8 @@ void PBRWater::DrawSettings()
 			T(TKEY("debug_roughness"), "Roughness"),
 			T(TKEY("debug_height"), "Wave Height"),
 			T(TKEY("debug_fetch"), "Fetch"),
+			T(TKEY("debug_clarity"), "Water Clarity"),
+			T(TKEY("debug_wind"), "Local Wind"),
 		};
 		ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &settings.DebugView, views, IM_ARRAYSIZE(views));
 
@@ -392,6 +642,44 @@ void PBRWater::UpdateFetchTexture()
 	fetchTexture->CreateSRV(srvDesc);
 }
 
+void PBRWater::UpdateLandTexture()
+{
+	const uint32_t generation = environment.GetLandGeneration();
+	if (generation == uploadedLandGeneration)
+		return;
+	uploadedLandGeneration = generation;
+
+	auto grid = environment.GetLand();
+	uploadedLand = grid;
+	landTexture.reset();
+	if (!grid || !grid->Valid())
+		return;
+
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = grid->width;
+	desc.Height = grid->height;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_R32_FLOAT;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_IMMUTABLE;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+	D3D11_SUBRESOURCE_DATA init{ grid->heights.data(), static_cast<UINT>(grid->width * sizeof(float)), 0 };
+	winrt::com_ptr<ID3D11Texture2D> texture;
+	if (FAILED(globals::d3d::device->CreateTexture2D(&desc, &init, texture.put()))) {
+		logger::warn("[PBR Water] Failed to create the terrain grid texture");
+		uploadedLand.reset();
+		return;
+	}
+	landTexture = std::make_unique<Texture2D>(texture.detach(), "PBRWater::LoadedTerrain");
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	srvDesc.Format = desc.Format;
+	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+	landTexture->CreateSRV(srvDesc);
+}
+
 // ============================================================================
 // Per-frame (render thread)
 // ============================================================================
@@ -399,6 +687,7 @@ void PBRWater::UpdateFetchTexture()
 void PBRWater::Prepass()
 {
 	UpdateFetchTexture();
+	UpdateLandTexture();
 
 	if (settings.EnableRipples) {
 		const auto& cameraPos = globals::game::frameBufferCached.GetCameraPosAdjust();
@@ -407,6 +696,7 @@ void PBRWater::Prepass()
 		rippleSettings.waveSpeed = settings.RippleSpeed;
 		rippleSettings.halfLife = settings.RippleHalfLife;
 		rippleSettings.foamHalfLife = settings.RippleHalfLife * 0.5f;
+		rippleSettings.siltHalfLife = 20.0f;
 		ripples.Update(cameraPos.x, cameraPos.y, renderDelta.load(std::memory_order_acquire), rippleSettings);
 	}
 
@@ -467,6 +757,12 @@ void PBRWater::UpdateFrameConstants()
 		const auto* heightmap = terrainShadows.cachedHeightmap;
 		d.Terrain1 = { heightmap->pos0.z, heightmap->pos1.z, 1.0f, std::max(texel, 1.0f) };
 	}
+	// Exact terrain of the loaded cells (vertex heights); preferred over the heightmap where it covers.
+	if (settings.UseBathymetry && uploadedLand && landTexture) {
+		const auto& g = *uploadedLand;
+		d.Land0 = { g.minX - 0.5f * g.stepX, g.minY - 0.5f * g.stepY, 1.0f / (g.width * g.stepX), 1.0f / (g.height * g.stepY) };
+		d.Land1 = { 1.0f, g.stepX, 0.0f, 0.0f };
+	}
 
 	// Tessellation: on-screen size uses the internal render resolution, so it scales with upscalers.
 	float renderHeight = static_cast<float>(globals::game::graphicsState->screenHeight);
@@ -487,6 +783,30 @@ void PBRWater::UpdateFrameConstants()
 	d.Foam0 = { settings.ShoreFoamWidth * UnitsPerMetre, settings.CrestFoamThreshold, settings.FoamAmount, settings.FoamScale * UnitsPerMetre };
 	// The foam animation only drifts noise slowly; wrapping once an hour keeps float precision.
 	d.Foam1 = { settings.FoamPersistence, std::fmod(globals::state->timer, 3600.0f), settings.WakeFoam, settings.RiverWaveDamping };
+	d.Foam2 = { settings.WhitecapAmount, settings.WhitecapScale * UnitsPerMetre, settings.WhitecapStreak, settings.BubbleAmount };
+	if (snap)
+		d.Foam3 = { snap->foamDrift[0], snap->foamDrift[1], snap->foamDrift[2], snap->foamDrift[3] };
+
+	// Water clarity and the light in the water.
+	d.Clarity0 = { settings.SedimentDensity / UnitsPerMetre, settings.Turbidity, settings.TurbidityPatchiness, settings.TurbidityPatchSize * UnitsPerMetre };
+	d.Clarity1 = { settings.SedimentColor.x, settings.SedimentColor.y, settings.SedimentColor.z, settings.ShoreResuspension };
+	d.Clarity2 = { settings.RiverTurbidity, weatherTurbidity.load(std::memory_order_acquire), settings.EnableRipples ? settings.WadingSilt : 0.0f, settings.SedimentLayerHeight * UnitsPerMetre };
+	// Sediment plumes drift and reshape over hours; a daily wrap keeps their coordinates precise.
+	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), snap ? snap->spectrum.significantHeight : 0.0f };
+
+	// Underwater view.
+	const auto camera = cameraWater.load(std::memory_order_acquire);
+	if (settings.EnableUnderwater && camera && camera->underwater) {
+		d.Underwater0 = { 1.0f, camera->flatZ, camera->nearSurface ? camera->band : 0.0f, camera->visibility * settings.UnderwaterVisibility * settings.Visibility };
+		d.Underwater1 = { camera->shallow.x, camera->shallow.y, camera->shallow.z, settings.LightShafts };
+		d.Underwater2 = { camera->deep.x, camera->deep.y, camera->deep.z, settings.LightShaftDepth * UnitsPerMetre };
+	}
+	d.Underwater3 = { settings.Meniscus, settings.SunGlow, 0.0f, static_cast<float>(settings.UnderwaterSamples) };
+
+	// Wind and rain on the surface, bioluminescence.
+	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
+	d.Surface1 = { settings.WindStreaks, settings.Bioluminescence, 0.0f, 0.0f };
+	d.Surface2 = { settings.BioluminescenceColor.x, settings.BioluminescenceColor.y, settings.BioluminescenceColor.z, 0.0f };
 
 	frameData = d;
 }
@@ -545,6 +865,8 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// Per-draw constants
 	GpuData& d = frameData;
 	d.Tess0.x = tessellate ? 1.0f : 0.0f;
+	// The surface seen from below only adds the water in front of Snell's window if the composite has not.
+	d.Underwater3.z = underwaterCompositeFrame == globals::state->frameCount ? 1.0f : 0.0f;
 	{
 		// Vertex spacing of this mesh, for filtering waves the untessellated grid cannot carry.
 		float spacing = 0.0f;
@@ -562,15 +884,16 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	context->VSSetConstantBuffers(7, 1, &cb);
 	context->PSSetConstantBuffers(7, 1, &cb);
 
-	ID3D11ShaderResourceView* srvs[4] = {
+	ID3D11ShaderResourceView* srvs[5] = {
 		settings.EnableRipples ? ripples.GetSRV() : nullptr,
 		fetchTexture ? fetchTexture->srv.get() : nullptr,
 		(d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr,
-		settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr
+		settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr,
+		(d.Land1.x > 0.5f && landTexture) ? landTexture->srv.get() : nullptr
 	};
 	ID3D11SamplerState* sampler = linearClampSampler.get();
-	context->VSSetShaderResources(110, 4, srvs);
-	context->PSSetShaderResources(110, 4, srvs);
+	context->VSSetShaderResources(110, 5, srvs);
+	context->PSSetShaderResources(110, 5, srvs);
 	context->VSSetSamplers(12, 1, &sampler);
 	context->PSSetSamplers(12, 1, &sampler);
 
@@ -601,7 +924,9 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->DSSetConstantBuffers(0, 3, vsBuffers);
 		context->DSSetConstantBuffers(7, 1, &cb);
 		context->DSSetConstantBuffers(12, 1, &frameBuffer);
-		context->DSSetShaderResources(110, 4, srvs);
+		context->DSSetShaderResources(110, 5, srvs);
+		context->HSSetShaderResources(110, 5, srvs);
+		context->HSSetSamplers(12, 1, &sampler);
 		context->DSSetSamplers(12, 1, &sampler);
 		context->DSSetShaderResources(8, 1, &flowmap);
 		context->DSSetSamplers(8, 1, &sampler);
@@ -626,6 +951,34 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->GSSetShader(geometryShader, nullptr, 0);
 		geometryShaderBound = true;
 	}
+}
+
+void PBRWater::BindUnderwaterComposite()
+{
+	if (!gpuBuffer)
+		return;
+
+	UpdateFrameConstants();
+	GpuData d = frameData;
+	d.Tess0.x = 0.0f;
+	gpuBuffer->Update(d);
+	if (d.Underwater0.x > 0.5f)
+		underwaterCompositeFrame = globals::state->frameCount;
+
+	auto context = globals::d3d::context;
+	ID3D11Buffer* cb = gpuBuffer->CB();
+	context->PSSetConstantBuffers(7, 1, &cb);
+
+	ID3D11ShaderResourceView* srvs[5] = {
+		settings.EnableRipples ? ripples.GetSRV() : nullptr,
+		fetchTexture ? fetchTexture->srv.get() : nullptr,
+		(d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr,
+		settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr,
+		(d.Land1.x > 0.5f && landTexture) ? landTexture->srv.get() : nullptr
+	};
+	context->PSSetShaderResources(110, 5, srvs);
+	ID3D11SamplerState* sampler = linearClampSampler.get();
+	context->PSSetSamplers(12, 1, &sampler);
 }
 
 void PBRWater::RestoreDraw()
@@ -705,6 +1058,21 @@ void PBRWater::MainThreadUpdate()
 	next->windDirection = std::atan2(smoothedWindDirY, smoothedWindDirX);
 	next->exterior = exterior;
 
+	// Surface (Stokes) drift carries foam and bubbles downwind at ~1.5% of the wind speed; bubbles
+	// below the surface lag and wander a little across it.
+	{
+		constexpr double Wrap = 1048576.0;
+		const double drift = smoothedWindSpeed * 0.015 * settings.FoamDrift * UnitsPerMetre * dt;
+		foamDriftX = std::fmod(foamDriftX + smoothedWindDirX * drift, Wrap);
+		foamDriftY = std::fmod(foamDriftY + smoothedWindDirY * drift, Wrap);
+		bubbleDriftX = std::fmod(bubbleDriftX + (-smoothedWindDirY * 0.3 - smoothedWindDirX * 0.3) * drift, Wrap);
+		bubbleDriftY = std::fmod(bubbleDriftY + (smoothedWindDirX * 0.3 - smoothedWindDirY * 0.3) * drift, Wrap);
+		next->foamDrift[0] = static_cast<float>(foamDriftX);
+		next->foamDrift[1] = static_cast<float>(foamDriftY);
+		next->foamDrift[2] = static_cast<float>(bubbleDriftX);
+		next->foamDrift[3] = static_cast<float>(bubbleDriftY);
+	}
+
 	// Shoreline waves: the dominant period of the sea, arriving from deep water.
 	auto& shore = next->shore;
 	shore.omega = std::clamp(next->spectrum.peakOmega, static_cast<float>(PBRWaterModel::TwoPi / 14.0), static_cast<float>(PBRWaterModel::TwoPi / 4.0));
@@ -719,16 +1087,104 @@ void PBRWater::MainThreadUpdate()
 	phases.Fill(*next);
 
 	environment.Update(exterior ? tes->GetRuntimeData2().worldSpace : nullptr);
+	environment.UpdateLoadedLand(exterior && settings.UseBathymetry);
 	if (settings.UseFetch)
 		next->fetch = environment.GetFetch();
 	if (settings.UseBathymetry)
 		next->bathymetry = environment.GetBathymetry();
+	if (settings.UseBathymetry)
+		next->land = environment.GetLand();
 
 	std::shared_ptr<const PBRWaterModel::WaveSnapshot> published = next;
 	snapshot.store(published, std::memory_order_release);
 	renderDelta.store(dt, std::memory_order_release);
 
+	// Storms and rain cloud the water over minutes, and it takes as long to clear.
+	smoothedWeatherTurbidity += (WeatherTurbidityTarget() - smoothedWeatherTurbidity) * SmoothFactor(dt, 90.0f);
+	weatherTurbidity.store(exterior ? smoothedWeatherTurbidity : 0.0f, std::memory_order_release);
+	// Rain on the surface follows the precipitation within seconds.
+	smoothedRain += ((exterior ? RainFraction() : 0.0f) - smoothedRain) * SmoothFactor(dt, 4.0f);
+	rainIntensity.store(smoothedRain, std::memory_order_release);
+
+	cameraWater.store(settings.EnableUnderwater ? FindCameraWater(*published, exterior) : nullptr, std::memory_order_release);
+
 	GatherInteractions(*published, dt);
+}
+
+float PBRWater::WeatherTurbidityTarget() const
+{
+	const auto sky = globals::game::sky;
+	if (!sky)
+		return 0.0f;
+	// Strong wind lifts sediment in the shallows and mixes it through; rain washes silt in from the land.
+	const float wind = std::clamp((smoothedWindSpeed - 6.0f) / 14.0f, 0.0f, 1.0f);
+	return settings.StormTurbidity * (wind + 0.5f * RainFraction());
+}
+
+float PBRWater::RainFraction() const
+{
+	const auto sky = globals::game::sky;
+	if (!sky)
+		return 0.0f;
+	auto rainy = [](const RE::TESWeather* weather) {
+		return weather && weather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy) ? 1.0f : 0.0f;
+	};
+	const float blend = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
+	return rainy(sky->currentWeather) * blend + rainy(sky->lastWeather) * (1.0f - blend);
+}
+
+std::shared_ptr<const PBRWater::CameraWater> PBRWater::FindCameraWater(const PBRWaterModel::WaveSnapshot& snap, bool exterior) const
+{
+	auto player = RE::PlayerCharacter::GetSingleton();
+	auto tes = globals::game::tes;
+	if (!player || !tes)
+		return nullptr;
+
+	const auto eye = Util::GetEyePosition();
+	RE::TESObjectCELL* cell = exterior ? tes->GetCell(eye) : nullptr;
+	if (!cell)
+		cell = player->GetParentCell();
+	float flatZ = 0.0f;
+	if (!cell || !TESObjectCELL_GetWaterHeight::func(cell, eye, flatZ) || flatZ <= -1e6f)
+		return nullptr;
+
+	auto water = std::make_shared<CameraWater>();
+	water->flatZ = flatZ;
+	// How far waves (shoaling included) and ripples can lift or drop the surface, plus a margin for the lens.
+	water->band = 2.0f * (snap.spectrum.amplitudeSum + snap.shore.amplitude) + 4.0f * settings.RippleHeight * UnitsPerMetre + 16.0f;
+	water->underwater = eye.z < flatZ + water->band;
+	water->nearSurface = eye.z > flatZ - water->band;
+	if (!water->underwater)
+		return water;
+
+	RE::TESWaterForm* form = nullptr;
+	if (const auto extra = cell->extraList.GetByType<RE::ExtraCellWaterType>())
+		form = extra->water;
+	if (!form && exterior) {
+		if (const auto worldSpace = tes->GetRuntimeData2().worldSpace)
+			form = worldSpace->worldWater;
+	}
+	if (!form) {
+		if (const auto waterSystem = RE::TESWaterSystem::GetSingleton())
+			form = waterSystem->currentWaterType;
+	}
+	if (!form) {
+		water->underwater = false;
+		return water;
+	}
+
+	// The weather scales the water colours through the day (as the water shader's material colours).
+	float3 multiplier{ 1.0f, 1.0f, 1.0f };
+	if (const auto sky = globals::game::sky) {
+		const auto& color = sky->skyColor[RE::TESWeather::ColorTypes::kWaterMultiplier];
+		multiplier = { color.red, color.green, color.blue };
+	}
+	const auto& data = form->data;
+	water->shallow = { data.shallowWaterColor.red / 255.0f * multiplier.x, data.shallowWaterColor.green / 255.0f * multiplier.y, data.shallowWaterColor.blue / 255.0f * multiplier.z };
+	water->deep = { data.deepWaterColor.red / 255.0f * multiplier.x, data.deepWaterColor.green / 255.0f * multiplier.y, data.deepWaterColor.blue / 255.0f * multiplier.z };
+	float visibility = data.underwaterFogDistFar > 1.0f ? data.underwaterFogDistFar : data.aboveWaterFogDistFar;
+	water->visibility = std::clamp(std::isfinite(visibility) ? visibility : 2048.0f, 128.0f, 200000.0f);
+	return water;
 }
 
 bool PBRWater::GetWaveHeight(const RE::NiPoint3& position, float flatWaterZ, float& height) const
@@ -754,6 +1210,7 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 
 	std::vector<RippleSimulation::Source> sources;
 	sources.reserve(RippleSimulation::MaxSources);
+	std::unordered_map<const void*, RE::NiPoint3> waveVelocities;
 
 	// Surface z (flat plane + waves) at a position, or false when there is no water.
 	auto surfaceAt = [&](RE::TESObjectREFR* ref, const RE::NiPoint3& pos, float& flatZ, float& surfaceZ) {
@@ -768,11 +1225,22 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		return true;
 	};
 
-	auto addSource = [&](const RE::NiPoint3& center, float radius, float surfaceZ) {
+	// Bodies only make waves while they move through the surface: a resting (or sunk) body excites
+	// nothing, so a dropped object rings once and the surface settles instead of being held down.
+	std::unordered_map<const void*, RE::NiPoint3> positions;
+	auto addSource = [&](const void* key, const RE::NiPoint3& center, float radius, float surfaceZ) {
 		if (!wantRipples || sources.size() >= RippleSimulation::MaxSources)
 			return;
+		positions[key] = center;
 		const float offset = center.z - surfaceZ;
-		if (std::abs(offset) >= radius)
+		if (std::abs(offset) >= radius || dt <= 0.0f)
+			return;
+		const auto previous = lastSourcePositions.find(key);
+		if (previous == lastSourcePositions.end())
+			return;
+		const float speed = center.GetDistance(previous->second) / dt;
+		const float motion = std::clamp(speed / (1.5f * UnitsPerMetre), 0.0f, 1.0f);
+		if (motion <= 0.01f)
 			return;
 		// Footprint of the body where it cuts the surface, and how much of it is under water.
 		const float footprint = std::sqrt(std::max(radius * radius - offset * offset, 0.0f));
@@ -781,7 +1249,21 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		s.x = center.x;
 		s.y = center.y;
 		s.radius = footprint;
-		s.depth = submerged * std::clamp(footprint / 24.0f, 0.25f, 1.0f);
+		s.depth = submerged * std::clamp(footprint / 24.0f, 0.25f, 1.0f) * motion;
+		sources.push_back(s);
+	};
+
+	// Silt kicked up by feet moving over the bed, released at the start of the next simulation steps.
+	const float siltRate = settings.WadingSilt > 0.0f ? 0.06f : 0.0f;
+	auto addSilt = [&](const RE::NiPoint3& feet, float amount) {
+		if (sources.size() >= RippleSimulation::MaxSources || amount <= 0.0f)
+			return;
+		RippleSimulation::Source s;
+		s.x = feet.x;
+		s.y = feet.y;
+		s.radius = 0.5f * UnitsPerMetre;
+		s.depth = 0.0f;
+		s.silt = amount;
 		sources.push_back(s);
 	};
 
@@ -796,6 +1278,16 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 			float flatZ, surfaceZ;
 			if (!surfaceAt(actor, pos, flatZ, surfaceZ))
 				return;
+			// Wading (feet on the bed, under water): moving feet stir the bottom up.
+			if (siltRate > 0.0f && pos.z < surfaceZ - 2.0f) {
+				const auto state = actor->AsActorState();
+				if (state && !state->IsSwimming()) {
+					RE::NiPoint3 velocity;
+					actor->GetLinearVelocity(velocity);
+					const float speed = std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y) / UnitsPerMetre;
+					addSilt(pos, siltRate * std::clamp(speed, 0.0f, 1.5f));
+				}
+			}
 			auto root = actor->Get3D(false);
 			if (!root)
 				return;
@@ -803,7 +1295,7 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 				RE::NiPoint3 center;
 				float radius;
 				if (Util::GetShapeBound(object, center, radius))
-					addSource(center, radius, surfaceZ);
+					addSource(object, center, radius, surfaceZ);
 				return sources.size() < RippleSimulation::MaxSources ? RE::BSVisit::BSVisitControl::kContinue : RE::BSVisit::BSVisitControl::kStop;
 			});
 		};
@@ -848,31 +1340,34 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 
 			float velocity[4];
 			_mm_storeu_ps(velocity, body->motion.linearVelocity.quad);
-			const float worldScaleInv = RE::bhkWorld::GetWorldScaleInverse();
 
 			if (wantRipples && settings.PhysicsObjectRipples)
-				addSource(center, radius, surfaceZ);
+				addSource(niCollision, center, radius, surfaceZ);
 
 			if (wantBuoyancy && dt > 0.0f) {
-				// The engine floats objects on the flat plane; add a spring towards the displaced
-				// surface and match its orbital motion so the object rides the waves.
+				// The engine's own buoyancy floats objects on the flat plane (and lets heavy ones sink).
+				// Add only the water's orbital motion, as a change in velocity relative to what was added
+				// last frame: floating objects ride the waves, sinking ones keep sinking, and nothing is
+				// pinned to the surface.
 				const auto wave = snap.SampleAt(center.x, center.y, flatZ);
-				const float stiffness = 6.0f * settings.BuoyancyStrength;
-				const float damping = 3.0f * settings.BuoyancyStrength;
-				const float vz = velocity[2] * worldScaleInv;
-				const float targetVz = wave.verticalVelocity + (surfaceZ - center.z) * stiffness;
-				const float response = std::clamp(damping * dt, 0.0f, 1.0f);
-				const float horizontal = std::clamp(settings.BuoyancyStrength * 0.5f * dt, 0.0f, 1.0f);
+				const float strength = std::clamp(settings.BuoyancyStrength, 0.0f, 3.0f) / 3.0f;
+				const RE::NiPoint3 target{ wave.velocityX * strength, wave.velocityY * strength, wave.verticalVelocity * strength };
+				RE::NiPoint3 previous{};
+				if (const auto it = lastWaveVelocities.find(bhkBody); it != lastWaveVelocities.end())
+					previous = it->second;
+				waveVelocities[bhkBody] = target;
 				const float worldScale = RE::bhkWorld::GetWorldScale();
-				velocity[0] += (wave.velocityX * worldScale - velocity[0]) * horizontal;
-				velocity[1] += (wave.velocityY * worldScale - velocity[1]) * horizontal;
-				velocity[2] = (vz + (targetVz - vz) * response) * worldScale;
+				velocity[0] += (target.x - previous.x) * worldScale;
+				velocity[1] += (target.y - previous.y) * worldScale;
+				velocity[2] += (target.z - previous.z) * worldScale;
 				bhkBody->SetLinearVelocity(RE::hkVector4(velocity[0], velocity[1], velocity[2], 0.0f));
 			}
 			return RE::BSContainer::ForEachResult::kContinue;
 		});
 	}
 
+	lastSourcePositions = std::move(positions);
+	lastWaveVelocities = std::move(waveVelocities);
 	if (wantRipples)
 		ripples.SubmitSources(std::move(sources));
 }
@@ -880,6 +1375,13 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 // ============================================================================
 // Hooks
 // ============================================================================
+
+template <int Variant>
+void PBRWater::ISSAOComposite_Render<Variant>::thunk(void* imageSpaceShader, RE::BSTriShape* shape, RE::ImageSpaceEffectParam* param)
+{
+	globals::features::pbrWater.BindUnderwaterComposite();
+	func(imageSpaceShader, shape, param);
+}
 
 void PBRWater::PostPostLoad()
 {
@@ -894,6 +1396,11 @@ void PBRWater::PostPostLoad()
 
 	// Same Main::Update call site Grass Collision uses; write_thunk_call chains with it.
 	stl::write_thunk_call<MainUpdate>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
+
+	// The SAO composite fogs the opaque scene; under water it renders the water volume instead.
+	stl::write_vfunc<0x1, ISSAOComposite_Render<0>>(RE::VTABLE_BSImagespaceShaderISSAOCompositeSAO[3]);
+	stl::write_vfunc<0x1, ISSAOComposite_Render<1>>(RE::VTABLE_BSImagespaceShaderISSAOCompositeFog[3]);
+	stl::write_vfunc<0x1, ISSAOComposite_Render<2>>(RE::VTABLE_BSImagespaceShaderISSAOCompositeSAOFog[3]);
 
 	logger::info("[PBR Water] Installed hooks");
 }

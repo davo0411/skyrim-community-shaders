@@ -65,21 +65,40 @@ namespace PBRWater
 		return mul(World, float4(cp.HPosition.xyz, 1.0)).xyz;
 	}
 
-	/// Tessellation factor of one edge: enough to hit the target on-screen triangle size, but never
-	/// finer than a quarter of the shortest displaced wavelength, and none where waves have faded.
+	/// Tessellation factor of one edge, from the endpoints in canonical order so both patches sharing
+	/// it agree. Two terms:
+	///  - curvature: enough segments that the chord error of the local wave curvature stays below a
+	///    fraction of a pixel (sagitta = curvature * segment^2 / 8), so sharp crests are dense and
+	///    troughs / calm water stay coarse;
+	///  - a coarse on-screen baseline (finer inside the ripple simulation, which has no analytic
+	///    curvature to measure), so nothing is ever more than a few target triangles across.
 	float EdgeTessFactor(float3 a, float3 b)
 	{
 		float3 lo = PositionLess(a, b) ? a : b;
 		float3 hi = PositionLess(a, b) ? b : a;
 		float len = length(hi - lo);
-		float dist = max(length((lo + hi) * 0.5), 1.0);
+		float3 mid = (lo + hi) * 0.5;
+		float dist = max(length(mid), 1.0);
 
-		if (DisplacementDistanceFade(dist) <= 0.0)
+		float fade = DisplacementDistanceFade(dist);
+		if (fade <= 0.0)
 			return 1.0;
 
-		float screenFactor = len * Tess0.w / (dist * max(Tess0.y, 1.0));
-		float waveFactor = len / max(Params2.w * 0.25, 1.0);
-		return clamp(min(screenFactor, waveFactor), 1.0, Tess0.z);
+		float pixelsPerUnit = Tess0.w / dist;
+		float targetPixels = max(Tess0.y, 1.0);
+
+		WaveContext ctx = BuildWaveContext(mid, fade, 0.0);
+		float2 e = (hi.xy - lo.xy) / max(len, 1e-3);
+		float curvature = SurfaceCurvature(mid, ctx, e);
+		float errorPixels = targetPixels * 0.05;  // 0.5 px at the default 10 px target
+		float curvatureFactor = len * sqrt(curvature * pixelsPerUnit / (8.0 * errorPixels));
+
+		float2 rippleUV = (mid.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
+		bool inRipples = Ripple0.w > 0.5 && all(rippleUV > 0.0) && all(rippleUV < 1.0);
+		float baselinePixels = targetPixels * (inRipples ? 1.0 : 4.0);
+		float screenFactor = len * pixelsPerUnit / baselinePixels;
+
+		return clamp(max(curvatureFactor, screenFactor), 1.0, Tess0.z);
 	}
 
 	/// Conservative frustum test of the patch bounds grown by the largest possible displacement.

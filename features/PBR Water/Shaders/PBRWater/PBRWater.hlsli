@@ -55,12 +55,28 @@ namespace PBRWater
 		float4 Light1;                     // x visibility scale, y foam albedo, z refraction distortion scale, w point light specular intensity
 		float4 Foam0;                      // x shore foam width (units), y crest foam threshold, z foam amount, w foam pattern scale (units)
 		float4 Foam1;                      // x crest foam persistence (s), y foam animation time (s, wrapped), z wake foam strength, w flow wave damping
+		float4 Clarity0;                   // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
+		float4 Clarity1;                   // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
+		float4 Clarity2;                   // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
+		float4 Optics0;                    // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
+		float4 Underwater0;                // x underwater view active, y flat water height at the camera (absolute z), z waterline band (units), w underwater visibility (units)
+		float4 Underwater1;                // xyz shallow colour of the camera's water (gamma), w light shaft strength
+		float4 Underwater2;                // xyz deep colour of the camera's water (gamma), w light shaft range (units)
+		float4 Underwater3;                // x meniscus strength, y sun glow strength, z 1 once the composite fogged the scene this frame, w march samples
+		float4 Surface0;                   // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
+		float4 Surface1;                   // x wind streak strength, y bioluminescence strength, zw unused
+		float4 Surface2;                   // xyz bioluminescence colour (gamma), w unused
+		float4 Land0;                      // xy loaded terrain grid corner (absolute units), zw 1 / grid extent (units)
+		float4 Land1;                      // x enabled, y vertex spacing (units)
+		float4 Foam2;                      // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount
+		float4 Foam3;                      // xy foam drift offset (units, wrapped), zw extra bubble drift (units, wrapped)
 	}
 
-	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w unused
+	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w silt
 	Texture2DArray<float> FetchTexture : register(t111);  // fetch in km, one slice per upwind direction
 	Texture2D<float> TerrainHeightTexture : register(t112);
 	Texture2D<float4> RipplePreviousTexture : register(t113);  // the ripple state as displayed last frame (motion vectors)
+	Texture2D<float> LoadedTerrainTexture : register(t114);    // exact terrain z of the loaded cells (LAND vertex heights)
 	SamplerState LinearClampSampler : register(s12);
 
 	static const float UnitsPerMetre = METRES_TO_UNITS;
@@ -168,12 +184,24 @@ namespace PBRWater
 		ctx.spacing = spacing;
 		ctx.halfInvSpacing = 0.5 / max(spacing, 1e-4);
 
-		if (Terrain1.z > 0.5 && TerrainInside(absPos.xy)) {
+		// The undisplaced surface point is the water plane: its own z is the water height.
+		float2 landUV = (absPos.xy - Land0.xy) * Land0.zw;
+		if (Land1.x > 0.5 && all(landUV > 0.0) && all(landUV < 1.0)) {
+			// Exact terrain of the loaded cells: resolves beaches, rocks and shelves.
+			float2 t = Land1.y * Land0.zw;
+			float z0 = LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV, 0);
+			float zx = LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV + float2(t.x, 0), 0) -
+			           LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV - float2(t.x, 0), 0);
+			float zy = LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV + float2(0, t.y), 0) -
+			           LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV - float2(0, t.y), 0);
+			ctx.depth = max(absPos.z - z0, 0.0);
+			ctx.terrainGrad = float2(zx, zy) / (2.0 * Land1.y);
+			ctx.hasTerrain = 1.0;
+		} else if (Terrain1.z > 0.5 && TerrainInside(absPos.xy)) {
 			float texel = Terrain1.w;
 			float z0 = SampleTerrainZ(absPos.xy);
 			float zx = SampleTerrainZ(absPos.xy + float2(texel, 0));
 			float zy = SampleTerrainZ(absPos.xy + float2(0, texel));
-			// The undisplaced surface point is the water plane: its own z is the water height.
 			ctx.depth = max(absPos.z - z0, 0.0);
 			ctx.terrainGrad = float2(zx - z0, zy - z0) / texel;
 			ctx.hasTerrain = 1.0;
@@ -380,6 +408,35 @@ namespace PBRWater
 		return o;
 	}
 
+	/**
+	 * Curvature of the displaced surface along unit direction `e` (units^-1) at undisplaced position
+	 * `positionWS`, for tessellation. Gerstner crests are sharpened by the horizontal compression
+	 * (1 + dX/ds), so the vertical second derivative is divided by its square: crests get the
+	 * subdivision, broad troughs and calm water do not.
+	 */
+	float SurfaceCurvature(float3 positionWS, WaveContext ctx, float2 e)
+	{
+		float2 p = positionWS.xy + (FrameBuffer::CameraPosAdjust.xy - RefCamPos.xy);
+		float zss = 0.0;
+		float xs = 0.0;
+		float steepnessScale = rcp(ctx.energyGain);
+		uint count = WaveCount();
+		[loop] for (uint i = 0; i < count; i++)
+		{
+			float4 dk = WaveDirK[i];
+			float A = WaveAmp[i].x * WaveWeight(i, ctx);
+			if (A <= 0.0)
+				continue;
+			float de = dot(dk.xy, e);
+			float kde2 = dk.z * dk.z * de * de;
+			float s = sin(dk.z * dot(dk.xy, p) + WaveAmp[i].z);
+			zss -= A * kde2 * s;
+			xs -= WaveAmp[i].y * steepnessScale * A * dk.z * de * de * s;
+		}
+		float compression = max(1.0 + xs, 0.2);
+		return abs(zss) / (compression * compression);
+	}
+
 	// ------------------------------------------------------------------------
 	// Interactive ripples (GPU wave-equation simulation centred on the camera)
 	// ------------------------------------------------------------------------
@@ -408,6 +465,17 @@ namespace PBRWater
 	{
 		float2 steps = RippleTexture.SampleLevel(LinearClampSampler, uv, 0).xy;
 		return lerp(steps.y, steps.x, Ripple2.z);
+	}
+
+	/// Silt stirred up from the bottom by bodies wading through shallow water (ripple simulation w channel).
+	float RippleSilt(float3 positionWS)
+	{
+		if (Ripple0.w < 0.5)
+			return 0.0;
+		float2 uv = (positionWS.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
+		if (any(uv <= 0.0) || any(uv >= 1.0))
+			return 0.0;
+		return max(RippleTexture.SampleLevel(LinearClampSampler, uv, 0).w, 0.0) * RippleEdgeFade(uv);
 	}
 
 	/// Ripples cannot be taller than the water is deep; keeps them from dipping below the shore.
@@ -474,6 +542,28 @@ namespace PBRWater
 		o.shoreBreak = now.shoreBreak;
 		o.depth = ctx.depth;
 		return o;
+	}
+
+	/**
+	 * Height of the displaced surface (waves and ripples) directly above camera-relative `xy`, for a flat
+	 * water plane at camera-relative height `flatZ`. Gerstner waves also move the water sideways, so the
+	 * undisplaced point that ends up above `xy` is found with a short fixed-point iteration, as
+	 * WaveSnapshot::SampleAt does on the CPU.
+	 */
+	float SurfaceHeightAt(float2 xy, float flatZ, uint iterations)
+	{
+		float3 p = float3(xy, flatZ);
+		WaveContext ctx = BuildWaveContext(p, DisplacementDistanceFade(length(p)), 0.0);
+		float2 x0 = xy;
+		[unroll] for (uint i = 0; i < iterations; i++)
+		{
+			x0 = xy - EvaluateWaves(float3(x0, flatZ), ctx, 0.0).displacement.xy;
+		}
+		float3 undisplaced = float3(x0, flatZ);
+		float height = EvaluateWaves(undisplaced, ctx, 0.0).displacement.z;
+		height += RippleHeight(undisplaced, false) * RippleDepthFade(ctx.depth);
+		float limit = 2.0 * max(Params2.z, 0.0) + 4.0 * max(Ripple1.x, 0.0) + 1.0;
+		return flatZ + clamp(height, -limit, limit);
 	}
 }
 

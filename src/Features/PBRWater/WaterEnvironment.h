@@ -34,6 +34,15 @@ public:
 	/** @brief Main thread: detects worldspace changes and starts a rebuild when needed. */
 	void Update(const RE::TESWorldSpace* worldSpace);
 
+	/**
+	 * @brief Main thread: rebuilds the exact terrain grid of the loaded exterior cells when they change.
+	 * The streamed LAND records give the true terrain (33 x 33 vertices per cell, 128 units apart), far
+	 * finer than the 8-bit Terrain Shadows heightmap, which cannot resolve beaches at all.
+	 */
+	void UpdateLoadedLand(bool exterior);
+	std::shared_ptr<const PBRWaterModel::Bathymetry> GetLand() const { return land.load(std::memory_order_acquire); }
+	uint32_t GetLandGeneration() const { return landGeneration.load(std::memory_order_acquire); }
+
 	std::shared_ptr<const PBRWaterModel::FetchField> GetFetch() const { return fetch.load(std::memory_order_acquire); }
 	std::shared_ptr<const PBRWaterModel::Bathymetry> GetBathymetry() const { return bathymetry.load(std::memory_order_acquire); }
 
@@ -55,4 +64,7 @@ private:
 
 	std::atomic<std::shared_ptr<const PBRWaterModel::FetchField>> fetch;
 	std::atomic<std::shared_ptr<const PBRWaterModel::Bathymetry>> bathymetry;
+	std::atomic<std::shared_ptr<const PBRWaterModel::Bathymetry>> land;
+	std::atomic_uint32_t landGeneration{ 0 };
+	uint64_t landSignature = 0;
 };

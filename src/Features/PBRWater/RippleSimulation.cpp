@@ -134,6 +134,9 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 			continue;
 		g.radius = std::max(s.radius / texelSize, 0.75f);
 		g.depth = s.depth;
+		g.silt = s.silt;
+		if (g.depth <= 0.0f && g.silt <= 0.0f)
+			continue;
 		++numSources;
 	}
 	sourceBuffer->Update(gpuSources.data(), sizeof(gpuSources));
@@ -146,6 +149,12 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	base.damping = std::pow(0.5f, FixedStep / std::max(settings.halfLife, 0.05f));
 	base.foamDecay = std::pow(0.5f, FixedStep / std::max(settings.foamHalfLife, 0.05f));
 	base.foamFromMotion = settings.foamFromMotion;
+	base.siltDecay = std::pow(0.5f, FixedStep / std::max(settings.siltHalfLife, 0.5f));
+	base.siltDiffusion = std::clamp(settings.siltSpread, 0.0f, 1.0f);
+	// Kills grid-scale (checkerboard) noise within a few steps while barely touching real ripples.
+	// Von Neumann analysis of the viscous leapfrog for the checkerboard mode (laplacian eigenvalue -8)
+	// gives stability for nu <= (1 - 2 C^2) / 4; stay at 80% of that bound.
+	base.viscosity = std::clamp(0.8f * (1.0f - 2.0f * base.waveSpeed2) / 4.0f, 0.0f, 0.12f);
 
 	accumulator = std::min(accumulator + std::max(dt, 0.0f), FixedStep * MaxStepsPerFrame);
 	bool first = true;

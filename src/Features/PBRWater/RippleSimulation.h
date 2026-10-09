@@ -25,6 +25,7 @@ public:
 		float y = 0.0f;
 		float radius = 0.0f;  ///< units
 		float depth = 0.0f;   ///< how far the body pushes the surface down (simulation units)
+		float silt = 0.0f;    ///< sediment kicked up from the bed per simulation step
 	};
 
 	struct Settings
@@ -34,6 +35,8 @@ public:
 		float halfLife = 1.5f;      ///< s, amplitude decay
 		float foamHalfLife = 3.0f;  ///< s
 		float foamFromMotion = 6.0f;
+		float siltHalfLife = 20.0f;  ///< s, settling time of stirred-up sediment
+		float siltSpread = 0.3f;     ///< diffusion per step (0..1)
 	};
 
 	void SetupResources();
@@ -70,7 +73,8 @@ private:
 		float2 position;
 		float radius;
 		float depth;
-		float pad[4];
+		float silt;
+		float pad[3];
 	};
 	static_assert(sizeof(GpuSource) == 32);
 
@@ -84,6 +88,10 @@ private:
 		float foamDecay;
 		float waveSpeed2;
 		float foamFromMotion;
+		float siltDecay;
+		float siltDiffusion;
+		float viscosity;
+		float pad;
 	};
 	STATIC_ASSERT_ALIGNAS_16(SimCB);
 

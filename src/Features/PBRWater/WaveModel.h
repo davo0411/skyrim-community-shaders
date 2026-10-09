@@ -86,6 +86,8 @@ namespace PBRWaterModel
 		float stepX = 1.0f, stepY = 1.0f;  ///< world units per texel (stepY may be negative)
 
 		bool Valid() const { return width > 1 && height > 1 && !heights.empty(); }
+		/** @brief True when (x, y) lies inside the sampled grid (no edge clamping needed). */
+		bool Contains(float x, float y) const;
 		float Sample(float x, float y) const;
 	};
 
@@ -118,9 +120,11 @@ namespace PBRWaterModel
 		double refX = 0.0, refY = 0.0, refZ = 0.0;  ///< reference camera
 		float windDirection = 0.0f;
 		bool exterior = true;
+		float foamDrift[4]{};  ///< xy foam drift, zw extra bubble drift (units, wrapped)
 
 		std::shared_ptr<const FetchField> fetch;
 		std::shared_ptr<const Bathymetry> bathymetry;
+		std::shared_ptr<const Bathymetry> land;  ///< exact terrain of the loaded cells; preferred where it covers
 
 		struct Sample
 		{

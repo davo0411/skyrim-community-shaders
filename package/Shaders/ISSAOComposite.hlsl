@@ -135,6 +135,10 @@ SamplerState SampColorSampler : register(s9);
 #		include "ExponentialHeightFog/ExponentialHeightFog.hlsli"
 #	endif
 
+#	if defined(PBR_WATER)
+#		include "PBRWater/Underwater.hlsli"
+#	endif
+
 PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
@@ -175,6 +179,17 @@ PS_OUTPUT main(PS_INPUT input)
 	float depth = depthTex.SampleLevel(depthSampler, screenPosition, 0).x;
 	static const float GeometryDepthMax = 1.0f - EPSILON_DIVISION;
 	bool isGeometryDepth = depth < GeometryDepthMax;
+
+#	if defined(PBR_WATER)
+	// Under water, PBR Water's water volume replaces the vanilla underwater fog below.
+	float3 pbrUnderwaterColor = composedColor.xyz;
+	float3 pbrMeniscus = 1.0;
+	bool pbrUnderwater = false;
+	[branch] if (PBRWater::UnderwaterActive())
+	{
+		pbrUnderwater = PBRWater::ApplyUnderwater(pbrUnderwaterColor, input.TexCoord, depth, isGeometryDepth, input.Position.xy, pbrMeniscus);
+	}
+#	endif
 
 #	if defined(APPLY_FOG)
 	float fogDistanceFactor = (2 * CameraNearFar.x * CameraNearFar.y) / ((CameraNearFar.y + CameraNearFar.x) - (2 * (1.01 * depth - 0.01) - 1) * (CameraNearFar.y - CameraNearFar.x));
@@ -225,6 +240,11 @@ PS_OUTPUT main(PS_INPUT input)
 #		endif
 #	endif
 
+#	if defined(PBR_WATER)
+	if (pbrUnderwater)
+		composedColor.xyz = pbrUnderwaterColor;
+#	endif
+
 	float sparklesInput = 0;
 	if (EyePosition.w != 0 && snowMask != 0 && 1e-5 < SparklesParameters2.z) {
 		float shadowMask = shadowMaskTex.SampleLevel(shadowMaskSampler, screenPosition, 0).x;
@@ -252,6 +272,10 @@ PS_OUTPUT main(PS_INPUT input)
 
 	composedColor *= 1 - SparklesParameters2.w;
 	composedColor += sparklesColor;
+
+#	if defined(PBR_WATER)
+	composedColor.xyz *= pbrMeniscus;
+#	endif
 
 	psout.Color = composedColor;
 

@@ -18,12 +18,12 @@ namespace HorizonFix
 
 struct VS_INPUT
 {
-	float4 Position: POSITION0;
+	float4 Position : POSITION0;
 };
 
 struct VS_OUTPUT
 {
-	float4 Position: SV_POSITION0;
+	float4 Position : SV_POSITION0;
 };
 
 #	ifdef VSHADER
@@ -43,7 +43,7 @@ typedef VS_OUTPUT PS_INPUT;
 
 struct PS_OUTPUT
 {
-	float4 Color: SV_Target0;
+	float4 Color : SV_Target0;
 };
 
 #	ifdef PSHADER
@@ -73,19 +73,19 @@ PS_OUTPUT main(PS_INPUT input)
 struct VS_INPUT
 {
 #	if defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)
-	float4 Position: POSITION0;
+	float4 Position : POSITION0;
 #		if defined(NORMAL_TEXCOORD)
-	float2 TexCoord0: TEXCOORD0;
+	float2 TexCoord0 : TEXCOORD0;
 #		endif
 #		if defined(VC)
-	float4 Color: COLOR0;
+	float4 Color : COLOR0;
 #		endif
 #	endif
 
 #	if defined(LOD)
-	float4 Position: POSITION0;
+	float4 Position : POSITION0;
 #		if defined(VC)
-	float4 Color: COLOR0;
+	float4 Color : COLOR0;
 #		endif
 #	endif
 };
@@ -93,52 +93,52 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
 #	if defined(SPECULAR) || defined(UNDERWATER)
-	float4 HPosition: SV_POSITION0;
+	float4 HPosition : SV_POSITION0;
 #		if !defined(UNIFIED_WATER)
-	float4 FogParam: COLOR0;
+	float4 FogParam : COLOR0;
 #		endif
-	float4 WPosition: TEXCOORD0;
-	float4 TexCoord1: TEXCOORD1;
-	float4 TexCoord2: TEXCOORD2;
+	float4 WPosition : TEXCOORD0;
+	float4 TexCoord1 : TEXCOORD1;
+	float4 TexCoord2 : TEXCOORD2;
 #		if defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP) /*!defined(NORMAL_TEXCOORD) && !defined(BLEND_NORMALS) && !defined(VC)*/)
-	float4 TexCoord3: TEXCOORD3;
+	float4 TexCoord3 : TEXCOORD3;
 #		endif
 #		if defined(FLOWMAP)
-	nointerpolation float2 TexCoord4: TEXCOORD4;
+	nointerpolation float2 TexCoord4 : TEXCOORD4;
 #		endif
 #		if NUM_SPECULAR_LIGHTS == 0
-	float4 MPosition: TEXCOORD5;
+	float4 MPosition : TEXCOORD5;
 #		endif
 #	endif
 
 #	if defined(SIMPLE)
-	float4 HPosition: SV_POSITION0;
-	float4 FogParam: COLOR0;
-	float4 WPosition: TEXCOORD0;
-	float4 TexCoord1: TEXCOORD1;
-	float4 TexCoord2: TEXCOORD2;
-	float4 MPosition: TEXCOORD5;
+	float4 HPosition : SV_POSITION0;
+	float4 FogParam : COLOR0;
+	float4 WPosition : TEXCOORD0;
+	float4 TexCoord1 : TEXCOORD1;
+	float4 TexCoord2 : TEXCOORD2;
+	float4 MPosition : TEXCOORD5;
 #	endif
 
 #	if defined(LOD)
-	float4 HPosition: SV_POSITION0;
-	float4 FogParam: COLOR0;
-	float4 WPosition: TEXCOORD0;
-	float4 TexCoord1: TEXCOORD1;
+	float4 HPosition : SV_POSITION0;
+	float4 FogParam : COLOR0;
+	float4 WPosition : TEXCOORD0;
+	float4 TexCoord1 : TEXCOORD1;
 #	endif
 
 #	if defined(STENCIL)
-	float4 HPosition: SV_POSITION0;
-	float4 WorldPosition: POSITION1;
-	float4 PreviousWorldPosition: POSITION2;
+	float4 HPosition : SV_POSITION0;
+	float4 WorldPosition : POSITION1;
+	float4 PreviousWorldPosition : POSITION2;
 #	endif
 
-	float4 NormalsScale: TEXCOORD8;
+	float4 NormalsScale : TEXCOORD8;
 
 #	if defined(PBR_WATER) && !defined(STENCIL)
-	float4 WaveParam: TEXCOORD9;   // xyz undisplaced camera-relative position, w wave damping (flow)
-	float4 WaveState: TEXCOORD10;  // x vertical displacement, y jacobian, z shore breaking, w water depth (units)
-	float3 Barycentric: TEXCOORD11;
+	float4 WaveParam : TEXCOORD9;   // xyz undisplaced camera-relative position, w wave damping (flow)
+	float4 WaveState : TEXCOORD10;  // x vertical displacement, y jacobian, z shore breaking, w water depth (units)
+	float3 Barycentric : TEXCOORD11;
 #	endif
 };
 
@@ -420,8 +420,8 @@ VS_INPUT UnpackControlPoint(VS_OUTPUT cp)
 struct HS_CONSTANT_OUTPUT
 {
 	float Edge[3] : SV_TessFactor;
-	float Inside: SV_InsideTessFactor;
-	float Spacing: SPACING0;  // world-space spacing of the generated vertices
+	float Inside : SV_InsideTessFactor;
+	float Spacing : SPACING0;  // world-space spacing of the generated vertices
 };
 #	endif
 
@@ -468,12 +468,12 @@ typedef VS_OUTPUT PS_INPUT;
 struct PS_OUTPUT
 {
 #	if defined(UNDERWATER) || defined(SIMPLE) || defined(LOD) || defined(SPECULAR)
-	float4 Lighting: SV_Target0;
+	float4 Lighting : SV_Target0;
 #	endif
 
 #	if defined(STENCIL)
-	float4 WaterMask: SV_Target0;
-	float2 MotionVector: SV_Target1;
+	float4 WaterMask : SV_Target0;
+	float2 MotionVector : SV_Target1;
 #	endif
 };
 
@@ -556,6 +556,7 @@ cbuffer PerGeometry : register(b2)
 
 #		if defined(PBR_WATER)
 #			include "PBRWater/Shading.hlsli"
+#			include "PBRWater/Underwater.hlsli"
 #		endif
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)
@@ -964,26 +965,36 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	return result;
 }
 
-float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular)
+float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular, float roughness = 0.0)
 {
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections))
 		return ReflectionColor.xyz * VarAmounts.y;
 
 	float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
+#			if defined(PBR_WATER)
+	// Glossy reflections: rough water (wind, rain, or wave detail filtered out at a distance) reflects a
+	// blurred environment, through the reflection cubemap's mips when it has them.
+	uint pbrCubeWidth, pbrCubeHeight, pbrCubeLevels;
+	CubeMapTex.GetDimensions(0, pbrCubeWidth, pbrCubeHeight, pbrCubeLevels);
+	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, roughness * (float)(pbrCubeLevels - 1)).xyz;
+	float pbrEnvironmentLevel = roughness * 8.0;
+#			else
 	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
+	float pbrEnvironmentLevel = 0.0;
+#			endif
 
 #			if defined(DYNAMIC_CUBEMAPS)
 	float3 dynamicCubemap;
 	if (SharedData::InInterior) {
-		dynamicCubemap = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, 0).xyz;
+		dynamicCubemap = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
 	} else {
 		float3 specularIrradiance = 1.0;
 		if (skylightingSpecular < 1.0)
-			specularIrradiance = Color::IrradianceToLinear(DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
+			specularIrradiance = Color::IrradianceToLinear(DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz);
 
 		float3 specularIrradianceReflections = 1.0;
 		if (skylightingSpecular > 0.0)
-			specularIrradianceReflections = Color::IrradianceToLinear(DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
+			specularIrradianceReflections = Color::IrradianceToLinear(DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz);
 
 		dynamicCubemap = Color::IrradianceToGamma(lerp(specularIrradiance, specularIrradianceReflections, skylightingSpecular));
 	}
@@ -1009,7 +1020,12 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 	float2 ssrReflectionUvDR = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(ssrReflectionUv);
 	float4 ssrReflectionColorBlurred = SSRReflectionTex.Sample(SSRReflectionSampler, ssrReflectionUvDR);
 	float4 ssrReflectionColorRaw = RawSSRReflectionTex.Sample(RawSSRReflectionSampler, ssrReflectionUvDR);
+#				if defined(PBR_WATER)
+	// Rough water only shows the blurred screen-space reflection.
+	float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7 * saturate(1.0 - roughness * 3.0));
+#				else
 	float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7);
+#				endif
 	float3 finalSsrReflectionColor = max(0, ssrReflectionColor.xyz);
 	float ssrFraction = saturate(ssrReflectionColor.w * distanceFactor * ssrAmount);
 	reflectionColor = lerp(reflectionColor, finalSsrReflectionColor, ssrFraction);
@@ -1133,7 +1149,8 @@ float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition, fl
 		return 0.0.xxx;
 
 #				if defined(PBR_WATER)
-	float reflectionMul = PBRWater::SpecularGGX(normal, -viewDirection, SunDir.xyz, roughness, 1.0 / PBRWater::WaterIOR, PBRWater::SunAngularRadius) * PBRWater::Light0.w;
+	// Clamp what one pixel can reflect: a sub-pixel glint the AA kernel misses must not bloom across the screen.
+	float reflectionMul = min(PBRWater::SpecularGGX(normal, -viewDirection, SunDir.xyz, roughness, 1.0 / PBRWater::WaterIOR, PBRWater::SunAngularRadius), 12.0) * PBRWater::Light0.w;
 #				else
 	float3 reflectionDirection = reflect(viewDirection, normal);
 	float reflectionMul = exp2(VarAmounts.x * log2(saturate(dot(reflectionDirection, SunDir.xyz))));
@@ -1311,9 +1328,9 @@ PS_OUTPUT main(PS_INPUT input)
 #			else
 
 #				if defined(SKYLIGHTING)
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, skylightingSpecular);
+	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, skylightingSpecular, pbrRoughness);
 #				else
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, 1.0);
+	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, 1.0, pbrRoughness);
 #				endif
 
 	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, viewPosition, depth);
@@ -1386,8 +1403,35 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 
 #				if defined(UNDERWATER)
+#					if defined(PBR_WATER)
+	float3 finalColor;
+	[branch] if (PBRWater::UnderwaterActive())
+	{
+		// The surface seen from below (Crest's underwater surface): Snell's window shows the world above,
+		// outside it total internal reflection mirrors the water body, and both are seen through the
+		// water between the camera and the surface.
+		PBRWater::UnderwaterLighting pbrLight = PBRWater::GetUnderwaterLighting();
+		float3 pbrBaseExtinction = PBRWater::UnderwaterBaseExtinction();
+		float pbrJitter = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
+		PBRWater::UnderwaterSegment pbrColumn = PBRWater::MarchUnderwater(viewDirection, length(input.WPosition.xyz), PBRWater::UnderwaterPlaneZ(), pbrLight, pbrBaseExtinction, pbrJitter, 4);
+		PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(pbrBaseExtinction, pbrColumn.endTurbidity);
+		float3 pbrReflected = PBRWater::UnderwaterBodyRadiance(pbrLight, pbrOptics, reflect(viewDirection, normal), 0.0);
+		pbrReflected = pbrReflected * pbrColumn.transmittance + pbrColumn.inscatter;
+		float3 pbrWindow = Color::IrradianceToLinear(diffuseOutput.refractionColor);
+		// Once the underwater composite has fogged the scene behind the surface, the window already carries this water.
+		if (PBRWater::Underwater3.z < 0.5)
+			pbrWindow = pbrWindow * pbrColumn.transmittance + pbrColumn.inscatter;
+		finalColor = Color::IrradianceToGamma(lerp(pbrWindow, pbrReflected, fresnel));
+	}
+	else
+	{
+		float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
+		finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
+	}
+#					else
 	float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
 	float3 finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
+#					endif
 	// Add ripple and splash color effects for underwater
 #					if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override water color with debug visualization (darker for underwater)
@@ -1467,39 +1511,89 @@ PS_OUTPUT main(PS_INPUT input)
 		pbrPathLength = pbrEmpty ? 1e7 : max(depthMul - length(input.WPosition.xyz), 0.0);
 	}
 #							endif
+	// Vertical depth of what is seen through the water, and the path the refracted ray really takes to it:
+	// Snell bends it towards the vertical, so at grazing angles light crosses far less water than the
+	// straight view ray suggests.
+	float pbrBottomDepth = pbrPathLength * abs(viewDirection.z);
+	float3 pbrRefracted = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
+	float pbrWaterPath = pbrBottomDepth / max(-pbrRefracted.z, 0.2);
+
+	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
+	float pbrFlow = saturate((1.0 - input.WaveParam.w) / max(PBRWater::Foam1.w, 0.01));
+	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.shoreBreak, pbrFlow);
+	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
+	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(Color::Water(ShallowColor.xyz), FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
+
+	// Body colour: the water form's, shifted towards the sediment colour as sediment takes over.
+	float3 pbrBodyLinear = Color::IrradianceToLinear(diffuseOutput.refractionDiffuseColor);
+	pbrBodyLinear = PBRWater::BodyColour(pbrBodyLinear, PBRWater::SedimentBodyColour(pbrBodyLinear), pbrOptics);
+
+	// Transmission (Beer-Lambert along the refracted path, in linear light). What is seen through the water
+	// was itself lit through the water above it, so light reaching the bottom is attenuated by K_d.
+	float pbrSunShare = Color::RGBToLuminance(dirColor) / max(Color::RGBToLuminance(dirColor + ambientColor), 1e-5);
 #							if defined(REFRACTIONS)
-	float3 pbrExtinction = PBRWater::Extinction(Color::Water(ShallowColor.xyz), FogParam.z * PBRWater::Light1.x);
-	float3 pbrTransmittance = exp(-pbrExtinction * pbrPathLength);
+	float3 pbrTransmittance = exp(-pbrOptics.extinction * pbrWaterPath);
+	float3 pbrBottomLight = PBRWater::DownwellingTransmittance(pbrOptics, pbrBottomDepth, PBRWater::RefractedSunDirection(SunDir.xyz).z, pbrSunShare);
 #							else
 	float3 pbrTransmittance = 0.0;
+	float3 pbrBottomLight = 1.0;
 #							endif
-	float3 pbrTransmitted = diffuseOutput.refractionColor * pbrTransmittance + diffuseOutput.refractionDiffuseColor * (1.0 - pbrTransmittance);
+	float3 pbrTransmitted = Color::IrradianceToGamma(Color::IrradianceToLinear(diffuseOutput.refractionColor) * pbrTransmittance * pbrBottomLight +
+													 pbrBodyLinear * (1.0 - pbrTransmittance));
 
-	// Light entering the back of wave crests.
+	// Sunlight transmitted through thin wave crests, coloured by the water it crosses.
 	float pbrCrest = saturate(input.WaveState.x / max(PBRWater::Params2.z, 1.0));
-	pbrTransmitted += dirColor * PBRWater::SubsurfaceScatter(normal, -viewDirection, SunDir.xyz, pbrCrest) * PBRWater::Light0.y;
+	float3 pbrSunLight, pbrSkyLight;
+	ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
+	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
+	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness) * PBRWater::Light0.y;
 
 	// Foam: shores, intersections, folding crests, breaking shore waves, wakes.
 	float pbrThickness = 1e6;
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
-	pbrThickness = pbrPathLength * abs(viewDirection.z);
+	pbrThickness = pbrBottomDepth;
 #							endif
-	float pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
-	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy;
-	float pbrFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage, pbrSurface.footprint, PBRWater::Foam1.y);
-	float pbrBubbles = PBRWater::FoamBubbles(pbrFoamPosition, pbrFoamCoverage, PBRWater::Foam1.y);
+	float2 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
+	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
+	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
+	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
+	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
+	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
+	float2 pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, max(pbrFoamCoverage.x, pbrFoamCoverage.y), pbrSurface.footprint, PBRWater::Foam1.y);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)
 	pbrFoamAmbient = Color::IrradianceToGamma(Color::IrradianceToLinear(pbrFoamAmbient) * skylightingDiffuse);
 #							endif
-	float3 pbrFoamColor = pbrFoamDir * dirShadow * saturate(dot(normal, SunDir.xyz) * 0.5 + 0.5) + pbrFoamAmbient;
-	// Aerated water under the foam scatters light back up: a milky, out-of-focus layer below the lace.
-	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.55, pbrBubbles * 0.35);
+	// Foam lies on the moving surface: light it with the wave normal bumped by its own relief, so it
+	// shades with the slopes and catches the sun on its bubbles instead of reading as a flat decal.
+	float3 pbrFoamNormal = PBRWater::FoamNormal(normal, pbrFoam, input.WaveParam.xy);
+	float pbrFoamSun = saturate(dot(pbrFoamNormal, SunDir.xyz) * 0.7 + 0.3);
+	float3 pbrFoamColor = pbrFoamDir * dirShadow * pbrFoamSun + pbrFoamAmbient * (0.55 + 0.45 * saturate(pbrFoamNormal.z));
+	// Aerated water under the foam scatters light back up: a milky layer with drifting bubble specks.
+	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.55, pbrBubbles.y * 0.35);
+	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.8, pbrBubbles.x * 0.6);
+	// Fresh whitecaps are brighter than the settled surface foam.
+	pbrFoamColor *= lerp(1.0, 1.15, saturate(pbrWhitecap / max(pbrFoam, 1e-3)));
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
-	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + sunColor * depthControl.w * (1.0 - pbrFoam);
+	// Wet foam keeps part of the water's glint.
+	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + sunColor * depthControl.w * (1.0 - 0.7 * pbrFoam);
+
+	// Bioluminescence where the water is churned, visible in the dark.
+	float pbrDarkness = saturate(1.0 - Color::RGBToLuminance(ShadowSampling::GetSceneLightingColor()) * 4.0);
+	finalColorPreFog += PBRWater::Bioluminescence(max(max(pbrFoamCoverage.x, pbrFoamCoverage.y), pbrSurface.rippleFoam), pbrFoamPosition, PBRWater::Foam1.y, pbrDarkness * pbrDarkness);
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH) && defined(REFRACTIONS)
+	// Soft shoreline: over the last few centimetres of water the surface (reflection, body colour,
+	// foam) fades into the ground seen through it, so the mesh never cuts the terrain with a hard line.
+	{
+		float pbrEdge = smoothstep(0.0, 0.12 * PBRWater::UnitsPerMetre, pbrThickness);
+		float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
+		finalColorPreFog = lerp(pbrGround, finalColorPreFog, pbrEdge);
+	}
+#							endif
 #						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(diffuseOutput.refractionDiffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
