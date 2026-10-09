@@ -54,9 +54,17 @@ namespace PBRWater
 		float4 Light1;                     // x visibility scale, y foam albedo, z refraction distortion scale, w point light specular intensity
 		float4 Foam0;                      // x shore foam width (units), y crest foam threshold, z foam amount, w foam pattern scale (units)
 		float4 Foam1;                      // x crest foam persistence (s), y foam animation time (s, wrapped), z wake foam strength, w flow wave damping
+		float4 Clarity0;                   // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
+		float4 Clarity1;                   // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
+		float4 Clarity2;                   // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
+		float4 Optics0;                    // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
+		float4 Underwater0;                // x underwater view active, y flat water height at the camera (absolute z), z waterline band (units), w underwater visibility (units)
+		float4 Underwater1;                // xyz shallow colour of the camera's water (gamma), w light shaft strength
+		float4 Underwater2;                // xyz deep colour of the camera's water (gamma), w light shaft range (units)
+		float4 Underwater3;                // x meniscus strength, y sun glow strength, z 1 once the composite fogged the scene this frame, w march samples
 	}
 
-	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w unused
+	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w silt
 	Texture2DArray<float> FetchTexture : register(t111);  // fetch in km, one slice per upwind direction
 	Texture2D<float> TerrainHeightTexture : register(t112);
 	Texture2D<float4> RipplePreviousTexture : register(t113);  // the ripple state as displayed last frame (motion vectors)
@@ -393,6 +401,17 @@ namespace PBRWater
 		return lerp(steps.y, steps.x, Ripple2.z);
 	}
 
+	/// Silt stirred up from the bottom by bodies wading through shallow water (ripple simulation w channel).
+	float RippleSilt(float3 positionWS)
+	{
+		if (Ripple0.w < 0.5)
+			return 0.0;
+		float2 uv = (positionWS.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
+		if (any(uv <= 0.0) || any(uv >= 1.0))
+			return 0.0;
+		return max(RippleTexture.SampleLevel(LinearClampSampler, uv, 0).w, 0.0) * RippleEdgeFade(uv);
+	}
+
 	/// Ripples cannot be taller than the water is deep; keeps them from dipping below the shore.
 	float RippleDepthFade(float depth)
 	{
@@ -458,6 +477,28 @@ namespace PBRWater
 		o.shoreBreak = now.shoreBreak;
 		o.depth = ctx.depth;
 		return o;
+	}
+
+	/**
+	 * Height of the displaced surface (waves and ripples) directly above camera-relative `xy`, for a flat
+	 * water plane at camera-relative height `flatZ`. Gerstner waves also move the water sideways, so the
+	 * undisplaced point that ends up above `xy` is found with a short fixed-point iteration, as
+	 * WaveSnapshot::SampleAt does on the CPU.
+	 */
+	float SurfaceHeightAt(float2 xy, float flatZ, uint iterations)
+	{
+		float3 p = float3(xy, flatZ);
+		WaveContext ctx = BuildWaveContext(p, DisplacementDistanceFade(length(p)), 0.0);
+		float2 x0 = xy;
+		[unroll] for (uint i = 0; i < iterations; i++)
+		{
+			x0 = xy - EvaluateWaves(float3(x0, flatZ), ctx, false, 0.0).displacement.xy;
+		}
+		float3 undisplaced = float3(x0, flatZ);
+		float height = EvaluateWaves(undisplaced, ctx, false, 0.0).displacement.z;
+		height += RippleHeight(undisplaced, false) * RippleDepthFade(ctx.depth);
+		float limit = 2.0 * max(Params2.z, 0.0) + 4.0 * max(Ripple1.x, 0.0) + 1.0;
+		return flatZ + clamp(height, -limit, limit);
 	}
 }
 

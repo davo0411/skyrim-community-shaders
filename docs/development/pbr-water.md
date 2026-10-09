@@ -40,17 +40,18 @@ the sea when the game is paused, and avoids float precision loss far from the wo
 
 ### Nothing is hard-coded per location
 
-| Input                  | Source                                                                       | Effect                                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                      |
-| Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak and height: ponds and rivers stay calm, the open sea builds swell |
-| Depth                  | Terrain Shadows heightmap                                                    | `tanh(kh)` depth attenuation, shoreline waves (Green's law shoaling, breaking at H = 0.78 h) |
-| Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                        |
-| Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                          |
+| Input                  | Source                                                                       | Effect                                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                       |
+| Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak and height: ponds and rivers stay calm, the open sea builds swell  |
+| Depth                  | Terrain Shadows heightmap                                                    | `tanh(kh)` depth attenuation, shoreline waves (Green's law shoaling, breaking at H = 0.78 h)  |
+| Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                         |
+| Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                           |
+| Clarity                | drifting sediment field, wave orbital velocity at the bed, flow, weather     | extra extinction and sediment colour; murky shallows in a swell, muddy rivers, clear calm sea |
 
 Per-weather overrides are registered with the weather variable registry (`RegisterWeatherVariables`):
 wave height, choppiness, directional spread, storm wind speed, shore waves, foam, visibility, subsurface,
-roughness.
+roughness, turbidity, storm turbidity, sediment colour, underwater visibility and light shafts.
 
 ## Tessellation
 
@@ -93,10 +94,19 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
     without aliasing.
 -   Exact dielectric Fresnel (IOR 1.333), with total internal reflection when seen from below.
 -   GGX sun and point-light specular (including Light Limit Fix lights).
--   Water column: `refraction * T + bodyColour * (1 - T)`, `T = exp(-sigma * pathLength)` with the path
-    length measured from the depth buffer to the _displaced_ surface. Reflections no longer vanish in
-    shallow water.
--   Wave subsurface scattering (Atlas, GDC 2019).
+-   Water column (`Optics.hlsli`), blended in linear light:
+    `refraction * T * Tbottom + body * (1 - T)` with `T = exp(-c * L)`, where `L` is the path along the
+    _refracted_ ray (vertical depth from the depth buffer divided by the refracted direction cosine; Snell
+    bends the ray down, so at grazing angles light crosses far less water than the straight view ray
+    suggests) and `Tbottom = exp(-K_d * depth / mu)` is the light lost on its way down to what is seen
+    (Gordon 1989: `K_d ~ a + b_b`). Extinction `c` is the water form's (shallow colour + visibility) plus
+    sediment; scattering is spectrally flat, so the colour of clear water comes from absorption.
+-   Body colour: the water form's lit body colour, shifted towards the lit sediment colour by the share of
+    the extinction the sediment causes, so muddy water turns khaki and clear water keeps its own colour.
+-   Wave translucency: sunlight refracts into the far face of a crest, scatters once (Henyey-Greenstein,
+    forward peaked as for ocean particles) towards the viewer and refracts out. Its colour is what survives
+    the path through the crest, `(b / c) (1 - exp(-c t)) exp(-c s)`: clear water glows green-blue, murky
+    water dimly in its sediment colour. Replaces the artistic Atlas term.
 -   Foam is a _coverage_ field turned into a pattern by a soft threshold (the approach used by Crest and
     Sea of Thieves): as coverage drops, the bubbles in the foam grow and merge, so dense foam thins into
     lace and then specks instead of fading uniformly. Coverage sources:
@@ -110,12 +120,62 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
     clumping noise. A blurred "bubbles" layer lightens the water under the foam. The pattern lives in
     Lagrangian coordinates so it rides the wave orbits, and fades to its average when sub-pixel.
 
+## Water clarity
+
+Suspended sediment ("turbidity", `Optics.hlsli`) is split by where it sits in the column:
+
+-   **Mixed** through the column: drifting, domain-warped fBm patches (`Patchiness`, `Patch Size`) that
+    move downwind at a few cm/s and change shape over hours; river silt from the flowmap current; and a
+    weather term from strong wind and rain that builds up and clears over minutes (`Storm Turbidity`).
+-   **Bottom layer**, decaying with height above the bed (`exp(-z / H)`, a Rouse-like profile with
+    `Sediment Layer Height` H):
+    -   resuspension by the waves' orbital motion: linear wave theory gives the near-bed velocity
+        `u_b = a w / sinh(k h)` (dispersion from Eckart's approximation); sand and silt start moving at
+        ~0.1 m/s, so the surf zone and shallows turn murky in a swell while deep or calm water stays clear;
+    -   **wading silt**: the ripple simulation's fourth channel. Feet moving over the bed (not swimming)
+        inject silt that diffuses slowly and settles with a 20 s half-life, leaving clouds behind anyone
+        walking through a pond or the shallows.
+
+The surface uses the column mean of the bottom layer; the underwater view samples it per step of its ray
+march, so clouds hang near the bottom.
+
+## Underwater
+
+Ported from the Crest Ocean System underwater effect (wave-harmonic/crest, MIT). Skyrim fogs the opaque
+scene in the SAO composite image-space pass (`ISSAOComposite.hlsl`, `APPLY_FOG`), which runs before the
+water is drawn; PBR Water hooks its three variants to bind its constants and, when the camera is in the
+water, replaces the vanilla underwater fog there (`Underwater.hlsli`):
+
+1. **Mask**: Crest renders an ocean mask; here the analytic wave surface (with the same Lagrangian
+   inversion the CPU uses) is tested at each pixel's near-plane point, so the waterline across a
+   half-submerged lens follows the waves.
+2. **Depth merge**: the fog distance is the nearer of the scene and the displaced surface seen from below.
+3. **Water volume**: a jittered, quadratically spaced ray march (`Underwater Quality` samples, resolved by
+   TAA) through the extinction of the water form plus the sediment field. Each sample scatters the water's
+   body colour (and the sediment colour, by share) split into sun and sky light by the current lights,
+   attenuated by `K_d` with depth, with a Henyey-Greenstein sun glow and **light shafts**: the brightness
+   of the sun ray through the sample comes from a caustic pattern where that ray entered the surface, so
+   it is extruded along the refracted sun direction and integrated into shafts; the pattern coarsens and
+   softens with depth. Submerged objects lose the light that was absorbed on its way down to them.
+4. **Meniscus**: Crest's thin blue-grey line where the surface crosses the lens, a couple of pixels wide
+   at any resolution (measured with the surface's screen-space gradient).
+
+The surface seen from below (`UNDERWATER` water permutation) then uses the same functions: Snell's window
+shows the world above, total internal reflection outside it mirrors the water body (instead of the sky
+cubemap), and both are seen through the water in front of the camera. The composite marks the frame when
+it has fogged the scene, so the window is not fogged twice.
+
+The camera's water (flat height, form colours scaled by the weather, underwater fog distance as the
+visibility) is looked up on the main thread each frame; the view is active while the camera is within the
+reach of the waves above the flat plane or below it.
+
 ## Interaction
 
 -   **Ripples** (`RippleSimulation`, `RippleSimCS.hlsl`): a 512^2 camera-centred heightfield integrated with the
     2D wave equation at a fixed 60 Hz, interpolated between steps to the render time. A copy of the
     previous frame's state provides correct motion vectors for the ripples. Every actor collision shape (each leg, the torso, ...), and loose Havok object
-    crossing the surface acts as a moving constraint, which produces bow waves, wakes and rings.
+    crossing the surface acts as a moving constraint, which produces bow waves, wakes and rings. A fourth
+    channel carries silt kicked up by wading feet (see Water clarity).
     It replaces the vanilla wading displacement mesh, which is disabled because it is a second surface
     that cannot follow the waves.
 -   **Swimming**: `TESObjectCELL::GetWaterHeight` returns the wave surface, so swimming actors ride waves.
@@ -125,14 +185,15 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
 ## Debugging
 
 -   Settings > PBR Water > Debug: wireframe overlay / wireframe only, and debug views (normals, foam,
-    depth/shore, crest compression, roughness, wave height, fetch), plus live spectrum values.
+    depth/shore, crest compression, roughness, wave height, fetch, water clarity), plus live spectrum values.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
 
 ## Validation outside the game
 
 The shaders are validated with the real `d3dcompiler_47` against every recorded Water permutation in
 `.github/configs/shader-validation.yaml`, for all five stages (VS, HS, DS, GS, PS) with `PBR_WATER`
-defined, plus `RippleSimCS.hlsl`. With `PBR_WATER` undefined the restructured `Water.hlsl` compiles to
+defined, plus `RippleSimCS.hlsl` and the `ISSAOComposite.hlsl` variants (fog, SAO, both) with and without
+the other image-space feature defines. With `PBR_WATER` undefined the restructured `Water.hlsl` compiles to
 bit-identical bytecode to `dev` for all permutations.
 
 ## In-game test checklist
@@ -145,12 +206,22 @@ bit-identical bytecode to `dev` for all permutations.
 -   [ ] Wade into the sea: ripples from each leg, wakes, foam; no vanilla wading mesh.
 -   [ ] Swim in waves: player bobs with the visible surface. Drop a basket in the sea: it rides the waves.
 -   [ ] Shader cache cold start (async compile): water renders untessellated until compiled, then switches.
+-   [ ] Dive in the sea at noon: deep water darkens with depth, glow towards the sun, shafts from the
+        surface; looking up, Snell's window shows the sky and total internal reflection the water body.
+-   [ ] Half-submerged camera in waves: the waterline follows the waves with a thin meniscus.
+-   [ ] Water Clarity debug view on a beach in a storm: brown surf zone, clear deeper water; walk through a
+        pond and watch silt clouds settle behind you.
+-   [ ] White River vs Lake Ilinalta: river silt vs patchy lake clarity.
 
 ## Known limitations
 
 -   Shoreline waves and depth attenuation need a Terrain Shadows heightmap for the worldspace.
 -   Gameplay water heights do not include the flowmap damping on rivers (fetch already keeps river waves small).
 -   Seams between Unified Water tiles of different LOD sizes rely on the displacement distance fade.
+-   The underwater view replaces vanilla fog for the opaque scene only; forward-rendered transparent
+    objects and particles keep the vanilla underwater fog.
+-   When a wave trough exposes a camera that is below the flat plane, the game still draws the water with
+    its from-below technique for that frame.
 
 ## References and credits
 
@@ -159,7 +230,12 @@ bit-identical bytecode to `dev` for all permutations.
 -   GPU Gems ch. 1, _Effective Water Simulation from Physical Models_
 -   Olano & Baker, _LEAN Mapping_ (2010)
 -   Ang, _The Technical Art of Sea of Thieves_ (SIGGRAPH 2018 Talks) - foam and scattering breakdown
--   Crest Ocean System (wave-harmonic/crest, MIT) - coverage-threshold foam with feathering and a bubble layer
+-   Crest Ocean System (wave-harmonic/crest, MIT) - coverage-threshold foam with feathering and a bubble layer;
+    the underwater effect (mask, depth merge, scatter colour fog, meniscus) is ported from its
+    `UnderwaterEffect.hlsl`, `UnderwaterEffectShared.hlsl` and `UnderwaterMeniscus.shader`
+-   Gordon (1989), _Dependence of the diffuse reflectance of natural waters on the sun angle_ - `K_d ~ a + b_b`
+-   Petzold (1972) particle phase functions; Henyey & Greenstein (1941)
+-   Eckart (1952) explicit dispersion relation; Rouse (1937) suspended sediment profile
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Pleasant & Ross, _Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas_ (GDC 2019) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement

@@ -556,6 +556,7 @@ cbuffer PerGeometry : register(b2)
 
 #		if defined(PBR_WATER)
 #			include "PBRWater/Shading.hlsli"
+#			include "PBRWater/Underwater.hlsli"
 #		endif
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)
@@ -1386,8 +1387,35 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 
 #				if defined(UNDERWATER)
+#					if defined(PBR_WATER)
+	float3 finalColor;
+	[branch] if (PBRWater::UnderwaterActive())
+	{
+		// The surface seen from below (Crest's underwater surface): Snell's window shows the world above,
+		// outside it total internal reflection mirrors the water body, and both are seen through the
+		// water between the camera and the surface.
+		PBRWater::UnderwaterLighting pbrLight = PBRWater::GetUnderwaterLighting();
+		float3 pbrBaseExtinction = PBRWater::UnderwaterBaseExtinction();
+		float pbrJitter = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
+		PBRWater::UnderwaterSegment pbrColumn = PBRWater::MarchUnderwater(viewDirection, length(input.WPosition.xyz), PBRWater::UnderwaterPlaneZ(), pbrLight, pbrBaseExtinction, pbrJitter, 4);
+		PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(pbrBaseExtinction, pbrColumn.endTurbidity);
+		float3 pbrReflected = PBRWater::UnderwaterBodyRadiance(pbrLight, pbrOptics, reflect(viewDirection, normal), 0.0);
+		pbrReflected = pbrReflected * pbrColumn.transmittance + pbrColumn.inscatter;
+		float3 pbrWindow = Color::IrradianceToLinear(diffuseOutput.refractionColor);
+		// Once the underwater composite has fogged the scene behind the surface, the window already carries this water.
+		if (PBRWater::Underwater3.z < 0.5)
+			pbrWindow = pbrWindow * pbrColumn.transmittance + pbrColumn.inscatter;
+		finalColor = Color::IrradianceToGamma(lerp(pbrWindow, pbrReflected, fresnel));
+	}
+	else
+	{
+		float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
+		finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
+	}
+#					else
 	float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
 	float3 finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
+#					endif
 	// Add ripple and splash color effects for underwater
 #					if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override water color with debug visualization (darker for underwater)
@@ -1467,22 +1495,48 @@ PS_OUTPUT main(PS_INPUT input)
 		pbrPathLength = pbrEmpty ? 1e7 : max(depthMul - length(input.WPosition.xyz), 0.0);
 	}
 #							endif
+	// Vertical depth of what is seen through the water, and the path the refracted ray really takes to it:
+	// Snell bends it towards the vertical, so at grazing angles light crosses far less water than the
+	// straight view ray suggests.
+	float pbrBottomDepth = pbrPathLength * abs(viewDirection.z);
+	float3 pbrRefracted = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
+	float pbrWaterPath = pbrBottomDepth / max(-pbrRefracted.z, 0.2);
+
+	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
+	float pbrFlow = saturate((1.0 - input.WaveParam.w) / max(PBRWater::Foam1.w, 0.01));
+	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.shoreBreak, pbrFlow);
+	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
+	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(Color::Water(ShallowColor.xyz), FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
+
+	// Body colour: the water form's, shifted towards the sediment colour as sediment takes over.
+	float3 pbrBodyLinear = Color::IrradianceToLinear(diffuseOutput.refractionDiffuseColor);
+	pbrBodyLinear = PBRWater::BodyColour(pbrBodyLinear, PBRWater::SedimentBodyColour(pbrBodyLinear), pbrOptics);
+
+	// Transmission (Beer-Lambert along the refracted path, in linear light). What is seen through the water
+	// was itself lit through the water above it, so light reaching the bottom is attenuated by K_d.
+	float pbrSunShare = Color::RGBToLuminance(dirColor) / max(Color::RGBToLuminance(dirColor + ambientColor), 1e-5);
 #							if defined(REFRACTIONS)
-	float3 pbrExtinction = PBRWater::Extinction(Color::Water(ShallowColor.xyz), FogParam.z * PBRWater::Light1.x);
-	float3 pbrTransmittance = exp(-pbrExtinction * pbrPathLength);
+	float3 pbrTransmittance = exp(-pbrOptics.extinction * pbrWaterPath);
+	float3 pbrBottomLight = PBRWater::DownwellingTransmittance(pbrOptics, pbrBottomDepth, PBRWater::RefractedSunDirection(SunDir.xyz).z, pbrSunShare);
 #							else
 	float3 pbrTransmittance = 0.0;
+	float3 pbrBottomLight = 1.0;
 #							endif
-	float3 pbrTransmitted = diffuseOutput.refractionColor * pbrTransmittance + diffuseOutput.refractionDiffuseColor * (1.0 - pbrTransmittance);
+	float3 pbrTransmitted = Color::IrradianceToGamma(Color::IrradianceToLinear(diffuseOutput.refractionColor) * pbrTransmittance * pbrBottomLight +
+													 pbrBodyLinear * (1.0 - pbrTransmittance));
 
-	// Light entering the back of wave crests.
+	// Sunlight transmitted through thin wave crests, coloured by the water it crosses.
 	float pbrCrest = saturate(input.WaveState.x / max(PBRWater::Params2.z, 1.0));
-	pbrTransmitted += dirColor * PBRWater::SubsurfaceScatter(normal, -viewDirection, SunDir.xyz, pbrCrest) * PBRWater::Light0.y;
+	float3 pbrSunLight, pbrSkyLight;
+	ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
+	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
+	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness) * PBRWater::Light0.y;
 
 	// Foam: shores, intersections, folding crests, breaking shore waves, wakes.
 	float pbrThickness = 1e6;
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
-	pbrThickness = pbrPathLength * abs(viewDirection.z);
+	pbrThickness = pbrBottomDepth;
 #							endif
 	float pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
 	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy;

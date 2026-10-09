@@ -11,7 +11,11 @@
 // The grid scrolls with the camera in whole texels; `Shift` re-addresses the previous state so the
 // simulation stays fixed in world space.
 //
-// Output: x height, y previous height, z foam, w unused.
+// A fourth channel carries silt: feet dragging over the bed in shallow water kick sediment up into a
+// cloud that spreads slowly (diffusion) and settles out over tens of seconds. The water shaders add it
+// to the turbidity near the bottom.
+//
+// Output: x height, y previous height, z foam, w silt.
 // ============================================================================
 
 struct RippleSource
@@ -19,7 +23,8 @@ struct RippleSource
 	float2 Position;  // texel coordinates in the current grid
 	float Radius;     // texels
 	float Depth;      // target surface depression (simulation units, > 0 pushes down)
-	float4 Pad;
+	float Silt;       // sediment kicked up per step at the centre of the footprint
+	float3 Pad;
 };
 
 cbuffer RippleSimCB : register(b0)
@@ -31,6 +36,9 @@ cbuffer RippleSimCB : register(b0)
 	float FoamDecay;   // foam retained per step
 	float WaveSpeed2;  // C^2
 	float FoamFromMotion;
+	float SiltDecay;      // silt retained per step (settling)
+	float SiltDiffusion;  // fraction of the neighbour difference exchanged per step
+	float2 Pad;
 };
 
 Texture2D<float4> PreviousState : register(t0);
@@ -53,11 +61,13 @@ float4 LoadState(int2 p)
 	float h = centre.x;
 	float hPrev = centre.y;
 
-	float sum = LoadState(p + int2(1, 0)).x + LoadState(p - int2(1, 0)).x +
-	            LoadState(p + int2(0, 1)).x + LoadState(p - int2(0, 1)).x;
+	float4 neighbours = LoadState(p + int2(1, 0)) + LoadState(p - int2(1, 0)) +
+	                    LoadState(p + int2(0, 1)) + LoadState(p - int2(0, 1));
+	float sum = neighbours.x;
 
 	float hNext = (2.0 * h - hPrev + WaveSpeed2 * (sum - 4.0 * h)) * Damping;
 	float foam = centre.z * FoamDecay;
+	float silt = (centre.w + SiltDiffusion * (neighbours.w * 0.25 - centre.w)) * SiltDecay;
 
 	// Absorb waves at the border so nothing reflects off the edge of the simulated area.
 	float2 border = min(float2(id.xy), float(GridSize - 1) - float2(id.xy));
@@ -71,13 +81,16 @@ float4 LoadState(int2 p)
 		float r2 = dot(d, d) / max(s.Radius * s.Radius, 1e-3);
 		if (r2 > 4.0)
 			continue;
-		float w = exp(-2.0 * r2);
 		// Constraint: the body pushes the surface down to its depression, it never pulls it up.
-		hNext = lerp(hNext, min(hNext, -s.Depth), w);
+		// Silt-only sources (feet on the bed) leave the surface alone.
+		if (s.Depth > 0.0)
+			hNext = lerp(hNext, min(hNext, -s.Depth), exp(-2.0 * r2));
+		// Silt billows out a little wider than the foot itself.
+		silt += s.Silt * exp(-r2);
 	}
 
 	// Foam only where the surface is pushed up into a crest and still rising or breaking over.
 	float crest = saturate((hNext - 0.08) * 4.0);
 	foam += crest * saturate(abs(hNext - h) * FoamFromMotion);
-	CurrentState[id.xy] = float4(hNext, h, saturate(foam), 0.0);
+	CurrentState[id.xy] = float4(hNext, h, saturate(foam), clamp(silt, 0.0, 4.0));
 }

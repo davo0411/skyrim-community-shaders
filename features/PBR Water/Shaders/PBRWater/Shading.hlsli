@@ -2,7 +2,7 @@
 #define __PBR_WATER_SHADING_HLSLI__
 
 #include "Common/BRDF.hlsli"
-#include "PBRWater/PBRWater.hlsli"
+#include "PBRWater/Optics.hlsli"
 
 // ============================================================================
 // PBR Water - pixel shading helpers.
@@ -13,31 +13,16 @@
 //               glitter energy instead of aliasing.
 //   Interface : exact dielectric Fresnel (air/water IOR 1.333), including total internal
 //               reflection when seen from below (Snell's window).
-//   Volume    : Beer-Lambert transmittance whose extinction is derived from the water form's own
-//               vanilla shallow colour and visibility distance, plus single-scatter in-scattering.
-//   Scatter   : wave subsurface term from Atlas (Pleasant & Ross, GDC 2019).
+//   Volume    : Beer-Lambert transmittance along the refracted path, with extinction from the water
+//               form's shallow colour and visibility plus spatially varying sediment, light reaching
+//               the bottom attenuated by K_d, and in-scattering towards the body colour (Optics.hlsli).
+//   Scatter   : sunlight transmitted through thin wave crests (Optics.hlsli).
 //   Foam      : procedural cellular foam advected with the waves, thresholded by a physically
 //               motivated coverage (shore depth, wave folding, breaking, wakes, whitecaps).
 // ============================================================================
 
 namespace PBRWater
 {
-	static const float WaterIOR = 1.333;
-
-	/// Exact unpolarised Fresnel reflectance for a dielectric. `eta` = n_incident / n_transmitted.
-	/// Returns 1 under total internal reflection.
-	float FresnelDielectric(float cosI, float eta)
-	{
-		cosI = saturate(cosI);
-		float sinT2 = eta * eta * (1.0 - cosI * cosI);
-		if (sinT2 >= 1.0)
-			return 1.0;
-		float cosT = sqrt(1.0 - sinT2);
-		float rs = (eta * cosI - cosT) / (eta * cosI + cosT);
-		float rp = (cosI - eta * cosT) / (cosI + eta * cosT);
-		return 0.5 * (rs * rs + rp * rp);
-	}
-
 	/// Perceptual roughness from the base roughness plus filtered-out slope variance.
 	float CombinedRoughness(float baseRoughness, float slopeVariance)
 	{
@@ -85,25 +70,6 @@ namespace PBRWater
 		return D * Vis * FresnelDielectric(VdotH, eta) * NdotL;
 	}
 
-	/// Per-channel extinction (1/unit). The vanilla shallow colour is read as the tint light picks up
-	/// over the water form's visibility distance; at that distance 5% of the light remains.
-	float3 Extinction(float3 shallowColorLinear, float visibilityUnits)
-	{
-		float3 tint = saturate(shallowColorLinear / max(max(shallowColorLinear.r, max(shallowColorLinear.g, shallowColorLinear.b)), 1e-4));
-		tint = max(tint, 0.02);
-		return (log(20.0) - log(tint)) / max(visibilityUnits, 1.0);
-	}
-
-	/// Wave subsurface scattering (Atlas, GDC 2019): light entering the back of a wave and leaving
-	/// towards the viewer, strongest at crests seen against the sun.
-	float SubsurfaceScatter(float3 N, float3 toEye, float3 toLight, float crestHeight)
-	{
-		float towardsSun = pow(saturate(dot(-toEye, toLight)), 4.0);
-		float backLit = pow(saturate(0.5 - 0.5 * dot(toLight, N)), 3.0);
-		float facing = pow(saturate(dot(toEye, N)), 2.0);
-		return crestHeight * towardsSun * backLit * 4.0 + facing * 0.15;
-	}
-
 	// ------------------------------------------------------------------------
 	// Foam
 	//
@@ -113,45 +79,6 @@ namespace PBRWater
 	// instead of fading uniformly. The pattern is procedural: round bubbles of random size on a
 	// jittered grid, with walls bent by a domain warp so no straight cell edges survive.
 	// ------------------------------------------------------------------------
-
-	// Hash without Sine, Dave Hoskins (MIT): stable across GPUs, unlike sin-based hashes.
-	float Hash12(float2 p)
-	{
-		float3 p3 = frac(float3(p.xyx) * 0.1031);
-		p3 += dot(p3, p3.yzx + 33.33);
-		return frac((p3.x + p3.y) * p3.z);
-	}
-
-	float2 Hash22(float2 p)
-	{
-		float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
-		p3 += dot(p3, p3.yzx + 33.33);
-		return frac((p3.xx + p3.yz) * p3.zy);
-	}
-
-	float ValueNoise(float2 p)
-	{
-		float2 i = floor(p);
-		float2 f = frac(p);
-		float2 u = f * f * (3.0 - 2.0 * f);
-		return lerp(lerp(Hash12(i), Hash12(i + float2(1, 0)), u.x),
-			lerp(Hash12(i + float2(0, 1)), Hash12(i + float2(1, 1)), u.x), u.y);
-	}
-
-	/// Three-octave fBm with rotated octaves (no grid-aligned artefacts), in [0, 1].
-	float Fbm(float2 p)
-	{
-		const float2x2 rotation = float2x2(0.8, 0.6, -0.6, 0.8);
-		float sum = 0.0;
-		float amplitude = 0.5;
-		[unroll] for (int i = 0; i < 3; i++)
-		{
-			sum += amplitude * ValueNoise(p);
-			p = mul(rotation, p) * 2.03 + 7.1;
-			amplitude *= 0.5;
-		}
-		return sum / 0.875;
-	}
 
 	/// Distance to the nearest bubble centre, normalised by that bubble's radius and merged with a
 	/// smooth minimum: 0 at a bubble centre, ~1 at its rim, with rounded walls between bubbles.
@@ -250,6 +177,7 @@ namespace PBRWater
 		float depth;
 		float fetchMetres;
 		float footprint;
+		float turbidity;  // column sediment, filled in by the water column shading
 	};
 
 	/**
@@ -294,6 +222,7 @@ namespace PBRWater
 		o.depth = ctx.depth;
 		o.fetchMetres = SampleFetchMetres(waveParam.xy + FrameBuffer::CameraPosAdjust.xy);
 		o.footprint = footprint;
+		o.turbidity = 0.0;
 		return o;
 	}
 
@@ -326,6 +255,9 @@ namespace PBRWater
 		case 7:
 			// Fetch on a log scale: black ~10 m (pond), white ~100 km (open sea).
 			return saturate(log10(max(s.fetchMetres, 10.0)) / 4.0 - 0.25).xxx;
+		case 8:
+			// Water clarity: blue clear, brown murky.
+			return lerp(float3(0.05, 0.25, 0.6), float3(0.55, 0.35, 0.1), saturate(s.turbidity / 2.0)) * (0.4 + 0.6 * saturate(s.turbidity));
 		default:
 			return 0.0;
 		}

@@ -134,6 +134,7 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 			continue;
 		g.radius = std::max(s.radius / texelSize, 0.75f);
 		g.depth = s.depth;
+		g.silt = s.silt;
 		++numSources;
 	}
 	sourceBuffer->Update(gpuSources.data(), sizeof(gpuSources));
@@ -146,6 +147,8 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	base.damping = std::pow(0.5f, FixedStep / std::max(settings.halfLife, 0.05f));
 	base.foamDecay = std::pow(0.5f, FixedStep / std::max(settings.foamHalfLife, 0.05f));
 	base.foamFromMotion = settings.foamFromMotion;
+	base.siltDecay = std::pow(0.5f, FixedStep / std::max(settings.siltHalfLife, 0.5f));
+	base.siltDiffusion = std::clamp(settings.siltSpread, 0.0f, 1.0f);
 
 	accumulator = std::min(accumulator + std::max(dt, 0.0f), FixedStep * MaxStepsPerFrame);
 	bool first = true;

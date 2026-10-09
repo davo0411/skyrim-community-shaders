@@ -20,14 +20,17 @@ struct PBRWater : Feature
 	virtual inline std::string GetShortName() override { return "PBRWater"; }
 	virtual inline std::string_view GetShaderDefineName() override { return "PBR_WATER"; }
 	virtual std::string_view GetCategory() const override { return FeatureCategories::kWater; }
-	virtual inline bool HasShaderDefine(RE::BSShader::Type t) override { return t == RE::BSShader::Type::Water; }
+	// Image space: the SAO composite, which fogs the opaque scene, hosts the underwater view.
+	virtual inline bool HasShaderDefine(RE::BSShader::Type t) override { return t == RE::BSShader::Type::Water || t == RE::BSShader::Type::ImageSpace; }
 
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { T("feature.pbr_water.description", "Physically based water with real waves, tessellated geometry, foam and interactive ripples."),
 			{ T("feature.pbr_water.key_feature_1", "Wind-driven wave spectrum that follows the weather, sized by open-water fetch and depth"),
 				T("feature.pbr_water.key_feature_2", "GPU tessellation of the water surface, stable with upscalers and frame generation"),
-				T("feature.pbr_water.key_feature_3", "PBR specular, Fresnel, light absorption and subsurface scattering"),
+				T("feature.pbr_water.key_feature_3", "PBR specular, Fresnel, light absorption and light transmitted through wave crests"),
+				T("feature.pbr_water.key_feature_7", "Water clarity that varies: drifting sediment, wave-stirred shallows, muddy rivers and silt kicked up by wading"),
+				T("feature.pbr_water.key_feature_8", "Volumetric underwater view with depth-dependent light, sun glow, light shafts and a waterline meniscus"),
 				T("feature.pbr_water.key_feature_4", "Shoreline breaking waves and foam on shores, crests, objects and wakes"),
 				T("feature.pbr_water.key_feature_5", "Ripple simulation for every actor and physics object, replacing the vanilla wading mesh"),
 				T("feature.pbr_water.key_feature_6", "Swimming and floating objects ride the rendered waves") } };
@@ -66,6 +69,29 @@ struct PBRWater : Feature
 		float VanillaFresnel = 0.0f;
 		float Visibility = 1.0f;
 		float RefractionDistortion = 1.0f;
+		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
+		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
+
+		// Water clarity
+		float Turbidity = 0.15f;            ///< suspended sediment everywhere (0 = crystal clear)
+		float TurbidityPatchiness = 0.7f;   ///< how unevenly it is spread
+		float TurbidityPatchSize = 150.0f;  ///< metres
+		float SedimentDensity = 0.35f;      ///< extinction (1/m) per unit of turbidity
+		float3 SedimentColor = { 0.34f, 0.29f, 0.2f };
+		float ShoreResuspension = 1.0f;    ///< sediment stirred up by the waves in the shallows
+		float RiverTurbidity = 0.8f;       ///< silt carried by river currents
+		float StormTurbidity = 1.0f;       ///< extra sediment in strong wind and rain
+		float WadingSilt = 1.0f;           ///< silt kicked up by feet on the bed
+		float SedimentLayerHeight = 1.5f;  ///< metres the stirred-up sediment reaches above the bed
+
+		// Underwater
+		bool EnableUnderwater = true;
+		float UnderwaterVisibility = 1.0f;
+		float LightShafts = 1.0f;
+		float LightShaftDepth = 15.0f;  ///< metres over which the shafts fade
+		float SunGlow = 1.0f;
+		float Meniscus = 1.0f;
+		int UnderwaterSamples = 12;
 
 		// Foam
 		float FoamAmount = 1.0f;
@@ -147,8 +173,28 @@ struct PBRWater : Feature
 		float4 Light1;
 		float4 Foam0;
 		float4 Foam1;
+		float4 Clarity0;
+		float4 Clarity1;
+		float4 Clarity2;
+		float4 Optics0;
+		float4 Underwater0;
+		float4 Underwater1;
+		float4 Underwater2;
+		float4 Underwater3;
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
+
+	/** @brief The water around the camera, for the underwater view. Published by the main thread. */
+	struct CameraWater
+	{
+		bool underwater = false;   ///< the camera may be below the (displaced) surface
+		bool nearSurface = false;  ///< the waterline can cross the lens
+		float flatZ = 0.0f;        ///< absolute height of the flat water plane
+		float band = 0.0f;         ///< how far the waves and ripples can move the surface (units)
+		float3 shallow{};          ///< water form colours (gamma, weather multiplier applied)
+		float3 deep{};
+		float visibility = 2048.0f;  ///< underwater fog distance of the water form (units)
+	};
 
 	// ---- Hooks ----
 	struct TESWaterSystem_InitializeWater
@@ -181,12 +227,25 @@ struct PBRWater : Feature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/** @brief ISSAOComposite (the pass that fogs the opaque scene), one hook per vtable variant. */
+	template <int Variant>
+	struct ISSAOComposite_Render
+	{
+		static void thunk(void* imageSpaceShader, RE::BSTriShape* shape, RE::ImageSpaceEffectParam* param);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/** @brief Render thread: binds the water constants and textures for the underwater composite. */
+	void BindUnderwaterComposite();
+
 private:
 	void UpdateFrameConstants();
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
 	void RestoreDraw();
 	void UpdateFetchTexture();
 	void GatherInteractions(const PBRWaterModel::WaveSnapshot& snapshot, float dt);
+	std::shared_ptr<const CameraWater> FindCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior) const;
+	float WeatherTurbidityTarget() const;
 	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed) const;
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
@@ -207,7 +266,13 @@ private:
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;
 	std::atomic<std::shared_ptr<const PBRWaterModel::WaveSnapshot>> snapshot;
+	std::atomic<std::shared_ptr<const CameraWater>> cameraWater;
 	std::atomic<float> renderDelta{ 0.0f };
+	std::atomic<float> weatherTurbidity{ 0.0f };
+	float smoothedWeatherTurbidity = 0.0f;
+
+	// Render thread
+	uint32_t underwaterCompositeFrame = UINT32_MAX;  ///< frame the composite last fogged the scene under water
 
 	// Per-draw tessellation state (render thread)
 	bool tessellationBound = false;
