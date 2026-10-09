@@ -134,6 +134,20 @@ namespace PBRWaterModel
 			float velocityY = 0.0f;
 		};
 
+		/** @brief Motion of one water parcel (units, units/s). */
+		struct Displacement
+		{
+			float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+			float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+		};
+
+		/**
+		 * @brief Displacement of the water parcels whose rest positions are (xs[i], ys[i]) above a flat plane
+		 * at `waterZ`. A floating hull rides the parcels under it, so no inversion is needed. The spectrum
+		 * weighting (fetch, depth) is evaluated once, at the first point.
+		 */
+		void ParcelDisplacements(const double* xs, const double* ys, size_t count, float waterZ, Displacement* out) const;
+
 		/**
 		 * @brief Surface displacement at world position (x, y) above a flat water plane at `waterZ`.
 		 * Inverts the Gerstner horizontal displacement with a short fixed-point iteration, so the

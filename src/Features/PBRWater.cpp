@@ -94,6 +94,11 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		RippleHalfLife,
 		GameplayWaves,
 		BuoyancyStrength,
+		EnableFloatingObjects,
+		FloatingRange,
+		MaxFloatingSize,
+		FloatingResponse,
+		CarryActors,
 		WireframeMode,
 		DebugView))
 }
@@ -176,6 +181,11 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		RippleHalfLife,
 		GameplayWaves,
 		BuoyancyStrength,
+		EnableFloatingObjects,
+		FloatingRange,
+		MaxFloatingSize,
+		FloatingResponse,
+		CarryActors,
 		WireframeMode,
 		DebugView))
 }
@@ -303,6 +313,9 @@ void PBRWater::SanitizeSettings()
 	clamp(s.RippleSpeed, 0.2f, 4.0f, d.RippleSpeed);
 	clamp(s.RippleHalfLife, 0.2f, 6.0f, d.RippleHalfLife);
 	clamp(s.BuoyancyStrength, 0.0f, 3.0f, d.BuoyancyStrength);
+	clamp(s.FloatingRange, 30.0f, 300.0f, d.FloatingRange);
+	clamp(s.MaxFloatingSize, 2.0f, 150.0f, d.MaxFloatingSize);
+	clamp(s.FloatingResponse, 0.0f, 2.0f, d.FloatingResponse);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
 	s.DebugView = std::clamp(s.DebugView, 0, 9);
 }
@@ -522,6 +535,27 @@ void PBRWater::DrawSettings()
 		ImGui::TreePop();
 	}
 
+	if (ImGui::TreeNodeEx(T(TKEY("floating_objects"), "Floating Objects"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Checkbox(T(TKEY("enable_floating_objects"), "Boats and Ice Ride the Waves"), &settings.EnableFloatingObjects);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("enable_floating_objects_tooltip"), "Boats, ships, rafts and ice floes heave, pitch and roll on the rendered waves, with everything on board. Found automatically: anything placed afloat that does not rest on the bottom. Nothing is saved; objects are back in place whenever the game saves."));
+		if (settings.EnableFloatingObjects) {
+			ImGui::SliderFloat(T(TKEY("floating_response"), "Hull Motion"), &settings.FloatingResponse, 0.0f, 2.0f, "%.2f");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("floating_response_tooltip"), "Scales how much floating hulls move with the waves."));
+			ImGui::Checkbox(T(TKEY("carry_actors"), "Carry Actors on Board"), &settings.CarryActors);
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("carry_actors_tooltip"), "The player and NPCs standing on a floating hull move with its deck, and their weight sinks and tilts small boats."));
+			ImGui::SliderFloat(T(TKEY("floating_range"), "Range"), &settings.FloatingRange, 30.0f, 300.0f, "%.0f m");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("floating_range_tooltip"), "Objects within this distance of the player float. Further away they rest in place, where the waves have flattened."));
+			ImGui::SliderFloat(T(TKEY("max_floating_size"), "Largest Hull"), &settings.MaxFloatingSize, 2.0f, 150.0f, "%.0f m");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("max_floating_size_tooltip"), "Longer objects placed in the water stay fixed. Lower it if a large structure moves that should not."));
+		}
+		ImGui::TreePop();
+	}
+
 	if (ImGui::TreeNodeEx(T(TKEY("geometry"), "Geometry"), ImGuiTreeNodeFlags_None)) {
 		ImGui::Checkbox(T(TKEY("enable_tessellation"), "Tessellation"), &settings.EnableTessellation);
 		if (auto _tt = Util::HoverTooltipWrapper())
@@ -558,6 +592,8 @@ void PBRWater::DrawSettings()
 			ImGui::Text("Whitecaps %.1f%%, shortest displaced wave %.1f m", s.whitecapCoverage * 100.0f, s.shortestDisplacedWavelength / UnitsPerMetre);
 		}
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
+		const auto floatingStats = floating.GetStats();
+		ImGui::Text("Floating: %u hulls, %u attached, %u actors on board", floatingStats.floaters, floatingStats.parts, floatingStats.carried);
 		ImGui::TreePop();
 	}
 }
@@ -1109,6 +1145,16 @@ void PBRWater::MainThreadUpdate()
 	cameraWater.store(settings.EnableUnderwater ? FindCameraWater(*published, exterior) : nullptr, std::memory_order_release);
 
 	GatherInteractions(*published, dt);
+
+	FloatingObjects::Settings floatingSettings;
+	floatingSettings.enabled = settings.EnableFloatingObjects && globals::shaderCache->IsEnabled();
+	floatingSettings.range = settings.FloatingRange * UnitsPerMetre;
+	floatingSettings.maxSize = settings.MaxFloatingSize * UnitsPerMetre;
+	floatingSettings.response = settings.FloatingResponse;
+	floatingSettings.carryActors = settings.CarryActors;
+	floatingSettings.fadeStart = settings.DisplacementFadeStart;
+	floatingSettings.fadeEnd = settings.DisplacementFadeEnd;
+	floating.Update(*published, floatingSettings, dt);
 }
 
 float PBRWater::WeatherTurbidityTarget() const
@@ -1433,6 +1479,17 @@ bool PBRWater::TESObjectCELL_GetWaterHeight::thunk(RE::TESObjectCELL* cell, cons
 			waterHeight += wave;
 	}
 	return result;
+}
+
+void PBRWater::GameLoaded()
+{
+	// The loaded game's references have new 3D; whatever floated before belongs to the old one.
+	floating.Reset();
+}
+
+void PBRWater::SavingGame()
+{
+	floating.RestorePlacements();
 }
 
 void PBRWater::MainUpdate::thunk()

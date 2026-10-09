@@ -271,6 +271,19 @@ namespace PBRWaterModel
 		}
 	}
 
+	void WaveSnapshot::ParcelDisplacements(const double* xs, const double* ys, size_t count, float waterZ, Displacement* out) const
+	{
+		for (size_t i = 0; i < count; ++i)
+			out[i] = {};
+		if (count == 0 || spectrum.amplitudeSum + shore.amplitude <= 0.5f)
+			return;
+		const Context ctx = BuildContext(xs[0], ys[0], waterZ);
+		for (size_t i = 0; i < count; ++i) {
+			auto& d = out[i];
+			Evaluate(xs[i], ys[i], ctx, d.dx, d.dy, d.dz, d.vz, d.vx, d.vy);
+		}
+	}
+
 	WaveSnapshot::Sample WaveSnapshot::SampleAt(double x, double y, float waterZ) const
 	{
 		Sample out;

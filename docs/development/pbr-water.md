@@ -40,13 +40,13 @@ the sea when the game is paused, and avoids float precision loss far from the wo
 
 ### Nothing is hard-coded per location
 
-| Input                  | Source                                                                       | Effect                                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                      |
+| Input                  | Source                                                                       | Effect                                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                              |
 | Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak, energy and height: ponds and rivers stay calm, the open sea builds swell |
-| Depth                  | Terrain Shadows heightmap                                                    | `tanh(kh)` depth attenuation, shoreline waves (Green's law shoaling, breaking at H = 0.78 h) |
-| Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                        |
-| Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                          |
+| Depth                  | Terrain Shadows heightmap                                                    | `tanh(kh)` depth attenuation, shoreline waves (Green's law shoaling, breaking at H = 0.78 h)         |
+| Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                                |
+| Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                                  |
 
 The fetch bake marches 16 upwind rays per cell, then stores the Shore Protection Manual _effective fetch_
 (cos²-weighted over ±45° of upwind) with a floor of 40% of the cell's longest radial for swell from the open
@@ -128,6 +128,50 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
 -   **Buoyancy**: dynamic Havok bodies floating at the surface get a spring towards the displaced surface
     plus the orbital velocity of the waves.
 
+## Floating objects
+
+Boats, ships, rafts and ice floes ride the waves (`FloatingObjects`). It builds on Bobbing Framework
+(RavenKZP, GPL-3.0-or-later WITH Modding Exception), which moves a configured reference's 3D on a sine
+with keyframed collision, carries its child references and the actors standing on it. Here nothing is
+configured: no JSON, no patched meshes, no plugin records.
+
+-   **Detection** (a scan every second, or after moving 2048 units, within the range): a static, movable
+    static, activator or furniture reference, placed upright through the flat water plane with at least a
+    couple of units below and above it, mostly above water (draft at most 80 % of its height), not taller
+    than three times its length, between 0.3 m and the size limit long, drawn with lit materials (waterfalls,
+    foam and fog are effect meshes), without dynamic Havok bodies (those already float through buoyancy), and
+    not resting on the bottom: the landscape (`TES::GetLandHeight` at five points) lies more than
+    `max(0.3 draft, 0.25 m)` below its keel and a Havok ray straight down from the keel hits nothing within
+    that distance (piers, posts, rocks and wrecks stand on something). Markers and water are skipped.
+-   **Hull parts**: candidates are sorted by waterplane area; a smaller one whose centre lies inside a larger
+    one's footprint becomes part of it (hull halves, decks placed as separate references). Ice floes that
+    only touch stay separate.
+-   **Attachments**: any other reference (statics, containers, lights, doors, flora, activators) inside the
+    hull's footprint and height range rides it, unless what lies directly below it, down to the keel, is not
+    this hull: so masts, sails and lanterns go with the ship, a dock reaching over it does not.
+-   **Motion**: five water parcels (the centre and both ends of each axis, at 70 % of the half extents) are
+    evaluated with the same wave function as the renderer (`WaveSnapshot::ParcelDisplacements`). The mean
+    vertical displacement drives heave, a plane through them pitch and roll, and their mean horizontal
+    displacement surge and sway, so a long hull averages out short waves and a raft follows every one.
+    Heave, pitch and roll respond as damped oscillators with the hull's own natural frequency,
+    `omega = sqrt(g / draft)` (a box hull), tilt at 0.75 of that, so small boats bob quickly and ships
+    roll slowly. Tilt is limited to 0.35 rad. The motion fades out with the wave geometry's distance fade
+    and towards the edge of the range.
+-   **Collision**: near the player (45 m plus the hull's half length) the hull's and its parts' collision
+    becomes keyframed through `NiAVObject::SetMotionType`, so it follows the moving 3D; loose props on board
+    are woken to react to the moving deck.
+-   **Actors on board**: the player and nearby high-process actors standing on a moving hull are carried
+    with the deck (Bobbing Framework's method: `Actor::SetPosition` without the controller, then
+    `bhkCharacterController::SetPositionImpl`, restoring the controller's forward vector and collector
+    early-out distance, and an in-air state from the deck dropping away reset to on-ground). Jumping and
+    swimming actors are left alone. Their weight sinks and tilts the hull from its waterplane area and
+    inertia (80 kg per actor, scaled), which is noticeable on a rowing boat and nothing on a ship.
+-   **Nothing is saved**: references keep their placed position and form data; collision changes go through
+    the 3D only (not `TESObjectREFR::SetMotionType`, which marks the reference Havok-moved for the save);
+    every object is put back in place when the game saves (`Feature::SavingGame`, from SKSE's save message)
+    and moves on the next frame. A reference that unloads or gets new 3D is dropped and found again.
+-   **Bobbing Framework installed**: forms it animates (its JSON configs) are left to it.
+
 ## Debugging
 
 -   Settings > PBR Water > Debug: wireframe overlay / wireframe only, and debug views (normals, foam,
@@ -151,12 +195,23 @@ bit-identical bytecode to `dev` for all permutations.
 -   [ ] Wade into the sea: ripples from each leg, wakes, foam; no vanilla wading mesh.
 -   [ ] Swim in waves: player bobs with the visible surface. Drop a basket in the sea: it rides the waves.
 -   [ ] Shader cache cold start (async compile): water renders untessellated until compiled, then switches.
+-   [ ] Sea of Ghosts in a storm: ice floes heave and tilt with the waves; big floes move slowly, small ones
+        follow every wave. Docks, piers and rocks in the water stay still.
+-   [ ] Solitude and Windhelm harbours: docked ships roll slowly with masts and rigging attached; walk on
+        deck and stay on it; save, reload: everything is where it was placed.
+-   [ ] Rowing boats on Lake Ilinalta / Riverwood: boats bob, stepping in tilts them; Debug shows the
+        hull, attachment and on-board counts.
 
 ## Known limitations
 
 -   Shoreline waves and depth attenuation need a Terrain Shadows heightmap for the worldspace.
 -   Gameplay water heights do not include the flowmap damping on rivers (fetch already keeps river waves small).
 -   Seams between Unified Water tiles of different LOD sizes rely on the displacement distance fade.
+-   Floating objects are found by heuristics: an unusual structure standing in deep water without touching
+    the bottom can float (lower the Largest Hull setting), and a ship whose mesh reaches into a shallow bed
+    stays still. Only loaded references move; distant LOD models do not. NPC navmesh on deck does not move,
+    so NPCs keep their path while the deck carries them. Open hulls are not masked out of the water
+    surface, so in rough seas a wave higher than a low gunwale can show inside the boat.
 
 ## References and credits
 
@@ -169,3 +224,6 @@ bit-identical bytecode to `dev` for all permutations.
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Pleasant & Ross, _Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas_ (GDC 2019) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement
+-   Bobbing Framework (RavenKZP, GPL-3.0-or-later WITH Modding Exception) - moving placed references with
+    keyframed collision, their children and the actors standing on them; the floating objects build on it
+-   Faltinsen, _Sea Loads on Ships and Offshore Structures_ (1990) - heave and roll natural periods of a hull

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "PBRWater/FloatingObjects.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/WaterEnvironment.h"
 #include "PBRWater/WaveModel.h"
@@ -34,7 +35,7 @@ struct PBRWater : Feature
 				T("feature.pbr_water.key_feature_8", "Volumetric underwater view with depth-dependent light, sun glow, light shafts and a waterline meniscus"),
 				T("feature.pbr_water.key_feature_4", "Shoreline breaking waves and foam on shores, crests, objects and wakes"),
 				T("feature.pbr_water.key_feature_5", "Ripple simulation for every actor and physics object, replacing the vanilla wading mesh"),
-				T("feature.pbr_water.key_feature_6", "Swimming and floating objects ride the rendered waves") } };
+				T("feature.pbr_water.key_feature_6", "Swimmers, floating props, boats, ships and ice floes ride the rendered waves, with no patches or configuration") } };
 	}
 
 	struct Settings
@@ -130,6 +131,13 @@ struct PBRWater : Feature
 		bool GameplayWaves = true;
 		float BuoyancyStrength = 1.0f;
 
+		// Floating objects
+		bool EnableFloatingObjects = true;
+		float FloatingRange = 150.0f;   ///< metres around the player in which objects float
+		float MaxFloatingSize = 60.0f;  ///< metres: the longest hull that floats
+		float FloatingResponse = 1.0f;  ///< scales how much the hulls move
+		bool CarryActors = true;
+
 		// Debug
 		int WireframeMode = 0;
 		int DebugView = 0;
@@ -155,6 +163,8 @@ struct PBRWater : Feature
 	virtual void Reset() override;
 	virtual void Prepass() override;
 	virtual void PostPostLoad() override;
+	virtual void GameLoaded() override;
+	virtual void SavingGame() override;
 
 	/** @brief Main thread, once per frame: wind, phases, environment, ripple sources, buoyancy. */
 	void MainThreadUpdate();
@@ -291,6 +301,7 @@ private:
 
 	RippleSimulation ripples;
 	WaterEnvironment environment;
+	FloatingObjects floating;  ///< main thread
 
 	// Main thread state
 	PBRWaterModel::PhaseIntegrator phases;

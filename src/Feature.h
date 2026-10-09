@@ -205,6 +205,9 @@ public:
 	/** @brief Called after loading an existing save. */
 	virtual void GameLoaded() {}
 
+	/** @brief Called on the main thread just before the game is saved. */
+	virtual void SavingGame() {}
+
 	/** @brief Called after all SKSE plugins have finished PostLoad. */
 	virtual void PostPostLoad() {}
 

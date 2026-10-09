@@ -144,6 +144,12 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				Feature::ForEachLoadedFeature("GameLoaded", [](Feature* feature) { feature->GameLoaded(); });
 			break;
 		}
+	case SKSE::MessagingInterface::kSaveGame:
+		{
+			if (errors.empty())
+				Feature::ForEachLoadedFeature("SavingGame", [](Feature* feature) { feature->SavingGame(); });
+			break;
+		}
 	}
 }
 
