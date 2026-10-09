@@ -71,6 +71,11 @@ struct PBRWater : Feature
 		float RefractionDistortion = 1.0f;
 		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
 		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
+		float WindRoughness = 1.0f;           ///< scales the wind-driven micro-roughness (Cox-Munk)
+		float Gusts = 0.6f;                   ///< how strongly gusts vary the wind over the water
+		float GustSize = 40.0f;               ///< metres
+		float Bioluminescence = 0.0f;         ///< plankton glow in churned water at night (off by default)
+		float3 BioluminescenceColor = { 0.1f, 0.75f, 0.95f };
 
 		// Water clarity
 		float Turbidity = 0.15f;            ///< suspended sediment everywhere (0 = crystal clear)
@@ -101,6 +106,7 @@ struct PBRWater : Feature
 		float FoamScale = 1.2f;  ///< metres
 		float BreakingFoam = 1.0f;
 		float WakeFoam = 1.0f;
+		float WindStreaks = 1.0f;  ///< windrows: foam streaks in strong wind, slicks in light wind
 		float FoamAlbedo = 0.85f;
 
 		// Ripples
@@ -181,6 +187,9 @@ struct PBRWater : Feature
 		float4 Underwater1;
 		float4 Underwater2;
 		float4 Underwater3;
+		float4 Surface0;
+		float4 Surface1;
+		float4 Surface2;
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -246,6 +255,8 @@ private:
 	void GatherInteractions(const PBRWaterModel::WaveSnapshot& snapshot, float dt);
 	std::shared_ptr<const CameraWater> FindCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior) const;
 	float WeatherTurbidityTarget() const;
+	/** @brief 0..1 how much of the current weather blend is rainy. */
+	float RainFraction() const;
 	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed) const;
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
@@ -270,6 +281,8 @@ private:
 	std::atomic<float> renderDelta{ 0.0f };
 	std::atomic<float> weatherTurbidity{ 0.0f };
 	float smoothedWeatherTurbidity = 0.0f;
+	std::atomic<float> rainIntensity{ 0.0f };
+	float smoothedRain = 0.0f;
 
 	// Render thread
 	uint32_t underwaterCompositeFrame = UINT32_MAX;  ///< frame the composite last fogged the scene under water

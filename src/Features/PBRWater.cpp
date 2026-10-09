@@ -44,6 +44,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	RefractionDistortion,
 	ScatteringAnisotropy,
 	DownwellingAttenuation,
+	WindRoughness,
+	Gusts,
+	GustSize,
+	Bioluminescence,
+	BioluminescenceColor,
+	WindStreaks,
 	Turbidity,
 	TurbidityPatchiness,
 	TurbidityPatchSize,
@@ -159,6 +165,14 @@ void PBRWater::SanitizeSettings()
 	clamp(s.RefractionDistortion, 0.0f, 2.0f, d.RefractionDistortion);
 	clamp(s.ScatteringAnisotropy, 0.0f, 0.9f, d.ScatteringAnisotropy);
 	clamp(s.DownwellingAttenuation, 0.0f, 3.0f, d.DownwellingAttenuation);
+	clamp(s.WindRoughness, 0.0f, 3.0f, d.WindRoughness);
+	clamp(s.Gusts, 0.0f, 1.0f, d.Gusts);
+	clamp(s.GustSize, 10.0f, 300.0f, d.GustSize);
+	clamp(s.Bioluminescence, 0.0f, 3.0f, d.Bioluminescence);
+	clamp(s.BioluminescenceColor.x, 0.0f, 1.0f, d.BioluminescenceColor.x);
+	clamp(s.BioluminescenceColor.y, 0.0f, 1.0f, d.BioluminescenceColor.y);
+	clamp(s.BioluminescenceColor.z, 0.0f, 1.0f, d.BioluminescenceColor.z);
+	clamp(s.WindStreaks, 0.0f, 3.0f, d.WindStreaks);
 	clamp(s.Turbidity, 0.0f, 5.0f, d.Turbidity);
 	clamp(s.TurbidityPatchiness, 0.0f, 1.0f, d.TurbidityPatchiness);
 	clamp(s.TurbidityPatchSize, 10.0f, 1000.0f, d.TurbidityPatchSize);
@@ -192,7 +206,7 @@ void PBRWater::SanitizeSettings()
 	clamp(s.RippleHalfLife, 0.2f, 6.0f, d.RippleHalfLife);
 	clamp(s.BuoyancyStrength, 0.0f, 3.0f, d.BuoyancyStrength);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
-	s.DebugView = std::clamp(s.DebugView, 0, 8);
+	s.DebugView = std::clamp(s.DebugView, 0, 9);
 }
 
 void PBRWater::SaveSettings(json& o_json)
@@ -227,6 +241,8 @@ void PBRWater::RegisterWeatherVariables()
 	addFloat("StormTurbidity", "Storm Turbidity", "Extra sediment stirred up by strong wind and rain", &settings.StormTurbidity, defaults.StormTurbidity, 0.0f, 3.0f);
 	addFloat("UnderwaterVisibility", "Underwater Visibility", "Scales how far you can see under water", &settings.UnderwaterVisibility, defaults.UnderwaterVisibility, 0.1f, 10.0f);
 	addFloat("LightShafts", "Underwater Light Shafts", "Strength of the sun shafts under water", &settings.LightShafts, defaults.LightShafts, 0.0f, 3.0f);
+	addFloat("Gusts", "Gusts", "How strongly gusts vary the wind over the water", &settings.Gusts, defaults.Gusts, 0.0f, 1.0f);
+	addFloat("Bioluminescence", "Bioluminescence", "Plankton glow in churned water at night", &settings.Bioluminescence, defaults.Bioluminescence, 0.0f, 3.0f);
 	registry->RegisterVariable(std::make_shared<WeatherVariables::Float3Variable>("SedimentColor", "Sediment Colour", "Colour of murky water", &settings.SedimentColor, defaults.SedimentColor));
 }
 
@@ -283,6 +299,13 @@ void PBRWater::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("downwelling_attenuation"), "Depth Light Falloff"), &settings.DownwellingAttenuation, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("downwelling_attenuation_tooltip"), "How quickly sunlight fades on its way down, darkening deep bottoms and everything under water."));
+		ImGui::SliderFloat(T(TKEY("wind_roughness"), "Wind Roughness"), &settings.WindRoughness, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("wind_roughness_tooltip"), "Tiny ripples raised by the local wind blur the reflections and spread the sun's glitter. Calm water is glassy, rain roughens it."));
+		Util::WeatherUI::SliderFloat(T(TKEY("gusts"), "Gusts"), this, "Gusts", &settings.Gusts, 0.0f, 1.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("gusts_tooltip"), "Gusts sweep across the water as darker, rougher patches (cat's paws). Water in the lee of the upwind shore stays calm."));
+		ImGui::SliderFloat(T(TKEY("gust_size"), "Gust Size"), &settings.GustSize, 10.0f, 300.0f, "%.0f m");
 		ImGui::SliderFloat(T(TKEY("vanilla_fresnel"), "Vanilla Fresnel Blend"), &settings.VanillaFresnel, 0.0f, 1.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("vanilla_fresnel_tooltip"), "0 uses the physical air/water Fresnel; 1 uses the water form's own Fresnel amount."));
@@ -347,8 +370,19 @@ void PBRWater::DrawSettings()
 			ImGui::TextUnformatted(T(TKEY("foam_persistence_tooltip"), "How long foam from a breaking crest lingers and thins out behind the wave."));
 		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Foam"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("wind_streaks"), "Wind Streaks"), &settings.WindStreaks, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("wind_streaks_tooltip"), "Lines along the wind (windrows): old foam gathers into streaks in a strong wind, and smooth, glassy slicks form in a light breeze."));
 		ImGui::SliderFloat(T(TKEY("foam_scale"), "Foam Pattern Size"), &settings.FoamScale, 0.2f, 5.0f, "%.2f m");
 		ImGui::SliderFloat(T(TKEY("foam_albedo"), "Foam Brightness"), &settings.FoamAlbedo, 0.1f, 1.0f, "%.2f");
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx(T(TKEY("bioluminescence_section"), "Bioluminescence"), ImGuiTreeNodeFlags_None)) {
+		Util::WeatherUI::SliderFloat(T(TKEY("bioluminescence"), "Bioluminescence"), this, "Bioluminescence", &settings.Bioluminescence, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("bioluminescence_tooltip"), "Plankton that flash when the water is disturbed: breaking waves, wakes and splashes glow in the dark."));
+		ImGui::ColorEdit3(T(TKEY("bioluminescence_color"), "Glow Colour"), reinterpret_cast<float*>(&settings.BioluminescenceColor));
 		ImGui::TreePop();
 	}
 
@@ -399,6 +433,7 @@ void PBRWater::DrawSettings()
 			T(TKEY("debug_height"), "Wave Height"),
 			T(TKEY("debug_fetch"), "Fetch"),
 			T(TKEY("debug_clarity"), "Water Clarity"),
+			T(TKEY("debug_wind"), "Local Wind"),
 		};
 		ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &settings.DebugView, views, IM_ARRAYSIZE(views));
 
@@ -599,6 +634,11 @@ void PBRWater::UpdateFrameConstants()
 		d.Underwater2 = { camera->deep.x, camera->deep.y, camera->deep.z, settings.LightShaftDepth * UnitsPerMetre };
 	}
 	d.Underwater3 = { settings.Meniscus, settings.SunGlow, 0.0f, static_cast<float>(settings.UnderwaterSamples) };
+
+	// Wind and rain on the surface, bioluminescence.
+	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
+	d.Surface1 = { settings.WindStreaks, settings.Bioluminescence, 0.0f, 0.0f };
+	d.Surface2 = { settings.BioluminescenceColor.x, settings.BioluminescenceColor.y, settings.BioluminescenceColor.z, 0.0f };
 
 	frameData = d;
 }
@@ -872,6 +912,9 @@ void PBRWater::MainThreadUpdate()
 	// Storms and rain cloud the water over minutes, and it takes as long to clear.
 	smoothedWeatherTurbidity += (WeatherTurbidityTarget() - smoothedWeatherTurbidity) * SmoothFactor(dt, 90.0f);
 	weatherTurbidity.store(exterior ? smoothedWeatherTurbidity : 0.0f, std::memory_order_release);
+	// Rain on the surface follows the precipitation within seconds.
+	smoothedRain += ((exterior ? RainFraction() : 0.0f) - smoothedRain) * SmoothFactor(dt, 4.0f);
+	rainIntensity.store(smoothedRain, std::memory_order_release);
 
 	cameraWater.store(settings.EnableUnderwater ? FindCameraWater(*published, exterior) : nullptr, std::memory_order_release);
 
@@ -885,12 +928,19 @@ float PBRWater::WeatherTurbidityTarget() const
 		return 0.0f;
 	// Strong wind lifts sediment in the shallows and mixes it through; rain washes silt in from the land.
 	const float wind = std::clamp((smoothedWindSpeed - 6.0f) / 14.0f, 0.0f, 1.0f);
+	return settings.StormTurbidity * (wind + 0.5f * RainFraction());
+}
+
+float PBRWater::RainFraction() const
+{
+	const auto sky = globals::game::sky;
+	if (!sky)
+		return 0.0f;
 	auto rainy = [](const RE::TESWeather* weather) {
 		return weather && weather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy) ? 1.0f : 0.0f;
 	};
 	const float blend = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
-	const float rain = rainy(sky->currentWeather) * blend + rainy(sky->lastWeather) * (1.0f - blend);
-	return settings.StormTurbidity * (wind + 0.5f * rain);
+	return rainy(sky->currentWeather) * blend + rainy(sky->lastWeather) * (1.0f - blend);
 }
 
 std::shared_ptr<const PBRWater::CameraWater> PBRWater::FindCameraWater(const PBRWaterModel::WaveSnapshot& snap, bool exterior) const

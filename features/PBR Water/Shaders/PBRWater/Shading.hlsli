@@ -17,6 +17,10 @@
 //               form's shallow colour and visibility plus spatially varying sediment, light reaching
 //               the bottom attenuated by K_d, and in-scattering towards the body colour (Optics.hlsli).
 //   Scatter   : sunlight transmitted through thin wave crests (Optics.hlsli).
+//   Wind      : micro-roughness from the local wind (Cox & Munk 1954): gusts sweep across the water as
+//               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
+//               roughens the surface.
+//   Glow      : opt-in bioluminescence where the water is churned, visible only in the dark.
 //   Foam      : procedural cellular foam advected with the waves, thresholded by a physically
 //               motivated coverage (shore depth, wave folding, breaking, wakes, whitecaps).
 // ============================================================================
@@ -29,6 +33,81 @@ namespace PBRWater
 		float alpha = baseRoughness * baseRoughness;
 		alpha = sqrt(alpha * alpha + 2.0 * slopeVariance);
 		return saturate(sqrt(alpha));
+	}
+
+	// ------------------------------------------------------------------------
+	// Wind on the surface
+	// ------------------------------------------------------------------------
+
+	/**
+	 * Wind speed (m/s) just above the water at absolute position `absXY`. Gusts are patches of stronger
+	 * and weaker wind carried downwind at the wind speed, stretched along the wind; close to the upwind
+	 * shore (short fetch) the water lies in the lee, where the wind has not yet reached the surface.
+	 */
+	float LocalWindSpeed(float2 absXY, float fetchMetres)
+	{
+		float U = Params0.y;
+		float2 along = Params1.xy;
+		float2 across = float2(-along.y, along.x);
+		float scale = max(Surface0.z, 100.0);
+		float t = ClarityTime();
+		float2 q = float2(dot(absXY, along) / (scale * 1.8), dot(absXY, across) / scale);
+		q.x -= t * U * UnitsPerMetre / (scale * 1.8);
+		float gusts = smoothstep(0.25, 0.75, Fbm2(q + float2(t * 0.01, 3.7)));
+		float gust = lerp(1.0, 0.35 + 1.3 * gusts, saturate(Surface0.y));
+		float shelter = sqrt(saturate(fetchMetres / 150.0));
+		return U * gust * lerp(0.25, 1.0, shelter);
+	}
+
+	/// Mean square slope of the ripples too small for the waves and normal maps: the capillary share of the
+	/// Cox & Munk (1954) clean-surface fit, mss = 0.003 + 5.08e-3 U (up-wind 3.16e-3 U, cross-wind 0.003 + 1.92e-3 U).
+	float WindMeanSquareSlope(float windSpeed)
+	{
+		return Surface0.x * 0.25 * (0.003 + 5.08e-3 * max(windSpeed, 0.0));
+	}
+
+	/// Rain drops ring and crown the surface.
+	float RainMeanSquareSlope()
+	{
+		return 0.015 * saturate(Surface0.w);
+	}
+
+	/**
+	 * Windrows: Langmuir circulation sweeps whatever floats into lines along the wind, spaced at about
+	 * twice the dominant wavelength (Craik & Leibovich 1976). Returns 0..1 how close `absXY` is to a line;
+	 * the lines meander and break up along their length. From a fresh breeze on they carry foam; in light
+	 * winds they collect natural surface films instead, which damp the capillary ripples into glassy slicks.
+	 */
+	float WindrowPattern(float2 absXY, float peakOmega)
+	{
+		if (Surface1.x <= 0.0 || Params0.y < 1.5)
+			return 0.0;
+		float wavelength = 6.2831853 * Gravity() / max(peakOmega * peakOmega, 1e-4);
+		float spacing = max(2.0 * wavelength, 3.0 * UnitsPerMetre);
+		float2 along = Params1.xy;
+		float2 across = float2(-along.y, along.x);
+		// Rows drift slowly downwind with the surface water.
+		float v = (dot(absXY, along) - ClarityTime() * 0.15 * UnitsPerMetre) / (spacing * 6.0);
+		float u = dot(absXY, across) / spacing;
+		u += (ValueNoise(float2(v * 2.0, u * 0.3)) - 0.5) * 0.8;
+		float row = 1.0 - abs(frac(u) * 2.0 - 1.0);
+		row *= row;
+		row *= row;
+		row *= row;
+		float breakup = smoothstep(0.3, 0.8, ValueNoise(float2(floor(u) * 7.31, v * 3.0)));
+		return row * breakup;
+	}
+
+	/// Foam gathered into the windrows, well marked from a fresh breeze on.
+	float WindrowFoam(float pattern)
+	{
+		return pattern * saturate((Params0.y - 5.0) / 10.0) * Surface1.x * saturate(Params2.y * 10.0 + 0.3);
+	}
+
+	/// Slicks: in light winds (~2-7 m/s) the windrows hold surface films that damp the ripples (0..1).
+	float WindrowSlick(float pattern)
+	{
+		return pattern * saturate((Params0.y - 1.5) / 2.0) * saturate((7.0 - Params0.y) / 3.0) * saturate(Surface1.x);
 	}
 
 	/// Angular radius of the sun disc (rad).
@@ -178,6 +257,8 @@ namespace PBRWater
 		float fetchMetres;
 		float footprint;
 		float turbidity;  // column sediment, filled in by the water column shading
+		float windSpeed;  // local wind at the surface (m/s)
+		float windrows;   // foam gathered into streaks along the wind
 	};
 
 	/**
@@ -197,13 +278,25 @@ namespace PBRWater
 		WaveResult waves = EvaluateWaves(waveParam.xyz, ctx, false, footprint);
 		float3 ripple = RippleSlopeFoam(waveParam.xyz, ctx.depth);
 
+		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
+		float fetchMetres = SampleFetchMetres(absXY);
+		float wind = LocalWindSpeed(absXY, fetchMetres);
+		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
+		// River currents and rain ripple it whatever the wind.
+		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
+		float windrows = WindrowPattern(absXY, ctx.peakOmega);
+		float slick = WindrowSlick(windrows);
+		float detailScale = max(lerp(0.3, 1.25, saturate(wind / 8.0)) * (1.0 - 0.6 * slick), max(flow, Surface0.w));
+
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
 		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05);
 		slope += ripple.xy;
-		slope += detailNormal.xy / max(detailNormal.z, 0.05);
+		slope += detailNormal.xy / max(detailNormal.z, 0.05) * detailScale;
 		o.normal = normalize(float3(-slope, 1.0));
 
-		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance);
+		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance + 0.5 * (WindMeanSquareSlope(wind) * (1.0 - 0.8 * slick) + RainMeanSquareSlope()));
+		o.windSpeed = wind;
+		o.windrows = WindrowFoam(windrows);
 		o.jacobian = waves.jacobian;
 
 		// Crest foam with a trail: where this water was folding a moment ago, thinner the older it is.
@@ -220,7 +313,7 @@ namespace PBRWater
 		o.shoreCrest = waves.shoreCrest;
 		o.rippleFoam = ripple.z;
 		o.depth = ctx.depth;
-		o.fetchMetres = SampleFetchMetres(waveParam.xy + FrameBuffer::CameraPosAdjust.xy);
+		o.fetchMetres = fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
 		return o;
@@ -234,7 +327,23 @@ namespace PBRWater
 		float contact = exp(-waterThickness / max(Foam0.x, 1.0));
 		float surge = 0.6 + 0.4 * s.shoreCrest;
 		float breaking = s.shoreBreak * Shore1.y * (0.5 + 0.5 * s.shoreCrest);
-		return saturate((contact * surge + s.crestFoam + breaking + s.rippleFoam * Foam1.z) * Foam0.z);
+		return saturate((contact * surge + s.crestFoam + breaking + s.rippleFoam * Foam1.z + s.windrows) * Foam0.z);
+	}
+
+	/**
+	 * Bioluminescence (opt-in): dinoflagellates flash blue-green when the water around them is sheared, so
+	 * breaking waves, wakes, splashes and the swash glow at night. `agitation` is the churned share of the
+	 * surface; the light is only visible in the dark. Returns emitted colour in the shading space.
+	 */
+	float3 Bioluminescence(float agitation, float2 absXY, float time, float darkness)
+	{
+		if (Surface1.y <= 0.0 || darkness <= 0.0 || agitation <= 0.0)
+			return 0.0;
+		// Individual flashes: sub-metre sparks that light up and fade within a second or so.
+		float2 p = absXY * MetresPerUnit * 3.0;
+		float sparks = smoothstep(0.55, 0.95, ValueNoise(p + float2(time * 1.7, -time * 1.3)));
+		sparks = max(sparks, 0.6 * smoothstep(0.6, 0.95, ValueNoise(p * 2.3 - float2(time * 2.9, time * 0.7) + 11.0)));
+		return Color::Water(Surface2.xyz) * (Surface1.y * darkness * saturate(agitation) * (0.35 + 1.65 * sparks));
 	}
 
 	float3 DebugView(uint mode, SurfaceShading s, float foam, float4 waveState)
@@ -258,6 +367,9 @@ namespace PBRWater
 		case 8:
 			// Water clarity: blue clear, brown murky.
 			return lerp(float3(0.05, 0.25, 0.6), float3(0.55, 0.35, 0.1), saturate(s.turbidity / 2.0)) * (0.4 + 0.6 * saturate(s.turbidity));
+		case 9:
+			// Local wind: black calm, white 15 m/s; foam streaks in red.
+			return float3(max(saturate(s.windSpeed / 15.0), saturate(s.windrows * 2.0)), saturate(s.windSpeed / 15.0).xx);
 		default:
 			return 0.0;
 		}

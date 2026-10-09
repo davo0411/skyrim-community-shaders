@@ -101,8 +101,10 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
     suggests) and `Tbottom = exp(-K_d * depth / mu)` is the light lost on its way down to what is seen
     (Gordon 1989: `K_d ~ a + b_b`). Extinction `c` is the water form's (shallow colour + visibility) plus
     sediment; scattering is spectrally flat, so the colour of clear water comes from absorption.
--   Body colour: the water form's lit body colour, shifted towards the lit sediment colour by the share of
-    the extinction the sediment causes, so muddy water turns khaki and clear water keeps its own colour.
+-   Body colour: the water form's lit body colour, shifted towards the sediment colour by the share of the
+    extinction the sediment causes. The sediment gives the hue at about twice the body's brightness
+    (particles backscatter more light than clear water), so muddy water turns olive-brown while every
+    water form keeps its own brightness through the day.
 -   Wave translucency: sunlight refracts into the far face of a crest, scatters once (Henyey-Greenstein,
     forward peaked as for ocean particles) towards the viewer and refracts out. Its colour is what survives
     the path through the crest, `(b / c) (1 - exp(-c t)) exp(-c s)`: clear water glows green-blue, murky
@@ -119,6 +121,34 @@ have faded out or the sea is calm, and patches outside the (displacement-padded)
     merged with a smooth minimum, with walls bent by an fBm domain warp and density varied by large-scale
     clumping noise. A blurred "bubbles" layer lightens the water under the foam. The pattern lives in
     Lagrangian coordinates so it rides the wave orbits, and fades to its average when sub-pixel.
+
+## Wind on the surface
+
+The ripples too small for the wave model and the normal maps follow the local wind (`Shading.hlsli`):
+
+-   **Micro-roughness**: the capillary share of the Cox & Munk (1954) clean-surface slope statistics,
+    `mss = 0.003 + 5.08e-3 U` (up-wind `3.16e-3 U`, cross-wind `0.003 + 1.92e-3 U`), is added to the GGX
+    roughness. Calm water is glassy, a breeze spreads the sun into a glitter path and blurs reflections.
+-   **Gusts (cat's paws)**: the wind over the water varies in patches stretched along the wind and carried
+    downwind at the wind speed; gusts show as darker, rougher patches sweeping across calm water. The vanilla
+    normal maps (the wind's ripples) are scaled by the local wind, so calm patches lose them.
+-   **Lee calm**: close to the upwind shore (short fetch) the wind has not reached the surface yet, so the
+    water there stays smooth.
+-   **Rain** roughens the surface (rings and crowns) and keeps the ripples whatever the wind.
+-   **Glossy reflections**: the reflection cubemap and Dynamic Cubemaps are sampled at a mip chosen by the
+    roughness, and rough water only shows the blurred screen-space reflection, so wind, rain and distance
+    (where the wave detail is filtered into roughness) blur the reflections.
+-   **Windrows**: Langmuir circulation sweeps whatever floats into lines along the wind, spaced at about
+    twice the dominant wavelength (Craik & Leibovich 1976); the lines meander, break up along their
+    length and drift slowly downwind. From a fresh breeze on (> 5 m/s) they carry streaks of old foam. In
+    light winds (~2-7 m/s) they collect natural surface films that damp the capillary ripples (Marangoni
+    damping), so they show as smooth, glassy slicks instead.
+
+## Bioluminescence
+
+Opt-in (off by default): plankton flash blue-green where the water is sheared, so breaking waves, wakes,
+splashes and the swash glow, as sparks that light up and fade. The glow is emitted under the fog and only
+shows in the dark (scaled by the scene light).
 
 ## Water clarity
 
@@ -185,7 +215,8 @@ reach of the waves above the flat plane or below it.
 ## Debugging
 
 -   Settings > PBR Water > Debug: wireframe overlay / wireframe only, and debug views (normals, foam,
-    depth/shore, crest compression, roughness, wave height, fetch, water clarity), plus live spectrum values.
+    depth/shore, crest compression, roughness, wave height, fetch, water clarity, local wind), plus live
+    spectrum values.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
 
 ## Validation outside the game
@@ -212,6 +243,10 @@ bit-identical bytecode to `dev` for all permutations.
 -   [ ] Water Clarity debug view on a beach in a storm: brown surf zone, clear deeper water; walk through a
         pond and watch silt clouds settle behind you.
 -   [ ] White River vs Lake Ilinalta: river silt vs patchy lake clarity.
+-   [ ] Calm morning on a lake: glassy water near the upwind shore, gusts sweeping across as dark patches
+        (Local Wind debug view); the sun's reflection spreads into a glitter path as the wind picks up.
+-   [ ] Storm at sea: foam streaks along the wind; rain roughens the surface and blurs the reflections.
+-   [ ] Bioluminescence on at night: wakes, splashes and breaking waves glow; nothing in daylight.
 
 ## Known limitations
 
@@ -236,6 +271,8 @@ bit-identical bytecode to `dev` for all permutations.
 -   Gordon (1989), _Dependence of the diffuse reflectance of natural waters on the sun angle_ - `K_d ~ a + b_b`
 -   Petzold (1972) particle phase functions; Henyey & Greenstein (1941)
 -   Eckart (1952) explicit dispersion relation; Rouse (1937) suspended sediment profile
+-   Cox & Munk (1954), _Measurement of the roughness of the sea surface from photographs of the sun's glitter_
+-   Craik & Leibovich (1976), _A rational model for Langmuir circulations_ - windrow spacing
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Pleasant & Ross, _Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas_ (GDC 2019) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement

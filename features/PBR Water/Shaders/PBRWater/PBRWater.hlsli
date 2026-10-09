@@ -62,6 +62,9 @@ namespace PBRWater
 		float4 Underwater1;                // xyz shallow colour of the camera's water (gamma), w light shaft strength
 		float4 Underwater2;                // xyz deep colour of the camera's water (gamma), w light shaft range (units)
 		float4 Underwater3;                // x meniscus strength, y sun glow strength, z 1 once the composite fogged the scene this frame, w march samples
+		float4 Surface0;                   // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
+		float4 Surface1;                   // x wind streak strength, y bioluminescence strength, zw unused
+		float4 Surface2;                   // xyz bioluminescence colour (gamma), w unused
 	}
 
 	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w silt

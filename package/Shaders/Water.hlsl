@@ -965,26 +965,36 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	return result;
 }
 
-float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular)
+float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular, float roughness = 0.0)
 {
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections))
 		return ReflectionColor.xyz * VarAmounts.y;
 
 	float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
+#			if defined(PBR_WATER)
+	// Glossy reflections: rough water (wind, rain, or wave detail filtered out at a distance) reflects a
+	// blurred environment, through the reflection cubemap's mips when it has them.
+	uint pbrCubeWidth, pbrCubeHeight, pbrCubeLevels;
+	CubeMapTex.GetDimensions(0, pbrCubeWidth, pbrCubeHeight, pbrCubeLevels);
+	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, roughness * (float)(pbrCubeLevels - 1)).xyz;
+	float pbrEnvironmentLevel = roughness * 8.0;
+#			else
 	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
+	float pbrEnvironmentLevel = 0.0;
+#			endif
 
 #			if defined(DYNAMIC_CUBEMAPS)
 	float3 dynamicCubemap;
 	if (SharedData::InInterior) {
-		dynamicCubemap = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, 0).xyz;
+		dynamicCubemap = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
 	} else {
 		float3 specularIrradiance = 1.0;
 		if (skylightingSpecular < 1.0)
-			specularIrradiance = Color::IrradianceToLinear(DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
+			specularIrradiance = Color::IrradianceToLinear(DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz);
 
 		float3 specularIrradianceReflections = 1.0;
 		if (skylightingSpecular > 0.0)
-			specularIrradianceReflections = Color::IrradianceToLinear(DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, 0).xyz);
+			specularIrradianceReflections = Color::IrradianceToLinear(DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz);
 
 		dynamicCubemap = Color::IrradianceToGamma(lerp(specularIrradiance, specularIrradianceReflections, skylightingSpecular));
 	}
@@ -1010,7 +1020,12 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 	float2 ssrReflectionUvDR = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(ssrReflectionUv);
 	float4 ssrReflectionColorBlurred = SSRReflectionTex.Sample(SSRReflectionSampler, ssrReflectionUvDR);
 	float4 ssrReflectionColorRaw = RawSSRReflectionTex.Sample(RawSSRReflectionSampler, ssrReflectionUvDR);
+#				if defined(PBR_WATER)
+	// Rough water only shows the blurred screen-space reflection.
+	float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7 * saturate(1.0 - roughness * 3.0));
+#				else
 	float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7);
+#				endif
 	float3 finalSsrReflectionColor = max(0, ssrReflectionColor.xyz);
 	float ssrFraction = saturate(ssrReflectionColor.w * distanceFactor * ssrAmount);
 	reflectionColor = lerp(reflectionColor, finalSsrReflectionColor, ssrFraction);
@@ -1312,9 +1327,9 @@ PS_OUTPUT main(PS_INPUT input)
 #			else
 
 #				if defined(SKYLIGHTING)
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, skylightingSpecular);
+	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, skylightingSpecular, pbrRoughness);
 #				else
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, 1.0);
+	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceFactor, 1.0, pbrRoughness);
 #				endif
 
 	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, viewPosition, depth);
@@ -1554,6 +1569,10 @@ PS_OUTPUT main(PS_INPUT input)
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
 	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + sunColor * depthControl.w * (1.0 - pbrFoam);
+
+	// Bioluminescence where the water is churned, visible in the dark.
+	float pbrDarkness = saturate(1.0 - Color::RGBToLuminance(ShadowSampling::GetSceneLightingColor()) * 4.0);
+	finalColorPreFog += PBRWater::Bioluminescence(max(pbrFoamCoverage, pbrSurface.rippleFoam), pbrFoamPosition, PBRWater::Foam1.y, pbrDarkness * pbrDarkness);
 #						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(diffuseOutput.refractionDiffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
