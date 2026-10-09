@@ -121,13 +121,17 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 		return coverage.water[static_cast<size_t>(y) * coverage.width + x] != 0;
 	};
 
+	const size_t cells = static_cast<size_t>(coverage.width) * coverage.height;
 	const float kmPerCell = CellSize * static_cast<float>(PBRWaterModel::MetresPerUnit) / 1000.0f;
+
+	// Straight-line open water upwind of each cell, per direction.
+	std::vector<float> radial(static_cast<size_t>(FetchField::Directions) * cells, 0.0f);
 	for (uint32_t d = 0; d < FetchField::Directions; ++d) {
 		// Slice d stores the fetch for wind blowing *towards* angle d; we march upwind.
 		const float angle = static_cast<float>(PBRWaterModel::TwoPi) * d / FetchField::Directions;
 		const float upwindX = -std::cos(angle) * StepCells;
 		const float upwindY = -std::sin(angle) * StepCells;
-		float* slice = &field->kilometres[static_cast<size_t>(d) * coverage.width * coverage.height];
+		float* slice = &radial[d * cells];
 
 		for (uint32_t y = 0; y < coverage.height; ++y) {
 			for (uint32_t x = 0; x < coverage.width; ++x) {
@@ -146,6 +150,33 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 				// Half a cell of open water exists even in a single water cell.
 				slice[static_cast<size_t>(y) * coverage.width + x] = std::max(travelled, 0.5f) * kmPerCell;
 			}
+		}
+	}
+
+	// A single upwind ray is far too sensitive: one headland or an offshore wind zeroes the sea. Waves
+	// arrive from a spread of directions around the wind, so use the Shore Protection Manual (USACE 1984)
+	// effective fetch, F = sum(F_i cos^2 a_i) / sum(cos a_i) over radials within 45 degrees of upwind.
+	// Swell generated over the open sea also reaches any exposed water whatever the local wind, so no
+	// cell gets less than a share of its longest radial.
+	constexpr int SpreadSteps = 2;  // 2 x 22.5 degrees each side
+	constexpr float SwellExposure = 0.4f;
+	const float stepAngle = static_cast<float>(PBRWaterModel::TwoPi) / FetchField::Directions;
+	for (size_t c = 0; c < cells; ++c) {
+		if (!coverage.water[c])
+			continue;
+		float longest = 0.0f;
+		for (uint32_t d = 0; d < FetchField::Directions; ++d)
+			longest = std::max(longest, radial[d * cells + c]);
+		for (uint32_t d = 0; d < FetchField::Directions; ++d) {
+			float weighted = 0.0f;
+			float weights = 0.0f;
+			for (int k = -SpreadSteps; k <= SpreadSteps; ++k) {
+				const uint32_t dk = (d + FetchField::Directions + k) % FetchField::Directions;
+				const float cosA = std::cos(k * stepAngle);
+				weighted += radial[dk * cells + c] * cosA * cosA;
+				weights += cosA;
+			}
+			field->kilometres[d * cells + c] = std::max(weighted / weights, SwellExposure * longest);
 		}
 	}
 	return field;

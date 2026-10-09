@@ -85,7 +85,8 @@ namespace PBRWater
 	/// Conservative frustum test of the patch bounds grown by the largest possible displacement.
 	bool PatchOutsideFrustum(float3 p0, float3 p1, float3 p2)
 	{
-		float margin = Params2.z + 2.0 * Shore0.x + Ripple1.x + 64.0;
+		// Amplitude sum doubled for the fetch energy gain, shore waves doubled for shoaling.
+		float margin = 2.0 * Params2.z + 2.0 * Shore0.x + Ripple1.x + 64.0;
 		float3 lo = min(p0, min(p1, p2)) - margin;
 		float3 hi = max(p0, max(p1, p2)) + margin;
 

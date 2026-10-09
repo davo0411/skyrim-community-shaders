@@ -34,11 +34,12 @@ namespace PBRWater
 	{
 		float4 WaveDirK[PBRW_MAX_WAVES];   // xy direction, z wavenumber k (rad/unit), w angular frequency (rad/s)
 		float4 WaveAmp[PBRW_MAX_WAVES];    // x amplitude (units), y steepness Q, z phase offset (now), w phase offset (previous frame)
-		float4 WaveExtra[PBRW_MAX_WAVES];  // x PM low-frequency weight at unlimited fetch, y wavelength (units), zw unused
+		float4 WaveExtra[PBRW_MAX_WAVES];  // x PM low-frequency weight at unlimited fetch, y wavelength (units), z 1 / omega, w 1 / x
+		float4 WavePast[PBRW_MAX_WAVES];   // xy cos/sin(omega * older foam delay), zw cos/sin(omega * oldest foam delay)
 		float4 Params0;                    // x wave count, y wind speed (m/s), z peak omega at unlimited fetch, w gravity (units/s^2)
 		float4 Params1;                    // xy wind direction, z displacement fade start, w displacement fade end (units)
 		float4 Params2;                    // x choppiness, y whitecap coverage, z amplitude sum (units), w shortest displaced wavelength (units)
-		float4 RefCamPos;                  // xyz camera position the phase offsets are relative to, w wave time (s)
+		float4 RefCamPos;                  // xyz camera position the phase offsets are relative to, w unused
 		float4 Tess0;                      // x tessellation active for this draw, y target triangle size (px), z max factor, w pixels per unit at distance 1
 		float4 Draw0;                      // x vertex spacing of this draw (units), y wireframe mode, z debug view, w unused
 		float4 Fetch0;                     // xy grid origin (absolute world units), zw 1 / grid extent (units)
@@ -74,20 +75,22 @@ namespace PBRWater
 
 	uint WaveCount() { return min((uint)Params0.x, PBRW_MAX_WAVES); }
 	float Gravity() { return Params0.w; }
-	float WaveTime() { return RefCamPos.w; }
 
 	// ------------------------------------------------------------------------
 	// Spatial context: everything that makes the spectrum vary over the map.
 	// ------------------------------------------------------------------------
 	struct WaveContext
 	{
-		float peakOmega;     // local spectral peak (rad/s); larger than the open-sea peak where fetch is short
-		float fetchRatio;    // local significant wave height relative to the open sea (fetch-limited growth)
-		float depth;         // water depth below the undisplaced surface (units)
-		float damping;       // overall amplitude multiplier (distance fade, flow, ...)
-		float spacing;       // local vertex spacing (units) for the Nyquist fade; 0 disables it
-		float2 terrainGrad;  // terrain height gradient (units/unit), points uphill i.e. towards the shore
-		float hasTerrain;    // 1 when depth and gradient come from the heightmap
+		float fetchMetres;     // open water upwind (m)
+		float peakOmega;       // local spectral peak (rad/s); larger than the open-sea peak where fetch is short
+		float energyGain;      // amplitude gain of the fetch-limited spectrum (FetchEnergyGain)
+		float fetchRatio;      // local significant wave height relative to the open sea (fetch-limited growth)
+		float depth;           // water depth below the undisplaced surface (units)
+		float damping;         // overall amplitude multiplier (distance fade, flow, ...)
+		float spacing;         // local vertex spacing (units) for the Nyquist fade; 0 disables it
+		float halfInvSpacing;  // 0.5 / spacing
+		float2 terrainGrad;    // terrain height gradient (units/unit), points uphill i.e. towards the shore
+		float hasTerrain;      // 1 when depth and gradient come from the heightmap
 	};
 
 	float SampleTerrainZ(float2 absXY)
@@ -133,6 +136,17 @@ namespace PBRWater
 		return max(omega, Params0.z);
 	}
 
+	/// Amplitude gain of a young, fetch-limited sea: its Phillips constant is larger than the open sea's
+	/// (JONSWAP alpha = 0.076 (gF/U^2)^-0.22 against Pierson-Moskowitz 0.0081), so the short waves that
+	/// survive the fetch carry more energy. Amplitude scales with sqrt(alpha).
+	float FetchEnergyGain(float fetchMetres)
+	{
+		float U = max(Params0.y, 0.5);
+		float chi = 9.81 * max(fetchMetres, 10.0) / (U * U);
+		float alpha = 0.076 * pow(chi, -0.22);
+		return sqrt(clamp(alpha / 0.0081, 1.0, 4.0));
+	}
+
 	/// JONSWAP fetch-limited growth: Hs(F) = 0.0016 sqrt(gF) U / g relative to Hs(open sea) = 0.21 U^2 / g.
 	float FetchHeightRatio(float fetchMetres)
 	{
@@ -143,14 +157,16 @@ namespace PBRWater
 	{
 		WaveContext ctx;
 		float3 absPos = positionWS + FrameBuffer::CameraPosAdjust.xyz;
-		float fetchMetres = SampleFetchMetres(absPos.xy);
-		ctx.peakOmega = FetchPeakOmega(fetchMetres);
-		ctx.fetchRatio = FetchHeightRatio(fetchMetres);
+		ctx.fetchMetres = SampleFetchMetres(absPos.xy);
+		ctx.peakOmega = FetchPeakOmega(ctx.fetchMetres);
+		ctx.energyGain = FetchEnergyGain(ctx.fetchMetres);
+		ctx.fetchRatio = FetchHeightRatio(ctx.fetchMetres);
 		ctx.depth = 1e6;
 		ctx.terrainGrad = 0.0;
 		ctx.hasTerrain = 0.0;
 		ctx.damping = damping;
 		ctx.spacing = spacing;
+		ctx.halfInvSpacing = 0.5 / max(spacing, 1e-4);
 
 		if (Terrain1.z > 0.5 && TerrainInside(absPos.xy)) {
 			float texel = Terrain1.w;
@@ -182,35 +198,36 @@ namespace PBRWater
 	/// Amplitude multiplier for one spectral component at this location.
 	float WaveWeight(uint i, WaveContext ctx)
 	{
-		float omega = WaveDirK[i].w;
-		float k = WaveDirK[i].z;
+		float4 extra = WaveExtra[i];
 		float w = ctx.damping;
 
 		// Fetch: ratio of the local Pierson-Moskowitz low-frequency cut-off to the open-sea one.
 		// Long swells cannot exist on a pond, short chop is unaffected.
-		float r = ctx.peakOmega / omega;
-		float rLocal = exp(-1.25 * r * r * r * r);
-		w *= saturate(rLocal / max(WaveExtra[i].x, 1e-4));
+		float r = ctx.peakOmega * extra.z;
+		float r2 = r * r;
+		w *= saturate(exp(-1.25 * r2 * r2) * extra.w) * ctx.energyGain;
 
 		// Depth: orbital motion is limited by the bottom (tanh(kh) from linear wave theory).
-		w *= SafeTanh(k * ctx.depth);
+		w *= SafeTanh(WaveDirK[i].z * ctx.depth);
 
 		// Nyquist: never displace geometry with waves the vertex grid cannot represent.
 		if (ctx.spacing > 0.0)
-			w *= saturate(WaveExtra[i].y / max(ctx.spacing, 1e-4) * 0.5 - 1.0);
+			w *= saturate(extra.y * ctx.halfInvSpacing - 1.0);
 
 		return w;
 	}
 
 	struct WaveResult
 	{
-		float3 displacement;  // world-space offset (units)
-		float3 normal;        // surface normal
-		float jacobian;       // < 1 where the surface compresses, < 0 where it folds (breaking)
-		float slopeVariance;  // filtered-out slope variance (for roughness)
-		float shoreBreak;     // 0..1 breaking intensity of the shore waves
-		float shoreMask;      // 0..1 presence of the shore waves
-		float shoreCrest;     // 0..1 how close this point is to a shore wave crest (swash foam)
+		float3 displacement;          // world-space offset (units)
+		float3 previousDisplacement;  // the same at the previous frame's phases (motion vectors)
+		float2 pastJacobian;          // jacobian of the open-sea waves at the two foam trail delays (WavePast)
+		float3 normal;                // surface normal
+		float jacobian;               // < 1 where the surface compresses, < 0 where it folds (breaking)
+		float slopeVariance;          // filtered-out slope variance (for roughness)
+		float shoreBreak;             // 0..1 breaking intensity of the shore waves
+		float shoreMask;              // 0..1 presence of the shore waves
+		float shoreCrest;             // 0..1 how close this point is to a shore wave crest (swash foam)
 	};
 
 	/// Nominal shoaling travel time from depth h to the shoreline on a beach of slope s:
@@ -223,15 +240,17 @@ namespace PBRWater
 	}
 
 	/**
-	 * Evaluates the wave field at undisplaced camera-relative position `positionWS`.
-	 * @param previous   evaluate at the previous frame's time (motion vectors)
+	 * Evaluates the wave field at undisplaced camera-relative position `positionWS`: now, at the previous
+	 * frame's phases (motion vectors) and at the foam trail delays, sharing the per-wave weights. Outputs a
+	 * caller does not use are compiled out.
 	 * @param filterSize world-space footprint of a pixel (0 for geometry); components smaller than
 	 *                   the footprint are faded out and their slope variance is returned instead
 	 */
-	WaveResult EvaluateWaves(float3 positionWS, WaveContext ctx, bool previous, float filterSize)
+	WaveResult EvaluateWaves(float3 positionWS, WaveContext ctx, float filterSize)
 	{
 		WaveResult o;
 		o.displacement = 0.0;
+		o.previousDisplacement = 0.0;
 		o.slopeVariance = 0.0;
 		o.shoreBreak = 0.0;
 		o.shoreMask = 0.0;
@@ -243,6 +262,12 @@ namespace PBRWater
 
 		float dxdx = 0.0, dydy = 0.0, dxdy = 0.0;
 		float dzdx = 0.0, dzdy = 0.0;
+		float2 pastXX = 0.0, pastYY = 0.0, pastXY = 0.0;  // x older, y oldest foam trail delay
+
+		// The steepness budget keeps sum(Q k A) < 1 (no loops) for the open-sea amplitudes; the fetch
+		// energy gain only raises the surface, so it is taken back out of the horizontal motion.
+		float steepnessScale = rcp(ctx.energyGain);
+		float halfInvFilter = 0.5 / max(filterSize, 1e-4);
 
 		uint count = WaveCount();
 		[loop] for (uint i = 0; i < count; i++)
@@ -253,7 +278,7 @@ namespace PBRWater
 
 			if (filterSize > 0.0) {
 				// Fade components whose wavelength is below ~2 pixels; their slopes become roughness.
-				float fade = saturate(WaveExtra[i].y / max(filterSize, 1e-4) * 0.5 - 1.0);
+				float fade = saturate(WaveExtra[i].y * halfInvFilter - 1.0);
 				float slope = dk.z * amp.x * weight;
 				o.slopeVariance += 0.5 * slope * slope * (1.0 - fade * fade);
 				weight *= fade;
@@ -263,22 +288,37 @@ namespace PBRWater
 			if (A <= 0.0)
 				continue;
 
-			float theta = dk.z * dot(dk.xy, p) + (previous ? amp.w : amp.z);
+			float spatial = dk.z * dot(dk.xy, p);
 			float s, c;
-			sincos(theta, s, c);
+			sincos(spatial + amp.z, s, c);
+			float sp, cp;
+			sincos(spatial + amp.w, sp, cp);
 
-			float QA = amp.y * A;
+			float Q = amp.y * steepnessScale;
+			float QA = Q * A;
 			o.displacement.xy += dk.xy * (QA * c);
 			o.displacement.z += A * s;
+			o.previousDisplacement.xy += dk.xy * (QA * cp);
+			o.previousDisplacement.z += A * sp;
 
 			float WA = dk.z * A;
-			float QWA = amp.y * WA;
+			float QWA = Q * WA;
+			float3 dd = float3(dk.x * dk.x, dk.y * dk.y, dk.x * dk.y) * QWA;
 			dzdx += dk.x * WA * c;
 			dzdy += dk.y * WA * c;
-			dxdx -= dk.x * dk.x * QWA * s;
-			dydy -= dk.y * dk.y * QWA * s;
-			dxdy -= dk.x * dk.y * QWA * s;
+			dxdx -= dd.x * s;
+			dydy -= dd.y * s;
+			dxdy -= dd.z * s;
+
+			// Going back in time advances the phase: sin(theta + omega dt) from precomputed cos/sin(omega dt).
+			float4 past = WavePast[i];
+			float2 sPast = s * past.xz + c * past.yw;
+			pastXX -= dd.x * sPast;
+			pastYY -= dd.y * sPast;
+			pastXY -= dd.z * sPast;
 		}
+		// Where the water at this (Lagrangian) point was folding a moment ago: lets crest foam linger.
+		o.pastJacobian = (1.0 + pastXX) * (1.0 + pastYY) - pastXY * pastXY;
 
 		// Shoreline waves: a separate train that travels up the depth gradient and breaks.
 		if (ctx.hasTerrain > 0.5 && Shore0.x > 0.0 && ctx.depth < Shore0.w) {
@@ -301,9 +341,11 @@ namespace PBRWater
 				A *= envelope;
 
 				float omega = Shore0.y;
-				float theta = -omega * ShoreTravelTime(h) - (previous ? Shore1.w : Shore1.z);
+				float travel = -omega * ShoreTravelTime(h);
 				float s, c;
-				sincos(theta, s, c);
+				sincos(travel - Shore1.z, s, c);
+				float sp, cp;
+				sincos(travel - Shore1.w, sp, cp);
 				o.shoreCrest = envelope * saturate(s);
 
 				// d(theta)/dx: theta' (h) * dh/dx, with dh/dx = -terrainGrad
@@ -318,6 +360,8 @@ namespace PBRWater
 
 				o.displacement.xy += dir * (QA * c);
 				o.displacement.z += A * s;
+				o.previousDisplacement.xy += dir * (QA * cp);
+				o.previousDisplacement.z += A * sp;
 				dzdx += dTheta.x * A * c;
 				dzdy += dTheta.y * A * c;
 				float QK = QA * kLocal;
@@ -334,33 +378,6 @@ namespace PBRWater
 		o.normal = SafeNormalize(cross(tx, ty), float3(0, 0, 1));
 		o.jacobian = (1.0 + dxdx) * (1.0 + dydy) - dxdy * dxdy;
 		return o;
-	}
-
-	/**
-	 * Jacobian of the open-sea waves `pastSeconds` ago at undisplaced position `positionWS`. Because the
-	 * position is Lagrangian, this is where the water at this point was folding a moment earlier:
-	 * sampling a few past instants lets crest foam linger and thin out behind the crest instead of popping.
-	 */
-	float WaveJacobian(float3 positionWS, WaveContext ctx, float pastSeconds, float filterSize)
-	{
-		float2 p = positionWS.xy + (FrameBuffer::CameraPosAdjust.xy - RefCamPos.xy);
-		float dxdx = 0.0, dydy = 0.0, dxdy = 0.0;
-		uint count = WaveCount();
-		[loop] for (uint i = 0; i < count; i++)
-		{
-			float4 dk = WaveDirK[i];
-			float4 amp = WaveAmp[i];
-			float weight = WaveWeight(i, ctx) * saturate(WaveExtra[i].y / max(filterSize, 1e-4) * 0.5 - 1.0);
-			float QWA = amp.y * dk.z * amp.x * weight;
-			if (QWA <= 0.0)
-				continue;
-			// Going back in time advances the phase by omega * dt.
-			float s = sin(dk.z * dot(dk.xy, p) + amp.z + dk.w * pastSeconds);
-			dxdx -= dk.x * dk.x * QWA * s;
-			dydy -= dk.y * dk.y * QWA * s;
-			dxdy -= dk.x * dk.y * QWA * s;
-		}
-		return (1.0 + dxdx) * (1.0 + dydy) - dxdy * dxdy;
 	}
 
 	// ------------------------------------------------------------------------
@@ -440,17 +457,16 @@ namespace PBRWater
 		float damping = DisplacementDistanceFade(distance) * flowDamping;
 
 		WaveContext ctx = BuildWaveContext(positionWS, damping, spacing);
-		WaveResult now = EvaluateWaves(positionWS, ctx, false, 0.0);
-		WaveResult prev = EvaluateWaves(positionWS, ctx, true, 0.0);
+		WaveResult now = EvaluateWaves(positionWS, ctx, 0.0);
 
 		float rippleFade = damping * RippleDepthFade(ctx.depth);
 		o.current = now.displacement + float3(0, 0, RippleHeight(positionWS, false) * rippleFade);
-		o.previous = prev.displacement + float3(0, 0, RippleHeight(positionWS, true) * rippleFade);
+		o.previous = now.previousDisplacement + float3(0, 0, RippleHeight(positionWS, true) * rippleFade);
 
-		// Hard bound: waves stay within their amplitude sum (doubled for shoaling) and the ripple sim stays within a few
-		// times its scale. Clamping also flushes NaN (D3D min/max return the non-NaN operand), so a
-		// bad input can never throw the mesh off-screen.
-		float limit = 2.0 * max(Params2.z, 0.0) + 4.0 * max(Ripple1.x, 0.0) + 1.0;
+		// Hard bound: waves stay within their amplitude sum (doubled for the fetch energy gain, the shore
+		// waves for shoaling) and the ripple sim within a few times its scale. Clamping also flushes NaN
+		// (D3D min/max return the non-NaN operand), so a bad input can never throw the mesh off-screen.
+		float limit = 2.0 * max(Params2.z, 0.0) + 2.0 * max(Shore0.x, 0.0) + 4.0 * max(Ripple1.x, 0.0) + 1.0;
 		o.current = clamp(o.current, -limit, limit);
 		o.previous = clamp(o.previous, -limit, limit);
 		o.waveNormal = now.normal;

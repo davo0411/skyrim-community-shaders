@@ -43,10 +43,16 @@ the sea when the game is paused, and avoids float precision loss far from the wo
 | Input                  | Source                                                                       | Effect                                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                      |
-| Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak and height: ponds and rivers stay calm, the open sea builds swell |
+| Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak, energy and height: ponds and rivers stay calm, the open sea builds swell |
 | Depth                  | Terrain Shadows heightmap                                                    | `tanh(kh)` depth attenuation, shoreline waves (Green's law shoaling, breaking at H = 0.78 h) |
 | Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                        |
 | Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                          |
+
+The fetch bake marches 16 upwind rays per cell, then stores the Shore Protection Manual _effective fetch_
+(cos²-weighted over ±45° of upwind) with a floor of 40% of the cell's longest radial for swell from the open
+sea. A single upwind ray zeroed the whole coastal sea whenever the wind blew offshore. Fetch-limited seas
+also get the JONSWAP Phillips constant `0.076 (gF/U²)^-0.22` (amplitude gain up to 2x over open-sea PM);
+the gain is taken out of the Gerstner steepness so `sum(Q k A) < 1` still holds.
 
 Per-weather overrides are registered with the weather variable registry (`RegisterWeatherVariables`):
 wave height, choppiness, directional spread, storm wind speed, shore waves, foam, visibility, subsurface,

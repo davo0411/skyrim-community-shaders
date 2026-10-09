@@ -141,6 +141,7 @@ namespace PBRWaterModel
 		struct Context
 		{
 			std::array<float, MaxWaves> amplitude;  ///< per-wave amplitude after fetch and depth weighting
+			float energyGain;                       ///< FetchEnergyGain at this point
 			float fetchRatio;
 			float depth;
 			float gradX, gradY;
@@ -154,6 +155,8 @@ namespace PBRWaterModel
 	float FetchPeakOmega(float fetchMetres, float windSpeed, float openSeaPeak);
 	/** @brief Fetch-limited significant height relative to the open sea (JONSWAP growth law). */
 	float FetchHeightRatio(float fetchMetres, float windSpeed);
+	/** @brief Amplitude gain of the fetch-limited spectrum (JONSWAP vs Pierson-Moskowitz alpha). Mirrors the shader. */
+	float FetchEnergyGain(float fetchMetres, float windSpeed);
 
 	/**
 	 * @brief Integrates the per-wave phases. Owned by the main thread.

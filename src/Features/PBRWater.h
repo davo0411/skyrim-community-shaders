@@ -128,6 +128,7 @@ struct PBRWater : Feature
 		float4 WaveDirK[PBRWaterModel::MaxWaves];
 		float4 WaveAmp[PBRWaterModel::MaxWaves];
 		float4 WaveExtra[PBRWaterModel::MaxWaves];
+		float4 WavePast[PBRWaterModel::MaxWaves];
 		float4 Params0;
 		float4 Params1;
 		float4 Params2;
@@ -213,4 +214,5 @@ private:
 	bool tessellationBound = false;
 	bool geometryShaderBound = false;
 	bool tessellationFailureLogged = false;
+	uint32_t tessellationMissingSince = UINT32_MAX;
 };

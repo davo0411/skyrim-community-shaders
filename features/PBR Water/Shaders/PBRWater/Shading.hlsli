@@ -266,7 +266,7 @@ namespace PBRWater
 		float footprint = max(length(dpdx), length(dpdy));
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w, 0.0);
-		WaveResult waves = EvaluateWaves(waveParam.xyz, ctx, false, footprint);
+		WaveResult waves = EvaluateWaves(waveParam.xyz, ctx, footprint);
 		float3 ripple = RippleSlopeFoam(waveParam.xyz, ctx.depth);
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
@@ -280,10 +280,9 @@ namespace PBRWater
 
 		// Crest foam with a trail: where this water was folding a moment ago, thinner the older it is.
 		o.crestFoam = CrestCoverage(waves.jacobian);
-		[branch] if (Foam1.x > 0.0 && Foam0.z > 0.0)
-		{
-			float older = CrestCoverage(WaveJacobian(waveParam.xyz, ctx, Foam1.x * 0.4, footprint));
-			float oldest = CrestCoverage(WaveJacobian(waveParam.xyz, ctx, Foam1.x, footprint));
+		if (Foam1.x > 0.0) {
+			float older = CrestCoverage(waves.pastJacobian.x);
+			float oldest = CrestCoverage(waves.pastJacobian.y);
 			o.crestFoam = max(o.crestFoam, max(older * 0.6, oldest * 0.3));
 		}
 
@@ -292,7 +291,7 @@ namespace PBRWater
 		o.shoreCrest = waves.shoreCrest;
 		o.rippleFoam = ripple.z;
 		o.depth = ctx.depth;
-		o.fetchMetres = SampleFetchMetres(waveParam.xy + FrameBuffer::CameraPosAdjust.xy);
+		o.fetchMetres = ctx.fetchMetres;
 		o.footprint = footprint;
 		return o;
 	}

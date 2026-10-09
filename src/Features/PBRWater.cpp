@@ -425,11 +425,16 @@ void PBRWater::UpdateFrameConstants()
 
 	if (snap) {
 		const auto& s = snap->spectrum;
+		// Crest foam trails sample the surface this long ago; going back in time advances the phase by
+		// omega * delay, which is the same for every pixel, so its sine and cosine are precomputed here.
+		const float olderDelay = settings.FoamPersistence * 0.4f;
+		const float oldestDelay = settings.FoamPersistence;
 		for (uint32_t i = 0; i < s.count; ++i) {
 			const auto& w = s.waves[i];
 			d.WaveDirK[i] = { w.dirX, w.dirY, w.k, w.omega };
 			d.WaveAmp[i] = { w.amplitude, w.steepness, static_cast<float>(snap->phase[i]), static_cast<float>(snap->phasePrev[i]) };
-			d.WaveExtra[i] = { w.pmWeightOpenSea, w.wavelength, 0.0f, 0.0f };
+			d.WaveExtra[i] = { w.pmWeightOpenSea, w.wavelength, 1.0f / std::max(w.omega, 1e-4f), 1.0f / std::max(w.pmWeightOpenSea, 1e-4f) };
+			d.WavePast[i] = { std::cos(w.omega * olderDelay), std::sin(w.omega * olderDelay), std::cos(w.omega * oldestDelay), std::sin(w.omega * oldestDelay) };
 		}
 		d.Params0 = { static_cast<float>(s.count), s.windSpeed, s.peakOmega, static_cast<float>(PBRWaterModel::Gravity) * UnitsPerMetre };
 		d.Params1 = { std::cos(snap->windDirection), std::sin(snap->windDirection), settings.DisplacementFadeStart, settings.DisplacementFadeEnd };
@@ -520,7 +525,13 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	if (settings.EnableTessellation && customShadersLive && hasWaves && IsTessellatedTechnique(technique)) {
 		hullShader = shaderCache->GetHullShader(*waterShader, vertexDescriptor);
 		domainShader = shaderCache->GetDomainShader(*waterShader, vertexDescriptor);
-		if ((!hullShader || !domainShader) && !shaderCache->IsCompiling() && !tessellationFailureLogged) {
+		// Async compiles are queued on first request, so only a shader still missing well after the
+		// compile queue drained is a real failure.
+		if ((hullShader && domainShader) || shaderCache->IsCompiling()) {
+			tessellationMissingSince = UINT32_MAX;
+		} else if (tessellationMissingSince == UINT32_MAX) {
+			tessellationMissingSince = state->frameCount;
+		} else if (state->frameCount - tessellationMissingSince > 300 && !tessellationFailureLogged) {
 			tessellationFailureLogged = true;
 			logger::warn("[PBR Water] Hull/domain shader unavailable for water descriptor {:X}; drawing without tessellation", vertexDescriptor);
 		}
@@ -563,18 +574,22 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	context->VSSetSamplers(12, 1, &sampler);
 	context->PSSetSamplers(12, 1, &sampler);
 
+	// The renderer binds textures and constant buffers lazily, right before the draw call, so the
+	// device still holds the previous draw's state here: read this draw's from the shadow state.
+	auto& shadow = globals::game::shadowState->GetRuntimeData();
+
 	// The vertex program reads the flowmap to calm waves on rivers.
-	ID3D11ShaderResourceView* flowmap = nullptr;
-	ID3D11SamplerState* flowmapSampler = nullptr;
-	context->PSGetShaderResources(8, 1, &flowmap);
-	context->PSGetSamplers(8, 1, &flowmapSampler);
+	ID3D11ShaderResourceView* flowmap = shadow.PSTexture[8];
 	context->VSSetShaderResources(8, 1, &flowmap);
-	context->VSSetSamplers(8, 1, &flowmapSampler);
+	context->VSSetSamplers(8, 1, &sampler);
 
 	if (tessellate) {
 		// The domain shader runs the full vertex program: give it everything the vertex shader has.
 		ID3D11Buffer* vsBuffers[3] = {};
-		context->VSGetConstantBuffers(0, 3, vsBuffers);
+		if (const auto* vertexShader = shadow.currentVertexShader) {
+			for (uint32_t i = 0; i < 3; ++i)
+				vsBuffers[i] = reinterpret_cast<ID3D11Buffer*>(vertexShader->constantBuffers[i].buffer);
+		}
 		ID3D11Buffer* frameBuffer = nullptr;
 		context->VSGetConstantBuffers(12, 1, &frameBuffer);
 		if (!frameBuffer)
@@ -589,19 +604,14 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->DSSetShaderResources(110, 4, srvs);
 		context->DSSetSamplers(12, 1, &sampler);
 		context->DSSetShaderResources(8, 1, &flowmap);
-		context->DSSetSamplers(8, 1, &flowmapSampler);
+		context->DSSetSamplers(8, 1, &sampler);
 
-		for (auto* buffer : vsBuffers) {
-			if (buffer)
-				buffer->Release();
-		}
 		if (frameBuffer)
 			frameBuffer->Release();
 
 		// The renderer only re-applies its cached topology when it changes, so make sure its cache
 		// says "triangle list" with nothing pending, then switch the device to patches behind it.
 		// RestoreDraw() puts the device back in sync before anything else is drawn.
-		auto& shadow = globals::game::shadowState->GetRuntimeData();
 		shadow.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		shadow.stateUpdateFlags.reset(RE::BSGraphics::ShaderFlags::DIRTY_PRIMITIVE_TOPO);
 		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
@@ -616,11 +626,6 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->GSSetShader(geometryShader, nullptr, 0);
 		geometryShaderBound = true;
 	}
-
-	if (flowmap)
-		flowmap->Release();
-	if (flowmapSampler)
-		flowmapSampler->Release();
 }
 
 void PBRWater::RestoreDraw()

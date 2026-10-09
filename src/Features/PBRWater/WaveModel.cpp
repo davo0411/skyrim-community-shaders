@@ -54,6 +54,15 @@ namespace PBRWaterModel
 		return std::clamp(0.0016f / 0.21f * std::sqrt(static_cast<float>(Gravity) * std::max(fetchMetres, 0.0f)) / U, 0.0f, 1.0f);
 	}
 
+	float FetchEnergyGain(float fetchMetres, float windSpeed)
+	{
+		// JONSWAP alpha = 0.076 (gF/U^2)^-0.22 against the Pierson-Moskowitz 0.0081 of the open sea.
+		const float U = std::max(windSpeed, 0.5f);
+		const float chi = static_cast<float>(Gravity) * std::max(fetchMetres, 10.0f) / (U * U);
+		const float alpha = 0.076f * std::pow(chi, -0.22f);
+		return std::sqrt(std::clamp(alpha / 0.0081f, 1.0f, 4.0f));
+	}
+
 	Spectrum GenerateSpectrum(const SpectrumParams& params)
 	{
 		Spectrum s;
@@ -173,6 +182,7 @@ namespace PBRWaterModel
 		const float fetchMetres = fetch ? fetch->SampleMetres(static_cast<float>(x), static_cast<float>(y), windDirection) : (exterior ? 500000.0f : 50.0f);
 		const float peakOmega = FetchPeakOmega(fetchMetres, spectrum.windSpeed, spectrum.peakOmega);
 		ctx.fetchRatio = FetchHeightRatio(fetchMetres, spectrum.windSpeed);
+		ctx.energyGain = FetchEnergyGain(fetchMetres, spectrum.windSpeed);
 		ctx.depth = 1e6f;
 		ctx.hasTerrain = false;
 
@@ -191,7 +201,7 @@ namespace PBRWaterModel
 		for (uint32_t i = 0; i < spectrum.count; ++i) {
 			const Wave& w = spectrum.waves[i];
 			const float r = peakOmega / w.omega;
-			float weight = std::clamp(std::exp(-1.25f * r * r * r * r) / std::max(w.pmWeightOpenSea, 1e-4f), 0.0f, 1.0f);
+			float weight = std::clamp(std::exp(-1.25f * r * r * r * r) / std::max(w.pmWeightOpenSea, 1e-4f), 0.0f, 1.0f) * ctx.energyGain;
 			weight *= std::tanh(w.k * ctx.depth);
 			ctx.amplitude[i] = w.amplitude * weight;
 		}
@@ -213,7 +223,8 @@ namespace PBRWaterModel
 			const double theta = w.k * (w.dirX * px + w.dirY * py) + phase[i];
 			const float s = static_cast<float>(std::sin(theta));
 			const float c = static_cast<float>(std::cos(theta));
-			const float QA = w.steepness * A;
+			// The energy gain only raises the surface; the steepness budget holds for the open-sea amplitudes.
+			const float QA = w.steepness * A / ctx.energyGain;
 			dx += w.dirX * QA * c;
 			dy += w.dirY * QA * c;
 			dz += A * s;
