@@ -985,7 +985,7 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 	float pbrEnvironmentLevel = roughness * 8.0;
 #			else
 	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
-	float pbrEnvironmentLevel = 0.0;
+	float pbrEnvironmentLevel = 0;
 #			endif
 
 #			if defined(DYNAMIC_CUBEMAPS)
@@ -1418,8 +1418,8 @@ PS_OUTPUT main(PS_INPUT input)
 
 			float3 normalizedLightDirection = normalize(lightDirection);
 
-			const bool isPointLightLinear = light.lightFlags & LightLimitFix::LightFlags::Linear;
 #					if defined(PBR_WATER)
+			const bool isPointLightLinear = light.lightFlags & LightLimitFix::LightFlags::Linear;
 			float3 lightColor = Color::PointLight(light.color.xyz, isPointLightLinear) * light.fade *
 			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
 									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius, lightDist)) *
@@ -1427,6 +1427,8 @@ PS_OUTPUT main(PS_INPUT input)
 #					else
 			float3 H = normalize(normalizedLightDirection - viewDirection);
 			float HdotN = saturate(dot(H, normal));
+
+			const bool isPointLightLinear = light.lightFlags & LightLimitFix::LightFlags::Linear;
 			float3 lightColor = Color::PointLight(light.color.xyz, isPointLightLinear) * pow(HdotN, FresnelRI.z) * light.fade;
 #					endif
 			specularLighting += lightColor * intensityMultiplier;
