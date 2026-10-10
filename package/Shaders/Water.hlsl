@@ -1558,7 +1558,7 @@ PS_OUTPUT main(PS_INPUT input)
 													 pbrBodyLinear * (1.0 - pbrTransmittance));
 
 	// Sunlight transmitted through thin wave crests, coloured by the water it crosses.
-	float pbrCrest = saturate(input.WaveState.x / max(PBRWater::Params2.z, 1.0));
+	float pbrCrest = saturate(input.WaveState.x / max(PBRWater::Optics0.w * 0.5, 1.0));
 	float3 pbrSunLight, pbrSkyLight;
 	ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
 	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);

@@ -2,18 +2,20 @@
 
 #include "Feature.h"
 #include "PBRWater/FloatingObjects.h"
+#include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/WaterEnvironment.h"
 #include "PBRWater/WaveModel.h"
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 
 /**
- * @brief Physically based water: spectral Gerstner waves on tessellated geometry, PBR lighting,
- * foam, shoreline waves, interactive ripples and gameplay that follows the rendered surface.
+ * @brief Physically based water: an FFT ocean on tessellated geometry, PBR lighting, foam, shoreline
+ * waves, interactive ripples and gameplay that follows the rendered surface.
  */
 struct PBRWater : Feature
 {
@@ -28,7 +30,7 @@ struct PBRWater : Feature
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { T("feature.pbr_water.description", "Physically based water with real waves, tessellated geometry, foam and interactive ripples."),
-			{ T("feature.pbr_water.key_feature_1", "Wind-driven wave spectrum that follows the weather, sized by open-water fetch and depth"),
+			{ T("feature.pbr_water.key_feature_1", "FFT ocean: thousands of waves from the weather's wind plus distant swell, sized by open-water fetch and depth"),
 				T("feature.pbr_water.key_feature_2", "GPU tessellation of the water surface, stable with upscalers and frame generation"),
 				T("feature.pbr_water.key_feature_3", "PBR specular, Fresnel, light absorption and light transmitted through wave crests"),
 				T("feature.pbr_water.key_feature_7", "Water clarity that varies: drifting sediment, wave-stirred shallows, muddy rivers and silt kicked up by wading"),
@@ -50,8 +52,12 @@ struct PBRWater : Feature
 		float WindSpeedCalm = 3.0f;    ///< m/s when the weather has no wind
 		float WindSpeedStorm = 22.0f;  ///< m/s at the strongest weather wind
 		float WaveHeight = 1.0f;
-		float Choppiness = 0.75f;
+		float Choppiness = 1.0f;  ///< horizontal displacement scale; 1 = linear wave theory
 		float DirectionalSpread = 0.6f;
+		float SwellHeight = 0.5f;      ///< metres, significant height of the swell from distant storms
+		float SwellPeriod = 10.0f;     ///< seconds
+		float SwellDirection = 35.0f;  ///< degrees from the wind direction
+		int WaveResolution = 1;        ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
 		bool UseFetch = true;
 		bool UseBathymetry = true;
 		float RiverWaveDamping = 0.85f;
@@ -96,7 +102,9 @@ struct PBRWater : Feature
 		float FoamScale = 1.2f;  ///< metres
 		float BreakingFoam = 1.0f;
 		float WakeFoam = 1.0f;
-		float WindStreaks = 1.0f;  ///< windrows: foam streaks in strong wind, slicks in light wind
+		float WakeFoamLifetime = 8.0f;  ///< seconds foam from wakes and splashes lasts
+		float SplashFoam = 1.0f;        ///< whitewater from bodies hitting the water
+		float WindStreaks = 1.0f;       ///< windrows: foam streaks in strong wind, slicks in light wind
 		float FoamAlbedo = 0.85f;
 		float FoamDrift = 1.0f;  ///< scales the wind's surface (Stokes) drift that carries foam and bubbles
 
@@ -154,7 +162,7 @@ struct PBRWater : Feature
 	virtual void GameLoaded() override;
 	virtual void SavingGame() override;
 
-	/** @brief Main thread, once per frame: wind, phases, environment, ripple sources, buoyancy. */
+	/** @brief Main thread, once per frame: wind, sea state, wave clock, CPU mirror, environment, ripple sources, buoyancy. */
 	void MainThreadUpdate();
 
 	/** @brief Wave displacement height above the flat plane at a world position (any thread). */
@@ -163,10 +171,8 @@ struct PBRWater : Feature
 	// ---- GPU constants, must match PBRWaterData in PBRWater.hlsli ----
 	struct GpuData
 	{
-		float4 WaveDirK[PBRWaterModel::MaxWaves];
-		float4 WaveAmp[PBRWaterModel::MaxWaves];
-		float4 WaveExtra[PBRWaterModel::MaxWaves];
-		float4 WavePast[PBRWaterModel::MaxWaves];
+		float4 Cascade0[PBRWaterModel::NumCascades];  // x 1 / tile size (1/unit), yz tile coordinate of the reference camera, w texel size (units)
+		float4 Cascade1[PBRWaterModel::NumCascades];  // x mean omega (rad/s), y 1 / its PM weight at unlimited fetch, z mean wavenumber (rad/unit)
 		float4 Params0;
 		float4 Params1;
 		float4 Params2;
@@ -241,7 +247,13 @@ private:
 	float WeatherTurbidityTarget() const;
 	/** @brief 0..1 how much of the current weather blend is rainy. */
 	float RainFraction() const;
-	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed) const;
+	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed, bool exterior) const;
+	/** @brief FFT size for the WaveResolution setting. */
+	uint32_t WaveResolutionSize() const;
+	/** @brief Render thread: the SRVs of slots t110-t118. */
+	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[9]) const;
+	/** @brief Render thread: puts back the samplers SetupDraw replaced. */
+	void RestoreSamplers();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
 	GpuData frameData{};
@@ -252,20 +264,30 @@ private:
 	uint32_t uploadedFetchGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::FetchField> uploadedFetch;
 	std::unique_ptr<Texture2D> landTexture;
-	std::unordered_map<const void*, RE::NiPoint3> lastSourcePositions;  ///< main thread: ripple source motion
-	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;   ///< main thread: wave velocity added per body
-	double foamDriftX = 0.0, foamDriftY = 0.0;                          ///< main thread: accumulated surface drift (units)
+	/** @brief Where a body last met the water: its rest (Lagrangian) position and height above the surface. */
+	struct SourceTrack
+	{
+		double originX = 0.0, originY = 0.0;
+		float offset = 0.0f;
+	};
+	std::unordered_map<const void*, SourceTrack> lastSources;          ///< main thread: ripple source motion relative to the water
+	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;  ///< main thread: wave velocity added per body
+	double foamDriftX = 0.0, foamDriftY = 0.0;                         ///< main thread: accumulated surface drift (units)
 	double bubbleDriftX = 0.0, bubbleDriftY = 0.0;
 	uint32_t uploadedLandGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedLand;
 	winrt::com_ptr<ID3D11SamplerState> linearClampSampler;
+	winrt::com_ptr<ID3D11SamplerState> oceanSampler;
 
 	RippleSimulation ripples;
+	OceanSimulation ocean;                  ///< render thread
+	std::atomic<bool> oceanReady{ false };  ///< the GPU ocean is live; until then gameplay sees no FFT waves
 	WaterEnvironment environment;
 	FloatingObjects floating;  ///< main thread
 
 	// Main thread state
-	PBRWaterModel::PhaseIntegrator phases;
+	PBRWaterModel::WaveClock clock;
+	PBRWaterModel::OceanMirror mirror;
 	float smoothedWindSpeed = -1.0f;
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;
@@ -281,6 +303,11 @@ private:
 	// Per-draw tessellation state (render thread)
 	bool tessellationBound = false;
 	bool geometryShaderBound = false;
+	/// Samplers s12-s13 as the game left them. Its renderer caches sampler state per slot and would not
+	/// rebind a slot it believes unchanged, so ours must not outlive the water draw (Lighting uses both).
+	std::array<ID3D11SamplerState*, 2> savedVSSamplers{};
+	std::array<ID3D11SamplerState*, 2> savedPSSamplers{};
+	bool samplersSaved = false;
 	bool tessellationFailureLogged = false;
 	uint32_t tessellationMissingSince = UINT32_MAX;
 };

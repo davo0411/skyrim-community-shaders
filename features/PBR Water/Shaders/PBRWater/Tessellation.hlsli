@@ -97,9 +97,10 @@ namespace PBRWater
 		float pixelsPerUnit = Tess0.w / dist;
 		float targetPixels = max(Tess0.y, 1.0);
 
-		WaveContext ctx = BuildWaveContext(mid, fade, 0.0);
+		WaveContext ctx = BuildWaveContext(mid, fade);
 		float2 e = (hi.xy - lo.xy) / max(len, 1e-3);
-		float curvature = SurfaceCurvature(mid, ctx, e);
+		// Curvature at the scale of the target triangles here: what the subdivided edge will have to follow.
+		float curvature = SurfaceCurvature(mid, ctx, e, targetPixels / pixelsPerUnit);
 		float errorPixels = targetPixels * 0.05;  // 0.5 px at the default 10 px target
 		float curvatureFactor = len * sqrt(curvature * pixelsPerUnit / (8.0 * errorPixels));
 
@@ -114,7 +115,7 @@ namespace PBRWater
 	/// Conservative frustum test of the patch bounds grown by the largest possible displacement.
 	bool PatchOutsideFrustum(float3 p0, float3 p1, float3 p2)
 	{
-		// Amplitude sum doubled for the fetch energy gain, shore waves doubled for shoaling.
+		// Displacement bound doubled for the fetch energy gain, shore waves doubled for shoaling.
 		float margin = 2.0 * Params2.z + 2.0 * Shore0.x + Ripple1.x + 64.0;
 		float3 lo = min(p0, min(p1, p2)) - margin;
 		float3 hi = max(p0, max(p1, p2)) + margin;

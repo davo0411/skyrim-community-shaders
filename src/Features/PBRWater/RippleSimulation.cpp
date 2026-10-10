@@ -41,6 +41,15 @@ void RippleSimulation::SetupResources()
 	previousFrame->CreateSRV(srvDesc);
 	previousFrame->CreateUAV(uavDesc);
 
+	D3D11_SAMPLER_DESC samplerDesc{};
+	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+	samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+	samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&samplerDesc, linearSampler.put()));
+	Util::SetResourceName(linearSampler.get(), "PBRWater::RippleSampler");
+
 	sourceBuffer = std::make_unique<StructuredBuffer>(StructuredBufferDesc<GpuSource>(MaxSources, true), MaxSources, "PBRWater::RippleSources");
 	sourceBuffer->CreateSRV();
 	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::RippleSimCB");
@@ -52,7 +61,7 @@ void RippleSimulation::SetupResources()
 void RippleSimulation::ClearShaderCache()
 {
 	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\RippleSimCS.hlsl", {}, "cs_5_0")));
-	ready = simCS && state[0] && state[1] && previousFrame;
+	ready = simCS && state[0] && state[1] && previousFrame && linearSampler;
 }
 
 void RippleSimulation::Reset()
@@ -135,7 +144,8 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 		g.radius = std::max(s.radius / texelSize, 0.75f);
 		g.depth = s.depth;
 		g.silt = s.silt;
-		if (g.depth <= 0.0f && g.silt <= 0.0f)
+		g.foam = s.foam;
+		if (g.depth <= 0.0f && g.silt <= 0.0f && g.foam <= 0.0f)
 			continue;
 		++numSources;
 	}
@@ -155,6 +165,10 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	// Von Neumann analysis of the viscous leapfrog for the checkerboard mode (laplacian eigenvalue -8)
 	// gives stability for nu <= (1 - 2 C^2) / 4; stay at 80% of that bound.
 	base.viscosity = std::clamp(0.8f * (1.0f - 2.0f * base.waveSpeed2) / 4.0f, 0.0f, 0.12f);
+	base.foamDiffusion = std::clamp(settings.foamSpread, 0.0f, 1.0f);
+	base.foamDriftX = settings.driftX * FixedStep / texelSize;
+	base.foamDriftY = settings.driftY * FixedStep / texelSize;
+	base.slopeScale = settings.heightScale / (2.0f * texelSize);
 
 	accumulator = std::min(accumulator + std::max(dt, 0.0f), FixedStep * MaxStepsPerFrame);
 	bool first = true;
@@ -191,18 +205,23 @@ void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources,
 	ID3D11UnorderedAccessView* uav = state[next]->uav.get();
 	ID3D11Buffer* cbs[1] = { simCB->CB() };
 
+	ID3D11SamplerState* sampler = linearSampler.get();
+
 	context->CSSetShader(simCS.get(), nullptr, 0);
 	context->CSSetShaderResources(0, 2, srvs);
 	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	context->CSSetConstantBuffers(0, 1, cbs);
+	context->CSSetSamplers(0, 1, &sampler);
 	context->Dispatch(GridSize / 8, GridSize / 8, 1);
 
 	ID3D11ShaderResourceView* nullSrvs[2] = { nullptr, nullptr };
 	ID3D11UnorderedAccessView* nullUav = nullptr;
 	ID3D11Buffer* nullCb = nullptr;
+	ID3D11SamplerState* nullSampler = nullptr;
 	context->CSSetShaderResources(0, 2, nullSrvs);
 	context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 	context->CSSetConstantBuffers(0, 1, &nullCb);
+	context->CSSetSamplers(0, 1, &nullSampler);
 	context->CSSetShader(nullptr, nullptr, 0);
 
 	current = next;

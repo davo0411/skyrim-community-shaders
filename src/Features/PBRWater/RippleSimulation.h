@@ -26,6 +26,7 @@ public:
 		float radius = 0.0f;  ///< units
 		float depth = 0.0f;   ///< how far the body pushes the surface down (simulation units)
 		float silt = 0.0f;    ///< sediment kicked up from the bed per simulation step
+		float foam = 0.0f;    ///< whitewater churned up under the footprint per simulation step
 	};
 
 	struct Settings
@@ -35,8 +36,12 @@ public:
 		float halfLife = 1.5f;      ///< s, amplitude decay
 		float foamHalfLife = 3.0f;  ///< s
 		float foamFromMotion = 6.0f;
+		float foamSpread = 0.04f;    ///< foam diffusion per step (0..1): patches slowly widen and soften
 		float siltHalfLife = 20.0f;  ///< s, settling time of stirred-up sediment
 		float siltSpread = 0.3f;     ///< diffusion per step (0..1)
+		float heightScale = 8.4f;    ///< units per simulation unit of height (for the ripple slope)
+		float driftX = 0.0f;         ///< surface drift that carries the foam (units/s)
+		float driftY = 0.0f;
 	};
 
 	void SetupResources();
@@ -74,7 +79,8 @@ private:
 		float radius;
 		float depth;
 		float silt;
-		float pad[3];
+		float foam;
+		float pad[2];
 	};
 	static_assert(sizeof(GpuSource) == 32);
 
@@ -91,6 +97,10 @@ private:
 		float siltDecay;
 		float siltDiffusion;
 		float viscosity;
+		float foamDiffusion;
+		float foamDriftX;  ///< texels per step
+		float foamDriftY;
+		float slopeScale;  ///< simulation height difference per texel -> surface slope
 		float pad;
 	};
 	STATIC_ASSERT_ALIGNAS_16(SimCB);
@@ -102,6 +112,7 @@ private:
 	std::unique_ptr<StructuredBuffer> sourceBuffer;
 	std::unique_ptr<ConstantBuffer> simCB;
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
+	winrt::com_ptr<ID3D11SamplerState> linearSampler;
 	uint32_t current = 0;
 
 	int64_t originTexelX = 0;

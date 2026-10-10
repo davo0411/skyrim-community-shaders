@@ -32,6 +32,10 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		WaveHeight,
 		Choppiness,
 		DirectionalSpread,
+		SwellHeight,
+		SwellPeriod,
+		SwellDirection,
+		WaveResolution,
 		UseFetch,
 		UseBathymetry,
 		RiverWaveDamping,
@@ -71,6 +75,8 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		FoamScale,
 		BreakingFoam,
 		WakeFoam,
+		WakeFoamLifetime,
+		SplashFoam,
 		FoamAlbedo,
 		FoamDrift,
 		WhitecapAmount,
@@ -110,6 +116,10 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		WaveHeight,
 		Choppiness,
 		DirectionalSpread,
+		SwellHeight,
+		SwellPeriod,
+		SwellDirection,
+		WaveResolution,
 		UseFetch,
 		UseBathymetry,
 		RiverWaveDamping,
@@ -149,6 +159,8 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		FoamScale,
 		BreakingFoam,
 		WakeFoam,
+		WakeFoamLifetime,
+		SplashFoam,
 		FoamAlbedo,
 		FoamDrift,
 		WhitecapAmount,
@@ -235,8 +247,12 @@ void PBRWater::SanitizeSettings()
 	clamp(s.WindSpeedCalm, 0.0f, 10.0f, d.WindSpeedCalm);
 	clamp(s.WindSpeedStorm, 1.0f, 40.0f, d.WindSpeedStorm);
 	clamp(s.WaveHeight, 0.0f, 3.0f, d.WaveHeight);
-	clamp(s.Choppiness, 0.0f, 0.95f, d.Choppiness);
+	clamp(s.Choppiness, 0.0f, 1.5f, d.Choppiness);
 	clamp(s.DirectionalSpread, 0.0f, 1.0f, d.DirectionalSpread);
+	clamp(s.SwellHeight, 0.0f, 4.0f, d.SwellHeight);
+	clamp(s.SwellPeriod, 4.0f, 20.0f, d.SwellPeriod);
+	clamp(s.SwellDirection, -180.0f, 180.0f, d.SwellDirection);
+	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
 	clamp(s.RiverWaveDamping, 0.0f, 1.0f, d.RiverWaveDamping);
 	clamp(s.ShoreWaveHeight, 0.0f, 2.0f, d.ShoreWaveHeight);
 	clamp(s.ShoreSlope, 0.01f, 0.2f, d.ShoreSlope);
@@ -274,6 +290,8 @@ void PBRWater::SanitizeSettings()
 	clamp(s.FoamScale, 0.2f, 5.0f, d.FoamScale);
 	clamp(s.BreakingFoam, 0.0f, 3.0f, d.BreakingFoam);
 	clamp(s.WakeFoam, 0.0f, 3.0f, d.WakeFoam);
+	clamp(s.WakeFoamLifetime, 1.0f, 30.0f, d.WakeFoamLifetime);
+	clamp(s.SplashFoam, 0.0f, 3.0f, d.SplashFoam);
 	clamp(s.FoamAlbedo, 0.1f, 1.0f, d.FoamAlbedo);
 	clamp(s.FoamDrift, 0.0f, 4.0f, d.FoamDrift);
 	clamp(s.WhitecapAmount, 0.0f, 3.0f, d.WhitecapAmount);
@@ -313,9 +331,12 @@ void PBRWater::RegisterWeatherVariables()
 	};
 
 	addFloat("WaveHeight", "Wave Height", "Scale of the wind-driven wave spectrum (sea state) for this weather", &settings.WaveHeight, defaults.WaveHeight, 0.0f, 3.0f);
-	addFloat("Choppiness", "Choppiness", "How sharp and pinched the wave crests are", &settings.Choppiness, defaults.Choppiness, 0.0f, 0.95f);
+	addFloat("Choppiness", "Choppiness", "How sharp and pinched the wave crests are", &settings.Choppiness, defaults.Choppiness, 0.0f, 1.5f);
 	addFloat("DirectionalSpread", "Directional Spread", "0 = waves all follow the wind (swell), 1 = confused sea", &settings.DirectionalSpread, defaults.DirectionalSpread, 0.0f, 1.0f);
 	addFloat("WindSpeedStorm", "Storm Wind Speed", "Wind speed (m/s) reached at the weather's maximum wind", &settings.WindSpeedStorm, defaults.WindSpeedStorm, 1.0f, 40.0f);
+	addFloat("SwellHeight", "Swell Height", "Significant height (m) of the swell arriving from distant storms", &settings.SwellHeight, defaults.SwellHeight, 0.0f, 4.0f);
+	addFloat("SwellPeriod", "Swell Period", "Period (s) of the swell: longer is faster, longer crests", &settings.SwellPeriod, defaults.SwellPeriod, 4.0f, 20.0f);
+	addFloat("SwellDirection", "Swell Direction", "Direction the swell travels, in degrees from the wind", &settings.SwellDirection, defaults.SwellDirection, -180.0f, 180.0f);
 	addFloat("ShoreWaveHeight", "Shore Wave Height", "Height of the breaking shoreline waves relative to the open sea", &settings.ShoreWaveHeight, defaults.ShoreWaveHeight, 0.0f, 2.0f);
 	addFloat("FoamAmount", "Foam Amount", "Overall foam coverage", &settings.FoamAmount, defaults.FoamAmount, 0.0f, 3.0f);
 	addFloat("Visibility", "Water Visibility", "Scales how far light travels through the water before it is absorbed", &settings.Visibility, defaults.Visibility, 0.05f, 5.0f);
@@ -333,10 +354,25 @@ void PBRWater::DrawSettings()
 		Util::WeatherUI::SliderFloat(T(TKEY("wave_height"), "Wave Height"), this, "WaveHeight", &settings.WaveHeight, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("wave_height_tooltip"), "Scales the wind-driven wave spectrum. The waves themselves come from the weather's wind, the open-water distance upwind (fetch) and the water depth."));
-		Util::WeatherUI::SliderFloat(T(TKEY("choppiness"), "Choppiness"), this, "Choppiness", &settings.Choppiness, 0.0f, 0.95f, "%.2f");
+		Util::WeatherUI::SliderFloat(T(TKEY("choppiness"), "Choppiness"), this, "Choppiness", &settings.Choppiness, 0.0f, 1.5f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("choppiness_tooltip"), "How sharp the crests are. Higher values pinch the crests and produce more crest foam."));
+			ImGui::TextUnformatted(T(TKEY("choppiness_tooltip"), "How sharp the crests are: how far the water moves sideways towards each crest. 1 follows linear wave theory; higher values pinch the crests and produce more crest foam. Automatically held back where the sea would fold over itself."));
 		Util::WeatherUI::SliderFloat(T(TKEY("directional_spread"), "Directional Spread"), this, "DirectionalSpread", &settings.DirectionalSpread, 0.0f, 1.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("directional_spread_tooltip"), "0 lines the waves up with the wind in long crests; 1 gives a confused, short-crested sea."));
+		Util::WeatherUI::SliderFloat(T(TKEY("swell_height"), "Swell Height"), this, "SwellHeight", &settings.SwellHeight, 0.0f, 4.0f, "%.2f m");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("swell_height_tooltip"), "Long, regular waves arriving from distant storms, on top of the local wind sea. Only on the open sea: sheltered water never sees them."));
+		Util::WeatherUI::SliderFloat(T(TKEY("swell_period"), "Swell Period"), this, "SwellPeriod", &settings.SwellPeriod, 4.0f, 20.0f, "%.1f s");
+		Util::WeatherUI::SliderFloat(T(TKEY("swell_direction"), "Swell Direction"), this, "SwellDirection", &settings.SwellDirection, -180.0f, 180.0f, "%.0f deg");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("swell_direction_tooltip"), "Direction the swell travels, relative to the wind. Swell crossing the wind sea gives the most natural, irregular water."));
+		{
+			const char* sizes[] = { T(TKEY("wave_resolution_low"), "Low (128)"), T(TKEY("wave_resolution_medium"), "Medium (256)"), T(TKEY("wave_resolution_high"), "High (512)") };
+			ImGui::Combo(T(TKEY("wave_resolution"), "Wave Detail"), &settings.WaveResolution, sizes, IM_ARRAYSIZE(sizes));
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("wave_resolution_tooltip"), "Resolution of each FFT wave cascade. Higher values add finer ripples close up at a small GPU cost; gameplay is unaffected."));
+		}
 		ImGui::SliderFloat(T(TKEY("wind_speed_calm"), "Calm Wind Speed"), &settings.WindSpeedCalm, 0.0f, 10.0f, "%.1f m/s");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("wind_speed_calm_tooltip"), "Wind speed used when the weather reports no wind."));
@@ -426,6 +462,12 @@ void PBRWater::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("shore_foam_width"), "Shore Foam Width"), &settings.ShoreFoamWidth, 0.0f, 5.0f, "%.2f m");
 		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Foam"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("wake_foam_tooltip"), "Foam churned up by anything moving through the water and by breaking ripples. It rides the waves and drifts with the surface current."));
+		ImGui::SliderFloat(T(TKEY("wake_foam_lifetime"), "Wake Foam Lifetime"), &settings.WakeFoamLifetime, 1.0f, 30.0f, "%.1f s");
+		ImGui::SliderFloat(T(TKEY("splash_foam"), "Splash Foam"), &settings.SplashFoam, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("splash_foam_tooltip"), "Whitewater thrown up when a body hits the water fast: jumping or falling in, a fast swimmer, a thrown object."));
 		ImGui::SliderFloat(T(TKEY("wind_streaks"), "Wind Streaks"), &settings.WindStreaks, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("wind_streaks_tooltip"), "Lines along the wind (windrows): old foam gathers into streaks in a strong wind, and smooth, glassy slicks form in a light breeze."));
@@ -527,10 +569,11 @@ void PBRWater::DrawSettings()
 		};
 		ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &settings.DebugView, views, IM_ARRAYSIZE(views));
 
-		if (const auto snap = snapshot.load(std::memory_order_acquire)) {
-			const auto& s = snap->spectrum;
-			ImGui::Text("Wind %.1f m/s, peak period %.1f s, Hs %.2f m", s.windSpeed, TwoPi / s.peakOmega, s.significantHeight / UnitsPerMetre);
-			ImGui::Text("Whitecaps %.1f%%, shortest displaced wave %.1f m", s.whitecapCoverage * 100.0f, s.shortestDisplacedWavelength / UnitsPerMetre);
+		if (const auto snap = snapshot.load(std::memory_order_acquire); snap && snap->ocean) {
+			const auto& o = *snap->ocean;
+			ImGui::Text("Wind %.1f m/s, peak period %.1f s, Hs %.2f m, choppiness %.2f", o.windSpeed, TwoPi / o.peakOmega, o.significantHeight / UnitsPerMetre, o.choppiness);
+			ImGui::Text("Whitecaps %.1f%%, mean square slope %.3f", o.whitecapCoverage * 100.0f, o.meanSquareSlope);
+			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
 		const auto floatingStats = floating.GetStats();
@@ -556,12 +599,25 @@ void PBRWater::SetupResources()
 	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&samplerDesc, linearClampSampler.put()));
 	Util::SetResourceName(linearClampSampler.get(), "PBRWater::LinearClampSampler");
 
+	// The ocean tiles repeat (wrap) and are seen at grazing angles (anisotropic filtering).
+	D3D11_SAMPLER_DESC oceanDesc = samplerDesc;
+	oceanDesc.Filter = D3D11_FILTER_ANISOTROPIC;
+	oceanDesc.MaxAnisotropy = 8;
+	oceanDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+	oceanDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&oceanDesc, oceanSampler.put()));
+	Util::SetResourceName(oceanSampler.get(), "PBRWater::OceanSampler");
+
 	ripples.SetupResources();
+	ocean.SetupResources();
+	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 }
 
 void PBRWater::ClearShaderCache()
 {
 	ripples.ClearShaderCache();
+	ocean.ClearShaderCache();
+	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 	tessellationFailureLogged = false;
 }
 
@@ -661,10 +717,35 @@ void PBRWater::UpdateLandTexture()
 // Per-frame (render thread)
 // ============================================================================
 
+uint32_t PBRWater::WaveResolutionSize() const
+{
+	return 128u << static_cast<uint32_t>(std::clamp(settings.WaveResolution, 0, 2));
+}
+
 void PBRWater::Prepass()
 {
 	UpdateFetchTexture();
 	UpdateLandTexture();
+
+	// Last frame's water draws leave our textures bound; the simulations below write them.
+	{
+		auto context = globals::d3d::context;
+		ID3D11ShaderResourceView* nullSrvs[9] = {};
+		context->VSSetShaderResources(110, 9, nullSrvs);
+		context->HSSetShaderResources(110, 9, nullSrvs);
+		context->DSSetShaderResources(110, 9, nullSrvs);
+		context->PSSetShaderResources(110, 9, nullSrvs);
+	}
+
+	const float dt = renderDelta.load(std::memory_order_acquire);
+	if (const auto snap = snapshot.load(std::memory_order_acquire)) {
+		OceanSimulation::Settings oceanSettings;
+		oceanSettings.resolution = WaveResolutionSize();
+		oceanSettings.crestThreshold = settings.CrestFoamThreshold;
+		oceanSettings.foamTrail = settings.FoamPersistence;
+		ocean.Update(*snap, dt, oceanSettings);
+	}
+	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 
 	if (settings.EnableRipples) {
 		const auto& cameraPos = globals::game::frameBufferCached.GetCameraPosAdjust();
@@ -672,9 +753,14 @@ void PBRWater::Prepass()
 		rippleSettings.extent = settings.RippleExtent * UnitsPerMetre;
 		rippleSettings.waveSpeed = settings.RippleSpeed;
 		rippleSettings.halfLife = settings.RippleHalfLife;
-		rippleSettings.foamHalfLife = settings.RippleHalfLife * 0.5f;
+		rippleSettings.foamHalfLife = settings.WakeFoamLifetime * 0.5f;
 		rippleSettings.siltHalfLife = 20.0f;
-		ripples.Update(cameraPos.x, cameraPos.y, renderDelta.load(std::memory_order_acquire), rippleSettings);
+		rippleSettings.heightScale = settings.RippleHeight * UnitsPerMetre;
+		if (const auto snap = snapshot.load(std::memory_order_acquire)) {
+			rippleSettings.driftX = snap->foamDriftVelocity[0];
+			rippleSettings.driftY = snap->foamDriftVelocity[1];
+		}
+		ripples.Update(cameraPos.x, cameraPos.y, dt, rippleSettings);
 	}
 
 	UpdateFrameConstants();
@@ -690,22 +776,27 @@ void PBRWater::UpdateFrameConstants()
 	GpuData d{};
 	const auto snap = snapshot.load(std::memory_order_acquire);
 
-	if (snap) {
-		const auto& s = snap->spectrum;
-		// Crest foam trails sample the surface this long ago; going back in time advances the phase by
-		// omega * delay, which is the same for every pixel, so its sine and cosine are precomputed here.
-		const float olderDelay = settings.FoamPersistence * 0.4f;
-		const float oldestDelay = settings.FoamPersistence;
-		for (uint32_t i = 0; i < s.count; ++i) {
-			const auto& w = s.waves[i];
-			d.WaveDirK[i] = { w.dirX, w.dirY, w.k, w.omega };
-			d.WaveAmp[i] = { w.amplitude, w.steepness, static_cast<float>(snap->phase[i]), static_cast<float>(snap->phasePrev[i]) };
-			d.WaveExtra[i] = { w.pmWeightOpenSea, w.wavelength, 1.0f / std::max(w.omega, 1e-4f), 1.0f / std::max(w.pmWeightOpenSea, 1e-4f) };
-			d.WavePast[i] = { std::cos(w.omega * olderDelay), std::sin(w.omega * olderDelay), std::cos(w.omega * oldestDelay), std::sin(w.omega * oldestDelay) };
+	if (snap && snap->ocean) {
+		const auto& o = *snap->ocean;
+		const uint32_t size = ocean.GetResolution() ? ocean.GetResolution() : WaveResolutionSize();
+		for (uint32_t c = 0; c < PBRWaterModel::NumCascades; ++c) {
+			// Tile coordinate of the reference camera, in double precision: the GPU only adds camera-relative offsets.
+			const double tile = PBRWaterModel::CascadeLength[c] * PBRWaterModel::UnitsPerMetre;
+			double u = snap->refX / tile;
+			double v = snap->refY / tile;
+			u -= std::floor(u);
+			v -= std::floor(v);
+			// FFT sample j sits at j * tile / size, i.e. at texel centres shifted by half a texel.
+			const double halfTexel = 0.5 / size;
+			const auto& band = o.cascades[c];
+			d.Cascade0[c] = { static_cast<float>(1.0 / tile), static_cast<float>(u + halfTexel), static_cast<float>(v + halfTexel), static_cast<float>(tile / size) };
+			// w: the spread of the cascade's compression (lambda sqrt(mss)), the shore waves' folding budget.
+			d.Cascade1[c] = { band.meanOmega, 1.0f / std::max(band.pmWeightOpenSea, 1e-4f), band.meanK / UnitsPerMetre, o.choppiness * std::sqrt(band.meanSquareSlope) };
 		}
-		d.Params0 = { static_cast<float>(s.count), s.windSpeed, s.peakOmega, static_cast<float>(PBRWaterModel::Gravity) * UnitsPerMetre };
+		const bool active = ocean.IsReady() && !o.calm;
+		d.Params0 = { active ? 1.0f : 0.0f, o.windSpeed, o.peakOmega, static_cast<float>(PBRWaterModel::Gravity) * UnitsPerMetre };
 		d.Params1 = { std::cos(snap->windDirection), std::sin(snap->windDirection), settings.DisplacementFadeStart, settings.DisplacementFadeEnd };
-		d.Params2 = { settings.Choppiness, s.whitecapCoverage, s.amplitudeSum + snap->shore.amplitude, s.shortestDisplacedWavelength };
+		d.Params2 = { o.choppiness, o.whitecapCoverage, active ? o.displacementBound : 0.0f, static_cast<float>(std::max(ocean.GetMipCount(), 1u) - 1) };
 		d.RefCamPos = { static_cast<float>(snap->refX), static_cast<float>(snap->refY), static_cast<float>(snap->refZ), 0.0f };
 		d.Shore0 = { snap->shore.amplitude, snap->shore.omega, snap->shore.slope, snap->shore.onsetDepth };
 		d.Shore1 = { snap->shore.steepness, settings.BreakingFoam, static_cast<float>(snap->shorePhase), static_cast<float>(snap->shorePhasePrev) };
@@ -769,7 +860,7 @@ void PBRWater::UpdateFrameConstants()
 	d.Clarity1 = { settings.SedimentColor.x, settings.SedimentColor.y, settings.SedimentColor.z, settings.ShoreResuspension };
 	d.Clarity2 = { settings.RiverTurbidity, weatherTurbidity.load(std::memory_order_acquire), settings.EnableRipples ? settings.WadingSilt : 0.0f, settings.SedimentLayerHeight * UnitsPerMetre };
 	// Sediment plumes drift and reshape over hours; a daily wrap keeps their coordinates precise.
-	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), snap ? snap->spectrum.significantHeight : 0.0f };
+	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), (snap && snap->ocean) ? snap->ocean->significantHeight : 0.0f };
 
 	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
@@ -810,7 +901,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	                               shaderCache->GetPixelShader(*waterShader, pixelDescriptor);
 
 	const auto snap = snapshot.load(std::memory_order_acquire);
-	const bool hasWaves = snap && (snap->spectrum.amplitudeSum > 1.0f || snap->shore.amplitude > 1.0f || settings.EnableRipples);
+	const bool hasWaves = snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.amplitude > 1.0f || settings.EnableRipples);
 
 	ID3D11HullShader* hullShader = nullptr;
 	ID3D11DomainShader* domainShader = nullptr;
@@ -854,18 +945,18 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	context->VSSetConstantBuffers(7, 1, &cb);
 	context->PSSetConstantBuffers(7, 1, &cb);
 
-	ID3D11ShaderResourceView* srvs[5] = {
-		settings.EnableRipples ? ripples.GetSRV() : nullptr,
-		fetchTexture ? fetchTexture->srv.get() : nullptr,
-		(d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr,
-		settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr,
-		(d.Land1.x > 0.5f && landTexture) ? landTexture->srv.get() : nullptr
-	};
+	ID3D11ShaderResourceView* srvs[9];
+	GatherWaterSRVs(d, srvs);
 	ID3D11SamplerState* sampler = linearClampSampler.get();
-	context->VSSetShaderResources(110, 5, srvs);
-	context->PSSetShaderResources(110, 5, srvs);
-	context->VSSetSamplers(12, 1, &sampler);
-	context->PSSetSamplers(12, 1, &sampler);
+	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
+	RestoreSamplers();
+	context->VSGetSamplers(12, 2, savedVSSamplers.data());
+	context->PSGetSamplers(12, 2, savedPSSamplers.data());
+	samplersSaved = true;
+	context->VSSetShaderResources(110, 9, srvs);
+	context->PSSetShaderResources(110, 9, srvs);
+	context->VSSetSamplers(12, 2, samplers);
+	context->PSSetSamplers(12, 2, samplers);
 
 	// The renderer binds textures and constant buffers lazily, right before the draw call, so the
 	// device still holds the previous draw's state here: read this draw's from the shadow state.
@@ -894,10 +985,10 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->DSSetConstantBuffers(0, 3, vsBuffers);
 		context->DSSetConstantBuffers(7, 1, &cb);
 		context->DSSetConstantBuffers(12, 1, &frameBuffer);
-		context->DSSetShaderResources(110, 5, srvs);
-		context->HSSetShaderResources(110, 5, srvs);
-		context->HSSetSamplers(12, 1, &sampler);
-		context->DSSetSamplers(12, 1, &sampler);
+		context->DSSetShaderResources(110, 9, srvs);
+		context->HSSetShaderResources(110, 9, srvs);
+		context->HSSetSamplers(12, 2, samplers);
+		context->DSSetSamplers(12, 2, samplers);
 		context->DSSetShaderResources(8, 1, &flowmap);
 		context->DSSetSamplers(8, 1, &sampler);
 
@@ -923,9 +1014,43 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	}
 }
 
+void PBRWater::RestoreSamplers()
+{
+	if (!samplersSaved)
+		return;
+	auto context = globals::d3d::context;
+	context->VSSetSamplers(12, 2, savedVSSamplers.data());
+	context->PSSetSamplers(12, 2, savedPSSamplers.data());
+	for (auto* sampler : savedVSSamplers) {
+		if (sampler)
+			sampler->Release();
+	}
+	for (auto* sampler : savedPSSamplers) {
+		if (sampler)
+			sampler->Release();
+	}
+	savedVSSamplers = {};
+	savedPSSamplers = {};
+	samplersSaved = false;
+}
+
+void PBRWater::GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[9]) const
+{
+	srvs[0] = settings.EnableRipples ? ripples.GetSRV() : nullptr;
+	srvs[1] = fetchTexture ? fetchTexture->srv.get() : nullptr;
+	srvs[2] = (d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr;
+	srvs[3] = settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr;
+	srvs[4] = (d.Land1.x > 0.5f && landTexture) ? landTexture->srv.get() : nullptr;
+	srvs[5] = ocean.GetDisplacementSRV();
+	srvs[6] = ocean.GetDerivativesSRV();
+	srvs[7] = ocean.GetSurfaceSRV();
+	srvs[8] = ocean.GetPreviousDisplacementSRV();
+}
+
 void PBRWater::RestoreDraw()
 {
 	auto context = globals::d3d::context;
+	RestoreSamplers();
 	if (tessellationBound) {
 		context->HSSetShader(nullptr, nullptr, 0);
 		context->DSSetShader(nullptr, nullptr, 0);
@@ -942,7 +1067,7 @@ void PBRWater::RestoreDraw()
 // Main thread
 // ============================================================================
 
-PBRWaterModel::SpectrumParams PBRWater::CurrentSpectrumParams(float windSpeed) const
+PBRWaterModel::SpectrumParams PBRWater::CurrentSpectrumParams(float windSpeed, bool exterior) const
 {
 	PBRWaterModel::SpectrumParams params;
 	params.windSpeed = windSpeed;
@@ -950,6 +1075,11 @@ PBRWaterModel::SpectrumParams PBRWater::CurrentSpectrumParams(float windSpeed) c
 	params.heightScale = settings.WaveHeight;
 	params.choppiness = settings.Choppiness;
 	params.spread = settings.DirectionalSpread;
+	// Swell comes in from the open sea; there is none indoors.
+	params.swellHeight = exterior ? settings.SwellHeight : 0.0f;
+	params.swellPeriod = settings.SwellPeriod;
+	params.swellDirection = params.windDirection + settings.SwellDirection * (TwoPi / 360.0f);
+	params.resolution = WaveResolutionSize();
 	return params;
 }
 
@@ -996,7 +1126,8 @@ void PBRWater::MainThreadUpdate()
 	}
 
 	auto next = std::make_shared<PBRWaterModel::WaveSnapshot>();
-	next->spectrum = PBRWaterModel::GenerateSpectrum(CurrentSpectrumParams(smoothedWindSpeed));
+	const auto spectrum = std::make_shared<const PBRWaterModel::OceanSpectrum>(PBRWaterModel::GenerateSpectrum(CurrentSpectrumParams(smoothedWindSpeed, exterior)));
+	next->ocean = spectrum;
 	next->windDirection = std::atan2(smoothedWindDirY, smoothedWindDirX);
 	next->exterior = exterior;
 
@@ -1004,7 +1135,10 @@ void PBRWater::MainThreadUpdate()
 	// below the surface lag and wander a little across it.
 	{
 		constexpr double Wrap = 1048576.0;
-		const double drift = smoothedWindSpeed * 0.015 * settings.FoamDrift * UnitsPerMetre * dt;
+		const double speed = smoothedWindSpeed * 0.015 * settings.FoamDrift * UnitsPerMetre;
+		const double drift = speed * dt;
+		next->foamDriftVelocity[0] = static_cast<float>(smoothedWindDirX * speed);
+		next->foamDriftVelocity[1] = static_cast<float>(smoothedWindDirY * speed);
 		foamDriftX = std::fmod(foamDriftX + smoothedWindDirX * drift, Wrap);
 		foamDriftY = std::fmod(foamDriftY + smoothedWindDirY * drift, Wrap);
 		bubbleDriftX = std::fmod(bubbleDriftX + (-smoothedWindDirY * 0.3 - smoothedWindDirX * 0.3) * drift, Wrap);
@@ -1017,16 +1151,26 @@ void PBRWater::MainThreadUpdate()
 
 	// Shoreline waves: the dominant period of the sea, arriving from deep water.
 	auto& shore = next->shore;
-	shore.omega = std::clamp(next->spectrum.peakOmega, static_cast<float>(PBRWaterModel::TwoPi / 14.0), static_cast<float>(PBRWaterModel::TwoPi / 4.0));
-	shore.amplitude = exterior ? settings.ShoreWaveHeight * next->spectrum.significantHeight * 0.5f : 0.0f;
+	shore.omega = std::clamp(spectrum->peakOmega, static_cast<float>(PBRWaterModel::TwoPi / 14.0), static_cast<float>(PBRWaterModel::TwoPi / 4.0));
+	shore.amplitude = exterior ? settings.ShoreWaveHeight * spectrum->significantHeight * 0.5f : 0.0f;
 	shore.slope = settings.ShoreSlope;
 	shore.steepness = settings.ShoreSteepness;
 	const float deepWavelengthMetres = static_cast<float>(PBRWaterModel::Gravity * PBRWaterModel::TwoPi / (shore.omega * shore.omega));
 	shore.onsetDepth = std::min(deepWavelengthMetres * 0.5f, settings.ShoreOnsetDepth) * UnitsPerMetre;
 
 	const auto eye = Util::GetEyePosition();
-	phases.Advance(next->spectrum, shore, dt, eye.x, eye.y, eye.z);
-	phases.Fill(*next);
+	clock.Advance(shore, dt, eye.x, eye.y, eye.z);
+	clock.Fill(*next);
+
+	// Gameplay follows the long-wave cascades through the CPU mirror, but only while the GPU renders them.
+	if (oceanReady.load(std::memory_order_acquire)) {
+		mirror.Update(spectrum, clock.Time());
+		next->mirror0 = mirror.frame0;
+		next->mirror1 = mirror.frame1;
+		next->mirrorAlpha = mirror.alpha;
+	} else {
+		mirror.Reset();
+	}
 
 	environment.Update(exterior ? tes->GetRuntimeData2().worldSpace : nullptr);
 	environment.UpdateLoadedLand(exterior && settings.UseBathymetry);
@@ -1108,8 +1252,8 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 	sources.reserve(RippleSimulation::MaxSources);
 	std::unordered_map<const void*, RE::NiPoint3> waveVelocities;
 
-	// Surface z (flat plane + waves) at a position, or false when there is no water.
-	auto surfaceAt = [&](RE::TESObjectREFR* ref, const RE::NiPoint3& pos, float& flatZ, float& surfaceZ) {
+	// The water at a position: flat plane height and the displaced surface above it, or false when there is none.
+	auto surfaceAt = [&](RE::TESObjectREFR* ref, const RE::NiPoint3& pos, float& flatZ, PBRWaterModel::WaveSnapshot::Sample& wave) {
 		auto parentCell = ref->GetParentCell();
 		if (!parentCell)
 			return false;
@@ -1117,46 +1261,65 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		if (!TESObjectCELL_GetWaterHeight::func(parentCell, pos, h) || h <= -1e6f)
 			return false;
 		flatZ = h;
-		surfaceZ = h + snap.SampleAt(pos.x, pos.y, h).height;
+		wave = snap.SampleAt(pos.x, pos.y, h);
 		return true;
 	};
 
-	// Bodies only make waves while they move through the surface: a resting (or sunk) body excites
-	// nothing, so a dropped object rings once and the surface settles instead of being held down.
-	std::unordered_map<const void*, RE::NiPoint3> positions;
-	auto addSource = [&](const void* key, const RE::NiPoint3& center, float radius, float surfaceZ) {
+	// The ripple simulation lives in the water's rest (Lagrangian) coordinates and the shaders sample it at
+	// undisplaced positions, so a body is placed where the water under it rests: its rings and foam then
+	// ride the waves with the water instead of sliding across them. Its motion is measured relative to the
+	// water too, so a body bobbing with the waves makes no ripples, while one moving through them does.
+	std::unordered_map<const void*, SourceTrack> tracks;
+	const float splashFoam = settings.SplashFoam;
+	auto addSource = [&](const void* key, const RE::NiPoint3& center, float radius, float flatZ, const PBRWaterModel::WaveSnapshot::Sample& wave, const RE::NiPoint3& anchor) {
 		if (!wantRipples || sources.size() >= RippleSimulation::MaxSources)
 			return;
-		positions[key] = center;
-		const float offset = center.z - surfaceZ;
-		if (std::abs(offset) >= radius || dt <= 0.0f)
+		const float surfaceZ = flatZ + wave.height;
+		// The waves move the water sideways by (anchor - origin); a limb is offset from the anchor by far less
+		// than a wavelength, so it shares that displacement.
+		const double originX = wave.originX + (center.x - anchor.x);
+		const double originY = wave.originY + (center.y - anchor.y);
+		float offset = center.z - surfaceZ;
+		tracks[key] = { originX, originY, offset };
+		const auto previous = lastSources.find(key);
+		if (previous == lastSources.end() || dt <= 0.0f)
 			return;
-		const auto previous = lastSourcePositions.find(key);
-		if (previous == lastSourcePositions.end())
+		// A fast fall can carry a body through the surface between two frames: that still hits the water.
+		const bool crossed = previous->second.offset > 0.0f && offset < 0.0f;
+		if (std::abs(offset) >= radius && !crossed)
 			return;
-		const float speed = center.GetDistance(previous->second) / dt;
+		const float moveX = static_cast<float>(originX - previous->second.originX);
+		const float moveY = static_cast<float>(originY - previous->second.originY);
+		const float sink = previous->second.offset - offset;  // > 0: moving down into the water
+		const float speed = std::sqrt(moveX * moveX + moveY * moveY + sink * sink) / dt;
 		const float motion = std::clamp(speed / (1.5f * UnitsPerMetre), 0.0f, 1.0f);
-		if (motion <= 0.01f)
+		// A splash: hitting the water fast from above digs a crater and throws up whitewater.
+		const float entry = std::clamp(sink / dt / (3.0f * UnitsPerMetre), 0.0f, 1.0f);
+		if (motion <= 0.01f && entry <= 0.0f)
 			return;
 		// Footprint of the body where it cuts the surface, and how much of it is under water.
-		const float footprint = std::sqrt(std::max(radius * radius - offset * offset, 0.0f));
+		offset = std::clamp(offset, -radius, radius);
+		const float footprint = std::max(std::sqrt(std::max(radius * radius - offset * offset, 0.0f)), crossed ? 0.7f * radius : 0.0f);
 		const float submerged = std::clamp(0.5f - offset / (2.0f * radius), 0.0f, 1.0f);
+		const float size = std::clamp(footprint / 24.0f, 0.25f, 1.0f);
 		RippleSimulation::Source s;
-		s.x = center.x;
-		s.y = center.y;
+		s.x = static_cast<float>(originX);
+		s.y = static_cast<float>(originY);
 		s.radius = footprint;
-		s.depth = submerged * std::clamp(footprint / 24.0f, 0.25f, 1.0f) * motion;
+		s.depth = submerged * size * motion + entry * size;
+		// Whitewater: a fast body churns a little along its wake, an impact a burst (per simulation step).
+		s.foam = splashFoam * size * (0.05f * motion * motion + 0.8f * entry);
 		sources.push_back(s);
 	};
 
 	// Silt kicked up by feet moving over the bed, released at the start of the next simulation steps.
 	const float siltRate = settings.WadingSilt > 0.0f ? 0.06f : 0.0f;
-	auto addSilt = [&](const RE::NiPoint3& feet, float amount) {
+	auto addSilt = [&](double x, double y, float amount) {
 		if (sources.size() >= RippleSimulation::MaxSources || amount <= 0.0f)
 			return;
 		RippleSimulation::Source s;
-		s.x = feet.x;
-		s.y = feet.y;
+		s.x = static_cast<float>(x);
+		s.y = static_cast<float>(y);
 		s.radius = 0.5f * UnitsPerMetre;
 		s.depth = 0.0f;
 		s.silt = amount;
@@ -1171,17 +1334,18 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 			const auto pos = actor->GetPosition();
 			if (pos.GetSquaredDistance(eye) > rangeSq)
 				return;
-			float flatZ, surfaceZ;
-			if (!surfaceAt(actor, pos, flatZ, surfaceZ))
+			float flatZ;
+			PBRWaterModel::WaveSnapshot::Sample wave;
+			if (!surfaceAt(actor, pos, flatZ, wave))
 				return;
 			// Wading (feet on the bed, under water): moving feet stir the bottom up.
-			if (siltRate > 0.0f && pos.z < surfaceZ - 2.0f) {
+			if (siltRate > 0.0f && pos.z < flatZ + wave.height - 2.0f) {
 				const auto state = actor->AsActorState();
 				if (state && !state->IsSwimming()) {
 					RE::NiPoint3 velocity;
 					actor->GetLinearVelocity(velocity);
 					const float speed = std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y) / UnitsPerMetre;
-					addSilt(pos, siltRate * std::clamp(speed, 0.0f, 1.5f));
+					addSilt(wave.originX, wave.originY, siltRate * std::clamp(speed, 0.0f, 1.5f));
 				}
 			}
 			auto root = actor->Get3D(false);
@@ -1191,7 +1355,7 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 				RE::NiPoint3 center;
 				float radius;
 				if (Util::GetShapeBound(object, center, radius))
-					addSource(object, center, radius, surfaceZ);
+					addSource(object, center, radius, flatZ, wave, pos);
 				return sources.size() < RippleSimulation::MaxSources ? RE::BSVisit::BSVisitControl::kContinue : RE::BSVisit::BSVisitControl::kStop;
 			});
 		};
@@ -1226,26 +1390,26 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 			if (!Util::GetShapeBound(niCollision, center, radius))
 				return RE::BSContainer::ForEachResult::kContinue;
 
-			float flatZ, surfaceZ;
-			if (!surfaceAt(ref, center, flatZ, surfaceZ))
+			float flatZ;
+			PBRWaterModel::WaveSnapshot::Sample wave;
+			if (!surfaceAt(ref, center, flatZ, wave))
 				return RE::BSContainer::ForEachResult::kContinue;
 
 			// Only bodies floating at the surface; sunken or airborne ones are left alone.
-			if (std::abs(center.z - surfaceZ) > radius * 1.5f)
+			if (std::abs(center.z - (flatZ + wave.height)) > radius * 1.5f)
 				return RE::BSContainer::ForEachResult::kContinue;
 
 			float velocity[4];
 			_mm_storeu_ps(velocity, body->motion.linearVelocity.quad);
 
 			if (wantRipples && settings.PhysicsObjectRipples)
-				addSource(niCollision, center, radius, surfaceZ);
+				addSource(niCollision, center, radius, flatZ, wave, center);
 
 			if (wantBuoyancy && dt > 0.0f) {
 				// The engine's own buoyancy floats objects on the flat plane (and lets heavy ones sink).
 				// Add only the water's orbital motion, as a change in velocity relative to what was added
 				// last frame: floating objects ride the waves, sinking ones keep sinking, and nothing is
 				// pinned to the surface.
-				const auto wave = snap.SampleAt(center.x, center.y, flatZ);
 				const float strength = std::clamp(settings.BuoyancyStrength, 0.0f, 3.0f) / 3.0f;
 				const RE::NiPoint3 target{ wave.velocityX * strength, wave.velocityY * strength, wave.verticalVelocity * strength };
 				RE::NiPoint3 previous{};
@@ -1262,7 +1426,7 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		});
 	}
 
-	lastSourcePositions = std::move(positions);
+	lastSources = std::move(tracks);
 	lastWaveVelocities = std::move(waveVelocities);
 	if (wantRipples)
 		ripples.SubmitSources(std::move(sources));

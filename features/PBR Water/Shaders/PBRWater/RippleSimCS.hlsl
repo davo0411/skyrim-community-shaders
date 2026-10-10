@@ -8,8 +8,16 @@
 // leapfrog scheme never dissipates by itself and that shows up as blocky "pixelated" ripples.
 // Bodies in the water (actor limbs, loose Havok objects) act as moving constraints that hold
 // the surface down under their footprint, which produces bow waves, wakes and rings without any
-// hand-authored ripple shapes. A third channel accumulates foam on the ripple crests, where the
-// raised water spills over, so foam rides the rings and wakes instead of pooling under the body.
+// hand-authored ripple shapes.
+//
+// A third channel carries foam: whitewater churned up where bodies move through the water or hit it
+// (splashes), and where ripples are steep enough to break. Foam is a tracer on the surface: it is carried
+// by the surface drift (semi-Lagrangian advection), spreads a little and thins out over its own lifetime,
+// independent of the ripples that made it.
+//
+// The grid lives in the water's rest (Lagrangian) coordinates: sources are placed where the water under
+// a body rests and the shaders sample at undisplaced positions, so rings and foam ride the waves with
+// the water instead of sliding across them.
 //
 // The grid scrolls with the camera in whole texels; `Shift` re-addresses the previous state so the
 // simulation stays fixed in world space.
@@ -27,7 +35,8 @@ struct RippleSource
 	float Radius;     // texels
 	float Depth;      // target surface depression (simulation units, > 0 pushes down)
 	float Silt;       // sediment kicked up per step at the centre of the footprint
-	float3 Pad;
+	float Foam;       // whitewater churned up per step under the footprint
+	float2 Pad;
 };
 
 cbuffer RippleSimCB : register(b0)
@@ -42,12 +51,16 @@ cbuffer RippleSimCB : register(b0)
 	float SiltDecay;      // silt retained per step (settling)
 	float SiltDiffusion;  // fraction of the neighbour difference exchanged per step
 	float Viscosity;      // nu
+	float FoamDiffusion;  // fraction of the neighbour difference exchanged per step
+	float2 FoamDrift;     // texels per step the surface current moves the foam
+	float SlopeScale;     // simulation height difference over two texels -> surface slope
 	float Pad;
 };
 
 Texture2D<float4> PreviousState : register(t0);
 StructuredBuffer<RippleSource> Sources : register(t1);
 RWTexture2D<float4> CurrentState : register(u0);
+SamplerState LinearSampler : register(s0);
 
 float4 LoadState(int2 p)
 {
@@ -71,8 +84,15 @@ float4 LoadState(int2 p)
 	float lapPrev = neighbours.y - 4.0 * hPrev;
 
 	float hNext = (2.0 * h - hPrev + WaveSpeed2 * lap + Viscosity * (lap - lapPrev)) * Damping;
-	float foam = centre.z * FoamDecay;
 	float silt = (centre.w + SiltDiffusion * (neighbours.w * 0.25 - centre.w)) * SiltDecay;
+
+	// Foam drifts with the surface current (sampled upstream), spreads and thins out.
+	float foam = centre.z;
+	if (any(FoamDrift != 0.0)) {
+		float2 upstream = (float2(p) + 0.5 - FoamDrift) / (float)GridSize;
+		foam = (any(upstream <= 0.0) || any(upstream >= 1.0)) ? 0.0 : PreviousState.SampleLevel(LinearSampler, upstream, 0).z;
+	}
+	foam = (foam + FoamDiffusion * (neighbours.z * 0.25 - foam)) * FoamDecay;
 
 	// Absorb waves at the border so nothing reflects off the edge of the simulated area.
 	float2 border = min(float2(id.xy), float(GridSize - 1) - float2(id.xy));
@@ -93,13 +113,17 @@ float4 LoadState(int2 p)
 			hNext = lerp(hNext, min(hNext, -s.Depth), exp(-2.0 * r2));
 		// Silt billows out a little wider than the foot itself.
 		silt += s.Silt * exp(-r2);
+		// Whitewater around the body, densest at the waterline where it cuts the surface.
+		foam += s.Foam * exp(-0.7 * r2);
 	}
 
-	// Foam only where the surface is pushed up into a crest and still rising or breaking over.
 	// Hard bound: a bad source can never feed back into a runaway.
 	hNext = clamp(hNext, -2.0, 2.0);
 
-	float crest = saturate((hNext - 0.08) * 4.0);
+	// Ripples spill over where they are pushed up into a crest, and break where they get steep.
+	float2 gradient = float2(LoadState(p + int2(1, 0)).x - LoadState(p - int2(1, 0)).x, LoadState(p + int2(0, 1)).x - LoadState(p - int2(0, 1)).x);
+	float steepness = length(gradient) * SlopeScale;
+	float crest = max(saturate((hNext - 0.08) * 4.0), saturate((steepness - 0.3) * 3.0));
 	foam += crest * saturate(abs(hNext - h) * FoamFromMotion);
 	CurrentState[id.xy] = float4(hNext, h, saturate(foam), clamp(silt, 0.0, 4.0));
 }

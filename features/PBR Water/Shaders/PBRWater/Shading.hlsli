@@ -7,10 +7,10 @@
 // ============================================================================
 // PBR Water - pixel shading helpers.
 //
-//   Surface   : analytic wave normals evaluated per pixel; wave components smaller than the pixel
-//               footprint are removed and their slope variance is folded into the GGX roughness
-//               (in the spirit of LEAN mapping, Olano & Baker 2010), so distant water keeps its
-//               glitter energy instead of aliasing.
+//   Surface   : FFT wave normals, trilinear / anisotropically filtered over the pixel footprint; the
+//               slope variance the filter averages away is recovered from mip-filtered second moments
+//               (LEAN mapping, Olano & Baker 2010; Bruneton et al. 2010) and folded into the GGX
+//               roughness, so distant water keeps its glitter energy instead of aliasing.
 //   Interface : exact dielectric Fresnel (air/water IOR 1.333), including total internal
 //               reflection when seen from below (Snell's window).
 //   Volume    : Beer-Lambert transmittance along the refracted path, with extinction from the water
@@ -314,13 +314,14 @@ namespace PBRWater
 		return normalize(waterNormal - float3(g, 0.0));
 	}
 
-	/// Crest foam coverage from surface folding (Jacobian below the threshold) and the wind's
-	/// whitecap coverage (Monahan & O'Muircheartaigh 1980).
-	float CrestCoverage(float jacobian)
+	/// Crest foam coverage from surface folding (Jacobian below the threshold), the trail of recent
+	/// folding, and the wind's whitecap coverage (Monahan & O'Muircheartaigh 1980).
+	float CrestCoverage(float jacobian, float trail)
 	{
 		// Folding decides where crests break; the wind's whitecap fraction (Monahan) decides how much
 		// of that actually turns white, so light winds give sparse caps and only gales foam over.
-		return saturate((Foam0.y - jacobian) * 3.0) * saturate(Params2.y * 6.0 + 0.03);
+		float folding = max(saturate((Foam0.y - jacobian) * 3.0), saturate(trail));
+		return folding * saturate(Params2.y * 6.0 + 0.03);
 	}
 
 	// ------------------------------------------------------------------------
@@ -357,8 +358,8 @@ namespace PBRWater
 		float2 dpdy = ddy(waveParam.xy);
 		float footprint = max(length(dpdx), length(dpdy));
 
-		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w, 0.0);
-		WaveResult waves = EvaluateWaves(waveParam.xyz, ctx, footprint);
+		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
+		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx);
 		float3 ripple = RippleSlopeFoam(waveParam.xyz, ctx.depth);
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
@@ -369,7 +370,10 @@ namespace PBRWater
 		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
 		float windrows = WindrowPattern(absXY, ctx.peakOmega);
 		float slick = WindrowSlick(windrows);
-		float detailScale = max(lerp(0.3, 1.25, saturate(wind / 8.0)) * (1.0 - 0.6 * slick), max(flow, Surface0.w));
+		// The smallest FFT cascade already carries the wind's waves down to a few centimetres, so on open
+		// water the normal maps only add the capillary texture on top.
+		float windDetail = lerp(0.3, 1.25, saturate(wind / 8.0)) * (OceanActive() ? 0.6 : 1.0);
+		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
 		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05);
@@ -389,13 +393,9 @@ namespace PBRWater
 		o.windrows = WindrowFoam(windrows);
 		o.jacobian = waves.jacobian;
 
-		// Crest foam with a trail: where this water was folding a moment ago, thinner the older it is.
-		o.crestFoam = CrestCoverage(waves.jacobian);
-		if (Foam1.x > 0.0) {
-			float older = CrestCoverage(waves.pastJacobian.x);
-			float oldest = CrestCoverage(waves.pastJacobian.y);
-			o.crestFoam = max(o.crestFoam, max(older * 0.6, oldest * 0.3));
-		}
+		// Crest foam where the surface folds now, plus the trail the cascades keep of where it folded a
+		// moment ago (thinning over the trail time and drifting with the surface current).
+		o.crestFoam = CrestCoverage(waves.jacobian, waves.crestTrail);
 
 		o.shoreBreak = waves.shoreBreak;
 		o.shoreMask = waves.shoreMask;
@@ -439,7 +439,8 @@ namespace PBRWater
 		case 5:
 			return s.roughness.xxx;
 		case 6:
-			return float3(saturate(waveState.x / max(Params2.z, 1.0)) * 0.5 + 0.5, saturate(-waveState.x / max(Params2.z, 1.0)), 0.0);
+			// Height in units of Hs / 2: crests red, troughs green.
+			return float3(saturate(2.0 * waveState.x / max(Optics0.w, 1.0)) * 0.5 + 0.5, saturate(-2.0 * waveState.x / max(Optics0.w, 1.0)), 0.0);
 		case 7:
 			// Fetch on a log scale: black ~10 m (pond), white ~100 km (open sea).
 			return saturate(log10(max(s.fetchMetres, 10.0)) / 4.0 - 0.25).xxx;
