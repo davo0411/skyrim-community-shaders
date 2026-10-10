@@ -8,10 +8,20 @@
 // vertices from both triangles that use it. Every per-edge quantity is therefore computed from
 // the two endpoints in a canonical (sorted) order, and the domain shader accumulates corner
 // contributions in a canonical order too, so floating point rounding is identical on both sides.
+// Nothing per patch may reach the displacement either: the wave filter spacing is a function of
+// the vertex position alone, or two patches would move their shared edge apart and open a crack.
 // ============================================================================
 
 namespace PBRWater
 {
+	/// Wave filter spacing for a tessellated vertex at camera-relative `positionWS`: the on-screen
+	/// target triangle size (doubled, as most edges end up between the curvature and the baseline
+	/// density) projected to that distance. Depends on the position only, so it is crack-free.
+	float TessellatedSpacing(float3 positionWS)
+	{
+		return 2.0 * max(Tess0.y, 1.0) * max(length(positionWS), 1.0) / max(Tess0.w, 1e-3);
+	}
+
 	/// Strict weak order on positions, used to canonicalise shared edges.
 	bool PositionLess(float3 a, float3 b)
 	{
@@ -135,7 +145,6 @@ namespace PBRWater
 		if (PatchOutsideFrustum(p0, p1, p2)) {
 			o.Edge[0] = o.Edge[1] = o.Edge[2] = 0.0;
 			o.Inside = 0.0;
-			o.Spacing = 0.0;
 			return o;
 		}
 
@@ -144,9 +153,6 @@ namespace PBRWater
 		o.Edge[1] = EdgeTessFactor(p2, p0);
 		o.Edge[2] = EdgeTessFactor(p0, p1);
 		o.Inside = max(o.Edge[0], max(o.Edge[1], o.Edge[2]));
-
-		float perimeter = length(p1 - p2) + length(p2 - p0) + length(p0 - p1);
-		o.Spacing = perimeter / (3.0 * o.Inside);
 		return o;
 	}
 #endif

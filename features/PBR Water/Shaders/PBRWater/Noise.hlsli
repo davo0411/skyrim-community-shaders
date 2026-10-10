@@ -52,6 +52,24 @@ namespace PBRWater
 		const float2x2 rotation = float2x2(0.8, 0.6, -0.6, 0.8);
 		return (ValueNoise(p) * 2.0 + ValueNoise(mul(rotation, p) * 2.03 + 7.1)) / 3.0;
 	}
+
+	/**
+	 * Focused sunlight below a wavy surface, in [0, ~10] with a mean of 1, at surface position `p`
+	 * (metres). Ridges of two drifting noise layers multiply into the bright filament network of
+	 * caustics; deeper down the focus is lost and the pattern softens (`blur` 0..1).
+	 */
+	float CausticPattern(float2 p, float time, float blur)
+	{
+		float2 q = p * 0.9;
+		float n1 = ValueNoise(q + float2(time * 0.31, time * 0.17));
+		float n2 = ValueNoise(mul(float2x2(0.8, 0.6, -0.6, 0.8), q) * 1.3 + float2(-time * 0.23, time * 0.29) + 5.3);
+		float r = (1.0 - abs(2.0 * n1 - 1.0)) * (1.0 - abs(2.0 * n2 - 1.0));
+		float r2 = r * r;
+		// Means measured over the noise: E[r^4] = 0.091, E[r^1.5] = 0.295.
+		float sharp = r2 * r2 / 0.091;
+		float soft = r * sqrt(r) / 0.295;
+		return lerp(sharp, soft, saturate(blur));
+	}
 }
 
 #endif  // __PBR_WATER_NOISE_HLSLI__

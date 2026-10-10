@@ -62,7 +62,7 @@ namespace PBRWater
 		float4 Underwater0;                // x underwater view active, y flat water height at the camera (absolute z), z waterline band (units), w underwater visibility (units)
 		float4 Underwater1;                // xyz shallow colour of the camera's water (gamma), w light shaft strength
 		float4 Underwater2;                // xyz deep colour of the camera's water (gamma), w light shaft range (units)
-		float4 Underwater3;                // x meniscus strength, y sun glow strength, z 1 once the composite fogged the scene this frame, w march samples
+		float4 Underwater3;                // x meniscus strength, yzw unused
 		float4 Surface0;                   // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
 		float4 Surface1;                   // x wind streak strength, y bioluminescence strength, zw unused
 		float4 Surface2;                   // xyz bioluminescence colour (gamma), w unused
@@ -70,6 +70,7 @@ namespace PBRWater
 		float4 Land1;                      // x enabled, y vertex spacing (units)
 		float4 Foam2;                      // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount
 		float4 Foam3;                      // xy foam drift offset (units, wrapped), zw extra bubble drift (units, wrapped)
+		float4 Flow0;                      // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 	}
 
 	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w silt
@@ -290,6 +291,7 @@ namespace PBRWater
 
 		float dxdx = 0.0, dydy = 0.0, dxdy = 0.0;
 		float dzdx = 0.0, dzdy = 0.0;
+		float steepness = 0.0;                            // sum(Q k A): the most the open-sea waves can compress the surface
 		float2 pastXX = 0.0, pastYY = 0.0, pastXY = 0.0;  // x older, y oldest foam trail delay
 
 		// The steepness budget keeps sum(Q k A) < 1 (no loops) for the open-sea amplitudes; the fetch
@@ -331,6 +333,7 @@ namespace PBRWater
 
 			float WA = dk.z * A;
 			float QWA = Q * WA;
+			steepness += QWA;
 			float3 dd = float3(dk.x * dk.x, dk.y * dk.y, dk.x * dk.y) * QWA;
 			dzdx += dk.x * WA * c;
 			dzdy += dk.y * WA * c;
@@ -368,7 +371,17 @@ namespace PBRWater
 				o.shoreMask = envelope;
 				A *= envelope;
 
+				// d(theta)/dx: theta' (h) * dh/dx, with dh/dx = -terrainGrad
 				float omega = Shore0.y;
+				float hm = max(h * MetresPerUnit, 0.02);
+				float dTdh = (1.0 / (max(Shore0.z, 0.005) * sqrt(9.81 * hm))) * MetresPerUnit;
+				float2 dTheta = omega * dTdh * ctx.terrainGrad;
+				float kLocal = length(dTheta);
+				// The wavelength collapses as 1 / sqrt(h) in the swash, and much faster on a steep (cliff)
+				// shore: hold the slope k A to the breaking limit (H / L ~ 1/7) so the last metre of water
+				// does not stand up into a bright, near-vertical seam along the waterline.
+				A = min(A, 0.4 / max(kLocal, 1e-5));
+
 				float travel = -omega * ShoreTravelTime(h);
 				float s, c;
 				sincos(travel - Shore1.z, s, c);
@@ -376,15 +389,10 @@ namespace PBRWater
 				sincos(travel - Shore1.w, sp, cp);
 				o.shoreCrest = envelope * saturate(s);
 
-				// d(theta)/dx: theta' (h) * dh/dx, with dh/dx = -terrainGrad
-				float hm = max(h * MetresPerUnit, 0.02);
-				float dTdh = (1.0 / (max(Shore0.z, 0.005) * sqrt(9.81 * hm))) * MetresPerUnit;
-				float2 dTheta = omega * dTdh * ctx.terrainGrad;
-				float kLocal = length(dTheta);
-
-				// Breaking waves pitch forward; keep Q*k*A < 1 so the surface never loops.
+				// Breaking waves pitch forward; keep the total Q*k*A below 1 with the open-sea waves on top,
+				// or crests that coincide fold the surface over itself (inside-out patches on the shore).
 				float Q = saturate(Shore1.x + o.shoreBreak * 0.5);
-				float QA = min(Q * A, 0.9 / max(kLocal, 1e-5));
+				float QA = min(Q * A, max(0.9 - steepness, 0.0) / max(kLocal, 1e-5));
 
 				o.displacement.xy += dir * (QA * c);
 				o.displacement.z += A * s;
@@ -402,8 +410,10 @@ namespace PBRWater
 		// Normal of the parametric surface P(x, y) = (x + Dx, y + Dy, Dz)
 		float3 tx = float3(1.0 + dxdx, dxdy, dzdx);
 		float3 ty = float3(dxdy, 1.0 + dydy, dzdy);
-		// tx and ty become parallel where the surface folds over itself; keep the normal defined there.
-		o.normal = SafeNormalize(cross(tx, ty), float3(0, 0, 1));
+		// tx and ty become parallel where the surface folds over itself; keep the normal defined there,
+		// and facing up where it has folded past vertical (the visible side of the fold).
+		float3 n = cross(tx, ty);
+		o.normal = SafeNormalize(n.z < 0.0 ? -n : n, float3(0, 0, 1));
 		o.jacobian = (1.0 + dxdx) * (1.0 + dydy) - dxdy * dxdy;
 		return o;
 	}

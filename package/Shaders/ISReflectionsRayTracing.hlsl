@@ -111,6 +111,14 @@ float4 GetReflectionColor(
 
 			float fadeFactor = depthThicknessFactor * ssrMarchingRadiusFadeFactor * centerDistanceFadeFactorX * centerDistanceFadeFactorY;
 
+#	if defined(PBR_WATER)
+			// Displaced water is not flat: rays leaving a trough run into the back of the next wave. The
+			// colour buffer there still shows what lies under the water (it is drawn later), so such a hit
+			// would reflect sea grass and rocks onto the crests. Treat it as a miss; the cubemap takes over.
+			if (NormalTex.SampleLevel(NormalSampler, ConvertRaySample(binaryRaySample.xy), 0).z > 0.0)
+				return 0.0;
+#	endif
+
 			if (fadeFactor > 0.0) {
 				float2 finalSampleUV = binaryRaySample.xy;
 

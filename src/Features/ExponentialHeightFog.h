@@ -94,10 +94,27 @@ public:
 		float pad3 = 0.0f;
 		float3 volumetricFogNoiseVelocity = { 0.0f, 0.0f, 0.0f };
 		float pad0;
+		// Runtime only (not saved): the camera is under water and the fog is the water body (see UnderwaterMedium).
+		float4 underwater = {};             ///< x 1 under water, y water plane height (absolute), z caustic shaft strength, w caustic time (s)
+		float4 underwaterSpectral = {};     ///< xyz per-channel extinction over the fog extinction, w caustic shaft fade depth (units)
+		float4 underwaterDownwelling = {};  ///< xyz light attenuation with depth K_d (1/unit), w mean of xyz
 	} settings;
 	STATIC_ASSERT_ALIGNAS_16(Settings);
 
 	Settings GetCommonBufferData() const;
+
+	/** @brief A water body the camera is inside of, which replaces the fog while it lasts (PBR Water). */
+	struct UnderwaterMedium
+	{
+		float planeZ = 0.0f;         ///< absolute height of the (flat) water surface
+		float3 extinction{};         ///< per-channel extinction (1/unit)
+		float3 albedo{};             ///< single-scattering albedo
+		float3 downwelling{};        ///< diffuse attenuation of light with depth K_d (1/unit)
+		float anisotropy = 0.0f;     ///< Henyey-Greenstein g
+		float shaftStrength = 0.0f;  ///< caustic light shafts, 0..1
+		float shaftDepth = 1.0f;     ///< depth over which the shafts fade (units)
+		float time = 0.0f;           ///< caustic animation time (s)
+	};
 
 private:
 	struct VolumetricFogCB
@@ -119,6 +136,8 @@ private:
 
 	/** @brief Shaders see height fog as disabled: an ENB preset replaces it, or the flat world map is open. */
 	bool IsSuppressed() const;
+	/** @brief The settings the frame renders with: suppression applied, and the water body while the camera is submerged. */
+	Settings EffectiveSettings() const;
 	void EnsureVolumetricResources();
 	void ReleaseVolumetricResources();
 	void BindIntegratedLightScattering();
@@ -161,5 +180,6 @@ private:
 	bool hasConservativeDepthHistory = false;
 	bool hasLightScatteringFarHistory = false;
 	bool hasConservativeDepthFarHistory = false;
+	bool historyUnderwater = false;  ///< the history volumes hold water, not air
 	uint32_t lastPrepassFrame = UINT32_MAX;
 };

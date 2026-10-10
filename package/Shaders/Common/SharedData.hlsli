@@ -361,6 +361,9 @@ namespace SharedData
 		float pad3;
 		float3 volumetricFogNoiseVelocity;
 		float pad0;
+		float4 underwater;             // x 1 under water, y water plane height (absolute), z caustic shaft strength, w caustic time (s)
+		float4 underwaterSpectral;     // xyz per-channel extinction over the fog extinction, w caustic shaft fade depth (units)
+		float4 underwaterDownwelling;  // xyz light attenuation with depth K_d (1/unit), w mean of xyz
 	};
 
 	struct TruePBRSettings

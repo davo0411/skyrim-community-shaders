@@ -233,16 +233,27 @@ namespace ExponentialHeightFog
 			rayOriginTerms2 = fogDensity2 * exp2(-exponent2);
 		}
 
-		float falloff = fogHeightFalloff * rayDirectionZ;
-		float lineIntegral = (1.0f - exp2(-falloff)) / falloff;
-		float lineIntegralTaylor = 0.69314718056f - 0.24022650695f * falloff;  // log(2) - (0.5 * (log(2)^2)) * falloff
-		float falloff2 = fogHeightFalloff2 * rayDirectionZ;
-		float lineIntegral2 = (1.0f - exp2(-falloff2)) / falloff2;
-		float lineIntegralTaylor2 = 0.69314718056f - 0.24022650695f * falloff2;
-		float exponentialHeightLineIntegralCalc =
-			rayOriginTerms * (abs(falloff) > 0.01f ? lineIntegral : lineIntegralTaylor) +
-			rayOriginTerms2 * (abs(falloff2) > 0.01f ? lineIntegral2 : lineIntegralTaylor2);
-		float exponentialHeightLineIntegral = exponentialHeightLineIntegralCalc * rayLength;
+		float exponentialHeightLineIntegral;
+		[branch] if (IsUnderwater())
+		{
+			// A uniform medium below the water plane: the exponential profile's closed form assumes the
+			// camera above the fog height and diverges below it.
+			float excludeTime = saturate(max(excludeDistance, 0.0f) * viewToPosLengthInv);
+			exponentialHeightLineIntegral = fogDensity * GetUnderwaterPathLength(cameraWS.z, viewToPos, excludeTime, 1.0f);
+		}
+		else
+		{
+			float falloff = fogHeightFalloff * rayDirectionZ;
+			float lineIntegral = (1.0f - exp2(-falloff)) / falloff;
+			float lineIntegralTaylor = 0.69314718056f - 0.24022650695f * falloff;  // log(2) - (0.5 * (log(2)^2)) * falloff
+			float falloff2 = fogHeightFalloff2 * rayDirectionZ;
+			float lineIntegral2 = (1.0f - exp2(-falloff2)) / falloff2;
+			float lineIntegralTaylor2 = 0.69314718056f - 0.24022650695f * falloff2;
+			float exponentialHeightLineIntegralCalc =
+				rayOriginTerms * (abs(falloff) > 0.01f ? lineIntegral : lineIntegralTaylor) +
+				rayOriginTerms2 * (abs(falloff2) > 0.01f ? lineIntegral2 : lineIntegralTaylor2);
+			exponentialHeightLineIntegral = exponentialHeightLineIntegralCalc * rayLength;
+		}
 
 		float expFogFactor = saturate(exp2(-exponentialHeightLineIntegral));
 
@@ -317,6 +328,8 @@ namespace ExponentialHeightFog
 
 	float GetSunlightFogAttenuation(float3 positionWS, float3 cameraWS)
 	{
+		if (IsUnderwater())
+			return dot(GetUnderwaterLightTransmittance(positionWS.z + cameraWS.z, SharedData::DirLightDirection.xyz), 1.0f / 3.0f);
 		float fogHeightFalloff = SharedData::exponentialHeightFogSettings.fogHeightFalloff * 0.001f;
 		float fogDensity = SharedData::exponentialHeightFogSettings.fogDensity * 0.001f;
 		float fogHeightFalloff2 = SharedData::exponentialHeightFogSettings.fogHeightFalloff2 * 0.001f;
@@ -348,6 +361,8 @@ namespace ExponentialHeightFog
 
 	float GetSunFogAttenuation(float3 cameraWS)
 	{
+		if (IsUnderwater())
+			return dot(GetUnderwaterLightTransmittance(cameraWS.z, SharedData::DirLightDirection.xyz), 1.0f / 3.0f);
 		float fogHeightFalloff = SharedData::exponentialHeightFogSettings.fogHeightFalloff * 0.001f;
 		float fogDensity = SharedData::exponentialHeightFogSettings.fogDensity * 0.001f;
 		float fogHeightFalloff2 = SharedData::exponentialHeightFogSettings.fogHeightFalloff2 * 0.001f;

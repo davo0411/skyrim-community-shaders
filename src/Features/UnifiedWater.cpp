@@ -442,6 +442,21 @@ void UnifiedWater::SetFlowmapTex() const
 	logger::debug("[Unified Water] [Flowmap] Texture set");
 }
 
+bool UnifiedWater::GetWorldFlowmap(ID3D11ShaderResourceView*& srv, float4& mapping) const
+{
+	RE::NiPointer<RE::NiSourceTexture> tex;
+	if (!loaded || !IsExteriorWorldspaceActive() || !flowmap || !flowmap->TryGetFlowmap(tex))
+		return false;
+	srv = tex->rendererTexture->resourceView;
+	// One texel per cell; v runs north to south (see BSWaterShader_SetupGeometry and the displacement mesh).
+	constexpr float CellSize = 4096.0f;
+	const float invWidth = flowmap->GetInverseWidth();
+	const float invHeight = flowmap->GetInverseHeight();
+	mapping = { invWidth / CellSize, static_cast<float>(flowmap->GetOffsetX()) * invWidth,
+		-invHeight / CellSize, 1.0f - static_cast<float>(flowmap->GetOffsetY()) * invHeight };
+	return true;
+}
+
 void UnifiedWater::PostPostLoad()
 {
 	stl::detour_thunk<TES_SetWorldSpace>(REL::RelocationID(13170, 13315));

@@ -188,10 +188,8 @@ cbuffer PerGeometry : register(b2)
 };
 
 #		if defined(PBR_WATER)
-#			if defined(FLOWMAP) && defined(UNIFIED_WATER) && defined(NORMAL_TEXCOORD)
 SamplerState FlowMapSamplerVS : register(s8);
 Texture2D<float4> FlowMapTexVS : register(t8);
-#			endif
 
 /// Inverse of the linear (rotation/scale) part of a world matrix: maps world offsets to model space.
 float3x3 InverseLinear(float4x4 m)
@@ -204,19 +202,18 @@ float3x3 InverseLinear(float4x4 m)
 	return transpose(float3x3(c0, c1, c2)) / det;
 }
 
-/// River current flattens the open-water waves; read the same flowmap the pixel shader uses.
-float GetWaveFlowDamping(VS_INPUT input)
+/**
+ * River current flattens the open-water waves. The worldspace flowmap is looked up by world position,
+ * not by mesh UVs: the stencil pass (depth and motion vectors) is compiled without FLOWMAP and must
+ * displace the surface exactly like the colour pass, and neighbouring meshes must agree on shared edges.
+ */
+float GetWaveFlowDamping(float3 positionWS)
 {
-	float damping = 1.0;
-#			if defined(FLOWMAP) && defined(UNIFIED_WATER) && defined(NORMAL_TEXCOORD)
-	if (ObjectUV.x > 0.0 && ObjectUV.y > 0.0) {
-		float2 cellShift = float2(floor(ObjectUV.z * 0.5), floor((ObjectUV.z - 1.0) * 0.5));
-		float2 scaledUV = input.TexCoord0.xy * ObjectUV.z - cellShift;
-		float4 flow = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, (CellTexCoordOffset.xy + scaledUV) / max(ObjectUV.xy, 1.0), 0);
-		damping = 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
-	}
-#			endif
-	return damping;
+	if (PBRWater::Flow0.x == 0.0)
+		return 1.0;
+	float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+	float4 flow = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
+	return 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
 }
 #		endif
 
@@ -237,7 +234,7 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 
 #		if defined(PBR_WATER)
 	{
-		float flowDamping = GetWaveFlowDamping(input);
+		float flowDamping = GetWaveFlowDamping(scrollWorldPos.xyz);
 		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, spacing);
 		float3x3 worldToModel = InverseLinear(World);
 		previousInputPosition.xyz += mul(worldToModel, surface.previous);
@@ -421,7 +418,6 @@ struct HS_CONSTANT_OUTPUT
 {
 	float Edge[3] : SV_TessFactor;
 	float Inside : SV_InsideTessFactor;
-	float Spacing : SPACING0;  // world-space spacing of the generated vertices
 };
 #	endif
 
@@ -443,7 +439,8 @@ VS_OUTPUT main(VS_INPUT input)
 #	if defined(DSHADER) && defined(PBRW_TESSELLATION)
 [domain("tri")] VS_OUTPUT main(HS_CONSTANT_OUTPUT patchConstants, float3 barycentric : SV_DomainLocation, const OutputPatch<VS_OUTPUT, 3> patch) {
 	VS_INPUT corners[3] = { UnpackControlPoint(patch[0]), UnpackControlPoint(patch[1]), UnpackControlPoint(patch[2]) };
-	return WaterVertex(PBRWater::InterpolateVertex(corners, barycentric), patchConstants.Spacing);
+	VS_INPUT v = PBRWater::InterpolateVertex(corners, barycentric);
+	return WaterVertex(v, PBRWater::TessellatedSpacing(mul(World, float4(v.Position.xyz, 1.0)).xyz));
 }
 #	endif
 
@@ -1310,7 +1307,7 @@ PS_OUTPUT main(PS_INPUT input)
 	{
 #				if defined(UNDERWATER)
 		// Seen from below: water -> air, total internal reflection outside Snell's window.
-		float pbrFresnel = PBRWater::FresnelDielectric(dot(viewDirection, normal), PBRWater::WaterIOR);
+		float pbrFresnel = PBRWater::FresnelFromBelow(dot(viewDirection, normal), pbrRoughness);
 #				else
 		// Roughness-aware environment Fresnel for F0 = 0.02 (air -> water).
 		float2 envBRDF = BRDF::EnvBRDF(pbrRoughness, saturate(dot(-viewDirection, normal)));
@@ -1437,30 +1434,20 @@ PS_OUTPUT main(PS_INPUT input)
 
 #				if defined(UNDERWATER)
 #					if defined(PBR_WATER)
-	float3 finalColor;
-	[branch] if (PBRWater::UnderwaterActive())
-	{
-		// The surface seen from below (Crest's underwater surface): Snell's window shows the world above,
-		// outside it total internal reflection mirrors the water body, and both are seen through the
-		// water between the camera and the surface.
-		PBRWater::UnderwaterLighting pbrLight = PBRWater::GetUnderwaterLighting();
-		float3 pbrBaseExtinction = PBRWater::UnderwaterBaseExtinction();
-		float pbrJitter = Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount);
-		PBRWater::UnderwaterSegment pbrColumn = PBRWater::MarchUnderwater(viewDirection, length(input.WPosition.xyz), PBRWater::UnderwaterPlaneZ(), pbrLight, pbrBaseExtinction, pbrJitter, 4);
-		PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(pbrBaseExtinction, pbrColumn.endTurbidity);
-		float3 pbrReflected = PBRWater::UnderwaterBodyRadiance(pbrLight, pbrOptics, reflect(viewDirection, normal), 0.0);
-		pbrReflected = pbrReflected * pbrColumn.transmittance + pbrColumn.inscatter;
-		float3 pbrWindow = Color::IrradianceToLinear(diffuseOutput.refractionColor);
-		// Once the underwater composite has fogged the scene behind the surface, the window already carries this water.
-		if (PBRWater::Underwater3.z < 0.5)
-			pbrWindow = pbrWindow * pbrColumn.transmittance + pbrColumn.inscatter;
-		finalColor = Color::IrradianceToGamma(lerp(pbrWindow, pbrReflected, fresnel));
+	// The surface seen from below (Crest's underwater surface). Snell's window shows the world above, which
+	// the composite has already fogged with the water up to it. Outside the window total internal reflection
+	// mirrors the water body: the water fog seen along the mirrored ray, out to where the water is opaque,
+	// so it darkens where the mirror looks steeply down into deep water and glows towards the sun.
+	float3 pbrMirror = reflect(viewDirection, normal);
+	float3 pbrBody = Color::Water(lerp(DeepColor.xyz, ShallowColor.xyz, 0.5)) * (0.6 + 0.4 * saturate(1.0 + pbrMirror.z));
+#						if defined(EXP_HEIGHT_FOG)
+	if (SharedData::exponentialHeightFogSettings.enabled) {
+		float pbrExtinction = SharedData::exponentialHeightFogSettings.fogDensity * 0.001 * 0.693147;
+		float pbrReach = min(4.0 / max(pbrExtinction, 1e-6), 0.9 * SharedData::exponentialHeightFogSettings.volumetricFogDistance);
+		pbrBody = ExponentialHeightFog::GetExponentialHeightFog(input.WPosition.xyz + pbrMirror * pbrReach, FrameBuffer::CameraPosAdjust.xyz, Color::Fog(FogFarColor.xyz)).xyz;
 	}
-	else
-	{
-		float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
-		finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
-	}
+#						endif
+	float3 finalColor = lerp(diffuseOutput.refractionColor, pbrBody, fresnel);
 #					else
 	float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
 	float3 finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;

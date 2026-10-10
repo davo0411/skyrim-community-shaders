@@ -181,14 +181,8 @@ PS_OUTPUT main(PS_INPUT input)
 	bool isGeometryDepth = depth < GeometryDepthMax;
 
 #	if defined(PBR_WATER)
-	// Under water, PBR Water's water volume replaces the vanilla underwater fog below.
-	float3 pbrUnderwaterColor = composedColor.xyz;
-	float3 pbrMeniscus = 1.0;
-	bool pbrUnderwater = false;
-	[branch] if (PBRWater::UnderwaterActive())
-	{
-		pbrUnderwater = PBRWater::ApplyUnderwater(pbrUnderwaterColor, input.TexCoord, depth, isGeometryDepth, input.Position.xy, pbrMeniscus);
-	}
+	// Under water the height fog below is the water body (PBR Water supplies it); only the waterline is drawn here.
+	float3 pbrMeniscus = PBRWater::UnderwaterActive() ? PBRWater::UnderwaterMeniscus(input.TexCoord) : 1.0;
 #	endif
 
 #	if defined(APPLY_FOG)
@@ -226,10 +220,10 @@ PS_OUTPUT main(PS_INPUT input)
 		if (exponentialHeightFogEnabled && isGeometryDepth && !ExponentialHeightFog::ShouldDisableVanillaFog()) {
 			// Apply vanilla fog first, then exp fog on top
 			composedColor.xyz = lerp(fogSource, fogFade * fogColor, Color::FogAlpha(fogFactor));
-			composedColor.xyz = lerp(composedColor.xyz, fogFade * exponentialHeightFog.xyz, exponentialHeightFog.w);
+			composedColor.xyz = lerp(composedColor.xyz, fogFade * exponentialHeightFog.xyz, ExponentialHeightFog::GetSpectralFogOpacity(exponentialHeightFog.w));
 		} else if (exponentialHeightFogEnabled) {
 			// Disable vanilla fog, only apply exp height fog
-			composedColor.xyz = lerp(fogSource, fogFade * exponentialHeightFog.xyz, exponentialHeightFog.w);
+			composedColor.xyz = lerp(fogSource, fogFade * exponentialHeightFog.xyz, ExponentialHeightFog::GetSpectralFogOpacity(exponentialHeightFog.w));
 		} else {
 			composedColor.xyz = lerp(fogSource, fogFade * fogColor, Color::FogAlpha(fogFactor));
 		}
@@ -239,11 +233,6 @@ PS_OUTPUT main(PS_INPUT input)
 		composedColor.xyz = FogNearColor.w * lerp(composedColor.xyz, fogColor, Color::FogAlpha(fogFactor));
 	}
 #		endif
-#	endif
-
-#	if defined(PBR_WATER)
-	if (pbrUnderwater)
-		composedColor.xyz = pbrUnderwaterColor;
 #	endif
 
 	float sparklesInput = 0;

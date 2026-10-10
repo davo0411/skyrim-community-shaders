@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "Features/ExponentialHeightFog.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/WaterEnvironment.h"
@@ -98,7 +99,6 @@ struct PBRWater : Feature
 		float LightShaftDepth = 15.0f;  ///< metres over which the shafts fade
 		float SunGlow = 1.0f;
 		float Meniscus = 1.0f;
-		int UnderwaterSamples = 12;
 
 		// Foam
 		float FoamAmount = 1.0f;
@@ -134,7 +134,7 @@ struct PBRWater : Feature
 		// Floating objects
 		bool EnableFloatingObjects = true;
 		float FloatingRange = 150.0f;   ///< metres around the player in which objects float
-		float MaxFloatingSize = 60.0f;  ///< metres: the longest hull that floats
+		float MaxFloatingSize = 90.0f;  ///< metres: the longest hull that floats (the large Skyrim ships are ~65 m)
 		float FloatingResponse = 1.0f;  ///< scales how much the hulls move
 		bool CarryActors = true;
 
@@ -171,6 +171,12 @@ struct PBRWater : Feature
 
 	/** @brief Wave displacement height above the flat plane at a world position (any thread). */
 	bool GetWaveHeight(const RE::NiPoint3& position, float flatWaterZ, float& height) const;
+
+	/**
+	 * @brief The water the camera is in, as a fog medium (Exponential Height Fog renders it).
+	 * @return false unless the underwater view is enabled and the eye is below the displaced surface
+	 */
+	bool GetUnderwaterMedium(ExponentialHeightFog::UnderwaterMedium& medium) const;
 
 	// ---- GPU constants, must match PBRWaterData in PBRWater.hlsli ----
 	struct GpuData
@@ -213,6 +219,7 @@ struct PBRWater : Feature
 		float4 Land1;  // x enabled, y vertex spacing (units)
 		float4 Foam2;  // x whitecap amount, y whitecap scale (units), z streak stretch, w bubble amount
 		float4 Foam3;  // xy foam drift (units, wrapped), zw extra bubble drift (units, wrapped)
+		float4 Flow0;  // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -221,6 +228,7 @@ struct PBRWater : Feature
 	{
 		bool underwater = false;   ///< the camera may be below the (displaced) surface
 		bool nearSurface = false;  ///< the waterline can cross the lens
+		bool submerged = false;    ///< the eye is below the displaced surface
 		float flatZ = 0.0f;        ///< absolute height of the flat water plane
 		float band = 0.0f;         ///< how far the waves and ripples can move the surface (units)
 		float3 shallow{};          ///< water form colours (gamma, weather multiplier applied)
@@ -285,6 +293,7 @@ private:
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
 	GpuData frameData{};
+	ID3D11ShaderResourceView* worldFlowmap = nullptr;  ///< render thread: Unified Water's worldspace flowmap (not owned)
 	uint32_t frameDataFrame = UINT32_MAX;
 
 	std::unique_ptr<Texture2D> fetchTexture;
@@ -317,7 +326,6 @@ private:
 	float smoothedRain = 0.0f;
 
 	// Render thread
-	uint32_t underwaterCompositeFrame = UINT32_MAX;  ///< frame the composite last fogged the scene under water
 
 	// Per-draw tessellation state (render thread)
 	bool tessellationBound = false;
