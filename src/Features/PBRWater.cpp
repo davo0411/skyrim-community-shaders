@@ -51,8 +51,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		WindRoughness,
 		Gusts,
 		GustSize,
-		Bioluminescence,
-		BioluminescenceColor,
 		WindStreaks,
 		Turbidity,
 		TurbidityPatchiness))
@@ -66,12 +64,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		StormTurbidity,
 		WadingSilt,
 		SedimentLayerHeight,
-		EnableUnderwater,
-		UnderwaterVisibility,
-		LightShafts,
-		LightShaftDepth,
-		SunGlow,
-		Meniscus,
 		FoamAmount,
 		ShoreFoamWidth,
 		FoamPersistence,
@@ -137,8 +129,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		WindRoughness,
 		Gusts,
 		GustSize,
-		Bioluminescence,
-		BioluminescenceColor,
 		WindStreaks,
 		Turbidity,
 		TurbidityPatchiness))
@@ -152,12 +142,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		StormTurbidity,
 		WadingSilt,
 		SedimentLayerHeight,
-		EnableUnderwater,
-		UnderwaterVisibility,
-		LightShafts,
-		LightShaftDepth,
-		SunGlow,
-		Meniscus,
 		FoamAmount,
 		ShoreFoamWidth,
 		FoamPersistence,
@@ -270,10 +254,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.WindRoughness, 0.0f, 3.0f, d.WindRoughness);
 	clamp(s.Gusts, 0.0f, 1.0f, d.Gusts);
 	clamp(s.GustSize, 10.0f, 300.0f, d.GustSize);
-	clamp(s.Bioluminescence, 0.0f, 3.0f, d.Bioluminescence);
-	clamp(s.BioluminescenceColor.x, 0.0f, 1.0f, d.BioluminescenceColor.x);
-	clamp(s.BioluminescenceColor.y, 0.0f, 1.0f, d.BioluminescenceColor.y);
-	clamp(s.BioluminescenceColor.z, 0.0f, 1.0f, d.BioluminescenceColor.z);
 	clamp(s.WindStreaks, 0.0f, 3.0f, d.WindStreaks);
 	clamp(s.Turbidity, 0.0f, 5.0f, d.Turbidity);
 	clamp(s.TurbidityPatchiness, 0.0f, 1.0f, d.TurbidityPatchiness);
@@ -287,11 +267,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.StormTurbidity, 0.0f, 3.0f, d.StormTurbidity);
 	clamp(s.WadingSilt, 0.0f, 3.0f, d.WadingSilt);
 	clamp(s.SedimentLayerHeight, 0.2f, 10.0f, d.SedimentLayerHeight);
-	clamp(s.UnderwaterVisibility, 0.1f, 10.0f, d.UnderwaterVisibility);
-	clamp(s.LightShafts, 0.0f, 3.0f, d.LightShafts);
-	clamp(s.LightShaftDepth, 1.0f, 60.0f, d.LightShaftDepth);
-	clamp(s.SunGlow, 0.0f, 1.0f, d.SunGlow);
-	clamp(s.Meniscus, 0.0f, 1.0f, d.Meniscus);
 	clamp(s.FoamAmount, 0.0f, 3.0f, d.FoamAmount);
 	clamp(s.ShoreFoamWidth, 0.0f, 5.0f, d.ShoreFoamWidth);
 	clamp(s.FoamPersistence, 0.0f, 5.0f, d.FoamPersistence);
@@ -348,10 +323,7 @@ void PBRWater::RegisterWeatherVariables()
 	addFloat("Roughness", "Surface Roughness", "Micro-roughness of the water surface below the wave detail", &settings.Roughness, defaults.Roughness, 0.02f, 0.5f);
 	addFloat("Turbidity", "Turbidity", "Suspended sediment in the water: higher is murkier", &settings.Turbidity, defaults.Turbidity, 0.0f, 5.0f);
 	addFloat("StormTurbidity", "Storm Turbidity", "Extra sediment stirred up by strong wind and rain", &settings.StormTurbidity, defaults.StormTurbidity, 0.0f, 3.0f);
-	addFloat("UnderwaterVisibility", "Underwater Visibility", "Scales how far you can see under water", &settings.UnderwaterVisibility, defaults.UnderwaterVisibility, 0.1f, 10.0f);
-	addFloat("LightShafts", "Underwater Light Shafts", "Strength of the sun shafts under water", &settings.LightShafts, defaults.LightShafts, 0.0f, 3.0f);
 	addFloat("Gusts", "Gusts", "How strongly gusts vary the wind over the water", &settings.Gusts, defaults.Gusts, 0.0f, 1.0f);
-	addFloat("Bioluminescence", "Bioluminescence", "Plankton glow in churned water at night", &settings.Bioluminescence, defaults.Bioluminescence, 0.0f, 3.0f);
 	registry->RegisterVariable(std::make_shared<WeatherVariables::Float3Variable>("SedimentColor", "Sediment Colour", "Colour of murky water", &settings.SedimentColor, defaults.SedimentColor));
 }
 
@@ -447,24 +419,6 @@ void PBRWater::DrawSettings()
 		ImGui::TreePop();
 	}
 
-	if (ImGui::TreeNodeEx(T(TKEY("underwater"), "Underwater"), ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Checkbox(T(TKEY("enable_underwater"), "Volumetric Underwater"), &settings.EnableUnderwater);
-		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("enable_underwater_tooltip"), "Under water, Exponential Height Fog and its volumetric fog render the water itself: light fading with depth, red absorbed first, sun glow, light shafts and shadows through the water, and the waterline across the lens."));
-		if (settings.EnableUnderwater) {
-			Util::WeatherUI::SliderFloat(T(TKEY("underwater_visibility"), "Underwater Visibility"), this, "UnderwaterVisibility", &settings.UnderwaterVisibility, 0.1f, 10.0f, "%.2f");
-			if (auto _tt = Util::HoverTooltipWrapper())
-				ImGui::TextUnformatted(T(TKEY("underwater_visibility_tooltip"), "Scales the water form's underwater fog distance."));
-			Util::WeatherUI::SliderFloat(T(TKEY("light_shafts"), "Light Shafts"), this, "LightShafts", &settings.LightShafts, 0.0f, 3.0f, "%.2f");
-			ImGui::SliderFloat(T(TKEY("light_shaft_depth"), "Light Shaft Depth"), &settings.LightShaftDepth, 1.0f, 60.0f, "%.0f m");
-			ImGui::SliderFloat(T(TKEY("sun_glow"), "Sun Glow"), &settings.SunGlow, 0.0f, 1.0f, "%.2f");
-			if (auto _tt = Util::HoverTooltipWrapper())
-				ImGui::TextUnformatted(T(TKEY("sun_glow_tooltip"), "Brightening of the water towards the sun from forward scattering."));
-			ImGui::SliderFloat(T(TKEY("meniscus"), "Waterline Meniscus"), &settings.Meniscus, 0.0f, 1.0f, "%.2f");
-		}
-		ImGui::TreePop();
-	}
-
 	if (ImGui::TreeNodeEx(T(TKEY("foam"), "Surface Foam"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		Util::WeatherUI::SliderFloat(T(TKEY("foam_amount"), "Foam Amount"), this, "FoamAmount", &settings.FoamAmount, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
@@ -498,14 +452,6 @@ void PBRWater::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("whitecap_streak"), "Whitecap Streaks"), &settings.WhitecapStreak, 1.0f, 8.0f, "%.1f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("whitecap_streak_tooltip"), "How strongly whitecap foam is torn into streaks along the wind."));
-		ImGui::TreePop();
-	}
-
-	if (ImGui::TreeNodeEx(T(TKEY("bioluminescence_section"), "Bioluminescence"), ImGuiTreeNodeFlags_None)) {
-		Util::WeatherUI::SliderFloat(T(TKEY("bioluminescence"), "Bioluminescence"), this, "Bioluminescence", &settings.Bioluminescence, 0.0f, 3.0f, "%.2f");
-		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("bioluminescence_tooltip"), "Plankton that flash when the water is disturbed: breaking waves, wakes and splashes glow in the dark."));
-		ImGui::ColorEdit3(T(TKEY("bioluminescence_color"), "Glow Colour"), reinterpret_cast<float*>(&settings.BioluminescenceColor));
 		ImGui::TreePop();
 	}
 
@@ -825,19 +771,9 @@ void PBRWater::UpdateFrameConstants()
 	// Sediment plumes drift and reshape over hours; a daily wrap keeps their coordinates precise.
 	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), snap ? snap->spectrum.significantHeight : 0.0f };
 
-	// Underwater view.
-	const auto camera = cameraWater.load(std::memory_order_acquire);
-	if (settings.EnableUnderwater && camera && camera->underwater) {
-		d.Underwater0 = { 1.0f, camera->flatZ, camera->nearSurface ? camera->band : 0.0f, camera->visibility * settings.UnderwaterVisibility * settings.Visibility };
-		d.Underwater1 = { camera->shallow.x, camera->shallow.y, camera->shallow.z, settings.LightShafts };
-		d.Underwater2 = { camera->deep.x, camera->deep.y, camera->deep.z, settings.LightShaftDepth * UnitsPerMetre };
-	}
-	d.Underwater3 = { settings.Meniscus, 0.0f, 0.0f, 0.0f };
-
-	// Wind and rain on the surface, bioluminescence.
+	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
-	d.Surface1 = { settings.WindStreaks, settings.Bioluminescence, 0.0f, 0.0f };
-	d.Surface2 = { settings.BioluminescenceColor.x, settings.BioluminescenceColor.y, settings.BioluminescenceColor.z, 0.0f };
+	d.Surface1 = { settings.WindStreaks, 0.0f, 0.0f, 0.0f };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
 	worldFlowmap = nullptr;
@@ -987,32 +923,6 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	}
 }
 
-void PBRWater::BindUnderwaterComposite()
-{
-	if (!gpuBuffer)
-		return;
-
-	UpdateFrameConstants();
-	GpuData d = frameData;
-	d.Tess0.x = 0.0f;
-	gpuBuffer->Update(d);
-
-	auto context = globals::d3d::context;
-	ID3D11Buffer* cb = gpuBuffer->CB();
-	context->PSSetConstantBuffers(7, 1, &cb);
-
-	ID3D11ShaderResourceView* srvs[5] = {
-		settings.EnableRipples ? ripples.GetSRV() : nullptr,
-		fetchTexture ? fetchTexture->srv.get() : nullptr,
-		(d.Terrain1.z > 0.5f && globals::features::terrainShadows.texHeightMap) ? globals::features::terrainShadows.texHeightMap->srv.get() : nullptr,
-		settings.EnableRipples ? ripples.GetPreviousSRV() : nullptr,
-		(d.Land1.x > 0.5f && landTexture) ? landTexture->srv.get() : nullptr
-	};
-	context->PSSetShaderResources(110, 5, srvs);
-	ID3D11SamplerState* sampler = linearClampSampler.get();
-	context->PSSetSamplers(12, 1, &sampler);
-}
-
 void PBRWater::RestoreDraw()
 {
 	auto context = globals::d3d::context;
@@ -1138,8 +1048,6 @@ void PBRWater::MainThreadUpdate()
 	smoothedRain += ((exterior ? RainFraction() : 0.0f) - smoothedRain) * SmoothFactor(dt, 4.0f);
 	rainIntensity.store(smoothedRain, std::memory_order_release);
 
-	cameraWater.store(settings.EnableUnderwater ? FindCameraWater(*published, exterior) : nullptr, std::memory_order_release);
-
 	GatherInteractions(*published, dt);
 
 	FloatingObjects::Settings floatingSettings;
@@ -1173,96 +1081,6 @@ float PBRWater::RainFraction() const
 	};
 	const float blend = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
 	return rainy(sky->currentWeather) * blend + rainy(sky->lastWeather) * (1.0f - blend);
-}
-
-std::shared_ptr<const PBRWater::CameraWater> PBRWater::FindCameraWater(const PBRWaterModel::WaveSnapshot& snap, bool exterior) const
-{
-	auto player = RE::PlayerCharacter::GetSingleton();
-	auto tes = globals::game::tes;
-	if (!player || !tes)
-		return nullptr;
-
-	const auto eye = Util::GetEyePosition();
-	RE::TESObjectCELL* cell = exterior ? tes->GetCell(eye) : nullptr;
-	if (!cell)
-		cell = player->GetParentCell();
-	float flatZ = 0.0f;
-	if (!cell || !TESObjectCELL_GetWaterHeight::func(cell, eye, flatZ) || flatZ <= -1e6f)
-		return nullptr;
-
-	auto water = std::make_shared<CameraWater>();
-	water->flatZ = flatZ;
-	// How far waves (shoaling included) and ripples can lift or drop the surface, plus a margin for the lens.
-	water->band = 2.0f * (snap.spectrum.amplitudeSum + snap.shore.amplitude) + 4.0f * settings.RippleHeight * UnitsPerMetre + 16.0f;
-	water->underwater = eye.z < flatZ + water->band;
-	water->nearSurface = eye.z > flatZ - water->band;
-	if (!water->underwater)
-		return water;
-
-	RE::TESWaterForm* form = nullptr;
-	if (const auto extra = cell->extraList.GetByType<RE::ExtraCellWaterType>())
-		form = extra->water;
-	if (!form && exterior) {
-		if (const auto worldSpace = tes->GetRuntimeData2().worldSpace)
-			form = worldSpace->worldWater;
-	}
-	if (!form) {
-		if (const auto waterSystem = RE::TESWaterSystem::GetSingleton())
-			form = waterSystem->currentWaterType;
-	}
-	if (!form) {
-		water->underwater = false;
-		return water;
-	}
-	water->submerged = eye.z < flatZ + snap.SampleAt(eye.x, eye.y, flatZ).height;
-
-	// The weather scales the water colours through the day (as the water shader's material colours).
-	float3 multiplier{ 1.0f, 1.0f, 1.0f };
-	if (const auto sky = globals::game::sky) {
-		const auto& color = sky->skyColor[RE::TESWeather::ColorTypes::kWaterMultiplier];
-		multiplier = { color.red, color.green, color.blue };
-	}
-	const auto& data = form->data;
-	water->shallow = { data.shallowWaterColor.red / 255.0f * multiplier.x, data.shallowWaterColor.green / 255.0f * multiplier.y, data.shallowWaterColor.blue / 255.0f * multiplier.z };
-	water->deep = { data.deepWaterColor.red / 255.0f * multiplier.x, data.deepWaterColor.green / 255.0f * multiplier.y, data.deepWaterColor.blue / 255.0f * multiplier.z };
-	float visibility = data.underwaterFogDistFar > 1.0f ? data.underwaterFogDistFar : data.aboveWaterFogDistFar;
-	water->visibility = std::clamp(std::isfinite(visibility) ? visibility : 2048.0f, 128.0f, 200000.0f);
-	return water;
-}
-
-bool PBRWater::GetUnderwaterMedium(ExponentialHeightFog::UnderwaterMedium& medium) const
-{
-	const auto camera = cameraWater.load(std::memory_order_acquire);
-	if (!settings.EnableUnderwater || !camera || !camera->underwater || !camera->submerged)
-		return false;
-
-	// CPU mirror of Extinction() and GetWaterOptics() (Optics.hlsli) at the camera: the water form's shallow
-	// colour is the tint light picks up over its underwater visibility, sediment adds grey-brown extinction.
-	const float visibility = std::max(camera->visibility * settings.UnderwaterVisibility * settings.Visibility, 1.0f);
-	const float3 shallow{ std::pow(std::max(camera->shallow.x, 0.0f), 2.2f), std::pow(std::max(camera->shallow.y, 0.0f), 2.2f), std::pow(std::max(camera->shallow.z, 0.0f), 2.2f) };
-	const float peak = std::max({ shallow.x, shallow.y, shallow.z, 1e-4f });
-	auto extinction = [&](float c) { return (std::log(20.0f) - std::log(std::max(c / peak, 0.02f))) / visibility; };
-	const float3 water{ extinction(shallow.x), extinction(shallow.y), extinction(shallow.z) };
-	const float turbidity = std::max(settings.Turbidity + weatherTurbidity.load(std::memory_order_acquire), 0.0f);
-	const float sediment = turbidity * settings.SedimentDensity / UnitsPerMetre;
-	const float3 c = settings.SedimentColor;
-	const float cPeak = std::max({ c.x, c.y, c.z, 1e-3f });
-	const float3 sedimentAlbedo{ 0.6f + 0.35f * std::max(c.x, 1e-3f) / cPeak, 0.6f + 0.35f * std::max(c.y, 1e-3f) / cPeak, 0.6f + 0.35f * std::max(c.z, 1e-3f) / cPeak };
-	const float clearScattering = 0.6f * std::min({ water.x, water.y, water.z });
-
-	medium.planeZ = camera->flatZ;
-	medium.extinction = { water.x + sediment, water.y + sediment, water.z + sediment };
-	const float3 scattering{ clearScattering + sediment * sedimentAlbedo.x, clearScattering + sediment * sedimentAlbedo.y, clearScattering + sediment * sedimentAlbedo.z };
-	medium.albedo = { scattering.x / medium.extinction.x, scattering.y / medium.extinction.y, scattering.z / medium.extinction.z };
-	// K_d ~ a + b_b with ~10% backscatter (forward-peaked particles).
-	medium.downwelling = { std::max(medium.extinction.x - 0.9f * scattering.x, 0.0f) * settings.DownwellingAttenuation,
-		std::max(medium.extinction.y - 0.9f * scattering.y, 0.0f) * settings.DownwellingAttenuation,
-		std::max(medium.extinction.z - 0.9f * scattering.z, 0.0f) * settings.DownwellingAttenuation };
-	medium.anisotropy = settings.ScatteringAnisotropy * settings.SunGlow;
-	medium.shaftStrength = settings.LightShafts;
-	medium.shaftDepth = settings.LightShaftDepth * UnitsPerMetre;
-	medium.time = std::fmod(globals::state->timer, 86400.0f);
-	return true;
 }
 
 bool PBRWater::GetWaveHeight(const RE::NiPoint3& position, float flatWaterZ, float& height) const
@@ -1454,13 +1272,6 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 // Hooks
 // ============================================================================
 
-template <int Variant>
-void PBRWater::ISSAOComposite_Render<Variant>::thunk(void* imageSpaceShader, RE::BSTriShape* shape, RE::ImageSpaceEffectParam* param)
-{
-	globals::features::pbrWater.BindUnderwaterComposite();
-	func(imageSpaceShader, shape, param);
-}
-
 void PBRWater::PostPostLoad()
 {
 	// Without the vanilla displacement (wading) mesh: it is a second water surface around the player
@@ -1474,11 +1285,6 @@ void PBRWater::PostPostLoad()
 
 	// Same Main::Update call site Grass Collision uses; write_thunk_call chains with it.
 	stl::write_thunk_call<MainUpdate>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
-
-	// The SAO composite fogs the opaque scene; under water it renders the water volume instead.
-	stl::write_vfunc<0x1, ISSAOComposite_Render<0>>(RE::VTABLE_BSImagespaceShaderISSAOCompositeSAO[3]);
-	stl::write_vfunc<0x1, ISSAOComposite_Render<1>>(RE::VTABLE_BSImagespaceShaderISSAOCompositeFog[3]);
-	stl::write_vfunc<0x1, ISSAOComposite_Render<2>>(RE::VTABLE_BSImagespaceShaderISSAOCompositeSAOFog[3]);
 
 	logger::info("[PBR Water] Installed hooks");
 }

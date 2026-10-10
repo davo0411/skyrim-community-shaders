@@ -6,8 +6,7 @@
 #include "PBRWater/PBRWater.hlsli"
 
 // ============================================================================
-// PBR Water - optical properties of the water body, shared by the surface (seen from above and
-// below) and the underwater view.
+// PBR Water - optical properties of the water body, used by the surface shading.
 //
 //   Clarity    : water is rarely uniformly clear. Suspended sediment ("turbidity") varies in drifting
 //                patches, is stirred up from the bottom by the waves' orbital motion in the shallows

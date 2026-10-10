@@ -13,68 +13,6 @@ namespace ExponentialHeightFog
 		return (1.0f - g2) / (4.0f * Math::PI * pow(max(denom, 1e-5f), 1.5f));
 	}
 
-	// ------------------------------------------------------------------------
-	// Under water (PBR Water) the fog is the water body: uniform up to the water plane, nothing above.
-	// ------------------------------------------------------------------------
-
-	bool IsUnderwater()
-	{
-		return SharedData::exponentialHeightFogSettings.underwater.x > 0.5f;
-	}
-
-	float GetUnderwaterPlaneZ()
-	{
-		return SharedData::exponentialHeightFogSettings.underwater.y;
-	}
-
-	/// Cosine of a light direction after refraction into the water: the sun is never more than ~49 degrees
-	/// from the vertical under water.
-	float GetUnderwaterLightCosine(float3 toLight)
-	{
-		float sin2 = saturate(1.0f - toLight.z * toLight.z) / (1.333f * 1.333f);
-		return max(sqrt(1.0f - sin2), 0.3f);
-	}
-
-	/// Share of the light entering the surface that reaches absolute height `worldZ` (direct light along
-	/// `toLight`), per channel: water absorbs red within metres and blue last.
-	float3 GetUnderwaterLightTransmittance(float worldZ, float3 toLight)
-	{
-		float depth = max(GetUnderwaterPlaneZ() - worldZ, 0.0f);
-		return exp(-SharedData::exponentialHeightFogSettings.underwaterDownwelling.xyz * depth / GetUnderwaterLightCosine(toLight));
-	}
-
-	/// Sky light reaching absolute height `worldZ`: diffuse, arriving on average from ~40 degrees off vertical.
-	float3 GetUnderwaterSkyTransmittance(float worldZ)
-	{
-		float depth = max(GetUnderwaterPlaneZ() - worldZ, 0.0f);
-		return exp(-SharedData::exponentialHeightFogSettings.underwaterDownwelling.xyz * depth / 0.75f);
-	}
-
-	/// Length of the part of the segment from absolute `startZ` along `ray` (from t0 to t1 of it) that
-	/// lies below the water plane.
-	float GetUnderwaterPathLength(float startZ, float3 ray, float t0, float t1)
-	{
-		float planeZ = GetUnderwaterPlaneZ();
-		if (abs(ray.z) > 1e-4f) {
-			float tPlane = (planeZ - startZ) / ray.z;
-			if (ray.z > 0.0f)
-				t1 = min(t1, tPlane);
-			else
-				t0 = max(t0, tPlane);
-		} else if (startZ > planeZ) {
-			return 0.0f;
-		}
-		return max(t1 - t0, 0.0f) * length(ray);
-	}
-
-	/// Per-channel fog opacity for a fog of opacity `alpha`. Under water the extinction differs per channel,
-	/// and the fog is all water, so each channel's transmittance is the fog's raised to its relative extinction.
-	float3 GetSpectralFogOpacity(float alpha)
-	{
-		float3 relativeExtinction = IsUnderwater() ? SharedData::exponentialHeightFogSettings.underwaterSpectral.xyz : 1.0f.xxx;
-		return 1.0f - pow(saturate(1.0f - alpha).xxx, relativeExtinction);
-	}
-
 	float GetHeightFogFalloff()
 	{
 		return SharedData::exponentialHeightFogSettings.fogHeightFalloff * 0.001f;

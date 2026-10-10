@@ -21,9 +21,6 @@ RWTexture3D<float4> LightScattering : register(u0);
 #endif
 #define SKYLIGHTING_PROBE_REGISTER t50
 #include "Skylighting/Skylighting.hlsli"
-#if defined(PBR_WATER)
-#	include "PBRWater/Noise.hlsli"
-#endif
 
 struct DirectionalShadowLightData
 {
@@ -229,39 +226,9 @@ float3 ComputeSkyLightScattering(float3 positionWS, float3 viewDirection)
 		skyVisibility;
 	[branch] if (VolumetricFogHasIBL)
 		skyLighting = ImageBasedLighting::GetIBLColorOccluded(skyDirection, skyVisibility);
-	else if (ExponentialHeightFog::IsUnderwater())
-		skyLighting = max(SharedData::GetAmbient(float3(0.0f, 0.0f, 1.0f)), 0.0f) * skyVisibility;  // sky light entering the surface
 
 	return skyLighting *
 	       SharedData::exponentialHeightFogSettings.volumetricSkyLightingIntensity;
-}
-
-/**
- * Under water: sunlight that entered through the wavy surface is focused into a moving network of
- * caustics; sampled where the refracted sun ray through this point crossed the surface, it streaks the
- * volume into light shafts. Mean 1, so the shafts redistribute the light. Fades and blurs with depth.
- */
-float UnderwaterLightShafts(float3 positionWS)
-{
-#if defined(PBR_WATER)
-	const float4 underwater = SharedData::exponentialHeightFogSettings.underwater;
-	float depth = max(underwater.y - (positionWS.z + FrameBuffer::CameraPosAdjust.z), 0.0f);
-	float fadeDepth = SharedData::exponentialHeightFogSettings.underwaterSpectral.w;
-	float strength = underwater.z * exp(-depth / fadeDepth);
-	if (strength <= 1e-3f || SharedData::InInterior || SharedData::DirLightDirection.z <= 0.0f)
-		return 1.0f;
-	float3 toSun = normalize(SharedData::DirLightDirection.xyz);
-	float cosSun = ExponentialHeightFog::GetUnderwaterLightCosine(toSun);
-	float2 refractedXY = toSun.xy / 1.333f;
-	float2 entry = positionWS.xy + FrameBuffer::CameraPosAdjust.xy + refractedXY / cosSun * depth;
-	static const float MetresPerUnit = 1.0f / 70.0f;
-	float depthMetres = depth * MetresPerUnit;
-	// Focus is lost with depth: the network grows coarser and softer.
-	float2 surface = entry * MetresPerUnit / (1.0f + depthMetres * 0.05f);
-	return max(lerp(1.0f, PBRWater::CausticPattern(surface, underwater.w, saturate(depth / fadeDepth)), strength), 0.0f);
-#else
-	return 1.0f;
-#endif
 }
 
 #if defined(LIGHT_LIMIT_FIX)
@@ -370,15 +337,6 @@ float4 ComputeLightScattering(uint3 coord, float3 cellOffset)
 
 	float3 skyScattering = ComputeSkyLightScattering(positionWS, viewDirection) *
 	                       materialScatteringAndExtinction.rgb;
-
-	[branch] if (ExponentialHeightFog::IsUnderwater())
-	{
-		// Light reaching this point through the water above it.
-		float worldZ = positionWS.z + FrameBuffer::CameraPosAdjust.z;
-		directionalScattering *= ExponentialHeightFog::GetUnderwaterLightTransmittance(worldZ, normalize(SharedData::DirLightDirection.xyz)) *
-		                         UnderwaterLightShafts(positionWS);
-		skyScattering *= ExponentialHeightFog::GetUnderwaterSkyTransmittance(worldZ);
-	}
 
 #if !defined(VOLUMETRIC_FOG_FAR_GRID)
 	float3 localScattering = AccumulateLocalLightScattering(

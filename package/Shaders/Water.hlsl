@@ -553,7 +553,6 @@ cbuffer PerGeometry : register(b2)
 
 #		if defined(PBR_WATER)
 #			include "PBRWater/Shading.hlsli"
-#			include "PBRWater/Underwater.hlsli"
 #		endif
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)
@@ -1303,16 +1302,11 @@ PS_OUTPUT main(PS_INPUT input)
 #			endif
 
 	float fresnel = GetFresnelValue(normal, viewDirection);
-#			if defined(PBR_WATER)
+#			if defined(PBR_WATER) && !defined(UNDERWATER)
 	{
-#				if defined(UNDERWATER)
-		// Seen from below: water -> air, total internal reflection outside Snell's window.
-		float pbrFresnel = PBRWater::FresnelFromBelow(dot(viewDirection, normal), pbrRoughness);
-#				else
 		// Roughness-aware environment Fresnel for F0 = 0.02 (air -> water).
 		float2 envBRDF = BRDF::EnvBRDF(pbrRoughness, saturate(dot(-viewDirection, normal)));
 		float pbrFresnel = saturate(0.02 * envBRDF.x + envBRDF.y);
-#				endif
 		fresnel = lerp(pbrFresnel, fresnel, PBRWater::Light0.z);
 	}
 #			endif
@@ -1435,25 +1429,8 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 
 #				if defined(UNDERWATER)
-#					if defined(PBR_WATER)
-	// The surface seen from below (Crest's underwater surface). Snell's window shows the world above, which
-	// the composite has already fogged with the water up to it. Outside the window total internal reflection
-	// mirrors the water body: the water fog seen along the mirrored ray, out to where the water is opaque,
-	// so it darkens where the mirror looks steeply down into deep water and glows towards the sun.
-	float3 pbrMirror = reflect(viewDirection, normal);
-	float3 pbrBody = Color::Water(lerp(DeepColor.xyz, ShallowColor.xyz, 0.5)) * (0.6 + 0.4 * saturate(1.0 + pbrMirror.z));
-#						if defined(EXP_HEIGHT_FOG)
-	if (SharedData::exponentialHeightFogSettings.enabled) {
-		float pbrExtinction = SharedData::exponentialHeightFogSettings.fogDensity * 0.001 * 0.693147;
-		float pbrReach = min(4.0 / max(pbrExtinction, 1e-6), 0.9 * SharedData::exponentialHeightFogSettings.volumetricFogDistance);
-		pbrBody = ExponentialHeightFog::GetExponentialHeightFog(input.WPosition.xyz + pbrMirror * pbrReach, FrameBuffer::CameraPosAdjust.xyz, Color::Fog(FogFarColor.xyz)).xyz;
-	}
-#						endif
-	float3 finalColor = lerp(diffuseOutput.refractionColor, pbrBody, fresnel);
-#					else
 	float3 finalSpecularColor = lerp(Color::Water(ShallowColor.xyz), specularColor, 0.5);
 	float3 finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
-#					endif
 	// Add ripple and splash color effects for underwater
 #					if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override water color with debug visualization (darker for underwater)
@@ -1592,13 +1569,17 @@ PS_OUTPUT main(PS_INPUT input)
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
 	pbrThickness = pbrBottomDepth;
 #							endif
-	float2 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
+	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
 	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
 	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
 	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
-	float2 pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, max(pbrFoamCoverage.x, pbrFoamCoverage.y), pbrSurface.footprint, PBRWater::Foam1.y);
+	// Splashes and wakes aerate the water: bubble specks, with only a faint milky haze.
+	float pbrSettledFoam = max(pbrFoamCoverage.x, pbrFoamCoverage.y);
+	float pbrAeration = max(pbrSettledFoam, pbrFoamCoverage.z);
+	float2 pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrAeration, pbrSurface.footprint, PBRWater::Foam1.y);
+	pbrBubbles.y *= saturate(pbrSettledFoam + 0.2 * pbrFoamCoverage.z) / max(pbrAeration, 1e-3);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)
@@ -1620,9 +1601,6 @@ PS_OUTPUT main(PS_INPUT input)
 	// Wet foam keeps part of the water's glint.
 	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + sunColor * depthControl.w * (1.0 - 0.7 * pbrFoam);
 
-	// Bioluminescence where the water is churned, visible in the dark.
-	float pbrDarkness = saturate(1.0 - Color::RGBToLuminance(ShadowSampling::GetSceneLightingColor()) * 4.0);
-	finalColorPreFog += PBRWater::Bioluminescence(max(max(pbrFoamCoverage.x, pbrFoamCoverage.y), pbrSurface.rippleFoam), pbrFoamPosition, PBRWater::Foam1.y, pbrDarkness * pbrDarkness);
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH) && defined(REFRACTIONS)
 	// Soft shoreline: over the last few centimetres of water the surface (reflection, body colour,
 	// foam) fades into the ground seen through it, so the mesh never cuts the terrain with a hard line.

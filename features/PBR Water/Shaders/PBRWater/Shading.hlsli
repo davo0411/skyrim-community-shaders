@@ -20,7 +20,6 @@
 //   Wind      : micro-roughness from the local wind (Cox & Munk 1954): gusts sweep across the water as
 //               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
 //               roughens the surface.
-//   Glow      : opt-in bioluminescence where the water is churned, visible only in the dark.
 //   Foam      : procedural cellular foam advected with the waves, thresholded by a physically
 //               motivated coverage (shore depth, wave folding, breaking, wakes, whitecaps).
 // ============================================================================
@@ -411,33 +410,19 @@ namespace PBRWater
 
 	/// Foam coverage from all sources. `waterThickness` is the vertical water depth to the scene behind
 	/// the surface (shores, rocks, piers, wading legs ...); pass a large value when unknown.
-	/// x surface foam (contact band, breaking shore waves, wakes), y whitecaps (folding crests).
-	float2 FoamCoverage(SurfaceShading s, float waterThickness)
+	/// x surface foam (contact band, breaking shore waves, windrows), y whitecaps (folding crests),
+	/// z aeration from splashes and wakes: churned water is full of bubbles but leaves little foam.
+	float3 FoamCoverage(SurfaceShading s, float waterThickness)
 	{
 		// A thin band where the water meets anything, surging as each shore wave runs up.
 		float contact = exp(-waterThickness / max(Foam0.x, 1.0));
 		float surge = 0.6 + 0.4 * s.shoreCrest;
 		// Breaking foam rides the crests that are breaking, with only a thin residue between them.
 		float breaking = s.shoreBreak * Shore1.y * (0.1 + 0.9 * s.shoreCrest * s.shoreCrest);
-		float surface = saturate((contact * surge + breaking + s.rippleFoam * Foam1.z + s.windrows) * Foam0.z);
+		float aeration = saturate(s.rippleFoam * Foam1.z * 2.0);
+		float surface = saturate((contact * surge + breaking + s.windrows) * Foam0.z + aeration * 0.05);
 		float whitecap = saturate(s.crestFoam * Foam2.x);
-		return float2(surface, whitecap);
-	}
-
-	/**
-	 * Bioluminescence (opt-in): dinoflagellates flash blue-green when the water around them is sheared, so
-	 * breaking waves, wakes, splashes and the swash glow at night. `agitation` is the churned share of the
-	 * surface; the light is only visible in the dark. Returns emitted colour in the shading space.
-	 */
-	float3 Bioluminescence(float agitation, float2 absXY, float time, float darkness)
-	{
-		if (Surface1.y <= 0.0 || darkness <= 0.0 || agitation <= 0.0)
-			return 0.0;
-		// Individual flashes: sub-metre sparks that light up and fade within a second or so.
-		float2 p = absXY * MetresPerUnit * 3.0;
-		float sparks = smoothstep(0.55, 0.95, ValueNoise(p + float2(time * 1.7, -time * 1.3)));
-		sparks = max(sparks, 0.6 * smoothstep(0.6, 0.95, ValueNoise(p * 2.3 - float2(time * 2.9, time * 0.7) + 11.0)));
-		return Color::Water(Surface2.xyz) * (Surface1.y * darkness * saturate(agitation) * (0.35 + 1.65 * sparks));
+		return float3(surface, whitecap, aeration);
 	}
 
 	float3 DebugView(uint mode, SurfaceShading s, float foam, float4 waveState)

@@ -6,7 +6,6 @@
 #include "Features/CloudShadows.h"
 #include "Features/IBL.h"
 #include "Features/LightLimitFix.h"
-#include "Features/PBRWater.h"
 #include "Features/Skylighting.h"
 #include "Features/TerrainShadows.h"
 #include "Globals.h"
@@ -98,56 +97,9 @@ void ExponentialHeightFog::SaveSettings(json& o_json)
 
 ExponentialHeightFog::Settings ExponentialHeightFog::GetCommonBufferData() const
 {
-	return EffectiveSettings();
-}
-
-ExponentialHeightFog::Settings ExponentialHeightFog::EffectiveSettings() const
-{
 	Settings data = settings;
 	if (IsSuppressed())
 		data.enabled = 0;
-
-	// The water body is rendered whatever renders the air: an ENB preset replaces the height fog, not the
-	// water. Only the flat world map, which keeps its vanilla look, goes without.
-	UnderwaterMedium water;
-	if (globals::state->IsFlatWorldMapOpen() || !globals::features::pbrWater.loaded || !globals::features::pbrWater.GetUnderwaterMedium(water))
-		return data;
-
-	// Under water the fog is the water body: a uniform medium up to the surface and nothing above it
-	// (a falloff of one halving per unit makes the exponential profile a step at the water plane).
-	// The volumetric grid carries all of it, so light shafts, shadows and local lights show in the water.
-	constexpr float Ln2 = 0.69314718f;
-	const float meanExtinction = std::max((water.extinction.x + water.extinction.y + water.extinction.z) / 3.0f, 1e-6f);
-	// Fog density is in exp2 units per 1000 units; the volume's extinction is density * scale * 0.5.
-	data.enabled = 1;
-	data.startDistance = 0.0f;
-	data.fogHeight = water.planeZ;
-	data.fogHeightFalloff = 1000.0f;
-	data.fogDensity = meanExtinction / Ln2 * 1000.0f;
-	data.fogDensity2 = 0.0f;
-	data.directionalInscatteringMultiplier = 0.0f;
-	data.useSkyIBL = 0;
-	data.inscatteringTint.w = 0.0f;
-	data.sunlightAttenuationAmount = 1.0f;
-	data.respectVanillaFogFade = 0;
-	data.disableVanillaFog = 1;
-	data.originalFogColorAmount = 1.0f;
-	data.fogInscatteringColor.w = 0.0f;
-	// Out to 0.1% transmittance; the analytic fog beyond it is a negligible remainder.
-	const float distance = std::clamp(6.9f / meanExtinction, 512.0f, 60000.0f);
-	data.volumetricFogEnabled = 1;
-	data.volumetricFogStartDistance = 0.0f;
-	data.volumetricFogDistance = distance;
-	data.volumetricNearGridDistance = distance;
-	data.volumetricFogNearFadeInDistance = 1.0f;
-	data.volumetricFogExtinctionScale = 2.0f * Ln2;
-	data.volumetricFogAlbedo = { water.albedo.x, water.albedo.y, water.albedo.z, 1.0f };
-	data.volumetricFogEmissive.w = 0.0f;
-	data.volumetricFogScatteringDistribution = std::clamp(water.anisotropy, -0.9f, 0.9f);
-	data.volumetricFogNoiseScale = 0.0f;
-	data.underwater = { 1.0f, water.planeZ, water.shaftStrength, water.time };
-	data.underwaterSpectral = { water.extinction.x / meanExtinction, water.extinction.y / meanExtinction, water.extinction.z / meanExtinction, std::max(water.shaftDepth, 1.0f) };
-	data.underwaterDownwelling = { water.downwelling.x, water.downwelling.y, water.downwelling.z, (water.downwelling.x + water.downwelling.y + water.downwelling.z) / 3.0f };
 	return data;
 }
 
@@ -555,9 +507,6 @@ ID3D11ComputeShader* ExponentialHeightFog::GetLightScatteringCS()
 		if (globals::features::cloudShadows.loaded) {
 			defines.emplace_back("CLOUD_SHADOWS", "");
 		}
-		if (globals::features::pbrWater.loaded) {
-			defines.emplace_back("PBR_WATER", "");
-		}
 		lightScatteringCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\ExponentialHeightFog\\VolumetricFogLightScatteringCS.hlsl", defines, "cs_5_0"));
 	}
 	return lightScatteringCS;
@@ -576,9 +525,6 @@ ID3D11ComputeShader* ExponentialHeightFog::GetFarLightScatteringCS()
 		}
 		if (globals::features::cloudShadows.loaded) {
 			defines.emplace_back("CLOUD_SHADOWS", "");
-		}
-		if (globals::features::pbrWater.loaded) {
-			defines.emplace_back("PBR_WATER", "");
 		}
 		farLightScatteringCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\ExponentialHeightFog\\VolumetricFogLightScatteringCS.hlsl", defines, "cs_5_0"));
 	}
@@ -615,25 +561,17 @@ ID3D11ComputeShader* ExponentialHeightFog::GetFarIntegrationCS()
 
 void ExponentialHeightFog::Prepass()
 {
-	const Settings fog = EffectiveSettings();
-	if (!fog.enabled || !fog.volumetricFogEnabled || fog.volumetricFogExtinctionScale <= 0.0f) {
+	if (!settings.enabled || !settings.volumetricFogEnabled || settings.volumetricFogExtinctionScale <= 0.0f) {
 		ReleaseVolumetricResources();
 		return;
 	}
 
+	if (IsSuppressed())
+		return;
+
 	EnsureVolumetricResources();
 
-	// Air and water fog are different media: never blend one's history into the other.
-	const bool underwater = fog.underwater.x > 0.5f;
-	if (underwater != historyUnderwater) {
-		historyUnderwater = underwater;
-		hasLightScatteringHistory = false;
-		hasConservativeDepthHistory = false;
-		hasLightScatteringFarHistory = false;
-		hasConservativeDepthFarHistory = false;
-	}
-
-	if (fog.fogDensity <= 0.0f && fog.fogDensity2 <= 0.0f) {
+	if (settings.fogDensity <= 0.0f && settings.fogDensity2 <= 0.0f) {
 		hasLightScatteringHistory = false;
 		hasConservativeDepthHistory = false;
 		hasLightScatteringFarHistory = false;
@@ -677,10 +615,10 @@ void ExponentialHeightFog::Prepass()
 	// the far volume continues [nearEndDepth, totalFarPlane] at quarter lattice.
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 	const auto cameraData = Util::GetCameraData();
-	const double nearPlane = std::max(static_cast<double>(cameraData.y), static_cast<double>(std::max(fog.volumetricFogStartDistance, 0.0f)));
-	const double totalFarPlane = std::max(nearPlane + 1.0, static_cast<double>(std::max(fog.volumetricFogDistance, fog.volumetricFogStartDistance + 1.0f)));
+	const double nearPlane = std::max(static_cast<double>(cameraData.y), static_cast<double>(std::max(settings.volumetricFogStartDistance, 0.0f)));
+	const double totalFarPlane = std::max(nearPlane + 1.0, static_cast<double>(std::max(settings.volumetricFogDistance, settings.volumetricFogStartDistance + 1.0f)));
 	const double nearEndDepth = std::min(
-		std::max(static_cast<double>(std::max(fog.volumetricNearGridDistance, 0.0f)), nearPlane + 1.0),
+		std::max(static_cast<double>(std::max(settings.volumetricNearGridDistance, 0.0f)), nearPlane + 1.0),
 		totalFarPlane);
 	const bool farGridEnabled = nearEndDepth + 1.0 < totalFarPlane;
 
@@ -714,9 +652,9 @@ void ExponentialHeightFog::Prepass()
 		1.0f / static_cast<float>(currentGridSize.x),
 		1.0f / static_cast<float>(currentGridSize.y),
 		1.0f / static_cast<float>(currentGridSize.z),
-		fog.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / fog.volumetricFogNearFadeInDistance : 100000000.0f
+		settings.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / settings.volumetricFogNearFadeInDistance : 100000000.0f
 	};
-	cb.gridZParams = computeGridZParams(nearPlane, nearEndDepth, currentGridSize.z, fog.volumetricDepthDistributionScale);
+	cb.gridZParams = computeGridZParams(nearPlane, nearEndDepth, currentGridSize.z, settings.volumetricDepthDistributionScale);
 
 	cb.farGridSizeAndFlags = {
 		currentFarGridSize.x,
@@ -732,9 +670,9 @@ void ExponentialHeightFog::Prepass()
 		1.0f / static_cast<float>(currentFarGridSize.x),
 		1.0f / static_cast<float>(currentFarGridSize.y),
 		1.0f / static_cast<float>(currentFarGridSize.z),
-		fog.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / fog.volumetricFogNearFadeInDistance : 100000000.0f
+		settings.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / settings.volumetricFogNearFadeInDistance : 100000000.0f
 	};
-	cb.farGridZParams = computeGridZParams(nearEndDepth, totalFarPlane, currentFarGridSize.z, fog.volumetricDepthDistributionScale);
+	cb.farGridZParams = computeGridZParams(nearEndDepth, totalFarPlane, currentFarGridSize.z, settings.volumetricDepthDistributionScale);
 	cb.farRange = { static_cast<float>(nearEndDepth), static_cast<float>(totalFarPlane), 0.0f, 0.0f };
 
 	cb.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
@@ -749,13 +687,13 @@ void ExponentialHeightFog::Prepass()
 		};
 	}
 	cb.historyParameters = {
-		temporalHistoryValid ? std::clamp(fog.volumetricHistoryWeight, 0.0f, 0.99f) : 0.0f,
-		static_cast<float>(std::clamp(fog.volumetricHistoryMissSampleCount, 1u, 16u)),
+		temporalHistoryValid ? std::clamp(settings.volumetricHistoryWeight, 0.0f, 0.99f) : 0.0f,
+		static_cast<float>(std::clamp(settings.volumetricHistoryMissSampleCount, 1u, 16u)),
 		0.0f,
 		0.0f
 	};
 	cb.jitterParameters = {
-		temporalReprojection ? std::max(fog.volumetricSampleJitterMultiplier, 0.0f) : 0.0f,
+		temporalReprojection ? std::max(settings.volumetricSampleJitterMultiplier, 0.0f) : 0.0f,
 		static_cast<float>(globals::state->frameCount % 8u),
 		0.0f,
 		0.0f

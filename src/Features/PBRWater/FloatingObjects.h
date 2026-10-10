@@ -113,11 +113,11 @@ private:
 	static bool IsIntact(const Floater& floater);
 	void LoadBobbingFrameworkExclusions();
 
-	std::unordered_map<RE::FormID, Floater> floaters;  ///< by hull form ID
-	std::unordered_map<RE::FormID, RE::FormID> owner;  ///< any moving reference -> its hull
+	std::unordered_map<RE::FormID, Floater> floaters;   ///< by hull form ID
+	std::unordered_map<RE::FormID, RE::FormID> owner;   ///< any moving reference -> its hull
 	std::unordered_map<RE::FormID, RE::FormID> riding;  ///< actor -> the hull it last stood on
-	std::unordered_set<RE::FormID> rejected;           ///< examined, not floating
-	std::unordered_set<RE::FormID> bobbingExcluded;    ///< animated by Bobbing Framework
+	std::unordered_set<RE::FormID> rejected;            ///< examined, not floating
+	std::unordered_set<RE::FormID> bobbingExcluded;     ///< animated by Bobbing Framework
 	bool bobbingLoaded = false;
 	float scanTimer = 0.0f;
 	RE::NiPoint3 lastScanPosition;

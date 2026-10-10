@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Feature.h"
-#include "Features/ExponentialHeightFog.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/WaterEnvironment.h"
@@ -23,7 +22,7 @@ struct PBRWater : Feature
 	virtual inline std::string GetShortName() override { return "PBRWater"; }
 	virtual inline std::string_view GetShaderDefineName() override { return "PBR_WATER"; }
 	virtual std::string_view GetCategory() const override { return FeatureCategories::kWater; }
-	// Image space: the SAO composite, which fogs the opaque scene, hosts the underwater view.
+	// Image space: screen-space reflections reject hits on the displaced water surface.
 	virtual inline bool HasShaderDefine(RE::BSShader::Type t) override { return t == RE::BSShader::Type::Water || t == RE::BSShader::Type::ImageSpace; }
 
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
@@ -33,7 +32,6 @@ struct PBRWater : Feature
 				T("feature.pbr_water.key_feature_2", "GPU tessellation of the water surface, stable with upscalers and frame generation"),
 				T("feature.pbr_water.key_feature_3", "PBR specular, Fresnel, light absorption and light transmitted through wave crests"),
 				T("feature.pbr_water.key_feature_7", "Water clarity that varies: drifting sediment, wave-stirred shallows, muddy rivers and silt kicked up by wading"),
-				T("feature.pbr_water.key_feature_8", "Volumetric underwater view with depth-dependent light, sun glow, light shafts and a waterline meniscus"),
 				T("feature.pbr_water.key_feature_4", "Shoreline breaking waves and foam on shores, crests, objects and wakes"),
 				T("feature.pbr_water.key_feature_5", "Ripple simulation for every actor and physics object, replacing the vanilla wading mesh"),
 				T("feature.pbr_water.key_feature_6", "Swimmers, floating props, boats, ships and ice floes ride the rendered waves, with no patches or configuration") } };
@@ -77,8 +75,6 @@ struct PBRWater : Feature
 		float WindRoughness = 1.0f;           ///< scales the wind-driven micro-roughness (Cox-Munk)
 		float Gusts = 0.6f;                   ///< how strongly gusts vary the wind over the water
 		float GustSize = 40.0f;               ///< metres
-		float Bioluminescence = 0.0f;         ///< plankton glow in churned water at night (off by default)
-		float3 BioluminescenceColor = { 0.1f, 0.75f, 0.95f };
 
 		// Water clarity
 		float Turbidity = 0.15f;            ///< suspended sediment everywhere (0 = crystal clear)
@@ -91,14 +87,6 @@ struct PBRWater : Feature
 		float StormTurbidity = 1.0f;       ///< extra sediment in strong wind and rain
 		float WadingSilt = 1.0f;           ///< silt kicked up by feet on the bed
 		float SedimentLayerHeight = 1.5f;  ///< metres the stirred-up sediment reaches above the bed
-
-		// Underwater
-		bool EnableUnderwater = true;
-		float UnderwaterVisibility = 1.0f;
-		float LightShafts = 1.0f;
-		float LightShaftDepth = 15.0f;  ///< metres over which the shafts fade
-		float SunGlow = 1.0f;
-		float Meniscus = 1.0f;
 
 		// Foam
 		float FoamAmount = 1.0f;
@@ -172,12 +160,6 @@ struct PBRWater : Feature
 	/** @brief Wave displacement height above the flat plane at a world position (any thread). */
 	bool GetWaveHeight(const RE::NiPoint3& position, float flatWaterZ, float& height) const;
 
-	/**
-	 * @brief The water the camera is in, as a fog medium (Exponential Height Fog renders it).
-	 * @return false unless the underwater view is enabled and the eye is below the displaced surface
-	 */
-	bool GetUnderwaterMedium(ExponentialHeightFog::UnderwaterMedium& medium) const;
-
 	// ---- GPU constants, must match PBRWaterData in PBRWater.hlsli ----
 	struct GpuData
 	{
@@ -208,13 +190,8 @@ struct PBRWater : Feature
 		float4 Clarity1;
 		float4 Clarity2;
 		float4 Optics0;
-		float4 Underwater0;
-		float4 Underwater1;
-		float4 Underwater2;
-		float4 Underwater3;
 		float4 Surface0;
 		float4 Surface1;
-		float4 Surface2;
 		float4 Land0;  // xy texel (0,0) corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;  // x enabled, y vertex spacing (units)
 		float4 Foam2;  // x whitecap amount, y whitecap scale (units), z streak stretch, w bubble amount
@@ -222,19 +199,6 @@ struct PBRWater : Feature
 		float4 Flow0;  // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
-
-	/** @brief The water around the camera, for the underwater view. Published by the main thread. */
-	struct CameraWater
-	{
-		bool underwater = false;   ///< the camera may be below the (displaced) surface
-		bool nearSurface = false;  ///< the waterline can cross the lens
-		bool submerged = false;    ///< the eye is below the displaced surface
-		float flatZ = 0.0f;        ///< absolute height of the flat water plane
-		float band = 0.0f;         ///< how far the waves and ripples can move the surface (units)
-		float3 shallow{};          ///< water form colours (gamma, weather multiplier applied)
-		float3 deep{};
-		float visibility = 2048.0f;  ///< underwater fog distance of the water form (units)
-	};
 
 	// ---- Hooks ----
 	struct TESWaterSystem_InitializeWater
@@ -267,17 +231,6 @@ struct PBRWater : Feature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	/** @brief ISSAOComposite (the pass that fogs the opaque scene), one hook per vtable variant. */
-	template <int Variant>
-	struct ISSAOComposite_Render
-	{
-		static void thunk(void* imageSpaceShader, RE::BSTriShape* shape, RE::ImageSpaceEffectParam* param);
-		static inline REL::Relocation<decltype(thunk)> func;
-	};
-
-	/** @brief Render thread: binds the water constants and textures for the underwater composite. */
-	void BindUnderwaterComposite();
-
 private:
 	void UpdateFrameConstants();
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
@@ -285,7 +238,6 @@ private:
 	void UpdateFetchTexture();
 	void UpdateLandTexture();
 	void GatherInteractions(const PBRWaterModel::WaveSnapshot& snapshot, float dt);
-	std::shared_ptr<const CameraWater> FindCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior) const;
 	float WeatherTurbidityTarget() const;
 	/** @brief 0..1 how much of the current weather blend is rainy. */
 	float RainFraction() const;
@@ -318,7 +270,6 @@ private:
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;
 	std::atomic<std::shared_ptr<const PBRWaterModel::WaveSnapshot>> snapshot;
-	std::atomic<std::shared_ptr<const CameraWater>> cameraWater;
 	std::atomic<float> renderDelta{ 0.0f };
 	std::atomic<float> weatherTurbidity{ 0.0f };
 	float smoothedWeatherTurbidity = 0.0f;

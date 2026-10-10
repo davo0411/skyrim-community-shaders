@@ -59,13 +59,8 @@ namespace PBRWater
 		float4 Clarity1;                   // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                   // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                    // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
-		float4 Underwater0;                // x underwater view active, y flat water height at the camera (absolute z), z waterline band (units), w underwater visibility (units)
-		float4 Underwater1;                // xyz shallow colour of the camera's water (gamma), w light shaft strength
-		float4 Underwater2;                // xyz deep colour of the camera's water (gamma), w light shaft range (units)
-		float4 Underwater3;                // x meniscus strength, yzw unused
 		float4 Surface0;                   // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
-		float4 Surface1;                   // x wind streak strength, y bioluminescence strength, zw unused
-		float4 Surface2;                   // xyz bioluminescence colour (gamma), w unused
+		float4 Surface1;                   // x wind streak strength, yzw unused
 		float4 Land0;                      // xy loaded terrain grid corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;                      // x enabled, y vertex spacing (units)
 		float4 Foam2;                      // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount

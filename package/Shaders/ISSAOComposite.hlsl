@@ -135,10 +135,6 @@ SamplerState SampColorSampler : register(s9);
 #		include "ExponentialHeightFog/ExponentialHeightFog.hlsli"
 #	endif
 
-#	if defined(PBR_WATER)
-#		include "PBRWater/Underwater.hlsli"
-#	endif
-
 PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
@@ -180,11 +176,6 @@ PS_OUTPUT main(PS_INPUT input)
 	static const float GeometryDepthMax = 1.0f - EPSILON_DIVISION;
 	bool isGeometryDepth = depth < GeometryDepthMax;
 
-#	if defined(PBR_WATER)
-	// Under water the height fog below is the water body (PBR Water supplies it); only the waterline is drawn here.
-	float3 pbrMeniscus = PBRWater::UnderwaterActive() ? PBRWater::UnderwaterMeniscus(input.TexCoord) : 1.0;
-#	endif
-
 #	if defined(APPLY_FOG)
 	float fogDistanceFactor = (2 * CameraNearFar.x * CameraNearFar.y) / ((CameraNearFar.y + CameraNearFar.x) - (2 * (1.01 * depth - 0.01) - 1) * (CameraNearFar.y - CameraNearFar.x));
 	float fogFactor = min(FogParam.w, pow(saturate(fogDistanceFactor * FogParam.y - FogParam.x), FogParam.z));
@@ -220,10 +211,10 @@ PS_OUTPUT main(PS_INPUT input)
 		if (exponentialHeightFogEnabled && isGeometryDepth && !ExponentialHeightFog::ShouldDisableVanillaFog()) {
 			// Apply vanilla fog first, then exp fog on top
 			composedColor.xyz = lerp(fogSource, fogFade * fogColor, Color::FogAlpha(fogFactor));
-			composedColor.xyz = lerp(composedColor.xyz, fogFade * exponentialHeightFog.xyz, ExponentialHeightFog::GetSpectralFogOpacity(exponentialHeightFog.w));
+			composedColor.xyz = lerp(composedColor.xyz, fogFade * exponentialHeightFog.xyz, exponentialHeightFog.w);
 		} else if (exponentialHeightFogEnabled) {
 			// Disable vanilla fog, only apply exp height fog
-			composedColor.xyz = lerp(fogSource, fogFade * exponentialHeightFog.xyz, ExponentialHeightFog::GetSpectralFogOpacity(exponentialHeightFog.w));
+			composedColor.xyz = lerp(fogSource, fogFade * exponentialHeightFog.xyz, exponentialHeightFog.w);
 		} else {
 			composedColor.xyz = lerp(fogSource, fogFade * fogColor, Color::FogAlpha(fogFactor));
 		}
@@ -262,10 +253,6 @@ PS_OUTPUT main(PS_INPUT input)
 
 	composedColor *= 1 - SparklesParameters2.w;
 	composedColor += sparklesColor;
-
-#	if defined(PBR_WATER)
-	composedColor.xyz *= pbrMeniscus;
-#	endif
 
 	psout.Color = composedColor;
 
