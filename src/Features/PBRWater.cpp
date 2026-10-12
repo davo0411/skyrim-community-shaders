@@ -583,7 +583,8 @@ void PBRWater::DrawSettings()
 		}
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
 		const auto floatingStats = floating.GetStats();
-		ImGui::Text("Floating: %u hulls, %u attached, %u actors on board", floatingStats.floaters, floatingStats.parts, floatingStats.carried);
+		ImGui::Text("Floating: %u hulls, %u attached, %u actors on board, %u small objects riding the water", floatingStats.floaters, floatingStats.parts, floatingStats.carried, floatingStats.riders);
+		ImGui::TextUnformatted(floating.GetSelectionReport().c_str());
 		ImGui::TreePop();
 	}
 }
@@ -874,6 +875,17 @@ void PBRWater::UpdateFrameConstants()
 	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
 	d.Surface1 = { settings.WindStreaks, 0.0f, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
+
+	// Small open hulls stay dry inside.
+	if (const auto masks = floating.GetHullMasks(); masks && settings.EnableFloatingObjects) {
+		const uint32_t count = static_cast<uint32_t>(std::min<size_t>(masks->size(), FloatingObjects::MaxHullMasks));
+		for (uint32_t i = 0; i < count; ++i) {
+			const auto& m = (*masks)[i];
+			d.HullA[i] = { m.centreX, m.centreY, m.floorZ, 0.0f };
+			d.HullB[i] = { m.axisX, m.axisY, m.halfLength, m.halfWidth };
+		}
+		d.Draw0.w = static_cast<float>(count);
+	}
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
 	worldFlowmap = nullptr;

@@ -198,11 +198,13 @@ struct PBRWater : Feature
 		float4 Optics0;
 		float4 Surface0;
 		float4 Surface1;
-		float4 Land0;  // xy texel (0,0) corner (absolute units), zw 1 / grid extent (units)
-		float4 Land1;  // x enabled, y vertex spacing (units)
-		float4 Foam2;  // x whitecap amount, y whitecap scale (units), z streak stretch, w bubble amount
-		float4 Foam3;  // xy foam drift (units, wrapped), zw extra bubble drift (units, wrapped)
-		float4 Flow0;  // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
+		float4 Land0;                                 // xy texel (0,0) corner (absolute units), zw 1 / grid extent (units)
+		float4 Land1;                                 // x enabled, y vertex spacing (units)
+		float4 Foam2;                                 // x whitecap amount, y whitecap scale (units), z streak stretch, w bubble amount
+		float4 Foam3;                                 // xy foam drift (units, wrapped), zw extra bubble drift (units, wrapped)
+		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
+		float4 HullA[FloatingObjects::MaxHullMasks];  // xy centre (absolute units), z floor (absolute units)
+		float4 HullB[FloatingObjects::MaxHullMasks];  // xy length axis, z half length, w half width (units)
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 

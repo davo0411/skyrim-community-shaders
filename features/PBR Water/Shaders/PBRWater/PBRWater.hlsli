@@ -33,6 +33,7 @@
 // ============================================================================
 
 #define PBRW_CASCADES 4
+#define PBRW_HULL_MASKS 8
 
 namespace PBRWater
 {
@@ -45,7 +46,7 @@ namespace PBRWater
 		float4 Params2;                  // x choppiness, y whitecap coverage, z displacement bound (units), w highest mip level
 		float4 RefCamPos;                // xyz camera position the tile coordinates are relative to, w unused
 		float4 Tess0;                    // x tessellation active for this draw, y target triangle size (px), z max factor, w pixels per unit at distance 1
-		float4 Draw0;                    // x vertex spacing of this draw (units), y wireframe mode, z debug view, w unused
+		float4 Draw0;                    // x vertex spacing of this draw (units), y wireframe mode, z debug view, w hull mask count
 		float4 Fetch0;                   // xy grid origin (absolute world units), zw 1 / grid extent (units)
 		float4 Fetch1;                   // x enabled, y direction count, z wind slice coordinate, w fetch outside the grid (m)
 		float4 Terrain0;                 // xy heightmap uv scale, zw heightmap uv offset
@@ -70,6 +71,8 @@ namespace PBRWater
 		float4 Foam2;                    // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount
 		float4 Foam3;                    // xy foam drift offset (units, wrapped), zw extra bubble drift (units, wrapped)
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
+		float4 HullA[PBRW_HULL_MASKS];   // xy centre (absolute units), z floor (absolute units), w unused
+		float4 HullB[PBRW_HULL_MASKS];   // xy length axis (unit), z half length, w half width (units)
 	}
 
 	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w silt
@@ -527,6 +530,30 @@ namespace PBRWater
 		}
 		float stretch = max(1.0 + compression, 0.2);
 		return curvature / (stretch * stretch);
+	}
+
+	/**
+	 * True inside a small open hull (rowboat, raft, a boat lying in the shallows) above its floor: a wave
+	 * rising over the floor must not show inside the boat. The footprint is a rounded rectangle (superellipse)
+	 * inside the hull's walls, so the bow and stern taper and the water around the hull is untouched.
+	 * @param positionWS camera-relative position of the displaced surface
+	 */
+	bool InsideDryHull(float3 positionWS)
+	{
+		uint count = (uint)Draw0.w;
+		float3 absPos = positionWS + FrameBuffer::CameraPosAdjust.xyz;
+		[loop] for (uint i = 0; i < PBRW_HULL_MASKS; i++)
+		{
+			if (i >= count)
+				break;
+			float2 d = absPos.xy - HullA[i].xy;
+			float2 axis = HullB[i].xy;
+			float2 local = float2(dot(d, axis), dot(d, float2(-axis.y, axis.x))) / max(HullB[i].zw, 1.0);
+			float2 a = abs(local);
+			if (pow(a.x, 2.5) + pow(a.y, 2.5) < 1.0 && absPos.z > HullA[i].z)
+				return true;
+		}
+		return false;
 	}
 
 	// ------------------------------------------------------------------------

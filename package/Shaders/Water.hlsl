@@ -1217,6 +1217,17 @@ PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
 
+#		if defined(PBR_WATER)
+	// No water inside small open hulls: the colour and stencil passes agree, so the water mask does too.
+#			if defined(STENCIL)
+	if (PBRWater::InsideDryHull(input.WorldPosition.xyz))
+		discard;
+#			elif !defined(LOD)
+	if (PBRWater::InsideDryHull(input.WPosition.xyz))
+		discard;
+#			endif
+#		endif
+
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)

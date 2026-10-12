@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <fstream>
 
 namespace
@@ -164,19 +165,97 @@ namespace
 		return dynamic && !fixed;
 	}
 
-	/// Pier, dock and jetty sections stand on piles at their edges; never float them.
-	bool IsPierModel(RE::TESBoundObject* base)
+	std::string LowerModelPath(RE::TESBoundObject* base)
 	{
-		auto* model = base->As<RE::TESModel>();
+		auto* model = base ? base->As<RE::TESModel>() : nullptr;
 		if (!model || !model->GetModel())
-			return false;
+			return {};
 		std::string path = model->GetModel();
 		std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-		for (const char* word : { "dock", "pier", "jetty", "wharf", "quay" }) {
-			if (path.find(word) != std::string::npos)
+		return path;
+	}
+
+	bool PathHasAny(const std::string& path, std::initializer_list<const char*> words)
+	{
+		return std::ranges::any_of(words, [&](const char* word) { return path.find(word) != std::string::npos; });
+	}
+
+	/// Pier, dock and jetty sections stand on piles at their edges; never float them.
+	bool IsPierModel(const std::string& path)
+	{
+		return PathHasAny(path, { "dock", "pier", "jetty", "wharf", "quay" });
+	}
+
+	bool IsBoatModel(const std::string& path)
+	{
+		return PathHasAny(path, { "boat", "ship", "raft", "canoe", "skiff", "barge" });
+	}
+
+	/// Rocks, boulders and cliffs are part of the land, however they sit in the water. Ice floes live under
+	/// Landscape\Ice and stay candidates.
+	bool IsTerrainFeatureModel(const std::string& path)
+	{
+		if (PathHasAny(path, { "ice", "floe" }) || IsBoatModel(path))
+			return false;
+		return PathHasAny(path, { "rock", "boulder", "cliff", "mountain", "rubble", "stalag", "landscape\\" });
+	}
+
+	/**
+	 * Height of the terrain under (x, y): the exact terrain of the loaded cells, else the heightmap, else a
+	 * landscape query from `aboveZ`. The query from above matters: started at the bottom of something sunk
+	 * into the river bed, a land query starts under the ground and misses it.
+	 */
+	bool BedHeight(RE::TES* tes, const PBRWaterModel::WaveSnapshot& snapshot, float x, float y, float aboveZ, float& z)
+	{
+		if (snapshot.land && snapshot.land->Contains(x, y)) {
+			z = snapshot.land->Sample(x, y);
+			if (z > -1.0e5f)
 				return true;
 		}
-		return false;
+		if (snapshot.bathymetry && snapshot.bathymetry->Contains(x, y)) {
+			z = snapshot.bathymetry->Sample(x, y);
+			return true;
+		}
+		RE::NiPoint3 from{ x, y, aboveZ };
+		return tes && tes->GetLandHeight(from, z);
+	}
+
+	/**
+	 * Why something placed through the water rests on the bottom, or null when it does not. A hull's keel may
+	 * graze the bed of a shallow harbour and still float, but the terrain may not rise into it, and something
+	 * that is mostly under water while touching the bed (a rock in a river) stands on it. Most of the
+	 * footprint over dry land or the last hand's breadth of water is a boat lying in the shallows.
+	 */
+	const char* GroundedReason(RE::TES* tes, const PBRWaterModel::WaveSnapshot& snapshot, const WorldBox& box, float flatZ)
+	{
+		const float u[5] = { 0.0f, SampleSpread, -SampleSpread, 0.0f, 0.0f };
+		const float v[5] = { 0.0f, 0.0f, 0.0f, SampleSpread, -SampleSpread };
+		const float draft = flatZ - box.minZ;
+		const float height = box.maxZ - box.minZ;
+		float bedCentre = 0.0f;
+		bool hasCentre = false;
+		int beached = 0;
+		for (int i = 0; i < 5; ++i) {
+			const RE::NiPoint3 p = box.centre + box.axis[0] * (u[i] * box.half.x) + box.axis[1] * (v[i] * box.half.y);
+			float bed = 0.0f;
+			if (!BedHeight(tes, snapshot, p.x, p.y, box.maxZ + 1000.0f, bed))
+				continue;
+			if (i == 0) {
+				bedCentre = bed;
+				hasCentre = true;
+			}
+			if (bed > flatZ - 0.15f * UnitsPerMetre)
+				++beached;
+		}
+		if (beached >= 3)
+			return "lies in the shallows";
+		if (!hasCentre)
+			return nullptr;
+		if (bedCentre > box.minZ + 0.25f * draft)
+			return "rests on the bottom: the terrain rises into it";
+		if (bedCentre > box.minZ - std::max(0.1f * draft, 5.0f) && draft > 0.55f * height)
+			return "rests on the bottom: mostly under water and touching the bed";
+		return nullptr;
 	}
 
 	/// Waterfalls, foam, fog and water planes are effect or water shader meshes; hulls are lit.
@@ -192,27 +271,6 @@ namespace
 			return RE::BSVisit::BSVisitControl::kContinue;
 		});
 		return lit;
-	}
-
-	/// Resting on the bottom: the landscape reaches up to within `clearance` of the box's bottom under its
-	/// centre or under most of it. A long hull moored off a sloping shore may have its bow over the
-	/// shallows without being aground.
-	bool LandBelow(RE::TES* tes, const WorldBox& box, float clearance)
-	{
-		const float u[5] = { 0.0f, SampleSpread, -SampleSpread, 0.0f, 0.0f };
-		const float v[5] = { 0.0f, 0.0f, 0.0f, SampleSpread, -SampleSpread };
-		int touching = 0;
-		for (int i = 0; i < 5; ++i) {
-			RE::NiPoint3 p = box.centre + box.axis[0] * (u[i] * box.half.x) + box.axis[1] * (v[i] * box.half.y);
-			p.z = box.minZ;
-			float land = 0.0f;
-			if (tes->GetLandHeight(p, land) && land > box.minZ - clearance) {
-				if (i == 0)
-					return true;
-				++touching;
-			}
-		}
-		return touching >= 3;
 	}
 
 	/// Casts a ray straight down from `from` over `length` units. Returns whether anything solid was hit and
@@ -308,7 +366,13 @@ void FloatingObjects::LoadBobbingFrameworkExclusions()
 	logger::info("[PBR Water] Bobbing Framework animates {} forms; floating objects leave them to it", bobbingExcluded.size());
 }
 
-void FloatingObjects::Scan(const Settings& settings)
+void FloatingObjects::Reject(RE::FormID id, const char* reason)
+{
+	rejected.insert(id);
+	reasons[id] = reason;
+}
+
+void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSnapshot& snapshot)
 {
 	auto* player = RE::PlayerCharacter::GetSingleton();
 	auto* tes = RE::TES::GetSingleton();
@@ -329,7 +393,7 @@ void FloatingObjects::Scan(const Settings& settings)
 		return RE::BSContainer::ForEachResult::kContinue;
 	});
 
-	// Hulls that left the area or unloaded go back where they were placed.
+	// Hulls and riders that left the area or unloaded go back where they were placed.
 	for (auto it = floaters.begin(); it != floaters.end();) {
 		if (!present.contains(it->first)) {
 			Release(it->second);
@@ -338,76 +402,175 @@ void FloatingObjects::Scan(const Settings& settings)
 			++it;
 		}
 	}
+	for (auto it = riders.begin(); it != riders.end();) {
+		if (!present.contains(it->first)) {
+			if (auto ref = it->second.ref.get(); ref && ref->Get3D() == it->second.node)
+				ApplyTransform(ref->Get3D(), ref->GetPosition(), ref->Get3D()->local.rotate);
+			it = riders.erase(it);
+		} else {
+			++it;
+		}
+	}
 	std::erase_if(rejected, [&](RE::FormID id) { return !present.contains(id); });
+	std::erase_if(reasons, [&](const auto& entry) { return !present.contains(entry.first); });
 
 	// Look at the references not examined yet.
 	std::vector<RE::TESObjectREFR*> fresh;
 	std::vector<Candidate> hulls;
 	std::vector<WorldBox> anchors;  // fixed structure standing in the water: piles, grounded pier sections
+	groundedBoats.erase(std::remove_if(groundedBoats.begin(), groundedBoats.end(), [&](const HullMask& m) {
+		return RE::NiPoint3(m.centreX, m.centreY, m.floorZ).GetDistance(player->GetPosition()) > settings.range;
+	}),
+		groundedBoats.end());
+	const float riderReach = std::max(snapshot.VerticalBound(), 1.5f * UnitsPerMetre) + 20.0f;
 	for (auto* ref : refs) {
 		const auto id = ref->GetFormID();
-		if (owner.contains(id) || rejected.contains(id))
+		if (owner.contains(id) || rejected.contains(id) || riders.contains(id))
 			continue;
 		fresh.push_back(ref);
 
 		auto* base = ref->GetBaseObject();
 		auto* node = ref->Get3D();
-		if (!base || !node || !IsHullType(base->GetFormType()) || IsMarker(base) || ref->IsWater() || isExcluded(ref, base))
+		if (!base || !node || IsMarker(base) || ref->IsWater()) {
+			Reject(id, "marker or water");
 			continue;
+		}
+		if (isExcluded(ref, base)) {
+			Reject(id, "animated by Bobbing Framework");
+			continue;
+		}
+		const WorldBox box = GetWorldBox(ref, node);
+		float flatZ = 0.0f;
+		if (box.degenerate || !FlatWaterHeight(ref, box.centre, flatZ)) {
+			Reject(id, "no water here");
+			continue;
+		}
+		const float draft = flatZ - box.minZ;
+		const float freeboard = box.maxZ - flatZ;
+		const float height = box.maxZ - box.minZ;
+		const float length = 2.0f * std::max(box.half.x, box.half.y);
+		const std::string path = LowerModelPath(base);
 
-		if (IsPierModel(base))
+		// Small things floating at the surface or swimming just under it ride the water around them.
+		if (length <= 2.5f * UnitsPerMetre && height <= 2.5f * UnitsPerMetre && box.minZ < flatZ + 2.0f && box.maxZ > flatZ - riderReach) {
+			const auto type = base->GetFormType();
+			const bool riderType = type == RE::FormType::Activator || type == RE::FormType::Static || type == RE::FormType::MovableStatic || type == RE::FormType::Flora;
+			const bool atSurface = height <= 0.5f * UnitsPerMetre && box.maxZ > flatZ - 2.0f;
+			const bool underSurface = box.maxZ < flatZ + 0.25f * height;
+			float bed = 0.0f;
+			const bool free = !BedHeight(tes, snapshot, box.centre.x, box.centre.y, box.maxZ + 1000.0f, bed) || bed < box.minZ - 5.0f;
+			const bool topLevel = (node->local.translate - ref->GetPosition()).Length() < 1.0f;
+			if (riderType && (atSurface || underSurface) && free && topLevel && HasLitGeometry(node) && !FindDynamicBody(node) && !IsTerrainFeatureModel(path)) {
+				Rider rider;
+				rider.ref = ref->GetHandle();
+				rider.id = id;
+				rider.node = node;
+				rider.flatZ = flatZ;
+				rider.halfHeight = 0.5f * height;
+				rider.centreOffset = 0.5f * (box.minZ + box.maxZ) - ref->GetPosition().z;
+				rider.atSurface = atSurface;
+				riders.emplace(id, rider);
+				reasons.erase(id);
+				continue;
+			}
+		}
+
+		if (!IsHullType(base->GetFormType())) {
+			Reject(id, "not a static, activator or furniture");
 			continue;
+		}
+		if (IsPierModel(path)) {
+			Reject(id, "pier or dock section");
+			continue;
+		}
+		if (IsTerrainFeatureModel(path)) {
+			Reject(id, "rock, cliff or other part of the land");
+			continue;
+		}
 
 		Candidate c;
 		c.ref = ref;
-		c.box = GetWorldBox(ref, node);
-		const auto& box = c.box;
+		c.box = box;
+		c.flatZ = flatZ;
 		// Placed upright, through the water plane.
-		if (box.degenerate || box.axis[2].z < 0.85f || !FlatWaterHeight(ref, box.centre, c.flatZ))
+		if (box.axis[2].z < 0.85f) {
+			Reject(id, "not upright");
 			continue;
-		const float draft = c.flatZ - box.minZ;
-		const float freeboard = box.maxZ - c.flatZ;
-		const float height = box.maxZ - box.minZ;
-		const float length = 2.0f * std::max(box.half.x, box.half.y);
-		if (draft < 2.0f || freeboard < 2.0f)
+		}
+		if (draft < 2.0f || freeboard < 2.0f) {
+			Reject(id, "not placed through the water surface");
 			continue;
+		}
 		// Almost entirely under water (a reef; ice floats ~90% submerged, so floes stay in) or shaped like a
-		// post, a column or a waterfall. Wrecks resting on the bottom are caught by the land test below.
+		// post, a column or a waterfall. Wrecks resting on the bottom are caught by the bed test below.
 		if (draft > 0.92f * height || height > 3.0f * length) {
 			anchors.push_back(box);
+			Reject(id, "under water or shaped like a post");
 			continue;
 		}
 		// Under a metre: fish, bottles and other clutter, never a hull.
-		if (length > settings.maxSize || length < 1.0f * UnitsPerMetre)
-			continue;
-		if (!HasLitGeometry(node) || IsLooseProp(node))
-			continue;
-		// Not resting on the bottom: the landscape lies below the keel and nothing solid is right under it.
-		const float clearance = std::max(0.3f * draft, 0.25f * UnitsPerMetre);
-		if (LandBelow(tes, box, clearance)) {
-			anchors.push_back(box);
+		if (length > settings.maxSize) {
+			Reject(id, "longer than the Largest Hull setting");
 			continue;
 		}
+		if (length < 1.0f * UnitsPerMetre) {
+			Reject(id, "too small for a hull");
+			continue;
+		}
+		if (!HasLitGeometry(node) || IsLooseProp(node)) {
+			Reject(id, "effect mesh or loose physics prop");
+			continue;
+		}
+		// Not resting on the bottom (the bed may graze the keel, but not rise into the hull)...
+		if (const char* grounded = GroundedReason(tes, snapshot, box, flatZ)) {
+			anchors.push_back(box);
+			if (IsBoatModel(path) && length < 25.0f * UnitsPerMetre) {
+				// A boat lying in the shallows: waves washing round it must not fill it.
+				HullMask mask;
+				RE::NiPoint3 axis = { box.axis[0].x, box.axis[0].y, 0.0f };
+				const float axisLength = std::max(axis.Length(), 1e-3f);
+				mask.centreX = box.centre.x;
+				mask.centreY = box.centre.y;
+				mask.axisX = axis.x / axisLength;
+				mask.axisY = axis.y / axisLength;
+				mask.halfLength = 0.8f * box.half.x;
+				mask.halfWidth = 0.75f * box.half.y;
+				mask.floorZ = box.minZ + 0.3f * height;
+				groundedBoats.push_back(mask);
+			}
+			Reject(id, grounded);
+			continue;
+		}
+		// ...and not standing on a structure (a pile, a pier, a wreck) right under it. The terrain was tested
+		// above; a ray that only finds the bed is no reason to stay put.
 		RE::TESObjectREFR* below = nullptr;
 		float belowZ = 0.0f;
 		// The ray starts just under the bounds, which can still be inside the reference's own collision.
-		if (PickBelow(tes, { box.centre.x, box.centre.y, box.minZ - 1.0f }, clearance, below, belowZ) && below != ref)
+		if (PickBelow(tes, { box.centre.x, box.centre.y, box.minZ - 1.0f }, std::max(0.1f * draft, 10.0f), below, belowZ) && below && below != ref) {
+			anchors.push_back(box);
+			Reject(id, "stands on another object");
 			continue;
+		}
 
 		c.area = box.half.x * box.half.y;
 		hulls.push_back(c);
 	}
 
 	// Part of a pier or a jetty: a pile or a grounded section stands inside the footprint (a boat moored
-	// alongside only touches the piles at its side). Piles at the very edge of a section are caught by
-	// the mesh name instead.
+	// alongside only touches the piles at its side). Only for low platforms: a ship's box reaches far
+	// beyond its waterline (bowsprit, rigging) and takes in the dock it is moored to.
 	std::erase_if(hulls, [&](const Candidate& c) {
-		return std::ranges::any_of(anchors, [&](const WorldBox& anchor) {
+		if (c.box.maxZ - c.box.minZ > 4.0f * UnitsPerMetre)
+			return false;
+		const bool onPiles = std::ranges::any_of(anchors, [&](const WorldBox& anchor) {
 			const RE::NiPoint3 d = anchor.centre - c.box.centre;
-			const float u = std::abs(d.Dot(c.box.axis[0])) - c.box.half.x;
-			const float v = std::abs(d.Dot(c.box.axis[1])) - c.box.half.y;
+			const float u = std::abs(d.Dot(c.box.axis[0])) - 0.8f * c.box.half.x;
+			const float v = std::abs(d.Dot(c.box.axis[1])) - 0.8f * c.box.half.y;
 			return u < 0.0f && v < 0.0f && anchor.maxZ > c.flatZ && anchor.minZ < c.box.minZ + 8.0f;
 		});
+		if (onPiles)
+			Reject(c.ref->GetFormID(), "pier section: stands on piles");
+		return onPiles;
 	});
 
 	// Hull parts placed as separate references (hull and deck, hull halves) become one hull: a candidate
@@ -507,7 +670,7 @@ void FloatingObjects::Scan(const Settings& settings)
 		auto* node = ref->Get3D();
 		if (!base || !node || !IsPartType(base->GetFormType()) || IsMarker(base) || ref->IsWater() || isExcluded(ref, base))
 			return false;
-		if (IsPierModel(base))
+		if (IsPierModel(LowerModelPath(base)))
 			return false;
 		const WorldBox box = GetWorldBox(ref, node);
 		if (!insideFootprint(f, box.centre, FootprintMargin))
@@ -517,7 +680,8 @@ void FloatingObjects::Scan(const Settings& settings)
 			return false;
 		if (FindDynamicBody(node))
 			return false;
-		if (!box.degenerate && LandBelow(tes, box, 10.0f))
+		float bed = 0.0f;
+		if (!box.degenerate && BedHeight(tes, snapshot, box.centre.x, box.centre.y, box.maxZ + 1000.0f, bed) && bed > box.minZ - 10.0f)
 			return false;
 		// Directly under it, down to the keel, there must be this hull or something riding it: open water
 		// under it means it stands beside the hull (a dock, a crate on the dock), not on it.
@@ -533,15 +697,20 @@ void FloatingObjects::Scan(const Settings& settings)
 		}
 		f.parts.push_back(makePart(ref));
 		owner[ref->GetFormID()] = hullId;
+		rejected.erase(ref->GetFormID());
+		reasons.erase(ref->GetFormID());
 		return true;
 	};
 
 	std::unordered_set<RE::FormID> createdSet(created.begin(), created.end());
+	std::unordered_set<RE::FormID> freshSet;
+	for (auto* ref : fresh)
+		freshSet.insert(ref->GetFormID());
 	for (auto* ref : refs) {
 		const auto id = ref->GetFormID();
-		if (owner.contains(id))
+		if (owner.contains(id) || riders.contains(id))
 			continue;
-		const bool isFresh = !rejected.contains(id);
+		const bool isFresh = freshSet.contains(id);
 		for (auto& [hullId, f] : floaters) {
 			if (!isFresh && !createdSet.contains(hullId))
 				continue;
@@ -551,8 +720,11 @@ void FloatingObjects::Scan(const Settings& settings)
 	}
 
 	for (auto* ref : fresh) {
-		if (!owner.contains(ref->GetFormID()))
-			rejected.insert(ref->GetFormID());
+		const auto id = ref->GetFormID();
+		if (!owner.contains(id) && !riders.contains(id)) {
+			rejected.insert(id);
+			reasons.try_emplace(id, "not a hull");
+		}
 	}
 
 	// Keep loose props on the hulls near the player awake, so they react as the deck moves under them.
@@ -752,8 +924,9 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 	auto* player = RE::PlayerCharacter::GetSingleton();
 	auto* tes = RE::TES::GetSingleton();
 	if (!settings.enabled || !player || !tes) {
-		if (!floaters.empty())
+		if (!floaters.empty() || !riders.empty() || !groundedBoats.empty())
 			Reset();
+		hullMasks.store(nullptr, std::memory_order_release);
 		return;
 	}
 	if (!bobbingLoaded)
@@ -771,7 +944,7 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 	const RE::NiPoint3 playerPosition = player->GetPosition();
 	scanTimer -= dt;
 	if (scanTimer <= 0.0f || playerPosition.GetDistance(lastScanPosition) > RescanDistance) {
-		Scan(settings);
+		Scan(settings, snapshot);
 		scanTimer = ScanInterval;
 		lastScanPosition = playerPosition;
 	}
@@ -836,6 +1009,121 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 		}
 		CarryActors(nearPlayer, actors, previousOffsets, previousRotations);
 	}
+
+	UpdateRiders(snapshot, settings, camera);
+	PublishHullMasks(camera);
+
+	std::string report = "Select a reference in the console to see why it floats or stays put";
+	if (const auto selected = RE::Console::GetSelectedRef())
+		report = std::format("Console selection {:08X}: {}", selected->GetFormID(), Describe(selected.get()));
+	std::scoped_lock lock(reportMutex);
+	selectionReport = std::move(report);
+}
+
+void FloatingObjects::UpdateRiders(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, const RE::NiPoint3& camera)
+{
+	auto* tes = RE::TES::GetSingleton();
+	const float windSpeed = snapshot.ocean ? snapshot.ocean->windSpeed : 0.5f;
+	const float openPeak = snapshot.ocean ? snapshot.ocean->peakOmega : 1.0f;
+	for (auto it = riders.begin(); it != riders.end();) {
+		Rider& rider = it->second;
+		const auto refPtr = rider.ref.get();
+		auto* ref = refPtr.get();
+		auto* node = ref ? ref->Get3D() : nullptr;
+		// Gone or given new 3D: that 3D stands where the engine put it.
+		if (!ref || ref->IsDisabled() || node != rider.node) {
+			it = riders.erase(it);
+			continue;
+		}
+
+		// The reference's own position is the rest position: critters keep swimming their paths, and the
+		// motion is added to wherever they are.
+		const RE::NiPoint3 position = ref->GetPosition();
+		const float distance = position.GetDistance(camera);
+		const float fade = (1.0f - Smoothstep(settings.fadeStart, settings.fadeEnd, distance)) *
+		                   (1.0f - Smoothstep(settings.range * 0.85f, settings.range, distance)) * settings.response;
+		RE::NiPoint3 offset{};
+		if (fade > 0.0f) {
+			const double x = position.x;
+			const double y = position.y;
+			PBRWaterModel::WaveSnapshot::Displacement d;
+			snapshot.ParcelDisplacements(&x, &y, 1, rider.flatZ, &d);
+			const float centreZ = position.z + rider.centreOffset;
+			if (rider.atSurface) {
+				// Floating on the surface: it rides it.
+				offset = { d.dx * fade, d.dy * fade, d.dz * fade };
+			} else {
+				// Under it: the orbital motion of the water fades as e^(-k depth) (linear wave theory), for the
+				// dominant waves here.
+				const float fetchMetres = snapshot.fetch ? snapshot.fetch->SampleMetres(position.x, position.y, snapshot.windDirection) * snapshot.fetchScale :
+				                                           (snapshot.exterior ? 500000.0f : 50.0f);
+				const float omega = PBRWaterModel::FetchPeakOmega(fetchMetres, windSpeed, openPeak);
+				const float k = omega * omega / Gravity * MetresPerUnit;
+				const float decay = std::exp(-k * std::max(rider.flatZ - centreZ, 0.0f)) * fade;
+				offset = { d.dx * decay, d.dy * decay, d.dz * decay };
+				// Never out of the water: a trough deeper than it swims pushes it down with the surface...
+				const float limit = rider.flatZ + d.dz * fade - 4.0f;
+				const float top = centreZ + rider.halfHeight + offset.z;
+				if (top > limit)
+					offset.z -= top - limit;
+				// ...but not into the bed.
+				float bed = 0.0f;
+				if (BedHeight(tes, snapshot, position.x, position.y, rider.flatZ + 1000.0f, bed))
+					offset.z = std::max(offset.z, bed + 2.0f - (centreZ - rider.halfHeight));
+			}
+		}
+		rider.offset = offset;
+		ApplyTransform(node, position + offset, node->local.rotate);
+		++stats.riders;
+		++it;
+	}
+}
+
+void FloatingObjects::PublishHullMasks(const RE::NiPoint3& camera)
+{
+	std::vector<std::pair<float, HullMask>> found;
+	for (const auto& [hullId, f] : floaters) {
+		// Ships: closed hulls and decks far above the water.
+		if (2.0f * f.halfLength > 25.0f * UnitsPerMetre)
+			continue;
+		const RE::NiPoint3 centre = f.pivot + f.offset;
+		const RE::NiPoint3 axis = f.rotation * f.axisX;
+		const float axisLength = std::sqrt(axis.x * axis.x + axis.y * axis.y);
+		if (axisLength < 1e-3f)
+			continue;
+		HullMask mask;
+		mask.centreX = centre.x;
+		mask.centreY = centre.y;
+		mask.axisX = axis.x / axisLength;
+		mask.axisY = axis.y / axisLength;
+		// Inside the walls: the bow and stern taper, the gunwales have thickness.
+		mask.halfLength = 0.8f * f.halfLength;
+		mask.halfWidth = 0.75f * f.halfWidth;
+		mask.floorZ = f.flatZ - f.draft + f.offset.z + 2.0f;
+		found.emplace_back(centre.GetDistance(camera), mask);
+	}
+	for (const auto& mask : groundedBoats)
+		found.emplace_back(RE::NiPoint3(mask.centreX, mask.centreY, mask.floorZ).GetDistance(camera), mask);
+	std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+	auto masks = std::make_shared<std::vector<HullMask>>();
+	for (size_t i = 0; i < found.size() && i < MaxHullMasks; ++i)
+		masks->push_back(found[i].second);
+	hullMasks.store(std::move(masks), std::memory_order_release);
+}
+
+std::string FloatingObjects::Describe(const RE::TESObjectREFR* ref) const
+{
+	if (!ref)
+		return "No reference selected";
+	const auto id = ref->GetFormID();
+	if (const auto it = owner.find(id); it != owner.end())
+		return it->second == id ? std::string("Floats: hull") : std::format("Floats: part of hull {:08X}", it->second);
+	if (riders.contains(id))
+		return "Rides the water: small object";
+	if (const auto it = reasons.find(id); it != reasons.end())
+		return std::format("Stays put: {}", it->second);
+	return "Not examined: out of range, not loaded or not in water";
 }
 
 // ============================================================================
@@ -880,16 +1168,26 @@ void FloatingObjects::RestorePlacements()
 		for (const auto& part : f.parts)
 			restore(part);
 	}
+	for (const auto& [id, rider] : riders) {
+		auto* ref = rider.ref.get().get();
+		if (auto* node = ref ? ref->Get3D() : nullptr; node && node == rider.node)
+			ApplyTransform(node, ref->GetPosition(), node->local.rotate);
+	}
 }
 
 void FloatingObjects::Reset()
 {
 	for (auto& [hullId, f] : floaters)
 		Release(f);
+	RestorePlacements();
 	floaters.clear();
 	owner.clear();
 	riding.clear();
 	rejected.clear();
+	reasons.clear();
+	riders.clear();
+	groundedBoats.clear();
+	hullMasks.store(nullptr, std::memory_order_release);
 	scanTimer = 0.0f;
 	stats = {};
 }

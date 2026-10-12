@@ -2,7 +2,11 @@
 
 #include "WaveModel.h"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -16,14 +20,22 @@
  * with it, and actors standing on it are carried. Instead of a configured sine motion, every hull is a
  * floating body on the PBR Water surface:
  *  - Detection: a static placed through the water plane, sized like a hull, drawn with lit materials and
- *    not resting on the bottom (the landscape lies below its keel and nothing solid is directly under it).
- *    Hull parts placed as separate references merge into one hull.
+ *    not resting on the bottom (the terrain does not rise into its hull and no structure stands under it).
+ *    Rocks, cliffs and pier sections never float. Hull parts placed as separate references merge into one
+ *    hull.
  *  - Attachment: references resting on a hull (a ray down from them hits it) or carried within its
  *    footprint (masts, sails, lanterns) move with it.
  *  - Motion: heave, pitch and roll follow a plane fitted to the water parcels under the hull, and surge and
  *    sway their mean orbital displacement, so long hulls average out short waves. The hull responds through
  *    second-order dynamics with its own natural period (a box hull heaves with T = 2 pi sqrt(draft / g)).
  *  - Load: actors on board sink and tilt the hull by their weight, from its waterplane area and inertia.
+ *
+ * Small things in the water ride it too ("riders"): fish and other critters, plants and debris floating at
+ * or just under the surface move with the orbital motion of the water around them, which fades with depth,
+ * and are kept under the surface when a trough passes over them.
+ *
+ * Small open hulls (rowboats, rafts) and boats lying in the shallows publish their footprint, so the water
+ * shader can leave the inside of the hull dry when a wave rises above its floor.
  *
  * Nothing is written to the save game: the references keep their placed positions, collision becomes
  * keyframed through the 3D only, and every object is put back in place before the game saves.
@@ -47,10 +59,32 @@ public:
 		uint32_t floaters = 0;  ///< hulls
 		uint32_t parts = 0;     ///< references moving with them (merged hull parts and attached objects)
 		uint32_t carried = 0;   ///< actors on board this frame
+		uint32_t riders = 0;    ///< small things carried by the water (fish, plants, debris)
 	};
+
+	/** @brief Horizontal footprint of a hull whose inside must stay dry (absolute units). */
+	struct HullMask
+	{
+		float centreX = 0.0f, centreY = 0.0f;
+		float axisX = 1.0f, axisY = 0.0f;  ///< unit length axis
+		float halfLength = 0.0f;           ///< of the dry inside, along the axis
+		float halfWidth = 0.0f;
+		float floorZ = 0.0f;  ///< lowest point of the inside: water below it stays
+	};
+	static constexpr uint32_t MaxHullMasks = 8;
 
 	/** @brief Main thread, once per frame after the wave snapshot is published. */
 	void Update(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, float dt);
+
+	/** @brief Any thread: the hull footprints near the camera, nearest first (at most MaxHullMasks). */
+	std::shared_ptr<const std::vector<HullMask>> GetHullMasks() const { return hullMasks.load(std::memory_order_acquire); }
+
+	/** @brief Any thread: what the detection made of the reference selected in the console (debug view). */
+	std::string GetSelectionReport() const
+	{
+		std::scoped_lock lock(reportMutex);
+		return selectionReport;
+	}
 
 	/** @brief Puts every object back where it was placed and forgets them (disabled, new game loaded). */
 	void Reset();
@@ -106,20 +140,44 @@ private:
 		float loadRoll = 0.0f;
 	};
 
+	/** @brief A small thing carried by the water around it. */
+	struct Rider
+	{
+		RE::ObjectRefHandle ref;
+		RE::FormID id = 0;
+		const RE::NiAVObject* node = nullptr;
+		float flatZ = 0.0f;
+		float halfHeight = 0.0f;    ///< of its bounds
+		float centreOffset = 0.0f;  ///< bounds centre above the reference position
+		bool atSurface = false;     ///< floats on the surface (rides it fully) rather than under it
+		RE::NiPoint3 offset;        ///< displacement applied this frame
+	};
+
 	struct Candidate;
 
-	void Scan(const Settings& settings);
+	void Scan(const Settings& settings, const PBRWaterModel::WaveSnapshot& snapshot);
+	void UpdateRiders(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, const RE::NiPoint3& camera);
+	void PublishHullMasks(const RE::NiPoint3& camera);
+	void Reject(RE::FormID id, const char* reason);
+	/** @brief Main thread: what the detection made of a reference. */
+	std::string Describe(const RE::TESObjectREFR* ref) const;
 	void UpdateFloater(Floater& floater, const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, float dt, const RE::NiPoint3& camera);
 	void CarryActors(std::vector<Floater*>& moved, const std::vector<RE::Actor*>& actors, const std::vector<RE::NiPoint3>& previousOffsets, const std::vector<RE::NiMatrix3>& previousRotations);
 	void Release(Floater& floater);
 	static bool IsIntact(const Floater& floater);
 	void LoadBobbingFrameworkExclusions();
 
-	std::unordered_map<RE::FormID, Floater> floaters;   ///< by hull form ID
-	std::unordered_map<RE::FormID, RE::FormID> owner;   ///< any moving reference -> its hull
-	std::unordered_map<RE::FormID, RE::FormID> riding;  ///< actor -> the hull it last stood on
-	std::unordered_set<RE::FormID> rejected;            ///< examined, not floating
-	std::unordered_set<RE::FormID> bobbingExcluded;     ///< animated by Bobbing Framework
+	std::unordered_map<RE::FormID, Floater> floaters;     ///< by hull form ID
+	std::unordered_map<RE::FormID, RE::FormID> owner;     ///< any moving reference -> its hull
+	std::unordered_map<RE::FormID, RE::FormID> riding;    ///< actor -> the hull it last stood on
+	std::unordered_set<RE::FormID> rejected;              ///< examined, not floating
+	std::unordered_map<RE::FormID, const char*> reasons;  ///< why a reference does not float (debug view)
+	std::unordered_map<RE::FormID, Rider> riders;         ///< by form ID
+	std::vector<HullMask> groundedBoats;                  ///< boats lying in the shallows: their insides stay dry too
+	std::atomic<std::shared_ptr<const std::vector<HullMask>>> hullMasks;
+	mutable std::mutex reportMutex;
+	std::string selectionReport;
+	std::unordered_set<RE::FormID> bobbingExcluded;  ///< animated by Bobbing Framework
 	bool bobbingLoaded = false;
 	float scanTimer = 0.0f;
 	RE::NiPoint3 lastScanPosition;
