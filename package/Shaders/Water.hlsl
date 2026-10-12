@@ -1592,12 +1592,9 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
-	// Bubble specks come from foam and from air churned in by anything moving through the water; the milky
-	// tint under the foam comes from the foam alone, so moving around fills the water with bubbles only.
-	float pbrSettledFoam = max(pbrFoamCoverage.x, pbrFoamCoverage.y);
-	float pbrAeration = max(pbrSettledFoam, pbrFoamCoverage.z);
-	float2 pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrAeration, pbrSurface.footprint, PBRWater::Foam1.y);
-	pbrBubbles.y *= pbrSettledFoam / max(pbrAeration, 1e-3);
+	// Bubble specks come from foam and from air churned in by anything moving through the water.
+	float pbrAeration = max(max(pbrFoamCoverage.x, pbrFoamCoverage.y), pbrFoamCoverage.z);
+	float pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrAeration, pbrSurface.footprint, PBRWater::Foam1.y);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)
@@ -1608,9 +1605,8 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 pbrFoamNormal = PBRWater::FoamNormal(normal, pbrFoam, input.WaveParam.xy);
 	float pbrFoamSun = saturate(dot(pbrFoamNormal, SunDir.xyz) * 0.7 + 0.3);
 	float3 pbrFoamColor = pbrFoamDir * dirShadow * pbrFoamSun + pbrFoamAmbient * (0.55 + 0.45 * saturate(pbrFoamNormal.z));
-	// Aerated water under the foam scatters light back up: a milky layer with drifting bubble specks.
-	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.55, pbrBubbles.y * 0.35);
-	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.8, pbrBubbles.x * 0.6);
+	// Drifting bubble specks just under the surface.
+	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.8, pbrBubbles * 0.6);
 	// Fresh whitecaps are brighter than the settled surface foam.
 	pbrFoamColor *= lerp(1.0, 1.15, saturate(pbrWhitecap / max(pbrFoam, 1e-3)));
 

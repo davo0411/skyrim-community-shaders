@@ -20,8 +20,8 @@ cbuffer OceanCB : register(b0)
 	float4 Swell;        // xy swell direction, z gravity (m/s^2), w omega0 = 2 pi / loop period (rad/s)
 	float4 Time;         // x loop fraction (0..1), y fft size, z units per metre, w unused
 	float4 Band[4];      // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
-	float4 Foam0;        // x dt (s), y foam trail retained this step, z crest foam threshold (Jacobian), w unused
-	float4 FoamBand[4];  // x 1 / std of the other bands' compression, yz foam drift this step (uv), w unused
+	float4 Foam0;        // x dt (s), y foam trail retained this step, zw unused
+	float4 FoamBand[4];  // x Jacobian below which the band's own crests break, yz foam drift this step (uv), w 1 / soft edge
 };
 
 static const float OceanPi = 3.14159265;

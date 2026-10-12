@@ -57,14 +57,14 @@ namespace PBRWater
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y foam albedo, z refraction distortion scale, w point light specular intensity
-		float4 Foam0;                    // x shore foam width (units), y breaking Jacobian (whitecap share of the wind), z foam amount, w foam pattern scale (units)
+		float4 Foam0;                    // x shore foam width (units), y unused, z foam amount, w foam pattern scale (units)
 		float4 Foam1;                    // x crest foam persistence (s), y foam animation time (s, wrapped), z wake foam strength, w flow wave damping
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
-		float4 Surface1;                 // x wind streak strength, y spread of the surface compression (std), z fetch scale, w unused
+		float4 Surface1;                 // x wind streak strength, y unused, z fetch scale, w unused
 		float4 Land0;                    // xy loaded terrain grid corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;                    // x enabled, y vertex spacing (units)
 		float4 Foam2;                    // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount
@@ -258,6 +258,19 @@ namespace PBRWater
 		return w * ctx.damping;
 	}
 
+	/**
+	 * How much cascade `c` carries the waves that make whitecaps here: the band holding the local spectral peak
+	 * and, fading out, the next shorter one. Shorter waves break too, but their small crests only sprinkle the
+	 * sea with flecks; whitecaps are the big breakers (Banner, Babanin & Young 2000: dominant-wave breaking).
+	 */
+	float BreakingDominance(uint c, float peakOmega)
+	{
+		if (c + 1 >= PBRW_CASCADES)
+			return 0.0;
+		float r = Cascade1[c].x / max(peakOmega, 1e-3);
+		return saturate(1.0 - 0.5 * log2(max(r, 1.0)));
+	}
+
 	/// Tile coordinate of camera-relative position `p` in cascade `c` (world-anchored, re-based on the
 	/// reference camera so other cameras still sample the same water).
 	float2 CascadeUV(float2 p, uint c)
@@ -273,7 +286,7 @@ namespace PBRWater
 		float3 normal;                // surface normal
 		float jacobian;               // < 1 where the surface compresses, < 0 where it folds (breaking)
 		float slopeVariance;          // slope variance filtered out of the pixel (for roughness)
-		float crestTrail;             // 0..1 foam left behind by crests that folded a moment ago
+		float crestTrail;             // 0..1 breaking crests of the dominant waves and the foam they left behind
 		float shoreBreak;             // 0..1 breaking intensity of the shore waves
 		float shoreMask;              // 0..1 presence of the shore waves
 		float shoreCrest;             // 0..1 how close this point is to a shore wave crest (swash foam)
@@ -474,9 +487,10 @@ namespace PBRWater
 				AddCompressionVariance(sums, c, horizontal);
 				float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
 				sums.slopeVariance += variance * vertical * vertical;
-				// The trail was laid down by the open-sea cascade; where fetch or depth calm it, it folds less.
+				// The trail was laid down by the open-sea cascade; where fetch or depth calm it, it breaks less, and
+				// only the bands with the dominant waves here make whitecaps.
 				float presence = saturate(horizontal);
-				sums.crestTrail = max(sums.crestTrail, m.z * presence * presence);
+				sums.crestTrail = max(sums.crestTrail, m.z * presence * presence * BreakingDominance(c, ctx.peakOmega));
 			}
 		}
 		AddShoreWaves(sums, o, ctx);

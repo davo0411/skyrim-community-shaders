@@ -17,9 +17,10 @@ class OceanSimulation
 public:
 	struct Settings
 	{
-		uint32_t resolution = 256;     ///< FFT size per cascade (128, 256 or 512)
-		float crestThreshold = 0.55f;  ///< Jacobian below which the surface counts as folding
-		float foamTrail = 1.5f;        ///< seconds a crest's foam lingers
+		uint32_t resolution = 256;  ///< FFT size per cascade (128, 256 or 512)
+		/// Where each cascade's own crests break (PBRWaterModel::CascadeBreaking).
+		std::array<PBRWaterModel::BreakingCriterion, PBRWaterModel::NumCascades> breaking{};
+		float foamTrail = 1.5f;  ///< seconds a crest's foam lingers
 	};
 
 	void SetupResources();

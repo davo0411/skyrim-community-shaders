@@ -479,6 +479,54 @@ namespace PBRWaterModel
 		return s;
 	}
 
+	BreakingCriterion CascadeBreaking(const OceanSpectrum& spectrum, uint32_t cascade, float amount)
+	{
+		BreakingCriterion out;
+		if (cascade >= NumCascades || spectrum.calm)
+			return out;
+		const CascadeBand& band = spectrum.cascades[cascade];
+		// The band's dominant waves: where its spectral density peaks (the spectral peak, or the long edge of
+		// a band in the tail).
+		auto density = [&](double omega) {
+			const double k = omega * omega / Gravity;
+			return BandDensity(spectrum, static_cast<float>(k)) * 2.0 * omega / Gravity;  // S(omega) = S(k) dk/domega
+		};
+		const double omegaLow = std::sqrt(Gravity * std::max<double>(band.kLow, TwoPi / CascadeLength[cascade]));
+		const double omegaHigh = std::sqrt(Gravity * band.kHigh);
+		constexpr int Samples = 128;
+		double omegaDominant = omegaLow, densityMax = -1.0;
+		for (int i = 0; i <= Samples; ++i) {
+			const double omega = omegaLow * std::pow(omegaHigh / omegaLow, static_cast<double>(i) / Samples);
+			if (const double d = density(omega); d > densityMax) {
+				densityMax = d;
+				omegaDominant = omega;
+			}
+		}
+		// Banner et al.'s significant steepness of the dominant waves: eps = k_p H_p / 2, with H_p = 4 sqrt(m0) of
+		// the spectrum between 0.7 and 1.3 of their frequency.
+		double m0 = 0.0;
+		for (int i = 0; i < Samples; ++i) {
+			const double w0 = omegaDominant * (0.7 + 0.6 * i / Samples);
+			const double w1 = omegaDominant * (0.7 + 0.6 * (i + 1) / Samples);
+			m0 += density(0.5 * (w0 + w1)) * (w1 - w0);
+		}
+		const float steepness = static_cast<float>(omegaDominant * omegaDominant / Gravity * 2.0 * std::sqrt(std::max(m0, 0.0)));
+		const float excess = steepness - 0.055f;
+		if (excess <= 0.0f || amount <= 0.0f)
+			return out;
+		out.probability = std::min(22.0f * std::pow(excess, 2.01f), 1.0f);
+		constexpr float CrestShare = 0.1f;  // the white front of a breaking crest, as a share of its wavelength
+		const float share = std::clamp(out.probability * CrestShare * amount, 1e-6f, 0.5f);
+		// Inverse normal CDF (Abramowitz & Stegun 26.2.23) of the share.
+		const float t = std::sqrt(-2.0f * std::log(share));
+		const float z = t - (2.515517f + 0.802853f * t + 0.010328f * t * t) / (1.0f + 1.432788f * t + 0.189269f * t * t + 0.001308f * t * t * t);
+		const float sigma = std::max(spectrum.choppiness * std::sqrt(std::max(band.meanSquareSlope, 0.0f)), 1e-4f);
+		out.threshold = 1.0f - sigma * z;
+		// The edge of a patch: a quarter of the spread, so a crest only just over the limit leaves faint foam.
+		out.invWidth = 1.0f / (0.25f * sigma);
+		return out;
+	}
+
 	// ========================================================================
 	// CPU mirror
 	// ========================================================================

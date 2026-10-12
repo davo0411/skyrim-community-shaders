@@ -163,14 +163,15 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, float dt, const Setti
 
 	const float step = std::max(dt, 0.0f);
 	const float retained = settings.foamTrail > 0.0f ? std::exp(-step / settings.foamTrail) : 0.0f;
-	cb.Foam0 = { step, retained, settings.crestThreshold, 0.0f };
+	cb.Foam0 = { step, retained, 0.0f, 0.0f };
 	for (uint32_t c = 0; c < Cascades; ++c) {
 		const CascadeBand& band = ocean.cascades[c];
 		cb.Band[c] = { band.length, band.kLow, band.kHigh, band.kFadeStart };
-		// Spread of the compression of every other band: how much the rest of the sea can add to this one's folding.
-		const float rest = std::sqrt(std::max(ocean.meanSquareSlope - band.meanSquareSlope, 1e-6f)) * std::max(ocean.choppiness, 0.05f);
+		// Each cascade's own breaking crests leave the trail; the shaders keep only the bands that carry the
+		// dominant waves at a location, so short chop never sprinkles the sea with flecks of foam.
+		const auto& breaking = settings.breaking[c];
 		const float tile = band.length * static_cast<float>(UnitsPerMetre);
-		cb.FoamBand[c] = { 1.0f / std::max(rest, 1e-3f), snapshot.foamDriftVelocity[0] * step / tile, snapshot.foamDriftVelocity[1] * step / tile, 0.0f };
+		cb.FoamBand[c] = { breaking.threshold, snapshot.foamDriftVelocity[0] * step / tile, snapshot.foamDriftVelocity[1] * step / tile, breaking.invWidth };
 	}
 	constants->Update(cb);
 

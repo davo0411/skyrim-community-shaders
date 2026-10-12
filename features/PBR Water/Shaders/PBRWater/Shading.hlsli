@@ -258,10 +258,12 @@ namespace PBRWater
 	/**
 	 * Bubbles: discrete specks of air carried just under the surface. Each grid cell holds one bubble
 	 * that drifts on its own path, rises, and pops after a random lifetime, so the layer is always
-	 * moving. `density` is how aerated the water is (foam, wakes, breaking waves).
-	 * @return x speck coverage, y soft milky aeration
+	 * moving. `density` is how aerated the water is (foam, wakes, breaking waves). Only the specks are
+	 * drawn: no milky layer tints the water, and specks too small to see fade out instead of averaging into
+	 * a white haze.
+	 * @return speck coverage
 	 */
-	float2 Bubbles(float2 p, float density, float footprint, float time)
+	float Bubbles(float2 p, float density, float footprint, float time)
 	{
 		density = saturate(density * Foam2.w);
 		if (density <= 0.002)
@@ -287,9 +289,7 @@ namespace PBRWater
 			}
 		}
 		float pixelCells = footprint / cellSize;
-		specks = lerp(saturate(specks), density * 0.15, saturate(pixelCells * 2.0 - 0.5));
-		float milk = density * (0.4 + 0.6 * Fbm(p / (cellSize * 6.0) + float2(time * 0.09, -time * 0.07)));
-		return float2(specks, milk);
+		return saturate(specks) * saturate(1.5 - pixelCells * 2.0);
 	}
 
 	/**
@@ -314,16 +314,6 @@ namespace PBRWater
 		float2 g = WorldGradient(foam, positionWS) * (0.04 * UnitsPerMetre);  // foam relief ~4 cm
 		g = clamp(g, -1.5, 1.5);
 		return normalize(waterNormal - float3(g, 0.0));
-	}
-
-	/// Breaking intensity: crests compressed past the breaking threshold (set on the CPU so that the wind's
-	/// whitecap share of the sea breaks, Monahan & O'Muircheartaigh 1980), plus the trail of recent breaking.
-	/// The soft edge is a fraction of the compression spread, so stronger breaking makes larger patches.
-	float CrestCoverage(float jacobian, float trail)
-	{
-		float width = max(Surface1.y * 0.6, 1e-3);
-		float breaking = saturate((Foam0.y - jacobian) / width);
-		return max(breaking, saturate(trail));
 	}
 
 	// ------------------------------------------------------------------------
@@ -373,9 +363,9 @@ namespace PBRWater
 		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
 		float windrows = WindrowPattern(absXY, ctx.peakOmega);
 		float slick = WindrowSlick(windrows);
-		// The smallest FFT cascade already carries the wind's waves down to a few centimetres, so on open
-		// water the normal maps only add the capillary texture on top.
-		float windDetail = lerp(0.3, 1.25, saturate(wind / 8.0)) * (OceanActive() ? 0.6 : 1.0);
+		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
+		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
+		float windDetail = lerp(0.75, 1.3, saturate(wind / 8.0));
 		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
@@ -396,9 +386,9 @@ namespace PBRWater
 		o.windrows = WindrowFoam(windrows);
 		o.jacobian = waves.jacobian;
 
-		// Crest foam where the surface folds now, plus the trail the cascades keep of where it folded a
-		// moment ago (thinning over the trail time and drifting with the surface current).
-		o.crestFoam = CrestCoverage(waves.jacobian, waves.crestTrail);
+		// Whitecaps: the dominant waves' crests breaking now and the trail they leave (thinning over the trail
+		// time and drifting with the surface current), kept per cascade in the assemble pass.
+		o.crestFoam = saturate(waves.crestTrail);
 
 		o.shoreBreak = waves.shoreBreak;
 		o.shoreMask = waves.shoreMask;
@@ -425,7 +415,7 @@ namespace PBRWater
 		// Breaking foam rides the crests that are breaking, with only a thin residue between them.
 		float breaking = s.shoreBreak * Shore1.y * (0.1 + 0.9 * s.shoreCrest * s.shoreCrest);
 		float aeration = saturate(s.rippleFoam * Foam1.z * 3.0);
-		float surface = saturate((contact * surge + breaking + s.windrows) * Foam0.z + aeration * 0.02);
+		float surface = saturate((contact * surge + breaking + s.windrows) * Foam0.z);
 		// The amount already sets how much of the sea breaks; this only switches it off at zero.
 		float whitecap = saturate(s.crestFoam) * saturate(Foam2.x * 4.0);
 		return float3(surface, whitecap, aeration);
@@ -448,11 +438,11 @@ namespace PBRWater
 			// Height in units of Hs / 2: crests red, troughs green.
 			return float3(saturate(2.0 * waveState.x / max(Optics0.w, 1.0)) * 0.5 + 0.5, saturate(-2.0 * waveState.x / max(Optics0.w, 1.0)), 0.0);
 		case 7:
-		{
-			// Fetch on a log scale: blue 100 m (pond, river), green ~3 km (bay, harbour), red 100 km+ (open sea).
-			float t = saturate((log10(max(s.fetchMetres, 10.0)) - 2.0) / 3.0);
-			return lerp(lerp(float3(0.0, 0.2, 1.0), float3(0.0, 1.0, 0.2), saturate(t * 2.0)), float3(1.0, 0.1, 0.0), saturate(t * 2.0 - 1.0));
-		}
+			{
+				// Fetch on a log scale: blue 100 m (pond, river), green ~3 km (bay, harbour), red 100 km+ (open sea).
+				float t = saturate((log10(max(s.fetchMetres, 10.0)) - 2.0) / 3.0);
+				return lerp(lerp(float3(0.0, 0.2, 1.0), float3(0.0, 1.0, 0.2), saturate(t * 2.0)), float3(1.0, 0.1, 0.0), saturate(t * 2.0 - 1.0));
+			}
 		case 8:
 			// Water clarity: blue clear, brown murky.
 			return lerp(float3(0.05, 0.25, 0.6), float3(0.55, 0.35, 0.1), saturate(s.turbidity / 2.0)) * (0.4 + 0.6 * saturate(s.turbidity));

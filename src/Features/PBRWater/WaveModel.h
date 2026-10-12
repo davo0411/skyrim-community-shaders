@@ -105,6 +105,26 @@ namespace PBRWaterModel
 	/** @brief Builds the sea state for the given wind and swell. */
 	OceanSpectrum GenerateSpectrum(const SpectrumParams& params);
 
+	/** @brief Where a cascade's own crests break: compression past `threshold`, softened over `1 / invWidth`. */
+	struct BreakingCriterion
+	{
+		float threshold = -1.0e3f;  ///< Jacobian of the cascade alone; below it the crest is breaking (-1e3: never)
+		float invWidth = 1.0f;      ///< 1 / soft edge of the criterion
+		float probability = 0.0f;   ///< share of the band's waves that break (Banner et al. 2000)
+	};
+
+	/**
+	 * @brief Breaking crests of one cascade's band, as if it held the dominant waves.
+	 *
+	 * Banner, Babanin & Young (2000) found that the share of dominant waves breaking is set by their
+	 * significant steepness eps = k Hs / 2, with nothing breaking below eps = 0.055:
+	 * P = 22 (eps - 0.055)^2.01. Only the front of a breaking crest, about a tenth of the wavelength, is
+	 * white, so P / 10 of the band's area breaks: its most compressed crests. Its compression is close to
+	 * Gaussian with a standard deviation of lambda sqrt(mss), which places the threshold.
+	 * @param amount artistic multiplier on the breaking share (1 = as measured)
+	 */
+	BreakingCriterion CascadeBreaking(const OceanSpectrum& spectrum, uint32_t cascade, float amount);
+
 	/** @brief Deterministic standard complex Gaussian for lattice index (m, n) of a cascade. Mirrors OceanSpectrum.hlsli. */
 	void OceanNoise(int32_t m, int32_t n, uint32_t cascade, float& re, float& im);
 	/** @brief Quantised angular frequency of wavenumber k (rad/m), as a multiple of 2 pi / LoopPeriod. Mirrors the shader. */

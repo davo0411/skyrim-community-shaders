@@ -214,25 +214,6 @@ namespace
 		return timeConstant > 0.0f ? 1.0f - std::exp(-std::max(dt, 0.0f) / timeConstant) : 1.0f;
 	}
 
-	/**
-	 * Jacobian below which `share` of an FFT sea is breaking. The surface compression is close to Gaussian
-	 * with a standard deviation of choppiness * sqrt(mean square slope), so the most compressed crests that
-	 * make up that share lie below 1 + sigma * Phi^-1(share) (Abramowitz & Stegun 26.2.23 for Phi^-1).
-	 */
-	float BreakingThreshold(float sigma, float share)
-	{
-		const float p = std::clamp(share, 1e-6f, 0.5f);
-		const float t = std::sqrt(-2.0f * std::log(p));
-		const float z = t - (2.515517f + 0.802853f * t + 0.010328f * t * t) / (1.0f + 1.432788f * t + 0.189269f * t * t + 0.001308f * t * t * t);
-		return 1.0f - std::max(sigma, 1e-4f) * z;
-	}
-
-	/// Spread of the surface compression of an FFT sea (see OceanSpectrum::choppiness).
-	float CompressionSigma(const PBRWaterModel::OceanSpectrum& o)
-	{
-		return o.choppiness * std::sqrt(std::max(o.meanSquareSlope, 0.0f));
-	}
-
 	bool IsDynamicMotion(const RE::hkpRigidBody* body)
 	{
 		using Type = RE::hkpMotion::MotionType;
@@ -502,14 +483,14 @@ void PBRWater::DrawSettings()
 			ImGui::TextUnformatted(T(TKEY("foam_drift_tooltip"), "How fast foam and bubbles are carried downwind by the surface drift."));
 		ImGui::SliderFloat(T(TKEY("bubble_amount"), "Bubbles"), &settings.BubbleAmount, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("bubble_amount_tooltip"), "Drifting bubbles and milky aerated water under foam, whitecaps and wakes."));
+			ImGui::TextUnformatted(T(TKEY("bubble_amount_tooltip"), "Drifting bubble specks under foam, whitecaps and wakes."));
 		ImGui::TreePop();
 	}
 
 	if (ImGui::TreeNodeEx(T(TKEY("whitecaps"), "Whitecaps"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::SliderFloat(T(TKEY("whitecap_amount"), "Whitecap Amount"), &settings.WhitecapAmount, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("whitecap_amount_tooltip"), "Scales how much of the sea breaks into whitecaps. The wind sets the amount (more and larger caps in a gale), and the foam sits on the crests that are actually breaking."));
+			ImGui::TextUnformatted(T(TKEY("whitecap_amount_tooltip"), "Scales the measured share of breaking waves. Which crests break is physical: the steepness of the dominant waves sets how many of them break (Banner, Babanin and Young 2000; nothing breaks below a threshold steepness), and only their most compressed fronts turn white. 1 is as measured."));
 		ImGui::SliderFloat(T(TKEY("foam_persistence"), "Crest Foam Trail"), &settings.FoamPersistence, 0.0f, 5.0f, "%.1f s");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("foam_persistence_tooltip"), "How long foam from a breaking crest lingers and thins out behind the wave."));
@@ -596,6 +577,8 @@ void PBRWater::DrawSettings()
 			const auto& o = *snap->ocean;
 			ImGui::Text("Wind %.1f m/s, peak period %.1f s, Hs %.2f m, choppiness %.2f", o.windSpeed, TwoPi / o.peakOmega, o.significantHeight / UnitsPerMetre, o.choppiness);
 			ImGui::Text("Whitecaps %.1f%%, mean square slope %.3f", o.whitecapCoverage * 100.0f, o.meanSquareSlope);
+			ImGui::Text("Breaking waves per band: %.1f%% %.1f%% %.1f%%", PBRWaterModel::CascadeBreaking(o, 0, 1.0f).probability * 100.0f,
+				PBRWaterModel::CascadeBreaking(o, 1, 1.0f).probability * 100.0f, PBRWaterModel::CascadeBreaking(o, 2, 1.0f).probability * 100.0f);
 			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
@@ -764,8 +747,10 @@ void PBRWater::Prepass()
 	if (const auto snap = snapshot.load(std::memory_order_acquire)) {
 		OceanSimulation::Settings oceanSettings;
 		oceanSettings.resolution = WaveResolutionSize();
-		if (snap->ocean)
-			oceanSettings.crestThreshold = BreakingThreshold(CompressionSigma(*snap->ocean), snap->ocean->whitecapCoverage * settings.WhitecapAmount);
+		if (snap->ocean) {
+			for (uint32_t c = 0; c < PBRWaterModel::NumCascades; ++c)
+				oceanSettings.breaking[c] = PBRWaterModel::CascadeBreaking(*snap->ocean, c, settings.WhitecapAmount);
+		}
 		oceanSettings.foamTrail = settings.FoamPersistence;
 		ocean.Update(*snap, dt, oceanSettings);
 	}
@@ -872,10 +857,7 @@ void PBRWater::UpdateFrameConstants()
 
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, settings.FoamAlbedo, settings.RefractionDistortion, settings.PointLightSpecular };
-	// Crests break where they compress past the threshold that makes the wind's whitecap share (Monahan).
-	const float compressionSigma = (snap && snap->ocean) ? CompressionSigma(*snap->ocean) : 0.0f;
-	const float breakingThreshold = (snap && snap->ocean) ? BreakingThreshold(compressionSigma, snap->ocean->whitecapCoverage * settings.WhitecapAmount) : 0.0f;
-	d.Foam0 = { settings.ShoreFoamWidth * UnitsPerMetre, breakingThreshold, settings.FoamAmount, settings.FoamScale * UnitsPerMetre };
+	d.Foam0 = { settings.ShoreFoamWidth * UnitsPerMetre, 0.0f, settings.FoamAmount, settings.FoamScale * UnitsPerMetre };
 	// The foam animation only drifts noise slowly; wrapping once an hour keeps float precision.
 	d.Foam1 = { settings.FoamPersistence, std::fmod(globals::state->timer, 3600.0f), settings.WakeFoam, settings.RiverWaveDamping };
 	d.Foam2 = { settings.WhitecapAmount, settings.WhitecapScale * UnitsPerMetre, settings.WhitecapStreak, settings.BubbleAmount };
@@ -891,7 +873,7 @@ void PBRWater::UpdateFrameConstants()
 
 	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
-	d.Surface1 = { settings.WindStreaks, compressionSigma, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
+	d.Surface1 = { settings.WindStreaks, 0.0f, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
 	worldFlowmap = nullptr;

@@ -6,11 +6,13 @@
 //   Surface      : xy squared slopes (LEAN moments: mip-filtered, they keep the variance of the slopes a
 //                  pixel averages away), z crest foam trail, w |laplacian of the height| (1/unit, tessellation)
 //
-// Crest foam: where a crest folds (Jacobian below the threshold) it leaves foam that thins over the trail
-// time and drifts with the surface current. Each cascade only knows its own band, so it stores the
-// probability that the *whole* surface folds there, given its own compression and the spread of all the
-// other bands (Gaussian): sharp where one band dominates, a uniform low level where it is minor. The foam
-// lives in the cascade's tile, i.e. in Lagrangian coordinates, so it rides the waves it came from.
+// Crest foam: where one of the band's own crests breaks it leaves foam that thins over the trail time and
+// drifts with the surface current. A crest breaks when it compresses past the band's threshold, set on the
+// CPU from the share of its waves that break (Banner, Babanin & Young 2000, from the band's significant
+// steepness): only the most compressed fronts of the steepest crests. The shaders keep a band's trail only
+// where it carries the dominant waves, so whitecaps sit on the big breakers and short chop never sprinkles
+// the sea with flecks. The foam lives in the cascade's tile, i.e. in Lagrangian coordinates, so it rides the
+// waves it came from.
 // ============================================================================
 
 #include "PBRWater/OceanSpectrum.hlsli"
@@ -52,9 +54,8 @@ float2 SlopesAt(int2 p, uint size, uint cascade)
 	float dyy = SlopesAt(p + int2(0, 1), size, cascade).y - SlopesAt(p - int2(0, 1), size, cascade).y;
 	float curvature = abs(dxx + dyy) / (2.0 * texel);
 
-	// Probability that the total surface folds here (logistic approximation of the normal CDF).
-	float x = (Foam0.z - jacobian) * FoamBand[cascade].x;
-	float folding = 1.0 / (1.0 + exp(-1.702 * clamp(x, -20.0, 20.0)));
+	// This band's crest breaking here: compressed past its threshold, with a soft edge.
+	float folding = saturate((FoamBand[cascade].x - jacobian) * FoamBand[cascade].w);
 	float2 uv = (float2(id.xy) + 0.5) / (float)size - FoamBand[cascade].yz;
 	float trail = FoamPrevious.SampleLevel(WrapSampler, float3(uv, cascade), 0) * Foam0.y;
 	float foam = saturate(max(trail, folding));
