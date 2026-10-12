@@ -1289,7 +1289,13 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float3 positionMSSkylight = input.WPosition.xyz;
 
-	sh2 skylightingSH = Skylighting::SampleNoBias(positionMSSkylight);
+#				if defined(PBR_WATER)
+	// The waves are in Skylighting's occlusion maps (PBR Water): read the sky just above this point of the surface,
+	// where a trough sees less of it past the crests around than a crest does.
+	positionMSSkylight.z += Skylighting::CELL_SIZE.z;
+#				endif
+	// The water surface itself is never lifted out of the water (Skylighting::SampleNoBias).
+	sh2 skylightingSH = Skylighting::SampleNoBias(positionMSSkylight, false);
 	float skylighting = SphericalHarmonics::Unproject(skylightingSH, float3(0, 0, 1));
 
 	float skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, float3(0, 0, 1), Skylighting::GetFadeOutFactor(input.WPosition.xyz));
@@ -1380,12 +1386,6 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
-#				if defined(PBR_WATER) && !defined(UNDERWATER) && !defined(LOD)
-	// At a low sun the crests shadow the troughs behind them.
-	float pbrWaveShadow = PBRWater::WaveSunShadow(input.WaveParam.xyz, pbrSurface.ctx, SunDir.xyz, pbrSurface.footprint);
-	dirShadow *= pbrWaveShadow;
-	surfaceShadow *= pbrWaveShadow;
-#				endif
 
 	float3 dirColor;
 	float3 ambientColor;

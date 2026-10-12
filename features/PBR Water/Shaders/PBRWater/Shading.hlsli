@@ -286,7 +286,6 @@ namespace PBRWater
 		float turbidity;  // column sediment, filled in by the water column shading
 		float windSpeed;  // local wind at the surface (m/s)
 		float windrows;   // foam gathered into streaks along the wind
-		WaveContext ctx;  // the waves' local context (wave shadows)
 	};
 
 	/**
@@ -370,70 +369,7 @@ namespace PBRWater
 		o.fetchMetres = fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
-		o.ctx = ctx;
 		return o;
-	}
-
-	// ------------------------------------------------------------------------
-	// Wave shadows
-	// ------------------------------------------------------------------------
-
-	/**
-	 * Height of the long-wave cascades (all but the finest, whose shadows are under a decimetre) at undisplaced
-	 * camera-relative `xy + offset`, low-passed over `blur` units. The offset is taken through the shore warp, which
-	 * shortens the waves by kappa along the ray.
-	 */
-	float LongWaveHeight(float2 xy, float2 offset, WaveContext ctx, float blur)
-	{
-		float height = 0.0;
-		[unroll] for (uint c = 0; c + 1 < PBRW_CASCADES; c++)
-		{
-			float vertical = CascadeWeight(c, ctx);
-			float kappa = ShoreCompression(ctx, c);
-			float2 warped = offset + (kappa - 1.0) * ctx.shore.dir * dot(ctx.shore.dir, offset);
-			float3 uv = float3(CascadeUV(xy + warped - ShoreShift(ctx, c), c), c);
-			float lod = clamp(log2(max(blur * kappa, 1e-3) / Cascade0[c].w), 0.0, Params2.w);
-			height += OceanDisplacement.SampleLevel(OceanSampler, uv, lod).z * vertical;
-		}
-		return height;
-	}
-
-	/**
-	 * Sunlight reaching the surface past the other waves, 0..1. Once the sun is lower than the steepest wave slopes
-	 * the crests shadow the troughs behind them: sea-surface shadowing (Wagner 1967; Smith 1967), resolved here
-	 * for the waves larger than a pixel instead of averaged. Marches the long-wave heightfield towards the sun with
-	 * a cone that widens with distance (coarser mips), softened by the sun's disc (0.53 degrees); the unresolved
-	 * short waves are left to the specular's own shadowing term.
-	 * @param positionWS undisplaced camera-relative position (Lagrangian)
-	 * @param toSun      unit direction to the sun
-	 * @param footprint  world size of a pixel (units)
-	 */
-	float WaveSunShadow(float3 positionWS, WaveContext ctx, float3 toSun, float footprint)
-	{
-		float horizontal = length(toSun.xy);
-		float tanSun = toSun.z / max(horizontal, 1e-4);
-		float shadow = 1.0;
-		// No sea is steeper than its breaking limit (ak ~ 0.44, crest slopes ~0.6): a sun higher than ~35 degrees
-		// lights every wave.
-		[branch] if (Surface1.y > 0.5 && OceanActive() && toSun.z > 0.0 && tanSun < 0.7 && ctx.damping > 0.0)
-		{
-			float2 dir = toSun.xy / max(horizontal, 1e-4);
-			float blur0 = max(footprint, 1.0);
-			float start = LongWaveHeight(positionWS.xy, 0.0, ctx, blur0);
-			float d = max(2.0 * footprint, 8.0);
-			// Out to 2^8 times the first step (~30 m near the camera): far enough for a long swell's crest at a low sun.
-			[unroll] for (uint i = 0; i < 9; i++)
-			{
-				float blur = max(0.15 * d, blur0);
-				float clearance = start + d * tanSun - LongWaveHeight(positionWS.xy, dir * d, ctx, blur);
-				float penumbra = 0.0093 * d + 0.5 * blur + 1.0;
-				shadow = min(shadow, saturate(clearance / penumbra + 0.5));
-				d *= 2.0;
-			}
-			// The waves fade to the flat plane with distance, and so do their shadows.
-			shadow = lerp(1.0, shadow, saturate(ctx.damping * 2.0));
-		}
-		return shadow;
 	}
 
 	/// Foam coverage from all sources. `contact` is 0..1 how close the waterline of something rising out of the

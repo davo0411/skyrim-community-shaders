@@ -217,11 +217,16 @@ crack), so waves the mesh cannot carry are averaged out instead of aliasing.
     fades to its average when sub-pixel.
 -   The vanilla normal maps keep most of their strength over the FFT waves (0.75-1.3 by local wind), so
     the flowmap to open-water transition and the capillary texture stay visible.
--   **Wave shadows**: at a low sun the crests shadow the troughs behind them. Once the sun is lower than the
-    steepest slopes (`tan e < ~0.7`, the breaking limit) the pixel marches the long-wave heightfield
-    towards the sun (`WaveSunShadow`: nine doubling steps, coarser mips with distance, softened by the
-    sun's disc) and dims the sun glint, translucency and foam (Wave Shadows setting). The sky the surface sees comes from
-    Skylighting at the displaced position, evaluated for the wave facet's normal.
+-   **Wave shadows through Skylighting**: the displaced water surface is drawn into Skylighting's sky
+    occlusion map each frame (`DrawSkylightingOccluder`, `SkylightingOccluderVS.hlsl`: one depth-only draw of
+    a 177^2-vertex grid over the cells' still water, displaced like the mesh, just before Skylighting updates
+    its probes), so the waves occlude the sky like any other geometry. The probes average it over many frames
+    and directions: a point low in a trough sees less sky past the crests around it than a crest does. The
+    water reads Skylighting one probe cell above its own displaced surface, for its ambient (with the wave
+    facet's normal) and its sky reflection. Anything under the still water reads Skylighting just above the
+    surface instead of from under the occluder (`Skylighting::LiftOutOfWater`, switched on by
+    `SharedData::pbrWaterSettings`), since its sky light comes in through the water and the water shaders
+    attenuate it. Nothing is drawn while the water is calm.
 
 ## Interaction
 
@@ -354,7 +359,8 @@ against the CPU mirror, including slopes and compression against finite differen
         break; each one runs up the sand, drains back and leaves a line of foam that the next one sweeps
         away; the sand is wet up to where the water reached and dries slowly. Rock outcrops and cliffs get
         no surf or swash, only the open-sea waves and wet rock up to the crest height.
--   [ ] Sunset over a choppy sea: troughs behind the crests fall into shadow.
+-   [ ] Choppy sea with Skylighting: troughs are darker than crests (sky light and reflection); shallow
+        seabeds and wading legs are not darkened by the water above them.
 -   [ ] Swim at the surface in waves: the underwater view starts when the camera dips under a crest.
 
 ## Known limitations
@@ -366,6 +372,9 @@ against the CPU mirror, including slopes and compression against finite differen
     pixel, but the foam left on the sand and the wet level are that coarse).
 -   Gameplay water heights include the shore warp but not the swash: swimming and buoyancy see the shoaled
     waves, not the run-up's thin film.
+-   The waves occlude Skylighting where the cells' own water is (sea, lakes); separate river meshes are not
+    drawn into its occlusion map. It is sky light only: the sun's shadows come from the shadow maps, which
+    the water is not drawn into.
 -   The underwater view switches on the surface height above the camera; the lens line across the screen is
     still the game's flat line at that height, not the wave profile.
 -   Fetch and depth weight whole cascades, so the transition from a sheltered bay to the open sea happens
@@ -406,7 +415,6 @@ against the CPU mirror, including slopes and compression against finite differen
     Engineering 2006) - run-up
 -   Shen & Meyer (1963); Peregrine & Williams, _Swash Overtopping a Truncated Plane Beach_ (JFM 2001) -
     ballistic swash and the swash lens
--   Wagner (1967); Smith, _Geometrical Shadowing of a Random Rough Surface_ (1967) - sea-surface shadowing
 -   Whitlock, Bartlett & Gurganus, _Sea Foam Reflectance_ (GRL 1982) - foam albedo
 -   Bobbing Framework (RavenKZP, GPL-3.0-or-later WITH Modding Exception) - moving placed references with
     keyframed collision, their children and the actors standing on them; the floating objects build on it

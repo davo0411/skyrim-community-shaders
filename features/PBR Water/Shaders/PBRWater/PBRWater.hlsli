@@ -65,7 +65,7 @@ namespace PBRWater
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
-		float4 Surface1;                 // x wind streak strength, y wave shadows on, z fetch scale, w unused
+		float4 Surface1;                 // x wind streak strength, y unused, z fetch scale, w unused
 		float4 Land0;                    // xy loaded terrain grid corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;                    // x enabled, y vertex spacing (units)
 		float4 Foam2;                    // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount

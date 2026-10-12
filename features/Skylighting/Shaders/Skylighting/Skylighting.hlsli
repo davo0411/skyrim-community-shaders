@@ -32,6 +32,21 @@ namespace Skylighting
 		return saturate(edgeDist * 20);
 	}
 
+	/**
+	 * PBR Water draws the displaced water surface into the occlusion maps, so the waves occlude the sky like any
+	 * other geometry. Sky light reaches anything under the water through that surface, so it is sampled just above
+	 * the still water instead of from under the occluder (the water shaders attenuate it on the way down).
+	 */
+	float3 LiftOutOfWater(float3 positionMS)
+	{
+		[branch] if (SharedData::pbrWaterSettings.Skylighting.x > 0.5)
+		{
+			float stillWater = SharedData::GetWaterData(positionMS).w;
+			positionMS.z = max(positionMS.z, stillWater + 1.5 * CELL_SIZE.z);
+		}
+		return positionMS;
+	}
+
 	float MixDiffuse(float visibility)
 	{
 		return lerp(SharedData::skylightingSettings.MinDiffuseVisibility, 1.0, visibility);
@@ -104,6 +119,7 @@ namespace Skylighting
 			return scaledUnitSH;
 
 		positionMS.xyz += normalWS * CELL_SIZE * 0.5;  // Receiver normal bias
+		positionMS = LiftOutOfWater(positionMS);
 
 		float3 positionMSAdjusted = positionMS - SharedData::skylightingSettings.PosOffset.xyz;
 		float3 uvw = positionMSAdjusted / ARRAY_SIZE + .5;
@@ -177,12 +193,16 @@ namespace Skylighting
 		return saturate(skylightingDiffuse / max(vertexAO, EPSILON_DIVISION));
 	}
 
-	sh2 SampleNoBias(float3 positionMS)
+	/// @param liftOutOfWater false for the water surface itself, which samples just above its own (displaced) height
+	sh2 SampleNoBias(float3 positionMS, bool liftOutOfWater = true)
 	{
 		sh2 scaledUnitSH = UNIT_SH / 1e-10;
 
 		if (SharedData::InInterior)
 			return scaledUnitSH;
+
+		if (liftOutOfWater)
+			positionMS = LiftOutOfWater(positionMS);
 
 		float3 positionMSAdjusted = positionMS - SharedData::skylightingSettings.PosOffset.xyz;
 		float3 uvw = positionMSAdjusted / ARRAY_SIZE + .5;

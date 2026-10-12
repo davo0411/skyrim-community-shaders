@@ -78,7 +78,6 @@ struct PBRWater : Feature
 		float PointLightSpecular = 1.0f;
 		float Subsurface = 1.0f;
 		float VanillaFresnel = 0.0f;
-		bool WaveShadows = true;  ///< at a low sun the crests shadow the troughs behind them
 		float Visibility = 1.0f;
 		float RefractionDistortion = 1.0f;
 		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
@@ -219,12 +218,22 @@ struct PBRWater : Feature
 	/** @brief What the lit objects need of the swash (Lighting.hlsl, wetness and caustics); matches PBRWaterSettings in SharedData.hlsli. */
 	struct alignas(16) SharedSettings
 	{
-		float4 SwashGrid;  // xy grid corner (absolute units), z 1 / extent (units), w enabled
-		float4 Wetness;    // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+		float4 SwashGrid;    // xy grid corner (absolute units), z 1 / extent (units), w enabled
+		float4 Wetness;      // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+		float4 Skylighting;  // x the water surface is in Skylighting's occlusion maps, yzw unused
 	};
 	STATIC_ASSERT_ALIGNAS_16(SharedSettings);
 	/** @brief Render thread: the swash data for the shared feature buffer. */
 	SharedSettings GetCommonBufferData() const;
+
+	/**
+	 * @brief Render thread, Skylighting's probe update: draws the displaced water surface into this frame's sky
+	 * occlusion map, so the waves occlude the sky like any other geometry (troughs see less of it past the crests).
+	 * A depth-only draw of one camera-centred heightfield grid; nothing when the water is calm.
+	 * @param occlusion         the occlusion map Skylighting just rendered (depth)
+	 * @param occlusionViewProj Skylighting's occlusion transform (eye-relative position to occlusion clip space)
+	 */
+	void DrawSkylightingOccluder(Texture2D& occlusion, const REX::W32::XMFLOAT4X4& occlusionViewProj);
 
 	// ---- Hooks ----
 	struct TESWaterSystem_InitializeWater
@@ -284,6 +293,8 @@ private:
 	void ApplyCameraWater();
 	/** @brief Render thread: puts back the samplers SetupDraw replaced. */
 	void RestoreSamplers();
+	/** @brief Render thread: compiles the Skylighting occluder's vertex shader. */
+	void CompileOccluder();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
 	GpuData frameData{};
@@ -315,7 +326,25 @@ private:
 	std::unique_ptr<Texture2D> shoreLevelTexture;  ///< render thread: beach slope, still water level
 	uint32_t uploadedShoreGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::ShoreField> uploadedShore;
-	OceanSimulation ocean;                  ///< render thread
+	OceanSimulation ocean;  ///< render thread
+
+	// Skylighting occluder (render thread)
+	static constexpr uint32_t OccluderQuads = 176;     ///< grid quads per side
+	static constexpr float OccluderExtent = 11000.0f;  ///< units across: Skylighting's 10000-unit probe grid and a margin
+	struct alignas(16) OccluderCB
+	{
+		REX::W32::XMFLOAT4X4 occlusionViewProj;
+		float4 eye;             // xyz absolute eye position, w grid extent (units)
+		float4 grid;            // x quads per side, y spacing (units), zw absolute cell of the eye
+		float4 cellLevels[25];  // x absolute still water level of cell (eye cell + (i - 2, j - 2)) at i + 5 j, < -1e8: no water
+	};
+	STATIC_ASSERT_ALIGNAS_16(OccluderCB);
+	winrt::com_ptr<ID3D11VertexShader> occluderVS;
+	winrt::com_ptr<ID3D11Buffer> occluderIndices;
+	winrt::com_ptr<ID3D11DepthStencilState> occluderDepthState;
+	winrt::com_ptr<ID3D11RasterizerState> occluderRasterizer;
+	std::unique_ptr<ConstantBuffer> occluderCB;
+	uint32_t occluderFrame = UINT32_MAX;    ///< State frame the occluder was last drawn in
 	std::atomic<bool> oceanReady{ false };  ///< the GPU ocean is live; until then gameplay sees no FFT waves
 	WaterEnvironment environment;
 	FloatingObjects floating;  ///< main thread

@@ -99,7 +99,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		CarryActors,
 		WetShores,
 		UnderwaterFollowsWaves,
-		WaveShadows,
 		WireframeMode,
 		DebugView))
 }
@@ -186,7 +185,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		CarryActors,
 		WetShores,
 		UnderwaterFollowsWaves,
-		WaveShadows,
 		WireframeMode,
 		DebugView))
 }
@@ -424,9 +422,6 @@ void PBRWater::DrawSettings()
 		Util::WeatherUI::SliderFloat(T(TKEY("roughness"), "Surface Roughness"), this, "Roughness", &settings.Roughness, 0.02f, 0.5f, "%.3f");
 		ImGui::SliderFloat(T(TKEY("sun_specular"), "Sun Specular"), &settings.SunSpecular, 0.0f, 4.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("point_light_specular"), "Light Specular"), &settings.PointLightSpecular, 0.0f, 4.0f, "%.2f");
-		ImGui::Checkbox(T(TKEY("wave_shadows"), "Wave Shadows"), &settings.WaveShadows);
-		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("wave_shadows_tooltip"), "When the sun is low, the wave crests cast shadows into the troughs behind them. Costs a little more at sunrise and sunset."));
 		Util::WeatherUI::SliderFloat(T(TKEY("subsurface"), "Subsurface Scattering"), this, "Subsurface", &settings.Subsurface, 0.0f, 4.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("subsurface_tooltip"), "Sunlight shining through thin, backlit wave crests. Its colour comes from the water: clear water glows green-blue, murky water dimly."));
@@ -640,6 +635,47 @@ void PBRWater::SetupResources()
 
 	ripples.SetupResources();
 	swash.SetupResources();
+
+	// The Skylighting occluder: a camera-centred grid of (OccluderQuads + 1)^2 vertices made by the vertex shader.
+	{
+		constexpr uint32_t verts = OccluderQuads + 1;
+		static_assert(verts * verts <= 65536, "16-bit indices");
+		std::vector<uint16_t> indices;
+		indices.reserve(static_cast<size_t>(OccluderQuads) * OccluderQuads * 6);
+		for (uint32_t y = 0; y < OccluderQuads; ++y) {
+			for (uint32_t x = 0; x < OccluderQuads; ++x) {
+				const auto a = static_cast<uint16_t>(y * verts + x);
+				const auto b = static_cast<uint16_t>(a + 1);
+				const auto c = static_cast<uint16_t>(a + verts);
+				const auto e = static_cast<uint16_t>(c + 1);
+				indices.insert(indices.end(), { a, c, b, b, c, e });
+			}
+		}
+		D3D11_BUFFER_DESC indexDesc{};
+		indexDesc.ByteWidth = static_cast<UINT>(indices.size() * sizeof(uint16_t));
+		indexDesc.Usage = D3D11_USAGE_IMMUTABLE;
+		indexDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+		const D3D11_SUBRESOURCE_DATA indexData{ indices.data(), 0, 0 };
+		DX::ThrowIfFailed(globals::d3d::device->CreateBuffer(&indexDesc, &indexData, occluderIndices.put()));
+		Util::SetResourceName(occluderIndices.get(), "PBRWater::SkylightingOccluderIndices");
+
+		D3D11_DEPTH_STENCIL_DESC depthDesc{};
+		depthDesc.DepthEnable = TRUE;
+		depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+		depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+		DX::ThrowIfFailed(globals::d3d::device->CreateDepthStencilState(&depthDesc, occluderDepthState.put()));
+		Util::SetResourceName(occluderDepthState.get(), "PBRWater::SkylightingOccluderDepth");
+
+		D3D11_RASTERIZER_DESC rasterizerDesc{};
+		rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+		rasterizerDesc.CullMode = D3D11_CULL_NONE;
+		rasterizerDesc.DepthClipEnable = TRUE;
+		DX::ThrowIfFailed(globals::d3d::device->CreateRasterizerState(&rasterizerDesc, occluderRasterizer.put()));
+		Util::SetResourceName(occluderRasterizer.get(), "PBRWater::SkylightingOccluderRasterizer");
+
+		occluderCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<OccluderCB>(), "PBRWater::SkylightingOccluderCB");
+		CompileOccluder();
+	}
 	ocean.SetupResources();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 }
@@ -648,6 +684,7 @@ void PBRWater::ClearShaderCache()
 {
 	ripples.ClearShaderCache();
 	swash.ClearShaderCache();
+	CompileOccluder();
 	ocean.ClearShaderCache();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 	tessellationFailureLogged = false;
@@ -914,11 +951,181 @@ void PBRWater::UpdateSwash(float dt)
 PBRWater::SharedSettings PBRWater::GetCommonBufferData() const
 {
 	SharedSettings data{};
-	if (loaded && frameData.Swash0.w > 0.5f) {
+	if (!loaded)
+		return data;
+	if (frameData.Swash0.w > 0.5f) {
 		data.SwashGrid = frameData.Swash0;
 		data.Wetness = { settings.WetShores ? 1.0f : 0.0f, settings.SwashFoam, settings.FoamScale * UnitsPerMetre, 0.0f };
 	}
+	// Drawn this frame or the last (the reflection passes update the shared data before Skylighting's probes).
+	const bool occluding = occluderFrame != UINT32_MAX && globals::state->frameCount - occluderFrame <= 1;
+	data.Skylighting = { occluding ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 	return data;
+}
+
+void PBRWater::CompileOccluder()
+{
+	occluderVS = nullptr;
+	if (auto* vs = reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SkylightingOccluderVS.hlsl", {}, "vs_5_0")))
+		occluderVS.attach(vs);
+	else
+		logger::warn("[PBR Water] Skylighting occluder failed to compile; the waves do not occlude the sky");
+}
+
+void PBRWater::DrawSkylightingOccluder(Texture2D& occlusion, const REX::W32::XMFLOAT4X4& occlusionViewProj)
+{
+	ID3D11DepthStencilView* dsv = occlusion.dsv.get();
+	if (!loaded || !dsv || !occluderVS || !occluderIndices || !occluderCB || !occluderDepthState || !occluderRasterizer || !gpuBuffer || !globals::shaderCache->IsEnabled())
+		return;
+	// Calm water is the flat plane the probes are lifted above anyway: only waves need drawing.
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (!snap || !snap->exterior || (frameData.Params0.x < 0.5f && frameData.Shore0.x < 0.5f))
+		return;
+	auto* tes = RE::TES::GetSingleton();
+	if (!tes)
+		return;
+
+	// The still water of the cells around the eye, as SharedData::GetWaterData sees them.
+	OccluderCB cb{};
+	cb.occlusionViewProj = occlusionViewProj;
+	const auto eye = Util::GetEyePosition();
+	const float eyeCellX = std::floor(eye.x / CellSize);
+	const float eyeCellY = std::floor(eye.y / CellSize);
+	cb.eye = { eye.x, eye.y, eye.z, OccluderExtent };
+	cb.grid = { static_cast<float>(OccluderQuads), OccluderExtent / OccluderQuads, eyeCellX, eyeCellY };
+	bool anyWater = false;
+	for (int32_t j = -2; j <= 2; ++j) {
+		for (int32_t i = -2; i <= 2; ++i) {
+			float level = -1.0e9f;
+			const RE::NiPoint3 centre{ (eyeCellX + static_cast<float>(i) + 0.5f) * CellSize, (eyeCellY + static_cast<float>(j) + 0.5f) * CellSize, eye.z };
+			if (auto* cell = tes->GetCell(centre)) {
+				if (const float height = cell->GetExteriorWaterHeight(); height > -1.0e6f) {
+					level = height;
+					anyWater = true;
+				}
+			}
+			cb.cellLevels[(i + 2) + 5 * (j + 2)] = { level, 0.0f, 0.0f, 0.0f };
+		}
+	}
+	if (!anyWater)
+		return;
+	occluderCB->Update(cb);
+	GpuData d = frameData;
+	d.Tess0.x = 0.0f;
+	gpuBuffer->Update(d);
+
+	auto context = globals::d3d::context;
+
+	// Save what this draw changes.
+	winrt::com_ptr<ID3D11InputLayout> savedLayout;
+	D3D11_PRIMITIVE_TOPOLOGY savedTopology{};
+	winrt::com_ptr<ID3D11Buffer> savedIndices;
+	DXGI_FORMAT savedIndexFormat{};
+	UINT savedIndexOffset = 0;
+	context->IAGetInputLayout(savedLayout.put());
+	context->IAGetPrimitiveTopology(&savedTopology);
+	context->IAGetIndexBuffer(savedIndices.put(), &savedIndexFormat, &savedIndexOffset);
+	winrt::com_ptr<ID3D11VertexShader> savedVS;
+	winrt::com_ptr<ID3D11HullShader> savedHS;
+	winrt::com_ptr<ID3D11DomainShader> savedDS;
+	winrt::com_ptr<ID3D11GeometryShader> savedGS;
+	winrt::com_ptr<ID3D11PixelShader> savedPS;
+	context->VSGetShader(savedVS.put(), nullptr, nullptr);
+	context->HSGetShader(savedHS.put(), nullptr, nullptr);
+	context->DSGetShader(savedDS.put(), nullptr, nullptr);
+	context->GSGetShader(savedGS.put(), nullptr, nullptr);
+	context->PSGetShader(savedPS.put(), nullptr, nullptr);
+	ID3D11Buffer* savedCB0 = nullptr;
+	ID3D11Buffer* savedCB7 = nullptr;
+	ID3D11Buffer* savedCB12 = nullptr;
+	context->VSGetConstantBuffers(0, 1, &savedCB0);
+	context->VSGetConstantBuffers(7, 1, &savedCB7);
+	context->VSGetConstantBuffers(12, 1, &savedCB12);
+	ID3D11ShaderResourceView* savedFlowmap = nullptr;
+	ID3D11ShaderResourceView* savedSRVs[WaterSRVCount] = {};
+	context->VSGetShaderResources(8, 1, &savedFlowmap);
+	context->VSGetShaderResources(110, WaterSRVCount, savedSRVs);
+	ID3D11SamplerState* savedSamplers[2] = {};
+	context->VSGetSamplers(12, 2, savedSamplers);
+	winrt::com_ptr<ID3D11RasterizerState> savedRasterizer;
+	context->RSGetState(savedRasterizer.put());
+	UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+	D3D11_VIEWPORT savedViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+	context->RSGetViewports(&viewportCount, savedViewports);
+	ID3D11RenderTargetView* savedRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+	ID3D11DepthStencilView* savedDSV = nullptr;
+	context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, &savedDSV);
+	winrt::com_ptr<ID3D11DepthStencilState> savedDepthState;
+	UINT savedStencilRef = 0;
+	context->OMGetDepthStencilState(savedDepthState.put(), &savedStencilRef);
+
+	// Depth only, with Skylighting's own transform.
+	context->OMSetRenderTargets(0, nullptr, dsv);
+	context->OMSetDepthStencilState(occluderDepthState.get(), 0);
+	const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, static_cast<float>(occlusion.desc.Width), static_cast<float>(occlusion.desc.Height), 0.0f, 1.0f };
+	context->RSSetViewports(1, &viewport);
+	context->RSSetState(occluderRasterizer.get());
+	context->IASetInputLayout(nullptr);
+	context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	context->IASetIndexBuffer(occluderIndices.get(), DXGI_FORMAT_R16_UINT, 0);
+	context->VSSetShader(occluderVS.get(), nullptr, 0);
+	context->HSSetShader(nullptr, nullptr, 0);
+	context->DSSetShader(nullptr, nullptr, 0);
+	context->GSSetShader(nullptr, nullptr, 0);
+	context->PSSetShader(nullptr, nullptr, 0);
+	ID3D11Buffer* cb0 = occluderCB->CB();
+	ID3D11Buffer* cb7 = gpuBuffer->CB();
+	ID3D11Buffer* cb12 = *globals::game::perFrame.get();
+	context->VSSetConstantBuffers(0, 1, &cb0);
+	context->VSSetConstantBuffers(7, 1, &cb7);
+	context->VSSetConstantBuffers(12, 1, &cb12);
+	ID3D11ShaderResourceView* srvs[WaterSRVCount];
+	GatherWaterSRVs(d, srvs);
+	context->VSSetShaderResources(110, WaterSRVCount, srvs);
+	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
+	context->VSSetShaderResources(8, 1, &flowmap);
+	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
+	context->VSSetSamplers(12, 2, samplers);
+
+	context->DrawIndexed(OccluderQuads * OccluderQuads * 6, 0, 0);
+
+	// Restore.
+	context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
+	context->OMSetDepthStencilState(savedDepthState.get(), savedStencilRef);
+	context->RSSetViewports(viewportCount, savedViewports);
+	context->RSSetState(savedRasterizer.get());
+	context->IASetInputLayout(savedLayout.get());
+	context->IASetPrimitiveTopology(savedTopology);
+	context->IASetIndexBuffer(savedIndices.get(), savedIndexFormat, savedIndexOffset);
+	context->VSSetShader(savedVS.get(), nullptr, 0);
+	context->HSSetShader(savedHS.get(), nullptr, 0);
+	context->DSSetShader(savedDS.get(), nullptr, 0);
+	context->GSSetShader(savedGS.get(), nullptr, 0);
+	context->PSSetShader(savedPS.get(), nullptr, 0);
+	context->VSSetConstantBuffers(0, 1, &savedCB0);
+	context->VSSetConstantBuffers(7, 1, &savedCB7);
+	context->VSSetConstantBuffers(12, 1, &savedCB12);
+	context->VSSetShaderResources(8, 1, &savedFlowmap);
+	context->VSSetShaderResources(110, WaterSRVCount, savedSRVs);
+	context->VSSetSamplers(12, 2, savedSamplers);
+	auto release = [](auto*& p) {
+		if (p)
+			p->Release();
+		p = nullptr;
+	};
+	release(savedCB0);
+	release(savedCB7);
+	release(savedCB12);
+	release(savedFlowmap);
+	for (auto*& srv : savedSRVs)
+		release(srv);
+	for (auto*& sampler : savedSamplers)
+		release(sampler);
+	for (auto*& rtv : savedRTVs)
+		release(rtv);
+	release(savedDSV);
+
+	occluderFrame = globals::state->frameCount;
 }
 
 void PBRWater::UpdateFrameConstants()
@@ -1029,7 +1236,7 @@ void PBRWater::UpdateFrameConstants()
 
 	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
-	d.Surface1 = { settings.WindStreaks, settings.WaveShadows ? 1.0f : 0.0f, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
+	d.Surface1 = { settings.WindStreaks, 0.0f, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
 
 	// Small open hulls stay dry inside.
 	if (const auto masks = floating.GetHullMasks(); masks && settings.EnableFloatingObjects) {

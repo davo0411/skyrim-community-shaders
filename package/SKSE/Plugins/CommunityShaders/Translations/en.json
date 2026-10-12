@@ -1409,8 +1409,6 @@
     "feature.pbr_water.wave_resolution_low": "Low (128)",
     "feature.pbr_water.wave_resolution_medium": "Medium (256)",
     "feature.pbr_water.wave_resolution_tooltip": "Resolution of each FFT wave cascade. Higher values add finer ripples close up at a small GPU cost; gameplay is unaffected.",
-    "feature.pbr_water.wave_shadows": "Wave Shadows",
-    "feature.pbr_water.wave_shadows_tooltip": "When the sun is low, the wave crests cast shadows into the troughs behind them. Costs a little more at sunrise and sunset.",
     "feature.pbr_water.waves": "Waves",
     "feature.pbr_water.wet_shores": "Wet Shores",
     "feature.pbr_water.wet_shores_tooltip": "Sand, rocks and anything else the swash reaches turn wet and slowly dry out (Wetness Effects).",

@@ -1,6 +1,7 @@
 #include "Skylighting.h"
 
 #include "Deferred.h"
+#include "Features/PBRWater.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -252,6 +253,9 @@ void Skylighting::Prepass()
 	TracyD3D11Zone(globals::state->tracyCtx, "Skylighting - Update Probes");
 
 	auto context = globals::d3d::context;
+
+	// PBR Water adds the displaced water surface to this frame's occlusion map, so the waves occlude the sky too.
+	globals::features::pbrWater.DrawSkylightingOccluder(*texOcclusion, OcclusionTransform);
 
 	{
 		auto renderer = globals::game::renderer;

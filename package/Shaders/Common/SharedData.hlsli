@@ -436,8 +436,9 @@ namespace SharedData
 
 	struct PBRWaterSettings
 	{
-		float4 SwashGrid;  // xy swash grid corner (absolute units), z 1 / extent (units), w enabled
-		float4 Wetness;    // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+		float4 SwashGrid;    // xy swash grid corner (absolute units), z 1 / extent (units), w enabled
+		float4 Wetness;      // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+		float4 Skylighting;  // x the water surface is in Skylighting's occlusion maps, yzw unused
 	};
 
 	cbuffer FeatureData : register(b6)
