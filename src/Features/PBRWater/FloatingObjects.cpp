@@ -25,6 +25,7 @@ namespace
 	constexpr float MaxTilt = 0.35f;           // rad
 	constexpr float SampleSpread = 0.7f;       // share of the half extents sampled for the tilt
 	constexpr float HeaveDamping = 0.3f;       // damping ratios (radiation damping of a small hull)
+	constexpr float DriftDamping = 0.7f;       // surge / sway: the water moves the hull sideways without rocking it back
 	constexpr float TiltDamping = 0.35f;
 	constexpr float MaxStep = 1.0f / 60.0f;
 	constexpr float FootprintMargin = 50.0f;  // units around a hull in which its parts are looked for
@@ -506,6 +507,8 @@ void FloatingObjects::Scan(const Settings& settings)
 		auto* node = ref->Get3D();
 		if (!base || !node || !IsPartType(base->GetFormType()) || IsMarker(base) || ref->IsWater() || isExcluded(ref, base))
 			return false;
+		if (IsPierModel(base))
+			return false;
 		const WorldBox box = GetWorldBox(ref, node);
 		if (!insideFootprint(f, box.centre, FootprintMargin))
 			return false;
@@ -516,11 +519,14 @@ void FloatingObjects::Scan(const Settings& settings)
 			return false;
 		if (!box.degenerate && LandBelow(tes, box, 10.0f))
 			return false;
-		// Whatever is directly under it, down to the keel, must be this hull or something riding it.
+		// Directly under it, down to the keel, there must be this hull or something riding it: open water
+		// under it means it stands beside the hull (a dock, a crate on the dock), not on it.
 		RE::TESObjectREFR* below = nullptr;
 		float belowZ = 0.0f;
 		const float start = box.minZ - 1.0f;
-		if (start > keelZ && PickBelow(tes, { box.centre.x, box.centre.y, start }, start - keelZ + 5.0f, below, belowZ)) {
+		if (start > keelZ) {
+			if (!PickBelow(tes, { box.centre.x, box.centre.y, start }, start - keelZ + 5.0f, below, belowZ))
+				return false;
 			const auto it = below ? owner.find(below->GetFormID()) : owner.end();
 			if (it == owner.end() || it->second != hullId)
 				return false;
@@ -607,11 +613,15 @@ void FloatingObjects::UpdateFloater(Floater& f, const PBRWaterModel::WaveSnapsho
 	const float targetPitch = std::clamp(-std::atan(slopeX) * gain + f.loadPitch, -MaxTilt, MaxTilt);
 	const float targetRoll = std::clamp(std::atan(slopeY) * gain + f.loadRoll, -MaxTilt, MaxTilt);
 
+	const float targetDriftX = meanDx * gain;
+	const float targetDriftY = meanDy * gain;
 	if (!f.initialised) {
 		f.heave = targetHeave;
 		f.pitch = targetPitch;
 		f.roll = targetRoll;
-		f.heaveVel = f.pitchVel = f.rollVel = 0.0f;
+		f.driftX = targetDriftX;
+		f.driftY = targetDriftY;
+		f.heaveVel = f.pitchVel = f.rollVel = f.driftVelX = f.driftVelY = 0.0f;
 		f.initialised = true;
 	} else {
 		// Second-order response with the hull's own natural frequency (semi-implicit Euler, fixed sub-steps).
@@ -625,6 +635,9 @@ void FloatingObjects::UpdateFloater(Floater& f, const PBRWaterModel::WaveSnapsho
 			spring(f.heave, f.heaveVel, targetHeave, f.omegaHeave, HeaveDamping);
 			spring(f.pitch, f.pitchVel, targetPitch, f.omegaTilt, TiltDamping);
 			spring(f.roll, f.rollVel, targetRoll, f.omegaTilt, TiltDamping);
+			// The hull's mass also smooths the orbital surge and sway: short waves only shake it a little.
+			spring(f.driftX, f.driftVelX, targetDriftX, f.omegaHeave, DriftDamping);
+			spring(f.driftY, f.driftVelY, targetDriftY, f.omegaHeave, DriftDamping);
 		}
 		f.pitch = std::clamp(f.pitch, -MaxTilt, MaxTilt);
 		f.roll = std::clamp(f.roll, -MaxTilt, MaxTilt);
@@ -641,7 +654,7 @@ void FloatingObjects::UpdateFloater(Floater& f, const PBRWaterModel::WaveSnapsho
 	pitchMatrix.entry[2][0] = -sp, pitchMatrix.entry[2][2] = cp;
 	const RE::NiMatrix3 frame = FromColumns(f.axisX, f.axisY, { 0.0f, 0.0f, 1.0f });
 	f.rotation = frame * (rollMatrix * pitchMatrix) * frame.Transpose();
-	f.offset = { meanDx * gain, meanDy * gain, f.heave };
+	f.offset = { f.driftX, f.driftY, f.heave };
 
 	auto place = [&](Part& part) {
 		auto* ref = part.ref.get().get();

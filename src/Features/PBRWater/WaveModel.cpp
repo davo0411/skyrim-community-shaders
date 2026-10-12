@@ -746,7 +746,7 @@ namespace PBRWaterModel
 		Context ctx{};
 		const float windSpeed = ocean ? ocean->windSpeed : 0.5f;
 		const float openPeak = ocean ? ocean->peakOmega : 1.0f;
-		const float fetchMetres = fetch ? fetch->SampleMetres(static_cast<float>(x), static_cast<float>(y), windDirection) : (exterior ? 500000.0f : 50.0f);
+		const float fetchMetres = fetch ? fetch->SampleMetres(static_cast<float>(x), static_cast<float>(y), windDirection) * fetchScale : (exterior ? 500000.0f : 50.0f);
 		const float peakOmega = FetchPeakOmega(fetchMetres, windSpeed, openPeak);
 		const float energyGain = FetchEnergyGain(fetchMetres, windSpeed);
 		ctx.fetchRatio = FetchHeightRatio(fetchMetres, windSpeed);

@@ -226,15 +226,16 @@ namespace PBRWater
 	}
 
 	/**
-	 * Whitecaps: the foam a breaking crest leaves behind. Unlike the lacy, settled surface foam it is
-	 * fresh, dense and bright, torn into streaks along the wind, so it uses its own pattern: anisotropic
-	 * fBm stretched along the wind direction, domain-warped, with a hard coverage threshold.
+	 * Whitecaps: the foam a breaking crest leaves behind. Where it lies and how large it is comes from the
+	 * breaking itself (`coverage`); the pattern only gives it texture: fresh, dense foam torn into streaks
+	 * along the wind (anisotropic, domain-warped fBm), thinning towards the edge of the patch.
 	 * @param p        Lagrangian absolute position (drift already applied)
-	 * @param coverage 0..1 whitecap coverage
+	 * @param coverage 0..1 breaking intensity: the crest folding now and the trail it leaves
 	 */
 	float Whitecaps(float2 p, float coverage, float footprint, float time)
 	{
-		if (coverage <= 0.002)
+		float patch = smoothstep(0.15, 0.6, coverage);
+		if (patch <= 0.002)
 			return 0.0;
 		float scale = max(Foam2.y, 1.0);
 		float2 wind = Params1.xy;
@@ -245,12 +246,13 @@ namespace PBRWater
 		float n = Fbm(q * 1.3 + warp * 1.4);
 		n = 0.65 * n + 0.35 * Fbm(q * 4.1 + warp * 2.0 + 5.7);
 
+		// Dense in the middle of the patch, broken into streaks towards its edge.
 		float pixelCells = footprint / scale;
 		float feather = 0.04 + pixelCells * 1.5;
-		float threshold = 1.0 - sqrt(saturate(coverage)) * 0.85;
-		float foam = smoothstep(threshold - feather, threshold + feather, n);
-		// Far away the streaks are sub-pixel: converge to their mean coverage.
-		return lerp(foam, coverage, saturate(pixelCells * 3.0 - 0.5));
+		float threshold = 1.0 - patch * 0.95;
+		float foam = smoothstep(threshold - feather, threshold + feather, n + 0.25 * patch);
+		// Far away the streaks are sub-pixel: converge to the patch.
+		return lerp(foam, patch * 0.8, saturate(pixelCells * 3.0 - 0.5));
 	}
 
 	/**
@@ -314,14 +316,14 @@ namespace PBRWater
 		return normalize(waterNormal - float3(g, 0.0));
 	}
 
-	/// Crest foam coverage from surface folding (Jacobian below the threshold), the trail of recent
-	/// folding, and the wind's whitecap coverage (Monahan & O'Muircheartaigh 1980).
+	/// Breaking intensity: crests compressed past the breaking threshold (set on the CPU so that the wind's
+	/// whitecap share of the sea breaks, Monahan & O'Muircheartaigh 1980), plus the trail of recent breaking.
+	/// The soft edge is a fraction of the compression spread, so stronger breaking makes larger patches.
 	float CrestCoverage(float jacobian, float trail)
 	{
-		// Folding decides where crests break; the wind's whitecap fraction (Monahan) decides how much
-		// of that actually turns white, so light winds give sparse caps and only gales foam over.
-		float folding = max(saturate((Foam0.y - jacobian) * 3.0), saturate(trail));
-		return folding * saturate(Params2.y * 6.0 + 0.03);
+		float width = max(Surface1.y * 0.6, 1e-3);
+		float breaking = saturate((Foam0.y - jacobian) / width);
+		return max(breaking, saturate(trail));
 	}
 
 	// ------------------------------------------------------------------------
@@ -338,6 +340,7 @@ namespace PBRWater
 		float shoreCrest;
 		float rippleFoam;
 		float depth;
+		float shoreDistance;  // horizontal distance to the waterline of the bed (units), large when unknown
 		float fetchMetres;
 		float footprint;
 		float turbidity;  // column sediment, filled in by the water column shading
@@ -402,26 +405,29 @@ namespace PBRWater
 		o.shoreCrest = waves.shoreCrest;
 		o.rippleFoam = ripple.z;
 		o.depth = ctx.depth;
+		// Depth over the bed's slope: how far the shoreline is, so the contact band has the same width on a gentle
+		// beach and at a cliff foot.
+		o.shoreDistance = ctx.hasTerrain > 0.5 ? ctx.depth / max(length(ctx.terrainGrad), 0.02) : 1e6;
 		o.fetchMetres = fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
 		return o;
 	}
 
-	/// Foam coverage from all sources. `waterThickness` is the vertical water depth to the scene behind
-	/// the surface (shores, rocks, piers, wading legs ...); pass a large value when unknown.
+	/// Foam coverage from all sources. `contact` is 0..1 how close the waterline of something rising out of the
+	/// water is (shores, rocks, piers, wading legs ...); 0 when unknown.
 	/// x surface foam (contact band, breaking shore waves, windrows), y whitecaps (folding crests),
 	/// z aeration from splashes and wakes: churned water is full of bubbles but leaves little foam.
-	float3 FoamCoverage(SurfaceShading s, float waterThickness)
+	float3 FoamCoverage(SurfaceShading s, float contact)
 	{
-		// A thin band where the water meets anything, surging as each shore wave runs up.
-		float contact = exp(-waterThickness / max(Foam0.x, 1.0));
+		// A band along the waterline of anything in the water, surging as each shore wave runs up.
 		float surge = 0.6 + 0.4 * s.shoreCrest;
 		// Breaking foam rides the crests that are breaking, with only a thin residue between them.
 		float breaking = s.shoreBreak * Shore1.y * (0.1 + 0.9 * s.shoreCrest * s.shoreCrest);
-		float aeration = saturate(s.rippleFoam * Foam1.z * 2.0);
-		float surface = saturate((contact * surge + breaking + s.windrows) * Foam0.z + aeration * 0.05);
-		float whitecap = saturate(s.crestFoam * Foam2.x);
+		float aeration = saturate(s.rippleFoam * Foam1.z * 3.0);
+		float surface = saturate((contact * surge + breaking + s.windrows) * Foam0.z + aeration * 0.02);
+		// The amount already sets how much of the sea breaks; this only switches it off at zero.
+		float whitecap = saturate(s.crestFoam) * saturate(Foam2.x * 4.0);
 		return float3(surface, whitecap, aeration);
 	}
 
@@ -442,8 +448,11 @@ namespace PBRWater
 			// Height in units of Hs / 2: crests red, troughs green.
 			return float3(saturate(2.0 * waveState.x / max(Optics0.w, 1.0)) * 0.5 + 0.5, saturate(-2.0 * waveState.x / max(Optics0.w, 1.0)), 0.0);
 		case 7:
-			// Fetch on a log scale: black ~10 m (pond), white ~100 km (open sea).
-			return saturate(log10(max(s.fetchMetres, 10.0)) / 4.0 - 0.25).xxx;
+		{
+			// Fetch on a log scale: blue 100 m (pond, river), green ~3 km (bay, harbour), red 100 km+ (open sea).
+			float t = saturate((log10(max(s.fetchMetres, 10.0)) - 2.0) / 3.0);
+			return lerp(lerp(float3(0.0, 0.2, 1.0), float3(0.0, 1.0, 0.2), saturate(t * 2.0)), float3(1.0, 0.1, 0.0), saturate(t * 2.0 - 1.0));
+		}
 		case 8:
 			// Water clarity: blue clear, brown murky.
 			return lerp(float3(0.05, 0.25, 0.6), float3(0.55, 0.35, 0.1), saturate(s.turbidity / 2.0)) * (0.4 + 0.6 * saturate(s.turbidity));

@@ -101,7 +101,7 @@ private:
 		float foamDriftX;  ///< texels per step
 		float foamDriftY;
 		float slopeScale;  ///< simulation height difference per texel -> surface slope
-		float pad;
+		uint32_t seed;     ///< step counter: varies where churned-in air lands from step to step
 	};
 	STATIC_ASSERT_ALIGNAS_16(SimCB);
 
@@ -114,6 +114,7 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
 	uint32_t current = 0;
+	uint32_t stepCount = 0;
 
 	int64_t originTexelX = 0;
 	int64_t originTexelY = 0;

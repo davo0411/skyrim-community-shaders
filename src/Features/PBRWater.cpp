@@ -37,6 +37,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		SwellDirection,
 		WaveResolution,
 		UseFetch,
+		FetchScale,
 		UseBathymetry,
 		RiverWaveDamping,
 		ShoreWaveHeight,
@@ -71,7 +72,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		FoamAmount,
 		ShoreFoamWidth,
 		FoamPersistence,
-		CrestFoamThreshold,
 		FoamScale,
 		BreakingFoam,
 		WakeFoam,
@@ -121,6 +121,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		SwellDirection,
 		WaveResolution,
 		UseFetch,
+		FetchScale,
 		UseBathymetry,
 		RiverWaveDamping,
 		ShoreWaveHeight,
@@ -155,7 +156,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		FoamAmount,
 		ShoreFoamWidth,
 		FoamPersistence,
-		CrestFoamThreshold,
 		FoamScale,
 		BreakingFoam,
 		WakeFoam,
@@ -214,6 +214,25 @@ namespace
 		return timeConstant > 0.0f ? 1.0f - std::exp(-std::max(dt, 0.0f) / timeConstant) : 1.0f;
 	}
 
+	/**
+	 * Jacobian below which `share` of an FFT sea is breaking. The surface compression is close to Gaussian
+	 * with a standard deviation of choppiness * sqrt(mean square slope), so the most compressed crests that
+	 * make up that share lie below 1 + sigma * Phi^-1(share) (Abramowitz & Stegun 26.2.23 for Phi^-1).
+	 */
+	float BreakingThreshold(float sigma, float share)
+	{
+		const float p = std::clamp(share, 1e-6f, 0.5f);
+		const float t = std::sqrt(-2.0f * std::log(p));
+		const float z = t - (2.515517f + 0.802853f * t + 0.010328f * t * t) / (1.0f + 1.432788f * t + 0.189269f * t * t + 0.001308f * t * t * t);
+		return 1.0f - std::max(sigma, 1e-4f) * z;
+	}
+
+	/// Spread of the surface compression of an FFT sea (see OceanSpectrum::choppiness).
+	float CompressionSigma(const PBRWaterModel::OceanSpectrum& o)
+	{
+		return o.choppiness * std::sqrt(std::max(o.meanSquareSlope, 0.0f));
+	}
+
 	bool IsDynamicMotion(const RE::hkpRigidBody* body)
 	{
 		using Type = RE::hkpMotion::MotionType;
@@ -256,6 +275,7 @@ void PBRWater::SanitizeSettings()
 	clamp(s.RiverWaveDamping, 0.0f, 1.0f, d.RiverWaveDamping);
 	clamp(s.ShoreWaveHeight, 0.0f, 2.0f, d.ShoreWaveHeight);
 	clamp(s.ShoreSlope, 0.01f, 0.2f, d.ShoreSlope);
+	clamp(s.FetchScale, 1.0f, 50.0f, d.FetchScale);
 	clamp(s.ShoreSteepness, 0.0f, 1.0f, d.ShoreSteepness);
 	clamp(s.ShoreOnsetDepth, 1.0f, 20.0f, d.ShoreOnsetDepth);
 	clamp(s.Roughness, 0.02f, 0.5f, d.Roughness);
@@ -286,7 +306,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.FoamAmount, 0.0f, 3.0f, d.FoamAmount);
 	clamp(s.ShoreFoamWidth, 0.0f, 5.0f, d.ShoreFoamWidth);
 	clamp(s.FoamPersistence, 0.0f, 5.0f, d.FoamPersistence);
-	clamp(s.CrestFoamThreshold, 0.0f, 1.0f, d.CrestFoamThreshold);
 	clamp(s.FoamScale, 0.2f, 5.0f, d.FoamScale);
 	clamp(s.BreakingFoam, 0.0f, 3.0f, d.BreakingFoam);
 	clamp(s.WakeFoam, 0.0f, 3.0f, d.WakeFoam);
@@ -382,6 +401,11 @@ void PBRWater::DrawSettings()
 		ImGui::Checkbox(T(TKEY("use_fetch"), "Fetch-Limited Waves"), &settings.UseFetch);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("use_fetch_tooltip"), "Limits wave size by how much open water lies upwind, so ponds and rivers stay calm while the open sea builds swell."));
+		if (settings.UseFetch) {
+			ImGui::SliderFloat(T(TKEY("fetch_scale"), "Fetch Scale"), &settings.FetchScale, 1.0f, 50.0f, "%.0fx");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("fetch_scale_tooltip"), "Skyrim's distances are compressed, so real fetch only builds a full sea far beyond where you can sail. Higher values let waves grow over shorter stretches of open water: river mouths and bays get rougher, while rivers and ponds stay calm."));
+		}
 		ImGui::Checkbox(T(TKEY("use_bathymetry"), "Depth-Aware Waves"), &settings.UseBathymetry);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("use_bathymetry_tooltip"), "Uses the Terrain Shadows heightmap to calm waves in shallow water and to drive shoreline waves."));
@@ -461,13 +485,13 @@ void PBRWater::DrawSettings()
 			ImGui::TextUnformatted(T(TKEY("foam_amount_tooltip"), "Settled foam along shores, around objects, in wakes and where shore waves break."));
 		ImGui::SliderFloat(T(TKEY("shore_foam_width"), "Shore Foam Width"), &settings.ShoreFoamWidth, 0.0f, 5.0f, "%.2f m");
 		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
-		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Foam"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
+		ImGui::SliderFloat(T(TKEY("wake_foam"), "Wake Bubbles"), &settings.WakeFoam, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("wake_foam_tooltip"), "Foam churned up by anything moving through the water and by breaking ripples. It rides the waves and drifts with the surface current."));
-		ImGui::SliderFloat(T(TKEY("wake_foam_lifetime"), "Wake Foam Lifetime"), &settings.WakeFoamLifetime, 1.0f, 30.0f, "%.1f s");
-		ImGui::SliderFloat(T(TKEY("splash_foam"), "Splash Foam"), &settings.SplashFoam, 0.0f, 3.0f, "%.2f");
+			ImGui::TextUnformatted(T(TKEY("wake_foam_tooltip"), "Bubbles churned into the water around anything moving through it and by breaking ripples. They drift with the surface current and leave almost no foam."));
+		ImGui::SliderFloat(T(TKEY("wake_foam_lifetime"), "Wake Bubble Lifetime"), &settings.WakeFoamLifetime, 1.0f, 30.0f, "%.1f s");
+		ImGui::SliderFloat(T(TKEY("splash_foam"), "Splash Bubbles"), &settings.SplashFoam, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("splash_foam_tooltip"), "Whitewater thrown up when a body hits the water fast: jumping or falling in, a fast swimmer, a thrown object."));
+			ImGui::TextUnformatted(T(TKEY("splash_foam_tooltip"), "Air churned in by anything moving through the water, and a burst when a body hits it fast: jumping or falling in, a thrown object."));
 		ImGui::SliderFloat(T(TKEY("wind_streaks"), "Wind Streaks"), &settings.WindStreaks, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("wind_streaks_tooltip"), "Lines along the wind (windrows): old foam gathers into streaks in a strong wind, and smooth, glassy slicks form in a light breeze."));
@@ -484,9 +508,8 @@ void PBRWater::DrawSettings()
 
 	if (ImGui::TreeNodeEx(T(TKEY("whitecaps"), "Whitecaps"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::SliderFloat(T(TKEY("whitecap_amount"), "Whitecap Amount"), &settings.WhitecapAmount, 0.0f, 3.0f, "%.2f");
-		ImGui::SliderFloat(T(TKEY("crest_foam_threshold"), "Crest Foam Threshold"), &settings.CrestFoamThreshold, 0.0f, 1.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("crest_foam_threshold_tooltip"), "Surface compression at which crests start to foam. Higher values give more crest foam."));
+			ImGui::TextUnformatted(T(TKEY("whitecap_amount_tooltip"), "Scales how much of the sea breaks into whitecaps. The wind sets the amount (more and larger caps in a gale), and the foam sits on the crests that are actually breaking."));
 		ImGui::SliderFloat(T(TKEY("foam_persistence"), "Crest Foam Trail"), &settings.FoamPersistence, 0.0f, 5.0f, "%.1f s");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T(TKEY("foam_persistence_tooltip"), "How long foam from a breaking crest lingers and thins out behind the wave."));
@@ -741,7 +764,8 @@ void PBRWater::Prepass()
 	if (const auto snap = snapshot.load(std::memory_order_acquire)) {
 		OceanSimulation::Settings oceanSettings;
 		oceanSettings.resolution = WaveResolutionSize();
-		oceanSettings.crestThreshold = settings.CrestFoamThreshold;
+		if (snap->ocean)
+			oceanSettings.crestThreshold = BreakingThreshold(CompressionSigma(*snap->ocean), snap->ocean->whitecapCoverage * settings.WhitecapAmount);
 		oceanSettings.foamTrail = settings.FoamPersistence;
 		ocean.Update(*snap, dt, oceanSettings);
 	}
@@ -848,7 +872,10 @@ void PBRWater::UpdateFrameConstants()
 
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, settings.FoamAlbedo, settings.RefractionDistortion, settings.PointLightSpecular };
-	d.Foam0 = { settings.ShoreFoamWidth * UnitsPerMetre, settings.CrestFoamThreshold, settings.FoamAmount, settings.FoamScale * UnitsPerMetre };
+	// Crests break where they compress past the threshold that makes the wind's whitecap share (Monahan).
+	const float compressionSigma = (snap && snap->ocean) ? CompressionSigma(*snap->ocean) : 0.0f;
+	const float breakingThreshold = (snap && snap->ocean) ? BreakingThreshold(compressionSigma, snap->ocean->whitecapCoverage * settings.WhitecapAmount) : 0.0f;
+	d.Foam0 = { settings.ShoreFoamWidth * UnitsPerMetre, breakingThreshold, settings.FoamAmount, settings.FoamScale * UnitsPerMetre };
 	// The foam animation only drifts noise slowly; wrapping once an hour keeps float precision.
 	d.Foam1 = { settings.FoamPersistence, std::fmod(globals::state->timer, 3600.0f), settings.WakeFoam, settings.RiverWaveDamping };
 	d.Foam2 = { settings.WhitecapAmount, settings.WhitecapScale * UnitsPerMetre, settings.WhitecapStreak, settings.BubbleAmount };
@@ -864,7 +891,7 @@ void PBRWater::UpdateFrameConstants()
 
 	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
-	d.Surface1 = { settings.WindStreaks, 0.0f, 0.0f, 0.0f };
+	d.Surface1 = { settings.WindStreaks, compressionSigma, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
 	worldFlowmap = nullptr;
@@ -961,6 +988,10 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// The renderer binds textures and constant buffers lazily, right before the draw call, so the
 	// device still holds the previous draw's state here: read this draw's from the shadow state.
 	auto& shadow = globals::game::shadowState->GetRuntimeData();
+	// That flush also re-binds every sampler slot the renderer has marked modified (Lighting uses 12-13),
+	// which would replace ours with a point or wrap sampler depending on what was drawn before: drop those
+	// pending updates for this draw. RestoreSamplers() marks them again so the next draw gets the game's.
+	shadow.PSSamplerModifiedBits &= ~(3u << 12);
 
 	// The vertex program reads the worldspace flowmap to calm waves on rivers.
 	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
@@ -1021,6 +1052,7 @@ void PBRWater::RestoreSamplers()
 	auto context = globals::d3d::context;
 	context->VSSetSamplers(12, 2, savedVSSamplers.data());
 	context->PSSetSamplers(12, 2, savedPSSamplers.data());
+	globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits |= (3u << 12);
 	for (auto* sampler : savedVSSamplers) {
 		if (sampler)
 			sampler->Release();
@@ -1176,6 +1208,7 @@ void PBRWater::MainThreadUpdate()
 	environment.UpdateLoadedLand(exterior && settings.UseBathymetry);
 	if (settings.UseFetch)
 		next->fetch = environment.GetFetch();
+	next->fetchScale = settings.FetchScale;
 	if (settings.UseBathymetry)
 		next->bathymetry = environment.GetBathymetry();
 	if (settings.UseBathymetry)
@@ -1307,8 +1340,9 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		s.y = static_cast<float>(originY);
 		s.radius = footprint;
 		s.depth = submerged * size * motion + entry * size;
-		// Whitewater: a fast body churns a little along its wake, an impact a burst (per simulation step).
-		s.foam = splashFoam * size * (0.05f * motion * motion + 0.8f * entry);
+		// Air churned into the water: anything moving through the surface leaves a cloud of bubbles around
+		// it, an impact a burst (per simulation step).
+		s.foam = splashFoam * size * (0.3f * motion + 0.8f * entry);
 		sources.push_back(s);
 	};
 

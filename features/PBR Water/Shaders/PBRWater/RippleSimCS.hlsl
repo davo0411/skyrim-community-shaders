@@ -26,7 +26,7 @@
 // cloud that spreads slowly (diffusion) and settles out over tens of seconds. The water shaders add it
 // to the turbidity near the bottom.
 //
-// Output: x height, y previous height, z foam, w silt.
+// Output: x height, y previous height, z churned-in air (bubbles), w silt.
 // ============================================================================
 
 struct RippleSource
@@ -54,7 +54,7 @@ cbuffer RippleSimCB : register(b0)
 	float FoamDiffusion;  // fraction of the neighbour difference exchanged per step
 	float2 FoamDrift;     // texels per step the surface current moves the foam
 	float SlopeScale;     // simulation height difference over two texels -> surface slope
-	float Pad;
+	uint Seed;            // step counter
 };
 
 Texture2D<float4> PreviousState : register(t0);
@@ -104,7 +104,7 @@ float4 LoadState(int2 p)
 		RippleSource s = Sources[i];
 		float2 d = texel - s.Position;
 		float r2 = dot(d, d) / max(s.Radius * s.Radius, 1e-3);
-		if (r2 > 4.0)
+		if (r2 > 9.0)
 			continue;
 		// Constraint: a moving body pushes the surface down to its depression, it never pulls it up.
 		// Depth scales with the body's speed (CPU side), so a resting body excites nothing; silt-only
@@ -113,8 +113,12 @@ float4 LoadState(int2 p)
 			hNext = lerp(hNext, min(hNext, -s.Depth), exp(-2.0 * r2));
 		// Silt billows out a little wider than the foot itself.
 		silt += s.Silt * exp(-r2);
-		// Whitewater around the body, densest at the waterline where it cuts the surface.
-		foam += s.Foam * exp(-0.7 * r2);
+		// Air churned in around the body: scattered over a patch wider than the body, a different random
+		// handful of texels each step, so the bubbles fill the water it moved through rather than a smooth blob.
+		uint hash = (id.x * 73856093u) ^ (id.y * 19349663u) ^ (Seed * 83492791u) ^ (i * 2654435761u);
+		hash = (hash ^ (hash >> 13)) * 1274126177u;
+		float scatter = (hash & 0xffffu) / 65535.0;
+		foam += s.Foam * exp(-0.3 * r2) * (scatter > 0.7 ? 3.0 : 0.15);
 	}
 
 	// Hard bound: a bad source can never feed back into a runaway.
@@ -124,6 +128,6 @@ float4 LoadState(int2 p)
 	float2 gradient = float2(LoadState(p + int2(1, 0)).x - LoadState(p - int2(1, 0)).x, LoadState(p + int2(0, 1)).x - LoadState(p - int2(0, 1)).x);
 	float steepness = length(gradient) * SlopeScale;
 	float crest = max(saturate((hNext - 0.08) * 4.0), saturate((steepness - 0.3) * 3.0));
-	foam += crest * saturate(abs(hNext - h) * FoamFromMotion);
+	foam += 0.3 * crest * saturate(abs(hNext - h) * FoamFromMotion);
 	CurrentState[id.xy] = float4(hNext, h, saturate(foam), clamp(silt, 0.0, 4.0));
 }

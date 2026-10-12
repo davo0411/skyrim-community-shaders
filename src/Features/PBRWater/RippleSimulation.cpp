@@ -198,6 +198,7 @@ void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources,
 	cb.shiftX = shiftX;
 	cb.shiftY = shiftY;
 	cb.numSources = numSources;
+	cb.seed = stepCount++;
 	simCB->Update(cb);
 
 	const uint32_t next = current ^ 1;

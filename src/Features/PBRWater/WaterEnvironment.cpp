@@ -11,7 +11,8 @@
 namespace
 {
 	constexpr float CellSize = 4096.0f;
-	constexpr float MaxFetchCells = 160.0f;  // ~9.6 km; beyond that the sea is fully developed for gameplay winds
+	constexpr float MaxFetchCells = 160.0f;  // ~9.6 km marched; a ray that gets this far reaches the open sea
+	constexpr float OpenSeaKm = 500.0f;      // fully developed: no fetch limit for any wind
 	constexpr float StepCells = 0.5f;
 	constexpr uint32_t BathymetryDownsample = 2;
 
@@ -111,7 +112,7 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 	field->minCellY = coverage.minY;
 	field->width = coverage.width;
 	field->height = coverage.height;
-	field->openSeaKm = MaxFetchCells * CellSize * static_cast<float>(PBRWaterModel::MetresPerUnit) / 1000.0f;
+	field->openSeaKm = OpenSeaKm;
 	field->kilometres.assign(static_cast<size_t>(FetchField::Directions) * coverage.width * coverage.height, 0.0f);
 
 	auto isWater = [&](int32_t x, int32_t y) {
@@ -140,43 +141,49 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 				float px = x + 0.5f;
 				float py = y + 0.5f;
 				float travelled = 0.0f;
+				bool openSea = true;
 				while (travelled < MaxFetchCells) {
 					px += upwindX;
 					py += upwindY;
 					travelled += StepCells;
-					if (!isWater(static_cast<int32_t>(std::floor(px)), static_cast<int32_t>(std::floor(py))))
+					const int32_t cx = static_cast<int32_t>(std::floor(px));
+					const int32_t cy = static_cast<int32_t>(std::floor(py));
+					if (!isWater(cx, cy)) {
+						openSea = false;
+						break;
+					}
+					// Past the edge of the map is the open ocean.
+					if (cx < 0 || cy < 0 || cx >= static_cast<int32_t>(coverage.width) || cy >= static_cast<int32_t>(coverage.height))
 						break;
 				}
-				// Half a cell of open water exists even in a single water cell.
-				slice[static_cast<size_t>(y) * coverage.width + x] = std::max(travelled, 0.5f) * kmPerCell;
+				// A ray that reaches the open sea has unlimited fetch; half a cell of open water exists even in a
+				// single water cell.
+				slice[static_cast<size_t>(y) * coverage.width + x] = openSea ? OpenSeaKm : std::max(travelled, 0.5f) * kmPerCell;
 			}
 		}
 	}
 
 	// A single upwind ray is far too sensitive: one headland or an offshore wind zeroes the sea. Waves
-	// arrive from a spread of directions around the wind, so use the Shore Protection Manual (USACE 1984)
-	// effective fetch, F = sum(F_i cos^2 a_i) / sum(cos a_i) over radials within 45 degrees of upwind.
-	// Swell generated over the open sea also reaches any exposed water whatever the local wind, so no
-	// cell gets less than a share of its longest radial.
+	// arrive from a spread of directions around the wind (the Shore Protection Manual's effective fetch,
+	// USACE 1984, weights the radials within 45 degrees of upwind by cos a). The radials are averaged in log
+	// space: a linear mean lets the one radial that sees the open sea dominate a sheltered harbour, while the
+	// geometric mean grows with how much of the upwind sector is open (all open: the open sea; three of five:
+	// tens of km; a harbour mouth: a few km).
 	constexpr int SpreadSteps = 2;  // 2 x 22.5 degrees each side
-	constexpr float SwellExposure = 0.4f;
 	const float stepAngle = static_cast<float>(PBRWaterModel::TwoPi) / FetchField::Directions;
 	for (size_t c = 0; c < cells; ++c) {
 		if (!coverage.water[c])
 			continue;
-		float longest = 0.0f;
-		for (uint32_t d = 0; d < FetchField::Directions; ++d)
-			longest = std::max(longest, radial[d * cells + c]);
 		for (uint32_t d = 0; d < FetchField::Directions; ++d) {
-			float weighted = 0.0f;
+			float logSum = 0.0f;
 			float weights = 0.0f;
 			for (int k = -SpreadSteps; k <= SpreadSteps; ++k) {
 				const uint32_t dk = (d + FetchField::Directions + k) % FetchField::Directions;
-				const float cosA = std::cos(k * stepAngle);
-				weighted += radial[dk * cells + c] * cosA * cosA;
-				weights += cosA;
+				const float w = std::cos(k * stepAngle);
+				logSum += std::log(std::max(radial[dk * cells + c], 1e-3f)) * w;
+				weights += w;
 			}
-			field->kilometres[d * cells + c] = std::max(weighted / weights, SwellExposure * longest);
+			field->kilometres[d * cells + c] = std::exp(logSum / weights);
 		}
 	}
 	return field;

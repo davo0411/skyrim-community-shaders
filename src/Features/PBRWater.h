@@ -59,8 +59,9 @@ struct PBRWater : Feature
 		float SwellDirection = 35.0f;  ///< degrees from the wind direction
 		int WaveResolution = 1;        ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
 		bool UseFetch = true;
+		float FetchScale = 15.0f;  ///< Skyrim's distances are compressed: upwind open water counts this many times over
 		bool UseBathymetry = true;
-		float RiverWaveDamping = 0.85f;
+		float RiverWaveDamping = 0.5f;
 
 		// Shore
 		float ShoreWaveHeight = 0.6f;
@@ -98,8 +99,7 @@ struct PBRWater : Feature
 		float FoamAmount = 1.0f;
 		float ShoreFoamWidth = 0.35f;  ///< metres
 		float FoamPersistence = 1.5f;  ///< seconds a crest's foam trail lasts
-		float CrestFoamThreshold = 0.55f;
-		float FoamScale = 1.2f;  ///< metres
+		float FoamScale = 0.2f;        ///< metres
 		float BreakingFoam = 1.0f;
 		float WakeFoam = 1.0f;
 		float WakeFoamLifetime = 8.0f;  ///< seconds foam from wakes and splashes lasts

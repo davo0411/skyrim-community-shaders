@@ -1000,7 +1000,13 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 		dynamicCubemap = Color::IrradianceToGamma(lerp(specularIrradiance, specularIrradianceReflections, skylightingSpecular));
 	}
 
+#				if defined(PBR_WATER)
+	// One environment at every distance: switching to the vanilla reflection cubemap (much darker) past
+	// 1024 units made the whole water change brightness as the camera rose above it.
+	float reflectionAmount = 0.0;
+#				else
 	float reflectionAmount = saturate(length(input.WPosition.xyz) / 1024.0);
+#				endif
 
 	if (SharedData::HideSky)
 		reflectionAmount = 0.0;
@@ -1565,21 +1571,33 @@ PS_OUTPUT main(PS_INPUT input)
 	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness) * PBRWater::Light0.y;
 
 	// Foam: shores, intersections, folding crests, breaking shore waves, wakes.
+	// Contact foam along the waterline, in world space so it never follows the camera: the terrain bed rising to
+	// the surface (shores), and whatever is seen through the surface when it stands on a bed close below (rocks,
+	// piles, feet in the surf). Something in deep water - a swimmer, a hull - is not a contact: its churn comes
+	// from the ripple simulation.
 	float pbrThickness = 1e6;
+	float pbrBand = max(PBRWater::Foam0.x, 1.0);
+	float pbrContact = exp(-max(pbrSurface.shoreDistance, 0.0) / pbrBand);
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
 	pbrThickness = pbrBottomDepth;
+	// How far what is seen through the water rises above the bed: the bed itself (already the shoreline band)
+	// does not count, nor does anything standing in deep water.
+	float pbrRise = pbrSurface.depth > 1e5 ? pbrBand : pbrSurface.depth - pbrThickness;
+	float pbrOnBed = smoothstep(0.3 * pbrBand, 0.8 * pbrBand, pbrRise) * saturate(1.0 - pbrRise / (3.0 * pbrBand));
+	pbrContact = max(pbrContact, exp(-pbrThickness / pbrBand) * pbrOnBed);
 #							endif
-	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrThickness);
+	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrContact);
 	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
 	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
 	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
-	// Splashes and wakes aerate the water: bubble specks, with only a faint milky haze.
+	// Bubble specks come from foam and from air churned in by anything moving through the water; the milky
+	// tint under the foam comes from the foam alone, so moving around fills the water with bubbles only.
 	float pbrSettledFoam = max(pbrFoamCoverage.x, pbrFoamCoverage.y);
 	float pbrAeration = max(pbrSettledFoam, pbrFoamCoverage.z);
 	float2 pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrAeration, pbrSurface.footprint, PBRWater::Foam1.y);
-	pbrBubbles.y *= saturate(pbrSettledFoam + 0.2 * pbrFoamCoverage.z) / max(pbrAeration, 1e-3);
+	pbrBubbles.y *= pbrSettledFoam / max(pbrAeration, 1e-3);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)

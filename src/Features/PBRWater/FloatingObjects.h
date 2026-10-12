@@ -91,6 +91,8 @@ private:
 		float massKg = 1.0f;  ///< displaced water
 
 		float heave = 0.0f, heaveVel = 0.0f;
+		float driftX = 0.0f, driftVelX = 0.0f;  ///< orbital surge / sway (units)
+		float driftY = 0.0f, driftVelY = 0.0f;
 		float pitch = 0.0f, pitchVel = 0.0f;  ///< about the hull's width axis
 		float roll = 0.0f, rollVel = 0.0f;    ///< about its length axis
 		bool initialised = false;

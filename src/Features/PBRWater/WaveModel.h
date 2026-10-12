@@ -197,6 +197,7 @@ namespace PBRWaterModel
 		std::shared_ptr<const MirrorFrame> mirror0;
 		std::shared_ptr<const MirrorFrame> mirror1;
 		float mirrorAlpha = 0.0f;
+		float fetchScale = 1.0f;  ///< multiplies the baked fetch (Skyrim's compressed distances)
 		ShoreParams shore;
 		double time = 0.0;  ///< wave time (s), drives the GPU spectrum
 		double shorePhase = 0.0;

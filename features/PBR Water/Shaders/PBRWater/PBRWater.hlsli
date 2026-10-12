@@ -57,14 +57,14 @@ namespace PBRWater
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y foam albedo, z refraction distortion scale, w point light specular intensity
-		float4 Foam0;                    // x shore foam width (units), y crest foam threshold, z foam amount, w foam pattern scale (units)
+		float4 Foam0;                    // x shore foam width (units), y breaking Jacobian (whitecap share of the wind), z foam amount, w foam pattern scale (units)
 		float4 Foam1;                    // x crest foam persistence (s), y foam animation time (s, wrapped), z wake foam strength, w flow wave damping
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
-		float4 Surface1;                 // x wind streak strength, yzw unused
+		float4 Surface1;                 // x wind streak strength, y spread of the surface compression (std), z fetch scale, w unused
 		float4 Land0;                    // xy loaded terrain grid corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;                    // x enabled, y vertex spacing (units)
 		float4 Foam2;                    // x whitecap amount, y whitecap pattern scale (units), z whitecap streak stretch, w bubble amount
@@ -112,10 +112,30 @@ namespace PBRWater
 		float hasTerrain;    // 1 when depth and gradient come from the heightmap
 	};
 
+	/// Bilinear lookup from texel loads, clamped to the edge. The terrain heights must never depend on the
+	/// sampler bound to the slot: the game re-binds sampler slots behind our back, and a point sampler
+	/// turns the depth into blocks (visible as pixelated shore waves and foam).
+	float BilinearLoad(Texture2D<float> t, float2 uv)
+	{
+		uint w, h;
+		t.GetDimensions(w, h);
+		float2 p = uv * float2(w, h) - 0.5;
+		int2 i0 = int2(floor(p));
+		float2 f = p - i0;
+		int2 hi = int2(w, h) - 1;
+		int2 a = clamp(i0, 0, hi);
+		int2 b = clamp(i0 + 1, 0, hi);
+		float z00 = t.Load(int3(a.x, a.y, 0));
+		float z10 = t.Load(int3(b.x, a.y, 0));
+		float z01 = t.Load(int3(a.x, b.y, 0));
+		float z11 = t.Load(int3(b.x, b.y, 0));
+		return lerp(lerp(z00, z10, f.x), lerp(z01, z11, f.x), f.y);
+	}
+
 	float SampleTerrainZ(float2 absXY)
 	{
 		float2 uv = absXY * Terrain0.xy + Terrain0.zw;
-		float h = TerrainHeightTexture.SampleLevel(LinearClampSampler, uv, 0);
+		float h = BilinearLoad(TerrainHeightTexture, uv);
 		return lerp(Terrain1.x, Terrain1.y, h);
 	}
 
@@ -141,7 +161,8 @@ namespace PBRWater
 		float s1 = fmod(s0 + 1.0, slices);
 		float f0 = FetchTexture.SampleLevel(LinearClampSampler, float3(uv, s0), 0);
 		float f1 = FetchTexture.SampleLevel(LinearClampSampler, float3(uv, s1), 0);
-		return lerp(f0, f1, t) * 1000.0;
+		// Skyrim's distances are compressed: the baked open water counts Surface1.z times over.
+		return lerp(f0, f1, t) * 1000.0 * max(Surface1.z, 1.0);
 	}
 
 	/// JONSWAP fetch-limited peak angular frequency (Hasselmann et al. 1973), clamped to the
@@ -190,11 +211,9 @@ namespace PBRWater
 		if (Land1.x > 0.5 && all(landUV > 0.0) && all(landUV < 1.0)) {
 			// Exact terrain of the loaded cells: resolves beaches, rocks and shelves.
 			float2 t = Land1.y * Land0.zw;
-			float z0 = LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV, 0);
-			float zx = LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV + float2(t.x, 0), 0) -
-			           LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV - float2(t.x, 0), 0);
-			float zy = LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV + float2(0, t.y), 0) -
-			           LoadedTerrainTexture.SampleLevel(LinearClampSampler, landUV - float2(0, t.y), 0);
+			float z0 = BilinearLoad(LoadedTerrainTexture, landUV);
+			float zx = BilinearLoad(LoadedTerrainTexture, landUV + float2(t.x, 0)) - BilinearLoad(LoadedTerrainTexture, landUV - float2(t.x, 0));
+			float zy = BilinearLoad(LoadedTerrainTexture, landUV + float2(0, t.y)) - BilinearLoad(LoadedTerrainTexture, landUV - float2(0, t.y));
 			ctx.depth = max(absPos.z - z0, 0.0);
 			ctx.terrainGrad = float2(zx, zy) / (2.0 * Land1.y);
 			ctx.hasTerrain = 1.0;
