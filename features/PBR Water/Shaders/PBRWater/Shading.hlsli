@@ -283,9 +283,12 @@ namespace PBRWater
 		float shoreDistance;  // horizontal distance to the waterline of the bed (units), large when unknown
 		float fetchMetres;
 		float footprint;
-		float turbidity;  // column sediment, filled in by the water column shading
-		float windSpeed;  // local wind at the surface (m/s)
-		float windrows;   // foam gathered into streaks along the wind
+		float turbidity;       // column sediment, filled in by the water column shading
+		float windSpeed;       // local wind at the surface (m/s)
+		float windrows;        // foam gathered into streaks along the wind
+		float3 dominantWaves;  // x height, yz slope of the dominant waves (sun shadows)
+		float dominantK;       // their wavenumber (1/unit)
+		float2 waveDir;        // the direction they travel in (wind, or towards the beach)
 	};
 
 	/**
@@ -369,7 +372,42 @@ namespace PBRWater
 		o.fetchMetres = fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
+		o.dominantWaves = waves.dominant;
+		o.dominantK = waves.dominantK;
+		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.dir, ctx.beach), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
+	}
+
+	/**
+	 * Sun shadows the waves cast on each other, from the dominant waves at this pixel alone (no texture reads).
+	 * Along the sun's azimuth they are locally a sinusoid A cos(k x + phi), fitted to their height h and slope h' here:
+	 * A = |(h, h' / k)|, phi = atan2(-h' / k, h). The ray to the sun rises at tan(e) = m A k; the next crest stands
+	 * highest above it at cos(u) = sqrt(1 - m^2), sin(u) = -m, and shadows this point when
+	 *     sqrt(1 - m^2) - cos(phi) - m (u - phi) > 0.
+	 * Nothing is shadowed once the sun is higher than the steepest slope (m >= 1), and where the waves are filtered
+	 * away (far off, or calm) A shrinks and the shadows go with it.
+	 */
+	float WaveSunShadow(SurfaceShading s, float3 toSun)
+	{
+		float shadow = 1.0;
+		float horizontal = length(toSun.xy);
+		[branch] if (toSun.z > 0.0 && horizontal > 1e-3 && s.dominantK > 1e-5)
+		{
+			float2 sunDir = toSun.xy / horizontal;
+			// Along the sun's azimuth the waves are as much longer as they cross it at an angle.
+			float k = s.dominantK * max(abs(dot(s.waveDir, sunDir)), 0.3);
+			float h = s.dominantWaves.x;
+			float slope = dot(s.dominantWaves.yz, sunDir) / k;
+			float amplitude = sqrt(h * h + slope * slope);
+			float m = toSun.z / horizontal / max(amplitude * k, 1e-6);
+			if (m < 1.0) {
+				float phi = atan2(-slope, h);
+				float ahead = frac((-asin(m) - phi) / 6.2831853) * 6.2831853;     // phase to the next crest's highest point
+				float clearance = m * ahead + h / amplitude - sqrt(1.0 - m * m);  // ray above that crest, in units of A
+				shadow = saturate(0.5 + clearance / 0.3);
+			}
+		}
+		return shadow;
 	}
 
 	/// Foam coverage from all sources. `contact` is 0..1 how close the waterline of something rising out of the

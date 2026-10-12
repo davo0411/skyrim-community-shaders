@@ -227,6 +227,14 @@ crack), so waves the mesh cannot carry are averaged out instead of aliasing.
     surface instead of from under the occluder (`Skylighting::LiftOutOfWater`, switched on by
     `SharedData::pbrWaterSettings`), since its sky light comes in through the water and the water shaders
     attenuate it. Nothing is drawn while the water is calm.
+-   **Sun shadows** (`WaveSunShadow`): at a low sun the crests shadow the troughs behind them, with no extra
+    texture reads. The filtered wave loop also keeps the height, slope and wavenumber of the dominant waves
+    (the bands at and below the local peak, through the shore warp). Along the sun's azimuth they are fitted
+    locally as a sinusoid `A cos(k x + phi)` from their height and slope at the pixel, and the ray to the sun
+    is tested analytically against the next crest: with `tan e = m A k` it peaks above the ray at
+    `sin u = -m`, shadowing the point when `sqrt(1 - m^2) - cos(phi) - m (u - phi) > 0`. A sun higher than
+    the steepest slope (`m >= 1`) shadows nothing, and waves filtered away by distance cast nothing. It dims
+    the sun glint, the light through the crests and the foam.
 
 ## Interaction
 
@@ -361,6 +369,8 @@ against the CPU mirror, including slopes and compression against finite differen
         no surf or swash, only the open-sea waves and wet rock up to the crest height.
 -   [ ] Choppy sea with Skylighting: troughs are darker than crests (sky light and reflection); shallow
         seabeds and wading legs are not darkened by the water above them.
+-   [ ] Sunset over a swell: the troughs behind the crests fall into shadow and lose the sun glint; at midday
+        nothing is shadowed.
 -   [ ] Swim at the surface in waves: the underwater view starts when the camera dips under a crest.
 
 ## Known limitations
@@ -373,8 +383,9 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Gameplay water heights include the shore warp but not the swash: swimming and buoyancy see the shoaled
     waves, not the run-up's thin film.
 -   The waves occlude Skylighting where the cells' own water is (sea, lakes); separate river meshes are not
-    drawn into its occlusion map. It is sky light only: the sun's shadows come from the shadow maps, which
-    the water is not drawn into.
+    drawn into its occlusion map.
+-   The waves' sun shadows fall only on the water itself, from a local fit of the dominant waves: a crest of
+    another wave group or the short chop casts none, and the shadow maps do not include the water.
 -   The underwater view switches on the surface height above the camera; the lens line across the screen is
     still the game's flat line at that height, not the wave profile.
 -   Fetch and depth weight whole cascades, so the transition from a sheltered bay to the open sea happens

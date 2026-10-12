@@ -1386,6 +1386,12 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
+#				if defined(PBR_WATER) && !defined(UNDERWATER)
+	// At a low sun the crests shadow the troughs behind them (no texture reads).
+	float pbrWaveShadow = PBRWater::WaveSunShadow(pbrSurface, SunDir.xyz);
+	dirShadow *= pbrWaveShadow;
+	surfaceShadow *= pbrWaveShadow;
+#				endif
 
 	float3 dirColor;
 	float3 ambientColor;

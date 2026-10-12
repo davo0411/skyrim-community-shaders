@@ -462,6 +462,8 @@ namespace PBRWater
 		float shoreBreak;             // 0..1 a shore wave breaking here now (crest high against the depth)
 		float shoreMask;              // 0..1 inner surf zone: the depth holds the waves down
 		float shoreCrest;             // 0..1 how high the shore waves stand here against the depth
+		float3 dominant;              // x height, yz slope of the dominant waves (EvaluateWavesFiltered only: sun shadows)
+		float dominantK;              // their energy-weighted wavenumber, shortened by the shore warp (1/unit)
 	};
 
 	/// Running sums of the cascades' fields.
@@ -602,11 +604,14 @@ namespace PBRWater
 		WaveSums sums = EmptySums();
 		float steepnessScale = rcp(ctx.energyGain);
 		float heave = 0.0;
+		float dominantVariance = 0.0;
+		float dominantK2 = 0.0;
 		if (OceanActive()) {
 			[unroll] for (uint c = 0; c < PBRW_CASCADES; c++)
 			{
 				float vertical = CascadeWeight(c, ctx);
 				float kappa = ShoreCompression(ctx, c);
+				float dominance = BreakingDominance(c, ctx.peakOmega);
 				float3 uv = float3(CascadeUV(positionWS.xy - ShoreShift(ctx, c), c), c);
 				// The footprint in the tile includes the warp's compression.
 				float2 gx = ddx(uv.xy);
@@ -624,9 +629,17 @@ namespace PBRWater
 				// The trail was laid down by the open-sea cascade; where fetch or depth calm it, it breaks less, and
 				// only the bands with the dominant waves here make whitecaps.
 				float presence = saturate(horizontal);
-				sums.crestTrail = max(sums.crestTrail, m.z * presence * presence * BreakingDominance(c, ctx.peakOmega));
+				sums.crestTrail = max(sums.crestTrail, m.z * presence * presence * dominance);
+				// The dominant waves alone, for their sun shadows: height, slope (through the warp) and wavenumber.
+				float2 slope = g.xy + (kappa - 1.0) * ctx.shore.dir * dot(ctx.shore.dir, g.xy);
+				o.dominant += float3(d.z, slope) * (vertical * dominance);
+				float sigma = Cascade2[c].x * vertical * dominance;
+				float k = Cascade1[c].z * kappa;
+				dominantVariance += sigma * sigma;
+				dominantK2 += sigma * sigma * k * k;
 			}
 		}
+		o.dominantK = dominantVariance > 1e-6 ? sqrt(dominantK2 / dominantVariance) : 0.0;
 		ShoreBreaking(o, ctx, heave);
 		return FinishWaves(sums, o);
 	}
