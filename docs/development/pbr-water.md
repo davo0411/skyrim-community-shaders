@@ -13,11 +13,12 @@ and the per-cell water cache) and, optionally, the Terrain Shadows heightmap (ba
 main thread (Main::Update)                         render thread
 --------------------------                         -------------
 weather wind + swell -> OceanSpectrum (WaveModel)  Prepass: FFT ocean CS (spectrum, FFT, assemble, mips),
-wave clock (double), CPU mirror frames (worker) -> ripple sim CS, fetch upload, frame constants
-WaterEnvironment: fetch bake + bathymetry           b7 PBRWaterData (cascades, fetch, terrain, ripples)
+wave clock (double), CPU mirror frames (worker) -> ripple sim CS, fetch / shore field upload, frame
+WaterEnvironment: fetch bake + bathymetry,           constants, swash CS (ShoreSimCS), t123 for Lighting
+  shore field (worker)                              b7 PBRWaterData (cascades, fetch, terrain, shore, swash)
 gather ripple sources, Havok buoyancy               BSWaterShader::SetupGeometry: per-draw constants,
 TESObjectCELL::GetWaterHeight += wave height          HS/DS/GS binding for that draw's descriptor
-                                                    BSWaterShader::RestoreGeometry: unbind, restore topology
+TESWaterSystem underwater height = wave surface     BSWaterShader::RestoreGeometry: unbind, restore topology
 ```
 
 ### FFT ocean
@@ -78,7 +79,7 @@ static destructors without risking a hang at game exit.
 | ---------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                                                     |
 | Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak, energy and height per cascade: ponds and rivers keep only short chop, the open sea builds swell |
-| Depth                  | Terrain Shadows heightmap and the loaded cells' terrain                      | `tanh(kh)` depth attenuation per cascade, shoreline waves (Green's law shoaling, breaking at H = 0.78 h)                    |
+| Depth                  | Terrain Shadows heightmap and the loaded cells' terrain                      | shore field: refraction, shoaling (Green's law), depth-limited breaking (Hs <= 0.6 h), swash up the beach                  |
 | Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                                                       |
 | Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                                                         |
 
@@ -95,7 +96,54 @@ cascades from sheltered water (whose spectrum is the open sea's high-frequency t
 
 Per-weather overrides are registered with the weather variable registry (`RegisterWeatherVariables`):
 wave height, choppiness, directional spread, swell height / period / direction, storm wind speed, shore
-waves, foam, visibility, subsurface, roughness.
+run-up, foam, visibility, subsurface, roughness.
+
+## Shoreline
+
+The shore waves are the FFT sea itself, carried into the shallows: no separate wave train, no per-shore
+setup. Three parts: a shore field (CPU, where the waves go), a warp of the FFT sampling (GPU, what they look
+like on the way in) and the swash (GPU state, what they do on the beach).
+
+-   **Shore field** (`WaveModel::BuildShoreField`, rebuilt on a `WaterEnvironment` worker around the player:
+    768^2 texels of 128 units, ~1.4 km across, from the loaded cells' exact terrain, else the Terrain
+    Shadows heightmap, and each cell's water level from Unified Water's cache). The wave travel time solves
+    the eikonal `|grad T| = 1 / c(h)` from the waterline by fast sweeping (Zhao 2005), with `c` the phase
+    speed of the sea's dominant frequency in the local depth (Eckart's dispersion approximation), so the
+    wavefronts refract around headlands and line up with the depth contours. Along each ray it accumulates
+    the shoaling delay `Delta = integral (1 / c - 1 / c0) ds` and carries the ray direction, the signed
+    distance to the waterline and the beach slope where the ray meets it. It is rebuilt after the player
+    moves ~175 m, so it always reaches past the displacement fade: the shore works as far out as the
+    waves are drawn, on distant shores from the heightmap.
+-   **Warp**: a point near the shore samples each cascade `c0 Delta` back along its ray (`ShoreShift`): the
+    sea that left deep water then, slowed, turned towards the shore and shortened across the contours by
+    `kappa = c0 / c` (`ShoreCompression`). Slopes go through the warp's Jacobian, the horizontal motion
+    shrinks by `1 / kappa` and the compression tensor is transformed with it, so the crests steepen and
+    fold where real ones would. Heights shoal with Green's law (`sqrt(cg0 / cg)`) and saturate at
+    `Hs <= 0.6 h` (Thornton & Guza 1983): the surf zone's depth-limited breaking, which also drives the
+    breaking foam (a crest standing higher than ~0.4 h over the bed breaks).
+-   **Beaches only**: the Iribarren number `xi = tan(beta) / sqrt(H0 / L0)` of the beach the ray runs up
+    (Battjes 1974) gates breaking, surf and swash: waves spill and plunge on gentle beaches (`xi < 2`) and
+    surge against rock faces, outcrops and cliffs (`xi > 3.3`) without breaking or running up, so those
+    keep only the open-sea waves (with depth attenuation) and the contact foam band.
+-   **Swash** (`ShoreSimulation`, `ShoreSimCS.hlsl`): a camera-centred 512^2 grid, twice the displacement
+    fade start across (32768 units, ~0.9 m texels, by default) so it covers all water at full wave height,
+    scrolled in whole texels. Each texel steps the run-up of its ray: the deep-water sea arriving at the ray's
+    waterline pushes the tip up the beach (Stockdon et al. 2006: set-up `0.35 beta sqrt(H0 L0)`, swash
+    `sqrt(H0 L0 (0.563 beta^2 + 0.004))`), and with nothing pushing it slides back down under gravity,
+    decelerating at `g sin^2 beta` (ballistic swash: Shen & Meyer 1963, Peregrine & Williams 2001). On
+    gentle beaches the next uprush arrives before the backwash has drained; on steep ones it drains each
+    time. The water mesh rises up the beach to the run-up as a thin lens (`SwashSurface`).
+-   **Foam cycle**: dense foam rides the front of each uprush; where the backwash leaves the sand it leaves
+    its foam, most along the line the uprush reached, which thins out as its bubbles pop (Foam on the Sand
+    lifetime) until the next uprush covers it and sweeps it away. The water is gone there, so the lit
+    terrain draws it (below).
+-   **Wet shores**: the grid also keeps the highest water each point saw lately (the swash on beaches, the
+    waves against rocks, piers and hulls), sinking slowly as it drains, and the water surface height
+    (waves and swash). Lighting reads both through `t123` and `SharedData::pbrWaterSettings`
+    (`PBRWater/ShoreWetness.hlsli`): Wetness Effects' shore wetness follows what the waves reached instead
+    of a fixed band at the still water level, caustics and underwater wetness follow the moving surface,
+    and the backwash's foam lies on the sand (matte, sea-foam albedo, same lace as on the water).
+-   Needs Depth-Aware Waves (bathymetry). Shore Run-up scales the measured run-up (1 = Stockdon).
 
 ## Tessellation
 
@@ -151,19 +199,29 @@ crack), so waves the mesh cannot carry are averaged out instead of aliasing.
 -   Foam is a _coverage_ field turned into a pattern by a soft threshold (the approach used by Crest and
     Sea of Thieves): as coverage drops, the bubbles in the foam grow and merge, so dense foam thins into
     lace and then specks instead of fading uniformly. Coverage sources:
-    -   contact: an exponential band where the water meets anything (shore, rocks, piers, legs), measured
-        from the depth buffer and surging as each shore wave runs up;
-    -   crests: surface folding (the Jacobian of the summed cascades) scaled by the Monahan whitecap
-        coverage for the wind, plus a trail: each cascade accumulates foam in its own tile (so it rides the
-        waves it came from), thinning over the Crest Foam Trail time and drifting with the surface current.
-        A cascade only knows its own band, so it stores the probability that the whole surface folds there
-        given its compression and the spread of the other bands: sharp where it dominates, a uniform low
-        level where it is minor. Trails survive into the distance as mean coverage when the waves are sub-pixel;
-    -   breaking shoreline waves, and wakes and splashes from the ripple simulation.
+    -   contact: an exponential band where the water meets rocks, piers, hulls and legs, measured from the
+        depth buffer (not on beaches, where the foam comes from the breaking waves and the swash);
+    -   crests: only crests that are actually breaking. Banner, Babanin & Young (2000) measured the share
+        of dominant waves that break from their significant steepness `eps = k Hs / 2` (over 0.7-1.3 of
+        their frequency): `P = 22 (eps - 0.055)^2.01`, nothing below `eps = 0.055`. Only the front tenth of a
+        breaking crest is white, so each cascade marks the `P / 10` most compressed share of its band
+        (`CascadeBreaking`: a Gaussian quantile of its Jacobian, spread `lambda sqrt(mss)`), and keeps a
+        trail in its own tile that thins over the Crest Foam Trail time. The shaders keep a band's foam only
+        where it carries the dominant waves (`BreakingDominance`), so short chop in turbulent water no
+        longer sprinkles white flecks. A fully developed sea breaks rarely, a young, steep one often;
+    -   breaking shoreline waves and the swash, and wakes and splashes from the ripple simulation.
 -   The pattern is procedural (no texture assets): round bubbles of random size on a jittered grid,
     merged with a smooth minimum, with walls bent by an fBm domain warp and density varied by large-scale
-    clumping noise. A blurred "bubbles" layer lightens the water under the foam. The pattern lives in
-    Lagrangian coordinates so it rides the wave orbits, and fades to its average when sub-pixel.
+    clumping noise (`FoamLacePattern`, shared with the foam on the sand). Aerated water shows only bubble
+    specks, no milky tint. The pattern lives in Lagrangian coordinates so it rides the wave orbits, and
+    fades to its average when sub-pixel.
+-   The vanilla normal maps keep most of their strength over the FFT waves (0.75-1.3 by local wind), so
+    the flowmap to open-water transition and the capillary texture stay visible.
+-   **Wave shadows**: at a low sun the crests shadow the troughs behind them. Once the sun is lower than the
+    steepest slopes (`tan e < ~0.7`, the breaking limit) the pixel marches the long-wave heightfield
+    towards the sun (`WaveSunShadow`: nine doubling steps, coarser mips with distance, softened by the
+    sun's disc) and dims the sun glint, translucency and foam (Wave Shadows setting). The sky the surface sees comes from
+    Skylighting at the displaced position, evaluated for the wave facet's normal.
 
 ## Interaction
 
@@ -183,9 +241,13 @@ crack), so waves the mesh cannot carry are averaged out instead of aliasing.
     Lifetime), carried by the surface drift (semi-Lagrangian) and spreading slowly. Bodies moving through the
     water churn it along their wake; a body hitting the water fast from above (jumping or falling in) digs a
     crater and churns a burst of it (Splash Foam); ripples that get steep enough break. The shading shows it
-    as aerated water (bubble specks and a milky layer) with only a trace of surface foam, and no longer gates
-    it to ripple crests, which made it flicker in and out as rings passed.
+    as aerated water (bubble specks) with only a trace of surface foam, and no longer gates it to ripple
+    crests, which made it flicker in and out as rings passed.
 -   **Swimming**: `TESObjectCELL::GetWaterHeight` returns the wave surface, so swimming actors ride waves.
+-   **Underwater view** (Underwater Follows Waves): the game's camera-underwater state (`TESWaterSystem`
+    underwater height and flag) is set from the displaced surface above the camera each frame, on the main
+    thread and again before the world is drawn, so the underwater view and the waterline across the lens
+    start where the camera dips under the rendered waves. Only within the waves' reach of the surface.
 -   **Buoyancy**: dynamic Havok bodies floating at the surface get a spring towards the displaced surface
     plus the orbital velocity of the waves.
 
@@ -200,10 +262,23 @@ configured: no JSON, no patched meshes, no plugin records.
     static, activator or furniture reference, placed upright through the flat water plane with at least a
     couple of units below and above it, mostly above water (draft at most 80 % of its height), not taller
     than three times its length, between 0.3 m and the size limit long, drawn with lit materials (waterfalls,
-    foam and fog are effect meshes), without dynamic Havok bodies (those already float through buoyancy), and
-    not resting on the bottom: the landscape (`TES::GetLandHeight` at five points) lies more than
-    `max(0.3 draft, 0.25 m)` below its keel and a Havok ray straight down from the keel hits nothing within
-    that distance (piers, posts, rocks and wrecks stand on something). Markers and water are skipped.
+    foam and fog are effect meshes), without dynamic Havok bodies (those already float through buoyancy),
+    not a rock, boulder or cliff model, and not resting on the bottom. The bed comes from the exact terrain
+    of the loaded cells (else the heightmap, else `TES::GetLandHeight` queried from above the hull, never
+    from its keel, which is under the ground for a sunk rock). A hull may graze the bed of a shallow
+    harbour: it stays put only if the terrain rises into it, if it is mostly under water and touching the
+    bed, or if most of its footprint lies in the last 15 cm of water; a Havok ray straight down from the
+    keel that hits a structure (pier, post, wreck) holds it too. The pier test (a pile or grounded section
+    inside the footprint) only applies to low platforms, so a moored ship whose box takes in the dock's
+    piles still floats. Markers and water are skipped. Select a reference in the console to see in the
+    Debug section why it floats or stays put.
+-   **Riders**: fish and other critters, plants and debris at or just under the surface move with the
+    water's orbital motion, which fades as `e^(-k z)` below the surface for the local dominant waves, and
+    are pushed down when a trough would leave them in the air (never into the bed). The motion is added to
+    the reference's own position each frame, so critters keep their paths.
+-   **Dry hulls**: small open hulls (under 25 m) and boats lying in the shallows publish their footprint
+    (a superellipse with a floor height); water pixels inside it and above the floor are discarded in the
+    colour and stencil passes, so a wave rising over the gunwale never shows inside the boat.
 -   **Hull parts**: candidates are sorted by waterplane area; a smaller one whose centre lies inside a larger
     one's footprint becomes part of it (hull halves, decks placed as separate references). Ice floes that
     only touch stay separate.
@@ -275,10 +350,24 @@ against the CPU mirror, including slopes and compression against finite differen
 -   [ ] Storm: whitecaps leave trails that thin out and drift downwind; far water keeps a faint foam cover.
 -   [ ] Swim in a choppy sea: rings and foam stay on the swimmer, no ripples while floating still.
 -   [ ] Jump off a dock: crater, ring and a burst of whitewater that drifts and fades over Wake Foam Lifetime.
+-   [ ] Beach near Dawnstar / the Solitude coast in a fresh breeze: waves shorten, turn to the shore and
+        break; each one runs up the sand, drains back and leaves a line of foam that the next one sweeps
+        away; the sand is wet up to where the water reached and dries slowly. Rock outcrops and cliffs get
+        no surf or swash, only the open-sea waves and wet rock up to the crest height.
+-   [ ] Sunset over a choppy sea: troughs behind the crests fall into shadow.
+-   [ ] Swim at the surface in waves: the underwater view starts when the camera dips under a crest.
 
 ## Known limitations
 
--   Shoreline waves and depth attenuation need a Terrain Shadows heightmap for the worldspace.
+-   Shoreline waves and depth attenuation need the bathymetry (loaded cells or a Terrain Shadows heightmap).
+-   The shore rays are traced for the sea's dominant frequency; other bands reuse its refraction (each still
+    with its own deep-water speed), and a rebuild follows the player every ~175 m or a change of the dominant
+    period. The swash state is resolved at ~0.9 m (the run-up level is compared with the exact bed per
+    pixel, but the foam left on the sand and the wet level are that coarse).
+-   Gameplay water heights include the shore warp but not the swash: swimming and buoyancy see the shoaled
+    waves, not the run-up's thin film.
+-   The underwater view switches on the surface height above the camera; the lens line across the screen is
+    still the game's flat line at that height, not the wave profile.
 -   Fetch and depth weight whole cascades, so the transition from a sheltered bay to the open sea happens
     in four steps of band, not per wave. Shallow water calms the waves but cannot slow them (one dispersion
     relation per tile).
@@ -289,8 +378,8 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Floating objects are found by heuristics: an unusual structure standing in deep water without touching
     the bottom can float (lower the Largest Hull setting), and a ship whose mesh reaches into a shallow bed
     stays still. Only loaded references move; distant LOD models do not. NPC navmesh on deck does not move,
-    so NPCs keep their path while the deck carries them. Open hulls are not masked out of the water
-    surface, so in rough seas a wave higher than a low gunwale can show inside the boat.
+    so NPCs keep their path while the deck carries them. Only the eight hulls nearest the camera are masked
+    out of the water surface.
 
 ## References and credits
 
@@ -308,7 +397,17 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Atlas (GDC 2019, above) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement
--   GPU Gems ch. 1 Gerstner waves - still the shape of the shoreline wave train
+-   Banner, Babanin & Young, _Breaking Probability for Dominant Waves on the Sea Surface_ (JPO 2000) - crest foam
+-   Zhao, _A Fast Sweeping Method for Eikonal Equations_ (Math. Comp. 2005) - shore wave rays
+-   Eckart (1952) - shallow-water dispersion approximation; Green's law shoaling
+-   Thornton & Guza, _Transformation of Wave Height Distribution_ (JGR 1983) - depth-limited breaking
+-   Battjes, _Surf Similarity_ (ICCE 1974) - Iribarren number, breaking vs surging shores
+-   Stockdon, Holman, Howd & Sallenger, _Empirical Parameterization of Setup, Swash, and Runup_ (Coastal
+    Engineering 2006) - run-up
+-   Shen & Meyer (1963); Peregrine & Williams, _Swash Overtopping a Truncated Plane Beach_ (JFM 2001) -
+    ballistic swash and the swash lens
+-   Wagner (1967); Smith, _Geometrical Shadowing of a Random Rough Surface_ (1967) - sea-surface shadowing
+-   Whitlock, Bartlett & Gurganus, _Sea Foam Reflectance_ (GRL 1982) - foam albedo
 -   Bobbing Framework (RavenKZP, GPL-3.0-or-later WITH Modding Exception) - moving placed references with
     keyframed collision, their children and the actors standing on them; the floating objects build on it
 -   Faltinsen, _Sea Loads on Ships and Offshore Structures_ (1990) - heave and roll natural periods of a hull

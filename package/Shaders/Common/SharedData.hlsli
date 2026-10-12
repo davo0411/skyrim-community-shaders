@@ -434,6 +434,12 @@ namespace SharedData
 		float3 pad;
 	};
 
+	struct PBRWaterSettings
+	{
+		float4 SwashGrid;  // xy swash grid corner (absolute units), z 1 / extent (units), w enabled
+		float4 Wetness;    // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -456,6 +462,7 @@ namespace SharedData
 		TruePBRSettings truePBRSettings;
 		SkinData skinData;
 		HorizonFixSettings horizonFixSettings;
+		PBRWaterSettings pbrWaterSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

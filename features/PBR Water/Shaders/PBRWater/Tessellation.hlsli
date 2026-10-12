@@ -106,7 +106,11 @@ namespace PBRWater
 
 		float2 rippleUV = (mid.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
 		bool inRipples = Ripple0.w > 0.5 && all(rippleUV > 0.0) && all(rippleUV < 1.0);
-		float baselinePixels = targetPixels * (inRipples ? 1.0 : 4.0);
+		// The swash follows the beach: the run-up's edge is where the terrain crosses it, which needs fine triangles.
+		float2 swashUV;
+		bool inSwash = ctx.beach > 0.0 && SwashUV(mid.xy + FrameBuffer::CameraPosAdjust.xy, false, swashUV) &&
+		               ctx.elevation > -2.0 * UnitsPerMetre && ctx.elevation < max(Shore0.w, 1.0);
+		float baselinePixels = targetPixels * ((inRipples || inSwash) ? 1.0 : 4.0);
 		float screenFactor = len * pixelsPerUnit / baselinePixels;
 
 		return clamp(max(curvatureFactor, screenFactor), 1.0, Tess0.z);
@@ -115,8 +119,8 @@ namespace PBRWater
 	/// Conservative frustum test of the patch bounds grown by the largest possible displacement.
 	bool PatchOutsideFrustum(float3 p0, float3 p1, float3 p2)
 	{
-		// Displacement bound doubled for the fetch energy gain, shore waves doubled for shoaling.
-		float margin = 2.0 * Params2.z + 2.0 * Shore0.x + Ripple1.x + 64.0;
+		// Displacement bound doubled for the fetch energy gain, the swash's run-up, ripples.
+		float margin = DisplacementLimit() + 64.0;
 		float3 lo = min(p0, min(p1, p2)) - margin;
 		float3 hi = max(p0, max(p1, p2)) + margin;
 

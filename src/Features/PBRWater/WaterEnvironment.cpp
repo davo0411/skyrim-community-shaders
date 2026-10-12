@@ -7,6 +7,7 @@
 #include <DirectXTex.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -96,8 +97,20 @@ namespace
 	}
 }
 
+float CellLevels::At(int32_t cellX, int32_t cellY) const
+{
+	const int32_t x = cellX - minX;
+	const int32_t y = cellY - minY;
+	if (x < 0 || y < 0 || x >= static_cast<int32_t>(width) || y >= static_cast<int32_t>(height))
+		return std::numeric_limits<float>::quiet_NaN();
+	return level[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
+}
+
 WaterEnvironment::~WaterEnvironment()
 {
+	shoreCancel.store(true, std::memory_order_release);
+	if (shoreWorker.joinable())
+		shoreWorker.join();
 	if (worker.joinable()) {
 		worker.request_stop();
 		worker.join();
@@ -195,6 +208,7 @@ void WaterEnvironment::UpdateLoadedLand(bool exterior)
 	{
 		int32_t x, y;
 		const RE::TESObjectLAND::LoadedLandData* data;
+		float waterLevel;
 	};
 	std::vector<LoadedCell> cells;
 	uint64_t signature = 1469598103934665603ull;
@@ -206,7 +220,8 @@ void WaterEnvironment::UpdateLoadedLand(bool exterior)
 			const auto* landRecord = cell->GetRuntimeData().cellLand;
 			if (!coords || !landRecord || !landRecord->loadedData)
 				return;
-			cells.push_back({ coords->cellX, coords->cellY, landRecord->loadedData });
+			const float waterLevel = cell->GetExteriorWaterHeight();
+			cells.push_back({ coords->cellX, coords->cellY, landRecord->loadedData, waterLevel > -1.0e6f ? waterLevel : std::numeric_limits<float>::quiet_NaN() });
 			signature = (signature ^ (static_cast<uint64_t>(static_cast<uint32_t>(coords->cellX)) << 32 | static_cast<uint32_t>(coords->cellY))) * 1099511628211ull;
 			signature = (signature ^ reinterpret_cast<uintptr_t>(landRecord->loadedData)) * 1099511628211ull;
 		});
@@ -217,6 +232,7 @@ void WaterEnvironment::UpdateLoadedLand(bool exterior)
 
 	if (cells.empty()) {
 		land.store(nullptr, std::memory_order_release);
+		loadedLevels.store(nullptr, std::memory_order_release);
 		landGeneration.fetch_add(1, std::memory_order_acq_rel);
 		return;
 	}
@@ -271,6 +287,17 @@ void WaterEnvironment::UpdateLoadedLand(bool exterior)
 		}
 	}
 
+	// The loaded cells' water levels: the shore field's fallback where Unified Water's cache has none.
+	auto levels = std::make_shared<CellLevels>();
+	levels->minX = minX;
+	levels->minY = minY;
+	levels->width = static_cast<uint32_t>(maxX - minX + 1);
+	levels->height = static_cast<uint32_t>(maxY - minY + 1);
+	levels->level.assign(static_cast<size_t>(levels->width) * levels->height, std::numeric_limits<float>::quiet_NaN());
+	for (const auto& c : cells)
+		levels->level[static_cast<size_t>(c.y - minY) * levels->width + static_cast<size_t>(c.x - minX)] = c.waterLevel;
+	loadedLevels.store(std::move(levels), std::memory_order_release);
+
 	const auto [lo, hi] = std::minmax_element(grid->heights.begin(), grid->heights.end());
 	logger::info("[PBR Water] Loaded terrain grid {}x{} cells at ({}, {}), z {:.0f}..{:.0f}", maxX - minX + 1, maxY - minY + 1, minX, minY, *lo, *hi);
 	land.store(std::move(grid), std::memory_order_release);
@@ -294,6 +321,10 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 
 	fetch.store(nullptr, std::memory_order_release);
 	bathymetry.store(nullptr, std::memory_order_release);
+	cellLevels.store(nullptr, std::memory_order_release);
+	// The old worldspace's shore field (and any build still running for it) no longer applies.
+	shoreEpoch.fetch_add(1, std::memory_order_acq_rel);
+	PublishShore(nullptr);
 	fetchGeneration.fetch_add(1, std::memory_order_acq_rel);
 
 	if (!worldSpace)
@@ -305,6 +336,15 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 	if (auto& unifiedWater = globals::features::unifiedWater; unifiedWater.loaded) {
 		if (auto* cache = unifiedWater.GetWaterCache())
 			hasCoverage = cache->GetCoverage(worldSpace, *coverage);
+	}
+	if (hasCoverage && coverage->level.size() == coverage->water.size()) {
+		auto levels = std::make_shared<CellLevels>();
+		levels->minX = coverage->minX;
+		levels->minY = coverage->minY;
+		levels->width = coverage->width;
+		levels->height = coverage->height;
+		levels->level = coverage->level;
+		cellLevels.store(std::move(levels), std::memory_order_release);
 	}
 	auto heightmap = FindHeightmap(worldSpace);
 
@@ -329,5 +369,134 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 			}
 		}
 		building.store(false, std::memory_order_release);
+	});
+}
+
+// ============================================================================
+// Shore field
+// ============================================================================
+
+void WaterEnvironment::PublishShore(std::shared_ptr<const PBRWaterModel::ShoreField> field)
+{
+	shore.store(std::move(field), std::memory_order_release);
+	shoreGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void WaterEnvironment::UpdateShore(float playerX, float playerY, float omega, bool enabled)
+{
+	if (!enabled) {
+		if (shore.load(std::memory_order_acquire))
+			PublishShore(nullptr);
+		return;
+	}
+	// One build at a time; the next one starts from whatever is current when it finishes.
+	if (shoreBuilding.load(std::memory_order_acquire))
+		return;
+
+	auto landGrid = land.load(std::memory_order_acquire);
+	auto coarse = bathymetry.load(std::memory_order_acquire);
+	auto levels = cellLevels.load(std::memory_order_acquire);
+	auto loaded = loadedLevels.load(std::memory_order_acquire);
+	if ((!landGrid && !coarse) || (!levels && !loaded)) {
+		if (shore.load(std::memory_order_acquire))
+			PublishShore(nullptr);
+		return;
+	}
+
+	const float half = 0.5f * ShoreTexels * ShoreStep;
+	const bool moved = std::abs(playerX - shoreCentreX) > 0.25f * half || std::abs(playerY - shoreCentreY) > 0.25f * half;
+	const bool newData = landGrid != shoreLand || coarse != shoreCoarse || levels != shoreLevels || loaded != shoreLoaded;
+	const bool newWaves = shoreOmega <= 0.0f || std::abs(omega / shoreOmega - 1.0f) > 0.08f;
+	if (shore.load(std::memory_order_acquire) && !moved && !newData && !newWaves)
+		return;
+
+	shoreCentreX = playerX;
+	shoreCentreY = playerY;
+	shoreOmega = omega;
+	shoreLand = landGrid;
+	shoreCoarse = coarse;
+	shoreLevels = levels;
+	shoreLoaded = loaded;
+
+	// Whole texels, so a rebuild never shifts the sampling grid.
+	const float minX = std::floor((playerX - half) / ShoreStep) * ShoreStep;
+	const float minY = std::floor((playerY - half) / ShoreStep) * ShoreStep;
+
+	if (shoreWorker.joinable())
+		shoreWorker.join();
+	shoreBuilding.store(true, std::memory_order_release);
+	const uint32_t epoch = shoreEpoch.load(std::memory_order_acquire);
+	shoreWorker = std::jthread([this, minX, minY, omega, landGrid, coarse, levels, loaded, epoch]() {
+		PBRWaterModel::ShoreInputs inputs;
+		inputs.width = ShoreTexels;
+		inputs.height = ShoreTexels;
+		inputs.minX = minX;
+		inputs.minY = minY;
+		inputs.step = ShoreStep;
+		inputs.omega = omega;
+		const size_t count = static_cast<size_t>(ShoreTexels) * ShoreTexels;
+		inputs.bed.assign(count, std::numeric_limits<float>::quiet_NaN());
+		inputs.level.assign(count, std::numeric_limits<float>::quiet_NaN());
+
+		// Still water level per cell: Unified Water's cache, else the loaded cells. A dry cell takes the highest
+		// level around it, so the beach above a shoreline on a cell edge still knows the water below it.
+		auto cellLevel = [&](int32_t cx, int32_t cy) {
+			float level = levels ? levels->At(cx, cy) : std::numeric_limits<float>::quiet_NaN();
+			if (!std::isfinite(level) && loaded)
+				level = loaded->At(cx, cy);
+			return level;
+		};
+		const int32_t cellMinX = static_cast<int32_t>(std::floor(minX / CellSize)) - 1;
+		const int32_t cellMinY = static_cast<int32_t>(std::floor(minY / CellSize)) - 1;
+		const int32_t cellCount = static_cast<int32_t>(std::ceil(ShoreTexels * ShoreStep / CellSize)) + 3;
+		std::vector<float> cellLevelsLocal(static_cast<size_t>(cellCount) * cellCount, std::numeric_limits<float>::quiet_NaN());
+		for (int32_t j = 0; j < cellCount; ++j) {
+			for (int32_t i = 0; i < cellCount; ++i) {
+				float level = cellLevel(cellMinX + i, cellMinY + j);
+				if (!std::isfinite(level)) {
+					for (int32_t dj = -1; dj <= 1; ++dj) {
+						for (int32_t di = -1; di <= 1; ++di) {
+							const float neighbour = cellLevel(cellMinX + i + di, cellMinY + j + dj);
+							if (std::isfinite(neighbour) && (!std::isfinite(level) || neighbour > level))
+								level = neighbour;
+						}
+					}
+				}
+				cellLevelsLocal[static_cast<size_t>(j) * cellCount + static_cast<size_t>(i)] = level;
+			}
+		}
+
+		for (uint32_t y = 0; y < ShoreTexels && !shoreCancel.load(std::memory_order_relaxed); ++y) {
+			const float wy = minY + static_cast<float>(y) * ShoreStep;
+			const int32_t cy = static_cast<int32_t>(std::floor(wy / CellSize)) - cellMinY;
+			for (uint32_t x = 0; x < ShoreTexels; ++x) {
+				const float wx = minX + static_cast<float>(x) * ShoreStep;
+				const size_t i = static_cast<size_t>(y) * ShoreTexels + x;
+				float bed = std::numeric_limits<float>::quiet_NaN();
+				if (landGrid && landGrid->Contains(wx, wy)) {
+					const float z = landGrid->Sample(wx, wy);
+					if (z > -1.0e5f)
+						bed = z;
+				}
+				if (!std::isfinite(bed) && coarse && coarse->Contains(wx, wy))
+					bed = coarse->Sample(wx, wy);
+				inputs.bed[i] = bed;
+				const int32_t cx = static_cast<int32_t>(std::floor(wx / CellSize)) - cellMinX;
+				if (cx >= 0 && cy >= 0 && cx < cellCount && cy < cellCount)
+					inputs.level[i] = cellLevelsLocal[static_cast<size_t>(cy) * cellCount + static_cast<size_t>(cx)];
+			}
+		}
+
+		std::shared_ptr<PBRWaterModel::ShoreField> field;
+		if (!shoreCancel.load(std::memory_order_relaxed)) {
+			try {
+				field = PBRWaterModel::BuildShoreField(inputs, &shoreCancel);
+			} catch (...) {
+				field = nullptr;
+			}
+		}
+		if (field && !shoreCancel.load(std::memory_order_relaxed) && epoch == shoreEpoch.load(std::memory_order_acquire))
+			PublishShore(std::move(field));
+		shoreBuilding.store(false, std::memory_order_release);
 	});
 }

@@ -4,6 +4,7 @@
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
+#include "PBRWater/ShoreSimulation.h"
 #include "PBRWater/WaterEnvironment.h"
 #include "PBRWater/WaveModel.h"
 
@@ -25,7 +26,7 @@ struct PBRWater : Feature
 	virtual inline std::string_view GetShaderDefineName() override { return "PBR_WATER"; }
 	virtual std::string_view GetCategory() const override { return FeatureCategories::kWater; }
 	// Image space: screen-space reflections reject hits on the displaced water surface.
-	virtual inline bool HasShaderDefine(RE::BSShader::Type t) override { return t == RE::BSShader::Type::Water || t == RE::BSShader::Type::ImageSpace; }
+	virtual inline bool HasShaderDefine(RE::BSShader::Type t) override { return t == RE::BSShader::Type::Water || t == RE::BSShader::Type::ImageSpace || t == RE::BSShader::Type::Lighting; }
 
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
@@ -64,10 +65,12 @@ struct PBRWater : Feature
 		float RiverWaveDamping = 0.5f;
 
 		// Shore
-		float ShoreWaveHeight = 0.6f;
-		float ShoreSlope = 0.04f;
-		float ShoreSteepness = 0.6f;
-		float ShoreOnsetDepth = 6.0f;  ///< metres
+		bool EnableShoreWaves = true;        ///< waves shoal, break and run up beaches
+		float ShoreWaveHeight = 1.0f;        ///< scales the run-up (1 = Stockdon et al. 2006)
+		float SwashFoam = 1.0f;              ///< foam riding the swash and left on the sand
+		float ShoreFoamLifetime = 10.0f;     ///< seconds the backwash's foam lasts on the sand
+		bool WetShores = true;               ///< the swash wets the sand and whatever it reaches (Wetness Effects)
+		bool UnderwaterFollowsWaves = true;  ///< the camera is under water when under the displaced surface
 
 		// Lighting
 		float Roughness = 0.06f;
@@ -75,6 +78,7 @@ struct PBRWater : Feature
 		float PointLightSpecular = 1.0f;
 		float Subsurface = 1.0f;
 		float VanillaFresnel = 0.0f;
+		bool WaveShadows = true;  ///< at a low sun the crests shadow the troughs behind them
 		float Visibility = 1.0f;
 		float RefractionDistortion = 1.0f;
 		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
@@ -205,8 +209,22 @@ struct PBRWater : Feature
 		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
 		float4 HullA[FloatingObjects::MaxHullMasks];  // xy centre (absolute units), z floor (absolute units)
 		float4 HullB[FloatingObjects::MaxHullMasks];  // xy length axis, z half length, w half width (units)
+		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), y deep-water phase speed of the mean frequency (units/s)
+		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
+		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
+		float4 Swash1;                                // xy last frame's swash grid corner
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
+
+	/** @brief What the lit objects need of the swash (Lighting.hlsl, wetness and caustics); matches PBRWaterSettings in SharedData.hlsli. */
+	struct alignas(16) SharedSettings
+	{
+		float4 SwashGrid;  // xy grid corner (absolute units), z 1 / extent (units), w enabled
+		float4 Wetness;    // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+	};
+	STATIC_ASSERT_ALIGNAS_16(SharedSettings);
+	/** @brief Render thread: the swash data for the shared feature buffer. */
+	SharedSettings GetCommonBufferData() const;
 
 	// ---- Hooks ----
 	struct TESWaterSystem_InitializeWater
@@ -240,6 +258,8 @@ struct PBRWater : Feature
 	};
 
 private:
+	static constexpr uint32_t WaterSRVCount = 14;  ///< t110-t123
+
 	void UpdateFrameConstants();
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
 	void RestoreDraw();
@@ -252,8 +272,16 @@ private:
 	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed, bool exterior) const;
 	/** @brief FFT size for the WaveResolution setting. */
 	uint32_t WaveResolutionSize() const;
-	/** @brief Render thread: the SRVs of slots t110-t118. */
-	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[9]) const;
+	/** @brief Render thread: the SRVs of slots t110-t123. */
+	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[WaterSRVCount]) const;
+	/** @brief Render thread: uploads a new shore field. */
+	void UpdateShoreTextures();
+	/** @brief Render thread: steps the swash (needs this frame's constants). */
+	void UpdateSwash(float dt);
+	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
+	void UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior);
+	/** @brief Render thread, before the world is drawn: applies the main thread's camera-under-water state again. */
+	void ApplyCameraWater();
 	/** @brief Render thread: puts back the samplers SetupDraw replaced. */
 	void RestoreSamplers();
 
@@ -282,6 +310,11 @@ private:
 	winrt::com_ptr<ID3D11SamplerState> oceanSampler;
 
 	RippleSimulation ripples;
+	ShoreSimulation swash;                         ///< render thread
+	std::unique_ptr<Texture2D> shoreFieldTexture;  ///< render thread: delay, signed distance, ray direction
+	std::unique_ptr<Texture2D> shoreLevelTexture;  ///< render thread: beach slope, still water level
+	uint32_t uploadedShoreGeneration = UINT32_MAX;
+	std::shared_ptr<const PBRWaterModel::ShoreField> uploadedShore;
 	OceanSimulation ocean;                  ///< render thread
 	std::atomic<bool> oceanReady{ false };  ///< the GPU ocean is live; until then gameplay sees no FFT waves
 	WaterEnvironment environment;
@@ -298,6 +331,8 @@ private:
 	std::atomic<float> weatherTurbidity{ 0.0f };
 	float smoothedWeatherTurbidity = 0.0f;
 	std::atomic<float> rainIntensity{ 0.0f };
+	std::atomic<float> cameraSurface{ 0.0f };  ///< displaced water height above the camera (absolute z)
+	std::atomic<bool> cameraSurfaceValid{ false };
 	float smoothedRain = 0.0f;
 
 	// Render thread

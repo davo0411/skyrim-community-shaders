@@ -158,36 +158,6 @@ namespace PBRWater
 	// jittered grid, with walls bent by a domain warp so no straight cell edges survive.
 	// ------------------------------------------------------------------------
 
-	/// Distance to the nearest bubble centre, normalised by that bubble's radius and merged with a
-	/// smooth minimum: 0 at a bubble centre, ~1 at its rim, with rounded walls between bubbles.
-	float BubbleField(float2 p, float time)
-	{
-		float2 cell = floor(p);
-		float2 f = frac(p);
-		float result = 0.0;
-		float weightSum = 0.0;
-		[unroll] for (int y = -1; y <= 1; y++)
-		{
-			[unroll] for (int x = -1; x <= 1; x++)
-			{
-				float2 o = float2(x, y);
-				// Each bubble drifts on its own small orbit and breathes, so the lace keeps churning.
-				float2 h = Hash22(cell + o);
-				float phase = Hash12(cell + o + 5.31) * 6.2831853;
-				float speed = 0.6 + 0.8 * h.x;
-				float2 orbit = float2(sin(time * speed + phase), cos(time * speed * 0.83 + phase * 1.7));
-				float2 centre = o + 0.5 + (h - 0.5) * 0.6 + orbit * 0.18;
-				float radius = (0.55 + 0.45 * Hash12(cell + o + 17.17)) * (0.9 + 0.1 * sin(time * 1.3 * speed + phase));
-				float d = length(centre - f) / radius;
-				// Exponential smooth minimum: neighbouring bubbles merge softly instead of meeting at an edge.
-				float w = exp2(-8.0 * d);
-				result += w * d;
-				weightSum += w;
-			}
-		}
-		return result / max(weightSum, 1e-6);
-	}
-
 	/**
 	 * Surface foam in [0, 1] for a local coverage.
 	 * @param p         Lagrangian (undisplaced) absolute position, so foam rides the wave orbits
@@ -198,31 +168,7 @@ namespace PBRWater
 	float FoamLace(float2 p, float coverage, float footprint, float time)
 	{
 		float scale = max(Foam0.w, 1.0);
-		float2 q = p / scale;
-
-		// Large-scale density variation: foam gathers in clumps and streaks.
-		float clumps = Fbm(q * 0.21 + float2(time * 0.011, -time * 0.007));
-		coverage = saturate(coverage * (0.45 + 1.1 * clumps));
-		if (coverage <= 0.002)
-			return 0.0;
-
-		// Domain warp bends the bubble walls into organic, curved filaments; it flows over time.
-		float2 warp = float2(Fbm(q * 0.6 + float2(time * 0.17, time * 0.05)), Fbm(q * 0.6 + 31.7 - float2(time * 0.06, time * 0.15))) - 0.5;
-		float2 w = q + warp * 1.6;
-
-		float large = BubbleField(w, time);
-		float small = BubbleField(w * 2.7 + 9.3, time * 1.7);
-
-		// Bubbles grow as coverage falls; at zero coverage they swallow everything.
-		float radius = lerp(1.45, 0.05, sqrt(coverage));
-		float pixelCells = footprint / scale;
-		float feather = 0.12 + pixelCells * 2.0;
-		float lace = smoothstep(radius - feather, radius + feather, large);
-		lace *= smoothstep(radius * 0.85 - feather * 2.7, radius * 0.85 + feather * 2.7, small);
-
-		// Far away the pattern is sub-pixel: converge to its average instead of shimmering.
-		float distanceBlend = saturate(pixelCells * 4.0 - 0.5);
-		return lerp(lace, coverage * coverage, distanceBlend);
+		return FoamLacePattern(p / scale, coverage, footprint / scale, time);
 	}
 
 	/**
@@ -324,10 +270,14 @@ namespace PBRWater
 		float3 normal;
 		float roughness;
 		float jacobian;
-		float crestFoam;  // crest foam coverage including its decaying trail
-		float shoreBreak;
-		float shoreMask;
+		float crestFoam;   // crest foam coverage including its decaying trail
+		float shoreBreak;  // a shore wave breaking here
+		float shoreMask;   // inner surf zone
 		float shoreCrest;
+		float beach;        // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
+		float shoreDelay;   // shoaling delay of the ray through here (s, debug)
+		float swashFoam;    // foam riding the swash over the beach
+		float2 foamAdvect;  // how far the swash has carried the foam pattern up the beach (units)
 		float rippleFoam;
 		float depth;
 		float shoreDistance;  // horizontal distance to the waterline of the bed (units), large when unknown
@@ -336,6 +286,7 @@ namespace PBRWater
 		float turbidity;  // column sediment, filled in by the water column shading
 		float windSpeed;  // local wind at the surface (m/s)
 		float windrows;   // foam gathered into streaks along the wind
+		WaveContext ctx;  // the waves' local context (wave shadows)
 	};
 
 	/**
@@ -393,6 +344,24 @@ namespace PBRWater
 		o.shoreBreak = waves.shoreBreak;
 		o.shoreMask = waves.shoreMask;
 		o.shoreCrest = waves.shoreCrest;
+		o.beach = ctx.beach;
+		o.shoreDelay = ctx.shore.delay * ctx.shore.weight;
+
+		// The swash over the beach: dense foam rides the front of each uprush, and drains away as lace on the
+		// backwash. What it leaves on the sand is drawn with the terrain (Lighting), as the water is gone.
+		o.swashFoam = 0.0;
+		o.foamAdvect = 0.0;
+		if (ctx.beach > 0.0) {
+			float4 swash = SwashState(absXY, false);
+			float cover = swash.x - ctx.elevation;  // how far under the run-up level the bed lies (units)
+			// A band a few metres behind the tip, whatever the beach slope.
+			float band = max(3.0 * UnitsPerMetre * ctx.shore.slope, 3.0);
+			float front = smoothstep(-2.0, 2.0, cover) * smoothstep(band, 0.0, cover);
+			float rising = saturate(swash.y / 15.0);
+			o.swashFoam = ctx.beach * front * lerp(0.35, 1.0, rising);
+			// The foam pattern rides up and down the beach with the swash: the tip's distance from the still waterline.
+			o.foamAdvect = ctx.shore.dir * (swash.x / max(ctx.shore.slope, 0.02)) * ctx.beach;
+		}
 		o.rippleFoam = ripple.z;
 		o.depth = ctx.depth;
 		// Depth over the bed's slope: how far the shoreline is, so the contact band has the same width on a gentle
@@ -401,21 +370,85 @@ namespace PBRWater
 		o.fetchMetres = fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
+		o.ctx = ctx;
 		return o;
+	}
+
+	// ------------------------------------------------------------------------
+	// Wave shadows
+	// ------------------------------------------------------------------------
+
+	/**
+	 * Height of the long-wave cascades (all but the finest, whose shadows are under a decimetre) at undisplaced
+	 * camera-relative `xy + offset`, low-passed over `blur` units. The offset is taken through the shore warp, which
+	 * shortens the waves by kappa along the ray.
+	 */
+	float LongWaveHeight(float2 xy, float2 offset, WaveContext ctx, float blur)
+	{
+		float height = 0.0;
+		[unroll] for (uint c = 0; c + 1 < PBRW_CASCADES; c++)
+		{
+			float vertical = CascadeWeight(c, ctx);
+			float kappa = ShoreCompression(ctx, c);
+			float2 warped = offset + (kappa - 1.0) * ctx.shore.dir * dot(ctx.shore.dir, offset);
+			float3 uv = float3(CascadeUV(xy + warped - ShoreShift(ctx, c), c), c);
+			float lod = clamp(log2(max(blur * kappa, 1e-3) / Cascade0[c].w), 0.0, Params2.w);
+			height += OceanDisplacement.SampleLevel(OceanSampler, uv, lod).z * vertical;
+		}
+		return height;
+	}
+
+	/**
+	 * Sunlight reaching the surface past the other waves, 0..1. Once the sun is lower than the steepest wave slopes
+	 * the crests shadow the troughs behind them: sea-surface shadowing (Wagner 1967; Smith 1967), resolved here
+	 * for the waves larger than a pixel instead of averaged. Marches the long-wave heightfield towards the sun with
+	 * a cone that widens with distance (coarser mips), softened by the sun's disc (0.53 degrees); the unresolved
+	 * short waves are left to the specular's own shadowing term.
+	 * @param positionWS undisplaced camera-relative position (Lagrangian)
+	 * @param toSun      unit direction to the sun
+	 * @param footprint  world size of a pixel (units)
+	 */
+	float WaveSunShadow(float3 positionWS, WaveContext ctx, float3 toSun, float footprint)
+	{
+		float horizontal = length(toSun.xy);
+		float tanSun = toSun.z / max(horizontal, 1e-4);
+		float shadow = 1.0;
+		// No sea is steeper than its breaking limit (ak ~ 0.44, crest slopes ~0.6): a sun higher than ~35 degrees
+		// lights every wave.
+		[branch] if (Surface1.y > 0.5 && OceanActive() && toSun.z > 0.0 && tanSun < 0.7 && ctx.damping > 0.0)
+		{
+			float2 dir = toSun.xy / max(horizontal, 1e-4);
+			float blur0 = max(footprint, 1.0);
+			float start = LongWaveHeight(positionWS.xy, 0.0, ctx, blur0);
+			float d = max(2.0 * footprint, 8.0);
+			// Out to 2^8 times the first step (~30 m near the camera): far enough for a long swell's crest at a low sun.
+			[unroll] for (uint i = 0; i < 9; i++)
+			{
+				float blur = max(0.15 * d, blur0);
+				float clearance = start + d * tanSun - LongWaveHeight(positionWS.xy, dir * d, ctx, blur);
+				float penumbra = 0.0093 * d + 0.5 * blur + 1.0;
+				shadow = min(shadow, saturate(clearance / penumbra + 0.5));
+				d *= 2.0;
+			}
+			// The waves fade to the flat plane with distance, and so do their shadows.
+			shadow = lerp(1.0, shadow, saturate(ctx.damping * 2.0));
+		}
+		return shadow;
 	}
 
 	/// Foam coverage from all sources. `contact` is 0..1 how close the waterline of something rising out of the
 	/// water is (shores, rocks, piers, wading legs ...); 0 when unknown.
-	/// x surface foam (contact band, breaking shore waves, windrows), y whitecaps (folding crests),
+	/// x surface foam (contact band, breaking shore waves, swash, windrows), y whitecaps (folding crests),
 	/// z aeration from splashes and wakes: churned water is full of bubbles but leaves little foam.
 	float3 FoamCoverage(SurfaceShading s, float contact)
 	{
-		// A band along the waterline of anything in the water, surging as each shore wave runs up.
-		float surge = 0.6 + 0.4 * s.shoreCrest;
-		// Breaking foam rides the crests that are breaking, with only a thin residue between them.
-		float breaking = s.shoreBreak * Shore1.y * (0.1 + 0.9 * s.shoreCrest * s.shoreCrest);
+		// A band along the waterline of rocks, piers and legs. On a beach the shore's foam comes from the waves
+		// themselves (breaking crests, the swash), so the waterline is not ringed with standing foam.
+		float band = contact * (1.0 - s.beach);
+		// Breaking shore waves: dense foam on the crests that break, a lace of old foam between them in the surf zone.
+		float breaking = (s.shoreBreak + 0.3 * s.shoreMask) * Shore1.x + s.swashFoam * Shore1.y;
 		float aeration = saturate(s.rippleFoam * Foam1.z * 3.0);
-		float surface = saturate((contact * surge + breaking + s.windrows) * Foam0.z);
+		float surface = saturate((band + breaking + s.windrows) * Foam0.z);
 		// The amount already sets how much of the sea breaks; this only switches it off at zero.
 		float whitecap = saturate(s.crestFoam) * saturate(Foam2.x * 4.0);
 		return float3(surface, whitecap, aeration);
@@ -429,7 +462,8 @@ namespace PBRWater
 		case 2:
 			return foam.xxx;
 		case 3:
-			return float3(saturate(s.depth / (10.0 * UnitsPerMetre)), s.shoreMask, 0.0);
+			// Depth (red, 10 m), beach where waves break and run up (green), shoaling delay of the wave rays (blue, 30 s).
+			return float3(saturate(s.depth / (10.0 * UnitsPerMetre)), s.beach, saturate(s.shoreDelay / 30.0));
 		case 4:
 			return float3(saturate(1.0 - s.jacobian), saturate(-s.jacobian), s.shoreBreak);
 		case 5:

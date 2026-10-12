@@ -798,6 +798,17 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #		include "WaterEffects/WaterCaustics.hlsli"
 #	endif
 
+#	if defined(PBR_WATER) && (defined(LOD) || defined(WORLD_MAP))
+#		undef PBR_WATER
+#	endif
+
+#	if defined(PBR_WATER)
+#		include "PBRWater/ShoreWetness.hlsli"
+#		if !defined(SKINNED) && !defined(SKIN) && !defined(HAIR) && !defined(EYE) && !defined(FACEGEN) && !defined(FACEGEN_RGB_TINT)
+#			define PBRW_SHORE_FOAM
+#		endif
+#	endif
+
 #	if defined(EYE)
 #		undef WETNESS_EFFECTS
 #	endif
@@ -2101,6 +2112,17 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float4 waterData = SharedData::GetWaterData(input.WorldPosition.xyz);
 	float waterHeight = waterData.w;
 
+#	if defined(PBR_WATER)
+	// PBR Water: the water at the shore rises and falls with the waves, and leaves wetness and foam where it reached.
+	PBRWaterShore::Shore shoreWater = PBRWaterShore::Sample(input.WorldPosition.xyz, waterHeight);
+	float stillWaterHeight = waterHeight;
+	waterHeight += shoreWater.surface;
+	waterData.w = waterHeight;
+#	endif
+#	if defined(PBRW_SHORE_FOAM)
+	float shoreFoam = PBRWaterShore::Foam(shoreWater, input.WorldPosition.xyz, worldNormal.z, length(fwidth(input.WorldPosition.xy)));
+#	endif
+
 	float waterRoughnessSpecular = 1;
 
 #	if defined(WETNESS_EFFECTS)
@@ -2111,6 +2133,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// Calculate shore wetness factors
 	float wetnessDistToWater = abs(input.WorldPosition.z - waterHeight);
 	float shoreFactor = saturate(1.0 - (wetnessDistToWater / SharedData::wetnessEffectsSettings.ShoreRange));
+#		if defined(PBR_WATER)
+	// Whatever the waves reached stays wet as it drains.
+	if (input.WorldPosition.z >= waterHeight)
+		shoreFactor = max(shoreFactor, PBRWaterShore::Wetness(shoreWater, input.WorldPosition.z, stillWaterHeight, SharedData::wetnessEffectsSettings.ShoreRange));
+#		endif
 	float shoreFactorAlbedo = (input.WorldPosition.z < waterHeight) ? 1.0 : shoreFactor;
 
 	// Calculate wetness angle and occlusion
@@ -2210,6 +2237,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// sharply without this floor.
 	static const float wetnessMinPuddleRoughness = 0.05;
 	waterRoughnessSpecular = max(saturate(1.0 - wetnessGlossinessSpecular), wetnessMinPuddleRoughness);
+#		if defined(PBRW_SHORE_FOAM)
+	// Foam lying on the wet sand is matte.
+	waterRoughnessSpecular = lerp(waterRoughnessSpecular, 1.0, shoreFoam);
+#		endif
 #	endif
 
 	float llDirLightMult = SharedData::linearLightingSettings.enableLinearLighting && !SharedData::linearLightingSettings.isDirLightLinear && (inWorld || inReflection) && !SharedData::InInterior ? SharedData::linearLightingSettings.dirLightMult : 1.0f;
@@ -2708,6 +2739,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float wetnessDarkeningAmount = porosity * wetnessGlossinessAlbedo;
 	material.BaseColor = lerp(material.BaseColor, pow(abs(material.BaseColor), 1.0 + wetnessDarkeningAmount), 0.5);
 #		endif
+#	endif
+
+#	if defined(PBRW_SHORE_FOAM)
+	// The foam the backwash left on the sand.
+	material.BaseColor = lerp(material.BaseColor, Color::Diffuse(PBRWaterShore::FoamAlbedo), shoreFoam);
 #	endif
 
 	float4 color = 0;

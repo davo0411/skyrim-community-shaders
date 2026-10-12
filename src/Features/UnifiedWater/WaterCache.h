@@ -69,6 +69,7 @@ public:
 		uint32_t width{};
 		uint32_t height{};
 		std::vector<uint8_t> water;
+		std::vector<float> level;  ///< absolute water height of each cell (NaN where it has none)
 	};
 
 	/**

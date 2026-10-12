@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <vector>
 
 /** @brief Minimal view of a cell coverage grid (decoupled from Unified Water's cache type). */
 struct WaterCoverageView
@@ -14,6 +15,19 @@ struct WaterCoverageView
 	uint32_t width = 0;
 	uint32_t height = 0;
 	const uint8_t* water = nullptr;
+};
+
+/** @brief Still water level of each cell of a worldspace (absolute z, NaN where a cell has no water). */
+struct CellLevels
+{
+	int32_t minX = 0;
+	int32_t minY = 0;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	std::vector<float> level;
+
+	/** @brief The cell's level, NaN outside the grid or where it has no water. */
+	float At(int32_t cellX, int32_t cellY) const;
 };
 
 /**
@@ -54,8 +68,25 @@ public:
 	/** @brief Bakes the directional fetch field from a cell coverage grid. */
 	static std::shared_ptr<PBRWaterModel::FetchField> BakeFetch(const WaterCoverageView& coverage);
 
+	/**
+	 * @brief Main thread: keeps the shore field around the player current (wave rays, shoaling delay, beach
+	 * slopes). It is rebuilt on a worker whenever the player leaves its middle, the terrain or water data change
+	 * (cells load), or the sea's dominant waves change.
+	 * @param omega angular frequency of the dominant waves (rad/s)
+	 */
+	void UpdateShore(float playerX, float playerY, float omega, bool enabled);
+	std::shared_ptr<const PBRWaterModel::ShoreField> GetShore() const { return shore.load(std::memory_order_acquire); }
+	/** @brief Incremented every time a new shore field is published (render thread re-uploads on change). */
+	uint32_t GetShoreGeneration() const { return shoreGeneration.load(std::memory_order_acquire); }
+	bool IsBuildingShore() const { return shoreBuilding.load(std::memory_order_acquire); }
+
+	/// Shore field size (texels per side) and texel size (units: the loaded terrain's vertex spacing).
+	static constexpr uint32_t ShoreTexels = 768;
+	static constexpr float ShoreStep = 128.0f;
+
 private:
 	void Rebuild(const RE::TESWorldSpace* worldSpace);
+	void PublishShore(std::shared_ptr<const PBRWaterModel::ShoreField> field);
 
 	const RE::TESWorldSpace* currentWorldSpace = nullptr;
 	std::jthread worker;
@@ -67,4 +98,18 @@ private:
 	std::atomic<std::shared_ptr<const PBRWaterModel::Bathymetry>> land;
 	std::atomic_uint32_t landGeneration{ 0 };
 	uint64_t landSignature = 0;
+
+	std::atomic<std::shared_ptr<const CellLevels>> cellLevels;    ///< Unified Water's cache for the worldspace
+	std::atomic<std::shared_ptr<const CellLevels>> loadedLevels;  ///< the loaded cells (fallback)
+
+	// Shore field (main thread state, worker build)
+	std::jthread shoreWorker;
+	std::atomic_bool shoreBuilding{ false };
+	std::atomic_bool shoreCancel{ false };
+	std::atomic<std::shared_ptr<const PBRWaterModel::ShoreField>> shore;
+	std::atomic_uint32_t shoreGeneration{ 0 };
+	std::atomic_uint32_t shoreEpoch{ 0 };  ///< bumped per worldspace: a build for an old one is never published
+	float shoreCentreX = 0.0f, shoreCentreY = 0.0f, shoreOmega = 0.0f;
+	std::shared_ptr<const PBRWaterModel::Bathymetry> shoreLand, shoreCoarse;
+	std::shared_ptr<const CellLevels> shoreLevels, shoreLoaded;
 };

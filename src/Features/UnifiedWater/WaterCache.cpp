@@ -2,6 +2,7 @@
 
 #include <BS_thread_pool.hpp>
 #include <cmath>
+#include <limits>
 
 #include "Utils/WinApi.h"
 
@@ -110,6 +111,7 @@ bool WaterCache::GetCoverage(const RE::TESWorldSpace* worldSpace, Coverage& out)
 	out.width = static_cast<uint32_t>(bounds.maxX - bounds.minX + 1);
 	out.height = static_cast<uint32_t>(bounds.maxY - bounds.minY + 1);
 	out.water.assign(static_cast<size_t>(out.width) * out.height, 0);
+	out.level.assign(static_cast<size_t>(out.width) * out.height, std::numeric_limits<float>::quiet_NaN());
 
 	// LOD4 (index 0) holds one instruction per water cell; larger sizes are handled for robustness.
 	for (const auto& chunk : currentCache->instructions[0]) {
@@ -119,8 +121,10 @@ bool WaterCache::GetCoverage(const RE::TESWorldSpace* worldSpace, Coverage& out)
 				for (int32_t dx = 0; dx < size; ++dx) {
 					const int32_t x = instruction.x + dx - out.minX;
 					const int32_t y = instruction.y + dy - out.minY;
-					if (x >= 0 && y >= 0 && x < static_cast<int32_t>(out.width) && y < static_cast<int32_t>(out.height))
+					if (x >= 0 && y >= 0 && x < static_cast<int32_t>(out.width) && y < static_cast<int32_t>(out.height)) {
 						out.water[static_cast<size_t>(y) * out.width + x] = 1;
+						out.level[static_cast<size_t>(y) * out.width + x] = instruction.waterHeight;
+					}
 				}
 			}
 		}

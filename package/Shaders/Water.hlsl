@@ -1314,6 +1314,10 @@ PS_OUTPUT main(PS_INPUT input)
 #			endif
 
 #			if defined(SKYLIGHTING)
+#				if defined(PBR_WATER)
+	// The sky each wave facet sees: tilted towards a cliff or a hull it sees less of it.
+	skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, normal, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
+#				endif
 	sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, 0.0);
 	float skylightingSpecular = Skylighting::EvaluateSpecular(skylightingSH, specularLobe, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
 #			endif
@@ -1376,6 +1380,12 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
+#				if defined(PBR_WATER) && !defined(UNDERWATER) && !defined(LOD)
+	// At a low sun the crests shadow the troughs behind them.
+	float pbrWaveShadow = PBRWater::WaveSunShadow(input.WaveParam.xyz, pbrSurface.ctx, SunDir.xyz, pbrSurface.footprint);
+	dirShadow *= pbrWaveShadow;
+	surfaceShadow *= pbrWaveShadow;
+#				endif
 
 	float3 dirColor;
 	float3 ambientColor;
@@ -1598,8 +1608,9 @@ PS_OUTPUT main(PS_INPUT input)
 	pbrContact = max(pbrContact, exp(-pbrThickness / pbrBand) * pbrOnBed);
 #							endif
 	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrContact);
-	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
-	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
+	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place; on a beach the
+	// swash carries it up and back down.
+	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy - pbrSurface.foamAdvect;
 	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
@@ -1623,18 +1634,22 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
-	// Wet foam keeps part of the water's glint.
-	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + sunColor * depthControl.w * (1.0 - 0.7 * pbrFoam);
+	float3 pbrSunGlint = sunColor * depthControl.w;
 
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH) && defined(REFRACTIONS)
-	// Soft shoreline: over the last few centimetres of water the surface (reflection, body colour,
-	// foam) fades into the ground seen through it, so the mesh never cuts the terrain with a hard line.
+	// Soft shoreline: over the last few centimetres of water the surface (reflection, body colour) fades into the
+	// ground seen through it, so the mesh never cuts the terrain with a hard line. Foam lies on the water, so it
+	// stays on the thin film of the swash and only thins away in the last millimetres.
 	{
 		float pbrEdge = smoothstep(0.0, 0.12 * PBRWater::UnitsPerMetre, pbrThickness);
 		float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
 		finalColorPreFog = lerp(pbrGround, finalColorPreFog, pbrEdge);
+		pbrSunGlint *= pbrEdge;
+		pbrFoam *= smoothstep(0.0, 0.01 * PBRWater::UnitsPerMetre, pbrThickness);
 	}
 #							endif
+	// Wet foam keeps part of the water's glint.
+	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + pbrSunGlint * (1.0 - 0.7 * pbrFoam);
 #						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float waterOpacity = diffuseOutput.refractionMul;

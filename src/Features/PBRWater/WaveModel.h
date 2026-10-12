@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -130,15 +131,17 @@ namespace PBRWaterModel
 	/** @brief Quantised angular frequency of wavenumber k (rad/m), as a multiple of 2 pi / LoopPeriod. Mirrors the shader. */
 	float DispersionSteps(float k);
 
-	/** @brief Shoreline wave train parameters derived from the spectrum. */
+	/** @brief Shoreline waves: what the shore field and the swash need from the sea state. */
 	struct ShoreParams
 	{
-		float amplitude = 0.0f;   ///< units at the onset depth (open sea, before fetch scaling)
-		float omega = 1.0f;       ///< rad/s
-		float slope = 0.04f;      ///< nominal beach slope
-		float onsetDepth = 0.0f;  ///< units; the train starts where it feels the bottom
-		float steepness = 0.6f;
+		float omega = 1.0f;       ///< angular frequency the wave rays are traced for (rad/s): the sea's dominant waves
+		float runupScale = 1.0f;  ///< scales the run-up (Shore Wave Height setting)
+		float maxRunup = 0.0f;    ///< how far above the still water the swash can reach (units), for bounds
+		bool enabled = false;
 	};
+
+	/** @brief Depth-limited breaking: the significant height of random waves in the surf zone stays below this share of the depth (Thornton & Guza 1983). */
+	inline constexpr float SurfHeightRatio = 0.6f;
 
 	/** @brief Bathymetry used by the CPU evaluator (downsampled copy of the terrain heightmap). */
 	struct Bathymetry
@@ -154,6 +157,64 @@ namespace PBRWaterModel
 		bool Contains(float x, float y) const;
 		float Sample(float x, float y) const;
 	};
+
+	/** @brief Phase speed (m/s) of waves of angular frequency `omega` (rad/s) in water `depth` metres deep. */
+	float PhaseSpeed(float omega, float depth);
+	/**
+	 * @brief Shoaling coefficient sqrt(cg0 / cg) (energy flux conservation, Green's law in shallow water) of waves
+	 * of angular frequency `omega` (rad/s) in water `depth` metres deep. Mirrors the shader.
+	 */
+	float ShoalingCoefficient(float omega, float depth);
+
+	/** @brief Terrain and water level around the player, input of BuildShoreField. */
+	struct ShoreInputs
+	{
+		uint32_t width = 0, height = 0;
+		float minX = 0.0f, minY = 0.0f;  ///< world position of texel (0, 0)'s centre
+		float step = 128.0f;             ///< units per texel
+		std::vector<float> bed;          ///< absolute terrain z (NaN: unknown, taken as deep water)
+		std::vector<float> level;        ///< absolute still water z (NaN: no water in reach)
+		float omega = 1.0f;              ///< angular frequency (rad/s) the wave rays are traced for
+	};
+
+	/**
+	 * @brief How waves travel to the shore around the player (CPU, worker thread; uploaded to the GPU).
+	 *
+	 * Wave rays and travel time come from the eikonal |grad T| = 1 / c(h) solved from the waterline (fast
+	 * sweeping), with c the phase speed of the reference frequency in the local depth, so wavefronts refract
+	 * around headlands and follow the depth contours. Along each ray the shoaling delay
+	 * Delta = integral of (1 / c - 1 / c0) ds accumulates: sampling the deep-water FFT ocean c0 Delta behind a
+	 * point (back along the ray) gives the sea that arrives there, with the wavelength shortened by c0 / c and
+	 * the crests turned towards the shore, in any depth profile.
+	 */
+	struct ShoreField
+	{
+		uint32_t width = 0, height = 0;
+		float minX = 0.0f, minY = 0.0f, step = 128.0f;
+		float omega = 1.0f;        ///< reference angular frequency (rad/s)
+		std::vector<float> delay;  ///< shoaling delay Delta (s); carried unchanged inland of the waterline
+		std::vector<float> dirX;   ///< unit ray direction towards (and, inland, beyond) the waterline; 0 where none
+		std::vector<float> dirY;
+		std::vector<float> distance;  ///< signed distance to the waterline (units): > 0 inland, < 0 offshore
+		std::vector<float> slope;     ///< bed slope (tan) at the waterline the ray reaches, carried along the ray
+		std::vector<float> level;     ///< absolute still water z (NaN: no water in reach)
+
+		bool Valid() const { return width > 1 && height > 1 && delay.size() == static_cast<size_t>(width) * height; }
+
+		struct Sample
+		{
+			float delay = 0.0f;
+			float dirX = 0.0f, dirY = 0.0f;
+			float distance = -1.0e6f;
+			float slope = 1.0f;
+			float weight = 0.0f;  ///< 0 outside the field (and fading out towards its border)
+		};
+		/** @brief Bilinear sample at absolute (x, y). */
+		Sample At(float x, float y) const;
+	};
+
+	/** @brief Builds the shore field. `cancel` (optional) aborts the build when set. */
+	std::shared_ptr<ShoreField> BuildShoreField(const ShoreInputs& inputs, const std::atomic_bool* cancel = nullptr);
 
 	/** @brief Upwind open-water distance per cell and direction, baked per worldspace. */
 	struct FetchField
@@ -219,10 +280,9 @@ namespace PBRWaterModel
 		float mirrorAlpha = 0.0f;
 		float fetchScale = 1.0f;  ///< multiplies the baked fetch (Skyrim's compressed distances)
 		ShoreParams shore;
-		double time = 0.0;  ///< wave time (s), drives the GPU spectrum
-		double shorePhase = 0.0;
-		double shorePhasePrev = 0.0;
-		double refX = 0.0, refY = 0.0, refZ = 0.0;  ///< reference camera (absolute units)
+		std::shared_ptr<const ShoreField> shoreField;  ///< wave rays and shoaling delay around the player
+		double time = 0.0;                             ///< wave time (s), drives the GPU spectrum
+		double refX = 0.0, refY = 0.0, refZ = 0.0;     ///< reference camera (absolute units)
 		float windDirection = 0.0f;
 		bool exterior = true;
 		float foamDrift[4]{};          ///< xy foam drift, zw extra bubble drift (units, wrapped)
@@ -263,17 +323,18 @@ namespace PBRWaterModel
 		 */
 		Sample SampleAt(double x, double y, float waterZ) const;
 
-		/** @brief Largest vertical reach of the waves (units), shoaling and fetch gain included. */
+		/** @brief Largest vertical reach of the waves (units), shoaling, fetch gain and run-up included. */
 		float VerticalBound() const;
 
 	private:
 		struct Context
 		{
-			std::array<float, NumCascades> weight;  ///< vertical amplitude multiplier per cascade
+			std::array<float, NumCascades> weight;  ///< vertical amplitude multiplier per cascade (fetch, shoaling, breaking)
 			float horizontalScale;                  ///< horizontal motion relative to vertical (energy gain taken out)
 			float fetchRatio;
-			float depth;
-			float gradX, gradY;
+			float depth;  ///< units
+			float delay;  ///< shoaling delay (s) along the ray through here, 0 outside the shore field
+			float dirX, dirY;
 			bool hasTerrain;
 		};
 		Context BuildContext(double x, double y, float waterZ) const;
@@ -281,23 +342,19 @@ namespace PBRWaterModel
 	};
 
 	/**
-	 * @brief Wave time and the shoreline train's phase. Owned by the main thread.
+	 * @brief Wave time and the reference camera. Owned by the main thread.
 	 */
 	class WaveClock
 	{
 	public:
 		/** @brief Advances by `dt` seconds of game time with the camera now at (camX, camY, camZ). */
-		void Advance(const ShoreParams& shore, double dt, double camX, double camY, double camZ);
-		void Reset() { initialised = false; }
+		void Advance(double dt, double camX, double camY, double camZ);
 		double Time() const { return time; }
 
 		void Fill(WaveSnapshot& snapshot) const;
 
 	private:
 		double time = 0.0;
-		double shorePhase = 0.0;
-		double shorePhasePrev = 0.0;
 		double camX = 0.0, camY = 0.0, camZ = 0.0;
-		bool initialised = false;
 	};
 }
