@@ -101,7 +101,7 @@ namespace PBRWater
 		if (Clarity1.w <= 0.0)
 			return 0.0;
 		float h = max(depthUnits * MetresPerUnit, 0.05);
-		float omega = max(Shore0.y, 0.3);
+		float omega = max(Shore4.x, 0.3);
 		float amplitude = 0.5 * Optics0.w * MetresPerUnit * fetchRatio * damping;
 		// Eckart's explicit approximation of the dispersion relation w^2 = g k tanh(k h).
 		float k0h = omega * omega * h / 9.81;

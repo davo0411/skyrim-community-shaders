@@ -3,13 +3,14 @@
 #include "Buffer.h"
 
 /**
- * @brief Camera-centred swash state (GPU, ShoreSimCS.hlsl): how far each breaking wave runs up the beach, the foam
- * the backwash leaves on the sand and how wet the sand is.
+ * @brief Camera-centred history of the swash (GPU, ShoreSimCS.hlsl): the foam the backwash leaves on the sand and
+ * how wet the sand is.
  *
- * Every texel steps the run-up of the wave ray through it, forced by the FFT sea arriving at the ray's waterline
- * (Stockdon et al. 2006 run-up, ballistic backwash). The water shaders raise the surface up the beach to it, the
- * lit terrain and objects read the foam and the wet level, and the grid scrolls with the camera in whole texels so
- * the state is never resampled.
+ * The run-up itself is analytic (PBRWater.hlsli: Stockdon et al. 2006 run-up of each crest of the shore wave train,
+ * ballistic backwash), so every shader evaluates it on its own. Only what depends on the past is kept here: since
+ * when each texel has been dry, the line the last uprush reached, the foam it left and how far up the sand is still
+ * wet. The lit terrain and objects read the Wet texture (t123 through SharedData's SwashGrid), and the grid scrolls
+ * with the camera in whole texels so the state is never resampled.
  */
 class ShoreSimulation
 {
@@ -19,7 +20,7 @@ public:
 	struct Settings
 	{
 		float extent = 32768.0f;     ///< world units covered by the grid
-		float foamLifetime = 10.0f;  ///< s the backwash's foam lasts on the sand
+		float foamLifetime = 30.0f;  ///< s the backwash's foam lasts on the sand (three wave periods)
 		float dryRate = 0.35f;       ///< units/s the wet level sinks as the sand dries
 	};
 
@@ -34,14 +35,11 @@ public:
 	 */
 	void Update(float cameraX, float cameraY, float dt, const Settings& settings);
 
-	ID3D11ShaderResourceView* GetStateSRV() const { return ready ? state[current]->srv.get() : nullptr; }
-	ID3D11ShaderResourceView* GetPreviousSRV() const { return ready ? previousFrame->srv.get() : nullptr; }
+	/** @brief x wet level, y foam left on the bed, z its deposit, w water surface height (units above the still water). */
 	ID3D11ShaderResourceView* GetWetSRV() const { return ready ? wet[current]->srv.get() : nullptr; }
-	/** @brief Absolute world position of the grid's corner, now and last frame. */
+	/** @brief Absolute world position of the grid's corner. */
 	float GetOriginX() const { return static_cast<float>(originTexelX) * texelSize; }
 	float GetOriginY() const { return static_cast<float>(originTexelY) * texelSize; }
-	float GetPreviousOriginX() const { return static_cast<float>(previousOriginTexelX) * texelSize; }
-	float GetPreviousOriginY() const { return static_cast<float>(previousOriginTexelY) * texelSize; }
 	float GetExtent() const { return texelSize * GridSize; }
 	bool IsReady() const { return ready && hasOrigin; }
 
@@ -61,17 +59,14 @@ private:
 	};
 	STATIC_ASSERT_ALIGNAS_16(SimCB);
 
-	std::unique_ptr<Texture2D> state[2];
+	std::unique_ptr<Texture2D> state[2];  ///< per texel history of the swash (layout owned by ShoreSimCS)
 	std::unique_ptr<Texture2D> wet[2];
-	std::unique_ptr<Texture2D> previousFrame;
 	std::unique_ptr<ConstantBuffer> simCB;
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
 	uint32_t current = 0;
 
 	int64_t originTexelX = 0;
 	int64_t originTexelY = 0;
-	int64_t previousOriginTexelX = 0;
-	int64_t previousOriginTexelY = 0;
 	float texelSize = 35.0f;
 	bool hasOrigin = false;
 	bool ready = false;

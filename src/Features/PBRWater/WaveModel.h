@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -94,6 +95,8 @@ namespace PBRWaterModel
 
 		std::array<CascadeBand, NumCascades> cascades{};
 		float significantHeight = 0.0f;  ///< Hs in units (open sea)
+		float windSeaHeight = 0.0f;      ///< Hs of the wind sea alone in units (open sea, unlimited fetch)
+		float swellHeight = 0.0f;        ///< Hs of the swell alone in units
 		float meanSquareSlope = 0.0f;    ///< all cascades
 		float displacementBound = 0.0f;  ///< units; no displacement component exceeds this (open sea)
 		float whitecapCoverage = 0.0f;   ///< fraction of the sea covered by whitecaps (Monahan 1980)
@@ -131,14 +134,62 @@ namespace PBRWaterModel
 	/** @brief Quantised angular frequency of wavenumber k (rad/m), as a multiple of 2 pi / LoopPeriod. Mirrors the shader. */
 	float DispersionSteps(float k);
 
-	/** @brief Shoreline waves: what the shore field and the swash need from the sea state. */
+	/// The shore wave train is the sum of this many components of the dominant sea (see ShoreParams).
+	inline constexpr uint32_t ShoreComponents = 3;
+	/// Relative amplitude of each shore wave component. Mirrored by PBRWater::ShoreComponentAmplitude.
+	inline constexpr std::array<float, ShoreComponents> ShoreComponentAmplitude = { 1.0f, 0.75f, 0.6f };
+	/// Each component's amplitude per unit significant height: sum a_i^2 / 2 = (Hs / 4)^2. Mirrored in PBRWater.hlsli.
+	inline constexpr float ShoreAmplitudeScale = 0.255f;
+	/// Frequency offset of each component, in units of the sea's relative spectral half-width.
+	inline constexpr std::array<float, ShoreComponents> ShoreComponentFrequency = { 0.0f, 1.3f, -1.1f };
+	/// Direction offset of each component, in units of the sea's directional spread.
+	inline constexpr std::array<float, ShoreComponents> ShoreComponentDirection = { 0.0f, 0.9f, -0.7f };
+
+	/**
+	 * @brief Shoreline waves: the wave train that arrives at the shore and the swash it throws up the beach, all
+	 * derived from the sea state (see UpdateShoreParams).
+	 *
+	 * Near the shore the sea is replaced by its dominant waves as three components at slightly different frequencies
+	 * and directions (ShoreComponent*). They beat into wave groups in time (the sets of larger and smaller waves) and,
+	 * crossing at small angles, into crest segments along the shore that wander along it with the groups. Each
+	 * component's phase is its wave clock minus omega times its arrival time T, which the shore field solves from the
+	 * open sea over the real depths (ShoreField): crests refract round headlands, wrap into bays and reach every
+	 * stretch of a beach at its own time.
+	 */
 	struct ShoreParams
 	{
-		float omega = 1.0f;       ///< angular frequency the wave rays are traced for (rad/s): the sea's dominant waves
-		float runupScale = 1.0f;  ///< scales the run-up (Shore Wave Height setting)
-		float maxRunup = 0.0f;    ///< how far above the still water the swash can reach (units), for bounds
+		float omega = 1.0f;                                       ///< peak angular frequency of the dominant waves (rad/s)
+		float delta = 0.07f;                                      ///< relative spectral half-width of the dominant sea
+		float spread = 0.3f;                                      ///< directional spread of the dominant sea (rad)
+		float direction = 0.0f;                                   ///< direction the dominant waves travel towards in deep water (rad)
+		float swellDirection = 0.0f;                              ///< direction the swell travels towards (rad): sets which shores it reaches
+		float swellHeight = 0.0f;                                 ///< significant height of the swell arriving from the open sea (units)
+		float windSeaHeight = 0.0f;                               ///< significant height of the open-sea wind sea (units), before the local fetch limit
+		float period = 10.0f;                                     ///< peak period 2 pi / omega (s)
+		float deepLength = 1.0f;                                  ///< deep-water wavelength g T^2 / (2 pi) (units)
+		float maxRunup = 0.0f;                                    ///< how far above the still water the swash can reach (units), for bounds
+		std::array<float, ShoreComponents> componentOmega{};      ///< angular frequency of each component (rad/s)
+		std::array<float, ShoreComponents> componentDirection{};  ///< direction each component travels towards in deep water (rad)
+		/// Wave clock of each component (rad, wrapped): integrated frame by frame (phase += omega dt), and shifted when a
+		/// new shore field takes over so that its phase omega (t - T) carries on unchanged (ShoreField::referenceTime).
+		std::array<double, ShoreComponents> phase{};
 		bool enabled = false;
+
+		/** @brief Largest open-sea height the train can bring to a shore (units): swell and wind sea at full fetch. */
+		float MaxDeepHeight() const { return std::sqrt(swellHeight * swellHeight + windSeaHeight * windSeaHeight); }
 	};
+
+	/**
+	 * @brief The shore wave train for this frame's sea state (`enabled` is left false for the caller to set).
+	 *
+	 * Everything comes from the spectrum: the dominant sea (swell or wind sea, whichever is higher) sets the
+	 * frequency, bandwidth, directional spread and direction of the components; the run-up bound follows Stockdon et
+	 * al. (2006). They ease towards the sea state's over a few seconds and the phases are integrated (phase += omega
+	 * dt), so a changing sea never makes the waves jump.
+	 * @param previous last frame's parameters (nullptr on the first frame)
+	 * @param dt       seconds of wave time since then
+	 */
+	ShoreParams UpdateShoreParams(const OceanSpectrum& spectrum, const ShoreParams* previous, double dt);
 
 	/** @brief Depth-limited breaking: the significant height of random waves in the surf zone stays below this share of the depth (Thornton & Guza 1983). */
 	inline constexpr float SurfHeightRatio = 0.6f;
@@ -158,6 +209,11 @@ namespace PBRWaterModel
 		float Sample(float x, float y) const;
 	};
 
+	/**
+	 * @brief Wavenumber (rad/m) of waves of angular frequency `omega` (rad/s) in water `depth` metres deep: Eckart
+	 * (1952), k = k0 / sqrt(tanh(k0 h)), within a few percent of omega^2 = g k tanh(k h). Mirrors the shader.
+	 */
+	float Wavenumber(float omega, float depth);
 	/** @brief Phase speed (m/s) of waves of angular frequency `omega` (rad/s) in water `depth` metres deep. */
 	float PhaseSpeed(float omega, float depth);
 	/**
@@ -166,47 +222,57 @@ namespace PBRWaterModel
 	 */
 	float ShoalingCoefficient(float omega, float depth);
 
-	/** @brief Terrain and water level around the player, input of BuildShoreField. */
+	struct FetchField;
+
+	/** @brief Terrain, water level and the waves to trace around the player, input of BuildShoreField. */
 	struct ShoreInputs
 	{
 		uint32_t width = 0, height = 0;
-		float minX = 0.0f, minY = 0.0f;  ///< world position of texel (0, 0)'s centre
-		float step = 128.0f;             ///< units per texel
-		std::vector<float> bed;          ///< absolute terrain z (NaN: unknown, taken as deep water)
-		std::vector<float> level;        ///< absolute still water z (NaN: no water in reach)
-		float omega = 1.0f;              ///< angular frequency (rad/s) the wave rays are traced for
+		float minX = 0.0f, minY = 0.0f;                  ///< world position of texel (0, 0)'s centre
+		float step = 128.0f;                             ///< units per texel
+		std::vector<float> bed;                          ///< absolute terrain z (NaN: unknown, taken as deep water)
+		std::vector<float> level;                        ///< absolute still water z (NaN: no water in reach)
+		std::array<float, ShoreComponents> omega{};      ///< angular frequency of each component (rad/s)
+		std::array<float, ShoreComponents> direction{};  ///< direction each component travels towards in deep water (rad)
+		float swellDirection = 0.0f;                     ///< direction the swell travels towards (rad), for the exposure
+		std::shared_ptr<const FetchField> fetch;         ///< open water upwind (null: every shore is open to the sea)
+		float fetchScale = 1.0f;                         ///< multiplies the baked fetch (Skyrim's compressed distances)
 	};
 
 	/**
-	 * @brief How waves travel to the shore around the player (CPU, worker thread; uploaded to the GPU).
+	 * @brief How the waves reach the shore around the player (CPU, worker thread; uploaded to the GPU).
 	 *
-	 * Wave rays and travel time come from the eikonal |grad T| = 1 / c(h) solved from the waterline (fast
-	 * sweeping), with c the phase speed of the reference frequency in the local depth, so wavefronts refract
-	 * around headlands and follow the depth contours. Along each ray the shoaling delay
-	 * Delta = integral of (1 / c - 1 / c0) ds accumulates: sampling the deep-water FFT ocean c0 Delta behind a
-	 * point (back along the ray) gives the sea that arrives there, with the wavelength shortened by c0 / c and
-	 * the crests turned towards the shore, in any depth profile.
+	 * For each shore wave component the arrival time T of its wavefronts solves the eikonal |grad T| = 1 / c(h) (fast
+	 * sweeping), with c the component's phase speed in the local depth, from the open sea: in water deep enough for
+	 * the waves not to feel the bottom (and where the waves enter the field or leave a lee shore) T is that of a plane
+	 * wave travelling in the component's deep-water direction. So the fronts refract round headlands, wrap into bays,
+	 * slow and shorten over the shoals, and reach every stretch of a beach at its own time. Up the beach T is carried
+	 * from the waterline, so the swash of a stretch of beach follows the crests that reach it.
 	 */
 	struct ShoreField
 	{
 		uint32_t width = 0, height = 0;
 		float minX = 0.0f, minY = 0.0f, step = 128.0f;
-		float omega = 1.0f;        ///< reference angular frequency (rad/s)
-		std::vector<float> delay;  ///< shoaling delay Delta (s); carried unchanged inland of the waterline
-		std::vector<float> dirX;   ///< unit ray direction towards (and, inland, beyond) the waterline; 0 where none
-		std::vector<float> dirY;
-		std::vector<float> distance;  ///< signed distance to the waterline (units): > 0 inland, < 0 offshore
-		std::vector<float> slope;     ///< bed slope (tan) at the waterline the ray reaches, carried along the ray
+		std::array<float, ShoreComponents> omega{};                  ///< angular frequency each component was traced for (rad/s)
+		std::array<float, ShoreComponents> direction{};              ///< direction each component travels towards in deep water (rad)
+		float swellDirection = 0.0f;                                 ///< direction the exposure was measured along (rad)
+		std::array<double, ShoreComponents> referenceTime{};         ///< plane-wave arrival time at the field's centre (s), taken out of travelTime
+		std::array<std::vector<float>, ShoreComponents> travelTime;  ///< T minus referenceTime (s); on land the T of the waterline the inland ray leaves
+		std::array<std::vector<float>, ShoreComponents> slownessX;   ///< grad T (s/m): the component travels along it, |grad T| = 1 / c
+		std::array<std::vector<float>, ShoreComponents> slownessY;
+		std::vector<float> slope;     ///< beach slope (tan) at the waterline, carried out along the rays and up the beach
+		std::vector<float> exposure;  ///< 0..1 how open the water is to the swell (open water upwind along its direction)
 		std::vector<float> level;     ///< absolute still water z (NaN: no water in reach)
 
-		bool Valid() const { return width > 1 && height > 1 && delay.size() == static_cast<size_t>(width) * height; }
+		bool Valid() const { return width > 1 && height > 1 && level.size() == static_cast<size_t>(width) * height && travelTime[0].size() == level.size(); }
 
 		struct Sample
 		{
-			float delay = 0.0f;
-			float dirX = 0.0f, dirY = 0.0f;
-			float distance = -1.0e6f;
+			std::array<float, ShoreComponents> travelTime{};  ///< relative to this field's referenceTime (s)
+			std::array<float, ShoreComponents> slownessX{};   ///< s/m
+			std::array<float, ShoreComponents> slownessY{};
 			float slope = 1.0f;
+			float exposure = 0.0f;
 			float weight = 0.0f;  ///< 0 outside the field (and fading out towards its border)
 		};
 		/** @brief Bilinear sample at absolute (x, y). */
@@ -268,6 +334,17 @@ namespace PBRWaterModel
 		float alpha = 0.0f;  ///< interpolation from frame0 to frame1
 	};
 
+	/** @brief The shore wave train's local, time-independent inputs at one point (as PBRWater::ShoreWaves gets them). */
+	struct ShoreTrainContext
+	{
+		float weight = 0.0f;      ///< hand-over from the FFT, 0..1 (0: no train)
+		float deepHeight = 0.0f;  ///< deep-water significant height H0 arriving here (m)
+		float depth = 0.0f;       ///< still water depth (m)
+		float wavenumber = 0.0f;  ///< of the dominant waves at this depth (rad/m)
+		float shoaling = 1.0f;    ///< shoaling coefficient Ks of the dominant waves
+		float beach = 0.0f;       ///< 0..1 the waves break on this shore rather than surge against it
+	};
+
 	/**
 	 * @brief Immutable, thread-safe description of the surface at one instant. Published by the main
 	 * thread, read by the render thread (to fill the GPU constants) and by gameplay hooks.
@@ -280,9 +357,11 @@ namespace PBRWaterModel
 		float mirrorAlpha = 0.0f;
 		float fetchScale = 1.0f;  ///< multiplies the baked fetch (Skyrim's compressed distances)
 		ShoreParams shore;
-		std::shared_ptr<const ShoreField> shoreField;  ///< wave rays and shoaling delay around the player
-		double time = 0.0;                             ///< wave time (s), drives the GPU spectrum
-		double refX = 0.0, refY = 0.0, refZ = 0.0;     ///< reference camera (absolute units)
+		std::shared_ptr<const ShoreField> shoreField;     ///< arrival times of the shore waves around the player
+		std::shared_ptr<const ShoreField> shorePrevious;  ///< the field it replaces, while shoreBlend < 1
+		float shoreBlend = 1.0f;                          ///< 0..1 from shorePrevious's arrival times to shoreField's
+		double time = 0.0;                                ///< wave time (s), drives the GPU spectrum
+		double refX = 0.0, refY = 0.0, refZ = 0.0;        ///< reference camera (absolute units)
 		float windDirection = 0.0f;
 		bool exterior = true;
 		float foamDrift[4]{};          ///< xy foam drift, zw extra bubble drift (units, wrapped)
@@ -323,22 +402,23 @@ namespace PBRWaterModel
 		 */
 		Sample SampleAt(double x, double y, float waterZ) const;
 
-		/** @brief Largest vertical reach of the waves (units), shoaling, fetch gain and run-up included. */
+		/** @brief Largest vertical reach of the waves (units), shoaling, fetch gain, shore train and run-up included. */
 		float VerticalBound() const;
 
 	private:
 		struct Context
 		{
-			std::array<float, NumCascades> weight;  ///< vertical amplitude multiplier per cascade (fetch, shoaling, breaking)
+			std::array<float, NumCascades> weight;  ///< vertical amplitude multiplier per cascade (fetch, shoaling, breaking, train hand-over)
 			float horizontalScale;                  ///< horizontal motion relative to vertical (energy gain taken out)
 			float fetchRatio;
 			float depth;  ///< units
-			float delay;  ///< shoaling delay (s) along the ray through here, 0 outside the shore field
-			float dirX, dirY;
 			bool hasTerrain;
+			ShoreTrainContext train;  ///< the shore wave train here
 		};
 		Context BuildContext(double x, double y, float waterZ) const;
 		Displacement Evaluate(double x, double y, const Context& ctx) const;
+		/** @brief The shore field at (x, y), arrival times blended from the field being replaced as the shaders do. */
+		ShoreField::Sample ShoreAt(float x, float y) const;
 	};
 
 	/**

@@ -137,8 +137,11 @@ struct VS_OUTPUT
 
 #	if defined(PBR_WATER) && !defined(STENCIL)
 	float4 WaveParam : TEXCOORD9;   // xyz undisplaced camera-relative position, w wave damping (flow)
-	float4 WaveState : TEXCOORD10;  // x vertical displacement, y jacobian, z shore breaking, w water depth (units)
+	float3 WaveState : TEXCOORD10;  // x vertical displacement of the water surface (without the waterline lift), y jacobian, z shore breaking
 	float3 Barycentric : TEXCOORD11;
+#	endif
+#	if defined(PBR_WATER)
+	float4 ShoreState : TEXCOORD12;  // x swash tip, y its rise speed (units/s), z water surface, w bed (units above the still water; DisplaceSurface)
 #	endif
 };
 
@@ -239,9 +242,10 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 		float3x3 worldToModel = InverseLinear(World);
 		previousInputPosition.xyz += mul(worldToModel, surface.previous);
 		inputPosition.xyz += mul(worldToModel, surface.current);
+		vsout.ShoreState = surface.shore;
 #			if !defined(STENCIL)
 		vsout.WaveParam = float4(scrollWorldPos.xyz, flowDamping);
-		vsout.WaveState = float4(surface.current.z, surface.jacobian, surface.shoreBreak, surface.depth);
+		vsout.WaveState = float3(surface.shore.z, surface.jacobian, surface.shoreBreak);
 		vsout.Barycentric = 1.0 / 3.0;
 #			endif
 	}
@@ -789,12 +793,38 @@ struct WaterNormalData
 {
 	float3 normal;
 	float4 rippleInfo;  // xyz = scaled ripple normal (normalized normal * intensity), w = splash effect intensity
+#			if defined(PBR_WATER)
+	float detailVariance;  // slope variance the mip filter averaged out of the normal maps (Toksvig), at their blended amplitude
+#			endif
 };
+
+#			if defined(PBR_WATER)
+/**
+ * Toksvig (2005): a mip-filtered normal map texel averages normals that point different ways, so the decoded
+ * normal comes out shorter than 1. Its shortening gives the slope variance the filter removed,
+ * (1 - |n|) / |n|, which the roughness takes over so distant detail turns into gloss instead of aliasing.
+ * A magnified map shortens its normals too, between texels, where nothing was filtered away: that share is
+ * dropped (PBRWater::MinifiedShare).
+ * @param n   decoded tangent-space normal before normalisation
+ * @param map the normal map it was sampled from, at `uv` with the material mip bias
+ */
+float ToksvigVariance(float3 n, Texture2D<float4> map, float2 uv)
+{
+	float width, height;
+	map.GetDimensions(width, height);
+	float2 texels = float2(width, height) * exp2(SharedData::MipBias);
+	float len = length(n);
+	return max(0.0, (1.0 - len) / max(len, 1e-3)) * PBRWater::MinifiedShare(ddx_fine(uv) * texels, ddy_fine(uv) * texels);
+}
+#			endif
 
 WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float depth, float wetnessOcclusion)
 {
 	WaterNormalData result;
 	result.rippleInfo = float4(0, 0, 0, 0);
+#			if defined(PBR_WATER)
+	result.detailVariance = 0.0;
+#			endif
 
 	float3 normalScalesRcp = rcp(input.NormalsScale.xyz);
 
@@ -862,6 +892,9 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			endif  // End of FLOWMAP block
 
 #			if !defined(FLOWMAP)
+#				if defined(PBR_WATER)
+	float2 baseNormalUv = input.TexCoord1.xy;
+#				endif
 #				if defined(WATER_PARALLAX)
 	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy + parallaxOffset.xy * normalScalesRcp.x, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
 #				else
@@ -872,9 +905,15 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				ifdef DISABLE_FLOWMAP_NORMALS
 	// FLOWMAP NORMALS DISABLED: Using only base normals (flow system still active for ripples/splashes)
 	float3 finalNormal = normalize(normals1 + float3(0, 0, 1));
+#					if defined(PBR_WATER)
+	result.detailVariance = ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv);
+#					endif
 #				else
 	// FLOWMAP NORMALS ENABLED: Blending flow-based normals with base normals
 	float3 finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), flowmapNormal, distanceFactor));
+#					if defined(PBR_WATER)
+	result.detailVariance = ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv) * (1.0 - distanceFactor) * (1.0 - distanceFactor);
+#					endif
 #				endif
 #			elif !defined(LOD)
 
@@ -893,16 +932,35 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				else
 	float3 finalNormal = normalize(lerp(float3(0, 0, 1), blendedNormal, normalsDepthFactor));
 #				endif
+#				if defined(PBR_WATER)
+	{
+		// The maps' slopes enter the blend with their amplitudes over its z of about 1 + a.y + a.z (normals1 is
+		// stored offset by -1 in z); the depth fade scales the slopes once more.
+		float3 a = normalsAmplitude.xyz;
+		float blendZ = 1.0 + a.y + a.z;
+		float variance = (a.x * a.x * ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv) + a.y * a.y * ToksvigVariance(normals2, Normals02Tex, input.TexCoord1.zw) + a.z * a.z * ToksvigVariance(normals3, Normals03Tex, input.TexCoord2.xy)) / (blendZ * blendZ);
+#					if !defined(UNDERWATER)
+		variance *= normalsDepthFactor * normalsDepthFactor;
+#					endif
+		result.detailVariance = variance;
+	}
+#				endif
 
 #				if defined(FLOWMAP)
 	float normalBlendFactor =
 		normalMul.y * ((1 - normalMul.x) * flowmapNormal3.z + normalMul.x * flowmapNormal2.z) +
 		(1 - normalMul.y) * (normalMul.x * flowmapNormal1.z + (1 - normalMul.x) * flowmapNormal0.z);
 	finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), normalize(lerp(finalNormal, flowmapNormal, normalBlendFactor)), distanceFactor));
+#					if defined(PBR_WATER)
+	result.detailVariance = lerp(ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv), result.detailVariance * (1.0 - normalBlendFactor) * (1.0 - normalBlendFactor), distanceFactor);
+#					endif
 #				endif
 #			else
 	float3 finalNormal =
 		normalize(float3(0, 0, 1) + normalsAmplitude.xxx * normals1);
+#				if defined(PBR_WATER)
+	result.detailVariance = normalsAmplitude.x * normalsAmplitude.x * ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv);
+#				endif
 #			endif
 
 #			if defined(WADING)
@@ -1226,6 +1284,10 @@ PS_OUTPUT main(PS_INPUT input)
 	if (PBRWater::InsideDryHull(input.WPosition.xyz))
 		discard;
 #			endif
+	// Dry: the bed rises above the water surface and the swash, where DisplaceSurface held the mesh just above it. Per
+	// vertex, so both passes agree; the colour pass then finds the waterline per pixel against the ground behind it.
+	if (input.ShoreState.z < input.ShoreState.w - 0.1 * PBRWater::UnitsPerMetre)
+		discard;
 #		endif
 
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
@@ -1312,7 +1374,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal = waterData.normal;
 
 #			if defined(PBR_WATER)
-	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, normal);
+	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.ShoreState, normal, waterData.detailVariance);
 	normal = pbrSurface.normal;
 	float pbrRoughness = pbrSurface.roughness;
 #			else
@@ -1620,9 +1682,8 @@ PS_OUTPUT main(PS_INPUT input)
 	pbrContact = max(pbrContact, exp(-pbrThickness / pbrBand) * pbrOnBed);
 #							endif
 	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrContact);
-	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place; on a beach the
-	// swash carries it up and back down.
-	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy - pbrSurface.foamAdvect;
+	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
+	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
 	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
 	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
@@ -1648,18 +1709,21 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
 	float3 pbrSunGlint = sunColor * depthControl.w;
 
-#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH) && defined(REFRACTIONS)
-	// Soft shoreline: over the last few centimetres of water the surface (reflection, body colour) fades into the
-	// ground seen through it, so the mesh never cuts the terrain with a hard line. Foam lies on the water, so it
-	// stays on the thin film of the swash and only thins away in the last millimetres.
-	{
-		float pbrEdge = smoothstep(0.0, 0.12 * PBRWater::UnitsPerMetre, pbrThickness);
-		float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
-		finalColorPreFog = lerp(pbrGround, finalColorPreFog, pbrEdge);
-		pbrSunGlint *= pbrEdge;
-		pbrFoam *= smoothstep(0.0, 0.01 * PBRWater::UnitsPerMetre, pbrThickness);
-	}
+	// The waterline per pixel: the water's surface here (the waves at this pixel, or the swash sheet over the ground)
+	// against the ground seen through it, so the edge follows the true bed - and rocks, piles and legs standing in the
+	// water - instead of the mesh's triangles cutting through the terrain. Over the last few centimetres the surface
+	// (reflection, body colour) fades into the ground; foam lies on the water, so it stays on the thin sheet.
+	float pbrBed = pbrSurface.elevation;
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	if (pbrPathLength < 1e6)
+		pbrBed = input.WPosition.z + viewDirection.z * pbrPathLength - input.WaveParam.z;
 #							endif
+	float pbrFilm = max(pbrSurface.height, PBRWater::SwashTop(pbrBed, input.ShoreState.x)) - pbrBed;
+	if (pbrFilm <= 0.0)
+		discard;
+	float pbrEdge = smoothstep(0.0, 0.06 * PBRWater::UnitsPerMetre, pbrFilm);
+	pbrSunGlint *= pbrEdge;
+	pbrFoam *= smoothstep(0.0, 0.01 * PBRWater::UnitsPerMetre, pbrFilm);
 	// Wet foam keeps part of the water's glint.
 	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + pbrSunGlint * (1.0 - 0.7 * pbrFoam);
 #						else
@@ -1719,6 +1783,11 @@ PS_OUTPUT main(PS_INPUT input)
 
 #						if defined(PBR_WATER)
 	float3 finalColor = finalColorPreFog;
+#							if defined(REFRACTIONS)
+	// The thinnest water shows the ground it covers (as it is, already lit and fogged).
+	float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
+	finalColor = lerp(pbrGround, finalColor, pbrEdge);
+#							endif
 	if (PBRWater::Draw0.z > 0.5)
 		finalColor = PBRWater::DebugView((uint)PBRWater::Draw0.z, pbrSurface, pbrFoam, input.WaveState);
 #						else

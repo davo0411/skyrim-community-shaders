@@ -99,18 +99,18 @@ namespace PBRWater
 
 		WaveContext ctx = BuildWaveContext(mid, fade);
 		float2 e = (hi.xy - lo.xy) / max(len, 1e-3);
-		// Curvature at the scale of the target triangles here: what the subdivided edge will have to follow.
+		// Curvature at the scale of the target triangles here: what the subdivided edge will have to follow, including
+		// the steep front of the breaking shore waves.
 		float curvature = SurfaceCurvature(mid, ctx, e, targetPixels / pixelsPerUnit);
 		float errorPixels = targetPixels * 0.05;  // 0.5 px at the default 10 px target
 		float curvatureFactor = len * sqrt(curvature * pixelsPerUnit / (8.0 * errorPixels));
 
 		float2 rippleUV = (mid.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
 		bool inRipples = Ripple0.w > 0.5 && all(rippleUV > 0.0) && all(rippleUV < 1.0);
-		// The swash follows the beach: the run-up's edge is where the terrain crosses it, which needs fine triangles.
-		float2 swashUV;
-		bool inSwash = ctx.beach > 0.0 && SwashUV(mid.xy + FrameBuffer::CameraPosAdjust.xy, false, swashUV) &&
-		               ctx.elevation > -2.0 * UnitsPerMetre && ctx.elevation < max(Shore0.w, 1.0);
-		float baselinePixels = targetPixels * ((inRipples || inSwash) ? 1.0 : 4.0);
+		// Near the waterline the mesh is held just above the bed (DisplaceSurface), so it has to follow the terrain, up to
+		// the largest run-up on beaches.
+		bool atWaterline = ctx.hasTerrain > 0.5 && ctx.elevation > -2.0 * UnitsPerMetre && ctx.elevation < max(Shore0.w * ctx.beach, 0.5 * UnitsPerMetre);
+		float baselinePixels = targetPixels * ((inRipples || atWaterline) ? 1.0 : 4.0);
 		float screenFactor = len * pixelsPerUnit / baselinePixels;
 
 		return clamp(max(curvatureFactor, screenFactor), 1.0, Tess0.z);

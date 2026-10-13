@@ -2,6 +2,7 @@
 
 #include "Feature.h"
 #include "PBRWater/FloatingObjects.h"
+#include "PBRWater/HullMaskAtlas.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
@@ -66,9 +67,7 @@ struct PBRWater : Feature
 
 		// Shore
 		bool EnableShoreWaves = true;        ///< waves shoal, break and run up beaches
-		float ShoreWaveHeight = 1.0f;        ///< scales the run-up (1 = Stockdon et al. 2006)
 		float SwashFoam = 1.0f;              ///< foam riding the swash and left on the sand
-		float ShoreFoamLifetime = 10.0f;     ///< seconds the backwash's foam lasts on the sand
 		bool WetShores = true;               ///< the swash wets the sand and whatever it reaches (Wetness Effects)
 		bool UnderwaterFollowsWaves = true;  ///< the camera is under water when under the displaced surface
 
@@ -186,8 +185,8 @@ struct PBRWater : Feature
 		float4 Fetch1;
 		float4 Terrain0;
 		float4 Terrain1;
-		float4 Shore0;
-		float4 Shore1;
+		float4 Shore0;  // x shore waves on (field ready), y blend from the previous shore field (0) to the current one (1), w largest run-up (units)
+		float4 Shore1;  // x breaking foam strength, y swash foam strength, z swell Hs (units), w open-sea wind sea Hs (units)
 		float4 Ripple0;
 		float4 Ripple1;
 		float4 Ripple2;
@@ -206,12 +205,17 @@ struct PBRWater : Feature
 		float4 Foam2;                                 // x whitecap amount, y whitecap scale (units), z streak stretch, w bubble amount
 		float4 Foam3;                                 // xy foam drift (units, wrapped), zw extra bubble drift (units, wrapped)
 		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
-		float4 HullA[FloatingObjects::MaxHullMasks];  // xy centre (absolute units), z floor (absolute units)
-		float4 HullB[FloatingObjects::MaxHullMasks];  // xy length axis, z half length, w half width (units)
+		float4 HullA[FloatingObjects::MaxHullMasks];  // xyz corner of the hull's maps, hull frame z = 0 (absolute units), w atlas slice
+		float4 HullB[FloatingObjects::MaxHullMasks];  // xyz hull frame x axis (unit), w texels per unit along it
+		float4 HullC[FloatingObjects::MaxHullMasks];  // xyz hull frame y axis (unit), w texels per unit along it
 		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), y deep-water phase speed of the mean frequency (units/s)
 		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
 		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
-		float4 Swash1;                                // xy last frame's swash grid corner
+		float4 Shore2;                                // xyz wave clock of each shore wave component (rad, wrapped), w peak period Tp (s)
+		float4 Shore3;                                // xyz the clocks last frame, w deep-water wavelength L0 (units)
+		float4 Shore4;                                // xyz angular frequency of each component (rad/s)
+		float4 Shore5;                                // xyz arrival time offset of the previous shore field (its reference minus the current one's, s)
+		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -267,7 +271,7 @@ struct PBRWater : Feature
 	};
 
 private:
-	static constexpr uint32_t WaterSRVCount = 14;  ///< t110-t123
+	static constexpr uint32_t WaterSRVCount = 15;  ///< t110-t124
 
 	void UpdateFrameConstants();
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
@@ -281,11 +285,22 @@ private:
 	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed, bool exterior) const;
 	/** @brief FFT size for the WaveResolution setting. */
 	uint32_t WaveResolutionSize() const;
-	/** @brief Render thread: the SRVs of slots t110-t123. */
+	/** @brief Render thread: the SRVs of slots t110-t124. */
 	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[WaterSRVCount]) const;
-	/** @brief Render thread: uploads a new shore field. */
+	/** @brief One shore field on the GPU. */
+	struct ShoreTextures
+	{
+		std::shared_ptr<const PBRWaterModel::ShoreField> field;
+		std::unique_ptr<Texture2D> times;     ///< arrival time of each component, still water level
+		std::unique_ptr<Texture2D> slowness;  ///< grad T of components 0 and 1
+		std::unique_ptr<Texture2D> beach;     ///< grad T of component 2, beach slope, exposure to the swell
+	};
+	/** @brief Render thread: uploads the shore fields the snapshot blends between, when they change. */
 	void UpdateShoreTextures();
-	/** @brief Render thread: steps the swash (needs this frame's constants). */
+	static ShoreTextures UploadShoreField(std::shared_ptr<const PBRWaterModel::ShoreField> field);
+	/** @brief Main thread: a new shore field takes over from the current one over a few seconds, the clocks moving onto its reference. */
+	void UpdateShoreField(float dt, bool enabled);
+	/** @brief Render thread: steps the swash history: wet sand and the foam left on it (needs this frame's constants). */
 	void UpdateSwash(float dt);
 	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
 	void UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior);
@@ -321,12 +336,12 @@ private:
 	winrt::com_ptr<ID3D11SamplerState> oceanSampler;
 
 	RippleSimulation ripples;
-	ShoreSimulation swash;                         ///< render thread
-	std::unique_ptr<Texture2D> shoreFieldTexture;  ///< render thread: delay, signed distance, ray direction
-	std::unique_ptr<Texture2D> shoreLevelTexture;  ///< render thread: beach slope, still water level
-	uint32_t uploadedShoreGeneration = UINT32_MAX;
-	std::shared_ptr<const PBRWaterModel::ShoreField> uploadedShore;
-	OceanSimulation ocean;  ///< render thread
+	ShoreSimulation swash;                                        ///< render thread
+	ShoreTextures shoreTextures;                                  ///< render thread: the current shore field
+	ShoreTextures previousShoreTextures;                          ///< render thread: the one it replaces, while they blend
+	std::shared_ptr<const PBRWaterModel::ShoreField> drawnShore;  ///< render thread: the field last frame's constants used
+	OceanSimulation ocean;                                        ///< render thread
+	HullMaskAtlas hullAtlas;                                      ///< render thread: the maps that keep the water out of the hulls near the camera
 
 	// Skylighting occluder (render thread)
 	static constexpr uint32_t OccluderQuads = 176;     ///< grid quads per side
@@ -352,6 +367,11 @@ private:
 	// Main thread state
 	PBRWaterModel::WaveClock clock;
 	PBRWaterModel::OceanMirror mirror;
+	PBRWaterModel::ShoreParams shoreState;  ///< last frame's shore wave train (phases and eased frequency)
+	bool hasShoreState = false;
+	std::shared_ptr<const PBRWaterModel::ShoreField> currentShore;   ///< the shore field the waves follow
+	std::shared_ptr<const PBRWaterModel::ShoreField> previousShore;  ///< the one it is taking over from
+	float shoreBlend = 1.0f;                                         ///< 0..1 from previousShore to currentShore
 	float smoothedWindSpeed = -1.0f;
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;
@@ -362,6 +382,7 @@ private:
 	std::atomic<float> rainIntensity{ 0.0f };
 	std::atomic<float> cameraSurface{ 0.0f };  ///< displaced water height above the camera (absolute z)
 	std::atomic<bool> cameraSurfaceValid{ false };
+	std::atomic<uint32_t> cameraSurfaceFrame{ 0 };  ///< frame the main thread worked it out in
 	float smoothedRain = 0.0f;
 
 	// Render thread

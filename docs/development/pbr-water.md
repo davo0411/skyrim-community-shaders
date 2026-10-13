@@ -95,55 +95,60 @@ cascades from sheltered water (whose spectrum is the open sea's high-frequency t
 `tanh(k h)` calms them in the shallows. The CPU applies the same weights.
 
 Per-weather overrides are registered with the weather variable registry (`RegisterWeatherVariables`):
-wave height, choppiness, directional spread, swell height / period / direction, storm wind speed, shore
-run-up, foam, visibility, subsurface, roughness.
+wave height, choppiness, directional spread, swell height / period / direction, storm wind speed, foam,
+visibility, subsurface, roughness.
 
 ## Shoreline
 
-The shore waves are the FFT sea itself, carried into the shallows: no separate wave train, no per-shore
-setup. Three parts: a shore field (CPU, where the waves go), a warp of the FFT sampling (GPU, what they look
-like on the way in) and the swash (GPU state, what they do on the beach).
+Near the shore the long FFT cascades hand over (`h < L0 / 2`) to an analytic wave train that is refracted
+from the open sea over the real depths: no per-shore setup, everything follows from the sea state and the
+terrain. Four parts: a shore field (CPU, when the waves arrive where), the train (GPU, what they look like),
+the swash (GPU, what they do on the beach) and a per-pixel waterline (where the water ends).
 
 -   **Shore field** (`WaveModel::BuildShoreField`, rebuilt on a `WaterEnvironment` worker around the player:
     768^2 texels of 128 units, ~1.4 km across, from the loaded cells' exact terrain, else the Terrain
-    Shadows heightmap, and each cell's water level from Unified Water's cache). The wave travel time solves
-    the eikonal `|grad T| = 1 / c(h)` from the waterline by fast sweeping (Zhao 2005), with `c` the phase
-    speed of the sea's dominant frequency in the local depth (Eckart's dispersion approximation), so the
-    wavefronts refract around headlands and line up with the depth contours. Along each ray it accumulates
-    the shoaling delay `Delta = integral (1 / c - 1 / c0) ds` and carries the ray direction, the signed
-    distance to the waterline and the beach slope where the ray meets it. It is rebuilt after the player
-    moves ~175 m, so it always reaches past the displacement fade: the shore works as far out as the
-    waves are drawn, on distant shores from the heightmap.
--   **Warp**: a point near the shore samples each cascade `c0 Delta` back along its ray (`ShoreShift`): the
-    sea that left deep water then, slowed, turned towards the shore and shortened across the contours by
-    `kappa = c0 / c` (`ShoreCompression`). Slopes go through the warp's Jacobian, the horizontal motion
-    shrinks by `1 / kappa` and the compression tensor is transformed with it, so the crests steepen and
-    fold where real ones would. Heights shoal with Green's law (`sqrt(cg0 / cg)`) and saturate at
-    `Hs <= 0.6 h` (Thornton & Guza 1983): the surf zone's depth-limited breaking, which also drives the
-    breaking foam (a crest standing higher than ~0.4 h over the bed breaks).
--   **Beaches only**: the Iribarren number `xi = tan(beta) / sqrt(H0 / L0)` of the beach the ray runs up
+    Shadows heightmap, and each cell's water level from Unified Water's cache). For each of the train's three
+    components the arrival time `T` of its wavefronts solves the eikonal `|grad T| = 1 / c(h)` by fast
+    sweeping (Zhao 2005), seeded with the deep-water plane wave `T = x.d / c0` in water deep enough not to
+    feel the bottom (`h > 0.3 L0`) and where the waves enter the field or leave a lee shore. So the fronts
+    refract round headlands, wrap into bays, slow and shorten over the shoals, and reach every stretch of a
+    beach at its own time. Up the beach `T` is carried from the waterline the inland ray leaves from. The field
+    also holds `grad T` (direction of travel, `1 / c`), the beach slope at the waterline and the exposure to
+    the swell (open water upwind along its direction: lee shores see little of it). `T` is stored relative to
+    the plane wave at the field's centre, and a new field (the player moved ~175 m, the sea turned or changed
+    period) takes over from the old one's arrival times over 4 s while the components' clocks move onto its
+    reference, so no crest ever jumps.
+-   **Train** (`PBRWater::ShoreWaves`, mirrored by `WaveModel.cpp`'s `ShoreTrain` for gameplay): three
+    components of the dominant sea (swell or wind sea) at slightly different frequencies and directions
+    (`ShoreComponent*`: offsets in units of the spectrum's relative width and directional spread). Summed as
+    one complex amplitude `Z = sum a_i e^(i (clock_i - omega_i T_i))` they beat into wave groups in time and,
+    crossing at small angles, into crest segments that wander along the shore. The local wave (`|Z|`,
+    `arg Z`) shoals with Green's law and breaks at `H = 0.78 h` (McCowan 1894); its profile is shaped in
+    phase, so it is a pure height field that cannot fold: cnoidal peaking with the Ursell number, and once
+    breaking a narrow front and long back (the saw-tooth bore). The Iribarren number of the beach
     (Battjes 1974) gates breaking, surf and swash: waves spill and plunge on gentle beaches (`xi < 2`) and
-    surge against rock faces, outcrops and cliffs (`xi > 3.3`) without breaking or running up, so those
-    keep only the open-sea waves (with depth attenuation) and the contact foam band.
--   **Swash** (`ShoreSimulation`, `ShoreSimCS.hlsl`): a camera-centred 512^2 grid, twice the displacement
-    fade start across (32768 units, ~0.9 m texels, by default) so it covers all water at full wave height,
-    scrolled in whole texels. Each texel steps the run-up of its ray: the deep-water sea arriving at the ray's
-    waterline pushes the tip up the beach (Stockdon et al. 2006: set-up `0.35 beta sqrt(H0 L0)`, swash
-    `sqrt(H0 L0 (0.563 beta^2 + 0.004))`), and with nothing pushing it slides back down under gravity,
-    decelerating at `g sin^2 beta` (ballistic swash: Shen & Meyer 1963, Peregrine & Williams 2001). On
-    gentle beaches the next uprush arrives before the backwash has drained; on steep ones it drains each
-    time. The water mesh rises up the beach to the run-up as a thin lens (`SwashSurface`).
+    surge against rock faces and cliffs (`xi > 3.3`).
+-   **Swash** (`PBRWater::SwashTip`): from the crests that reached the waterline of the ray through a point
+    over the last three periods (each with its own height `2 |Z|`), the tip runs up as far as Stockdon et al.
+    (2006) give and moves ballistically, decelerating at `g sin^2 beta` (Shen & Meyer 1963; Peregrine &
+    Williams 2001). The water over the beach is a thin sheet (`SwashTop`: a tenth of the height below the tip,
+    at most 15 cm), never a raised mesh.
+-   **Waterline per pixel**: near the waterline the vertex shader holds the mesh just above the bed
+    (`WaterlineLift`), so where the water ends is decided per pixel in `Water.hlsl`: the water's surface there
+    (the waves at the pixel, or the swash sheet) against the ground seen through it (depth buffer), so the edge
+    follows the true terrain and whatever stands in the water, never the triangles cutting through it. The
+    thinnest water fades into the ground over 6 cm.
 -   **Foam cycle**: dense foam rides the front of each uprush; where the backwash leaves the sand it leaves
-    its foam, most along the line the uprush reached, which thins out as its bubbles pop (Foam on the Sand
-    lifetime) until the next uprush covers it and sweeps it away. The water is gone there, so the lit
-    terrain draws it (below).
--   **Wet shores**: the grid also keeps the highest water each point saw lately (the swash on beaches, the
-    waves against rocks, piers and hulls), sinking slowly as it drains, and the water surface height
-    (waves and swash). Lighting reads both through `t123` and `SharedData::pbrWaterSettings`
-    (`PBRWater/ShoreWetness.hlsli`): Wetness Effects' shore wetness follows what the waves reached instead
-    of a fixed band at the still water level, caustics and underwater wetness follow the moving surface,
-    and the backwash's foam lies on the sand (matte, sea-foam albedo, same lace as on the water).
--   Needs Depth-Aware Waves (bathymetry). Shore Run-up scales the measured run-up (1 = Stockdon).
+    its foam, most along the line the uprush reached, which breaks up into rafts and specks as its bubbles
+    burst (`BeachFoamPattern`) until the next uprush covers it. The water is gone there, so the lit terrain
+    draws it (below).
+-   **Wet shores** (`ShoreSimulation`, `ShoreSimCS.hlsl`, a camera-centred grid scrolled in whole texels):
+    the highest water each point saw lately (the swash on beaches, the waves against rocks, piers and hulls),
+    sinking slowly as it drains, the backwash's foam and the water surface height. Lighting reads them through
+    `t123` and `SharedData::pbrWaterSettings` (`PBRWater/ShoreWetness.hlsli`): Wetness Effects' shore wetness
+    follows what the waves reached, caustics and underwater wetness follow the moving surface, and the foam
+    lies on the sand.
+-   Needs Depth-Aware Waves (bathymetry).
 
 ## Tessellation
 
@@ -289,9 +294,17 @@ configured: no JSON, no patched meshes, no plugin records.
     water's orbital motion, which fades as `e^(-k z)` below the surface for the local dominant waves, and
     are pushed down when a trough would leave them in the air (never into the bed). The motion is added to
     the reference's own position each frame, so critters keep their paths.
--   **Dry hulls**: small open hulls (under 25 m) and boats lying in the shallows publish their footprint
-    (a superellipse with a floor height); water pixels inside it and above the floor are discarded in the
-    colour and stencil passes, so a wave rising over the gunwale never shows inside the boat.
+-   **Dry hulls**: the eight nearest hulls under 25 m and boats lying in the shallows publish their shape
+    and their frame this frame. The shape is captured once (when the hull is found or parts join it): the
+    lit, rigid `BSTriShape`s under its references, with their engine vertex and index buffers and their
+    transform into the hull's rest frame. `HullMaskAtlas` draws them once into a slice of a 256 x 256 x 8
+    atlas (`HullMask.hlsl`): an orthographic view of the hull frame keeps per texel the lowest and the
+    highest hull surface (MIN / MAX blending), and a flood from the open water around the hull
+    (morphological reconstruction, row and column sweeps) finds the height the water must reach before it
+    can flow into each texel: the lowest point of the gunwale inside a boat, the deck of a raft. The water
+    shader (`PBRWater::InsideDryHull`, colour and stencil passes) moves its point into each hull's frame and
+    discards it when it lies above the lowest surface and below that level in all four texels around it, so
+    the water runs up to the hull's outer skin and pours in only where a wave rises over the gunwale.
 -   **Hull parts**: candidates are sorted by waterplane area; a smaller one whose centre lies inside a larger
     one's footprint becomes part of it (hull halves, decks placed as separate references). Ice floes that
     only touch stay separate.
@@ -376,12 +389,12 @@ against the CPU mirror, including slopes and compression against finite differen
 ## Known limitations
 
 -   Shoreline waves and depth attenuation need the bathymetry (loaded cells or a Terrain Shadows heightmap).
--   The shore rays are traced for the sea's dominant frequency; other bands reuse its refraction (each still
-    with its own deep-water speed), and a rebuild follows the player every ~175 m or a change of the dominant
-    period. The swash state is resolved at ~0.9 m (the run-up level is compared with the exact bed per
-    pixel, but the foam left on the sand and the wet level are that coarse).
--   Gameplay water heights include the shore warp but not the swash: swimming and buoyancy see the shoaled
-    waves, not the run-up's thin film.
+-   Only the dominant sea is refracted: the train's three components are traced for its period and direction,
+    the shorter FFT bands near the shore are only shoaled and depth-limited. The field follows the player every
+    ~175 m or a change of the dominant period or direction (blended over 4 s). The wet level and the foam left
+    on the sand are resolved at the swash grid's ~0.9 m; the swash itself is evaluated per vertex and per pixel.
+-   Gameplay water heights include the shore wave train but not the swash: swimming and buoyancy see the
+    shoaled waves, not the run-up's thin sheet.
 -   The waves occlude Skylighting where the cells' own water is (sea, lakes); separate river meshes are not
     drawn into its occlusion map.
 -   The waves' sun shadows fall only on the water itself, from a local fit of the dominant waves: a crest of

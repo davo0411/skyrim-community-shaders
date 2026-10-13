@@ -382,7 +382,7 @@ void WaterEnvironment::PublishShore(std::shared_ptr<const PBRWaterModel::ShoreFi
 	shoreGeneration.fetch_add(1, std::memory_order_acq_rel);
 }
 
-void WaterEnvironment::UpdateShore(float playerX, float playerY, float omega, bool enabled)
+void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterModel::ShoreParams& waves, std::shared_ptr<const PBRWaterModel::FetchField> fetchField, float fetchScale, bool enabled)
 {
 	if (!enabled) {
 		if (shore.load(std::memory_order_acquire))
@@ -406,13 +406,17 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, float omega, bo
 	const float half = 0.5f * ShoreTexels * ShoreStep;
 	const bool moved = std::abs(playerX - shoreCentreX) > 0.25f * half || std::abs(playerY - shoreCentreY) > 0.25f * half;
 	const bool newData = landGrid != shoreLand || coarse != shoreCoarse || levels != shoreLevels || loaded != shoreLoaded;
-	const bool newWaves = shoreOmega <= 0.0f || std::abs(omega / shoreOmega - 1.0f) > 0.08f;
+	// The arrival times hold for the period and directions they were traced for; a new field takes over smoothly.
+	auto turned = [](float a, float b, float degrees) { return std::abs(std::remainder(a - b, 6.2831853f)) > degrees * 0.0174533f; };
+	bool newWaves = shoreTraced.omega <= 0.0f || std::abs(waves.omega / shoreTraced.omega - 1.0f) > 0.08f || turned(waves.swellDirection, shoreTraced.swellDirection, 8.0f);
+	for (uint32_t c = 0; c < PBRWaterModel::ShoreComponents; ++c)
+		newWaves = newWaves || turned(waves.componentDirection[c], shoreTraced.componentDirection[c], 4.0f);
 	if (shore.load(std::memory_order_acquire) && !moved && !newData && !newWaves)
 		return;
 
 	shoreCentreX = playerX;
 	shoreCentreY = playerY;
-	shoreOmega = omega;
+	shoreTraced = waves;
 	shoreLand = landGrid;
 	shoreCoarse = coarse;
 	shoreLevels = levels;
@@ -426,14 +430,18 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, float omega, bo
 		shoreWorker.join();
 	shoreBuilding.store(true, std::memory_order_release);
 	const uint32_t epoch = shoreEpoch.load(std::memory_order_acquire);
-	shoreWorker = std::jthread([this, minX, minY, omega, landGrid, coarse, levels, loaded, epoch]() {
+	shoreWorker = std::jthread([this, minX, minY, waves, fetchField, fetchScale, landGrid, coarse, levels, loaded, epoch]() {
 		PBRWaterModel::ShoreInputs inputs;
 		inputs.width = ShoreTexels;
 		inputs.height = ShoreTexels;
 		inputs.minX = minX;
 		inputs.minY = minY;
 		inputs.step = ShoreStep;
-		inputs.omega = omega;
+		inputs.omega = waves.componentOmega;
+		inputs.direction = waves.componentDirection;
+		inputs.swellDirection = waves.swellDirection;
+		inputs.fetch = fetchField;
+		inputs.fetchScale = fetchScale;
 		const size_t count = static_cast<size_t>(ShoreTexels) * ShoreTexels;
 		inputs.bed.assign(count, std::numeric_limits<float>::quiet_NaN());
 		inputs.level.assign(count, std::numeric_limits<float>::quiet_NaN());

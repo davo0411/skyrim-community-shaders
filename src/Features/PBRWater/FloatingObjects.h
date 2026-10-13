@@ -19,10 +19,10 @@
  * is moved at runtime with keyframed collision so its collision follows, the objects resting on it move
  * with it, and actors standing on it are carried. Instead of a configured sine motion, every hull is a
  * floating body on the PBR Water surface:
- *  - Detection: a static placed through the water plane, sized like a hull, drawn with lit materials and
- *    not resting on the bottom (the terrain does not rise into its hull and no structure stands under it).
- *    Rocks, cliffs and pier sections never float. Hull parts placed as separate references merge into one
- *    hull.
+ *  - Detection: a boat, ship, raft or ice floe by the name of its model (piers, rocks and houses on stilts
+ *    stand through the water just like hulls), placed through the water plane, sized like a hull, drawn with
+ *    lit materials and not resting on the bottom (the terrain does not rise into its hull and no structure
+ *    stands under it). Hull parts placed as separate references merge into one hull.
  *  - Attachment: references resting on a hull (a ray down from them hits it) or carried within its
  *    footprint (masts, sails, lanterns) move with it.
  *  - Motion: heave, pitch and roll follow a plane fitted to the water parcels under the hull, and surge and
@@ -34,8 +34,9 @@
  * or just under the surface move with the orbital motion of the water around them, which fades with depth,
  * and are kept under the surface when a trough passes over them.
  *
- * Small open hulls (rowboats, rafts) and boats lying in the shallows publish their footprint, so the water
- * shader can leave the inside of the hull dry when a wave rises above its floor.
+ * Small hulls (rowboats, rafts) and boats lying in the shallows near the camera publish their shape and where
+ * it is this frame, so the water stays out of a hull until it rises over the gunwale (HullMaskAtlas). The shape
+ * is the hull's own render meshes in its frame, captured once: the hull is rigid and only moves as a whole.
  *
  * Nothing is written to the save game: the references keep their placed positions, collision becomes
  * keyframed through the 3D only, and every object is put back in place before the game saves.
@@ -62,21 +63,44 @@ public:
 		uint32_t riders = 0;    ///< small things carried by the water (fish, plants, debris)
 	};
 
-	/** @brief Horizontal footprint of a hull whose inside must stay dry (absolute units). */
+	/** @brief One render piece of a hull: an engine triangle mesh and where it sits in the hull's frame. */
+	struct HullPiece
+	{
+		winrt::com_ptr<ID3D11Buffer> vertices;  ///< the engine's own buffers, held for the render thread
+		winrt::com_ptr<ID3D11Buffer> indices;   ///< 16-bit triangle list
+		uint32_t triangles = 0;
+		uint32_t stride = 0;          ///< bytes between vertices
+		uint32_t positionOffset = 0;  ///< bytes from a vertex to its position
+		bool halfPositions = false;   ///< the position is stored as half floats rather than full precision
+		float meshToHull[3][4] = {};  ///< rows of the affine transform from mesh space to the hull frame
+	};
+
+	/**
+	 * @brief A hull's rigid shape: its render pieces in the hull frame (x along the hull, y across it, z up) and
+	 * the extent the water shader's maps cover. Immutable once published.
+	 */
+	struct HullShape
+	{
+		std::vector<HullPiece> pieces;
+		float minX = 0.0f, minY = 0.0f;  ///< extent of the maps in the hull frame, with a margin of open water (units)
+		float maxX = 0.0f, maxY = 0.0f;
+		float maxZ = 0.0f;  ///< top of the hull (hull frame z, units)
+	};
+
+	/** @brief A hull whose inside stays dry: its shape and its frame this frame. */
 	struct HullMask
 	{
-		float centreX = 0.0f, centreY = 0.0f;
-		float axisX = 1.0f, axisY = 0.0f;  ///< unit length axis
-		float halfLength = 0.0f;           ///< of the dry inside, along the axis
-		float halfWidth = 0.0f;
-		float floorZ = 0.0f;  ///< lowest point of the inside: water below it stays
+		std::shared_ptr<const HullShape> shape;
+		RE::NiPoint3 origin;  ///< hull frame origin (absolute units)
+		RE::NiPoint3 axisX;   ///< hull frame axes in the world (unit); z is their cross product
+		RE::NiPoint3 axisY;
 	};
 	static constexpr uint32_t MaxHullMasks = 8;
 
 	/** @brief Main thread, once per frame after the wave snapshot is published. */
 	void Update(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, float dt);
 
-	/** @brief Any thread: the hull footprints near the camera, nearest first (at most MaxHullMasks). */
+	/** @brief Any thread: the hulls near the camera whose insides stay dry, nearest first (at most MaxHullMasks). */
 	std::shared_ptr<const std::vector<HullMask>> GetHullMasks() const { return hullMasks.load(std::memory_order_acquire); }
 
 	/** @brief Any thread: what the detection made of the reference selected in the console (debug view). */
@@ -138,6 +162,20 @@ private:
 		float loadSink = 0.0f;  ///< from the actors on board (units, rad)
 		float loadPitch = 0.0f;
 		float loadRoll = 0.0f;
+
+		std::shared_ptr<const HullShape> shape;  ///< captured once it is among the hulls near the camera
+		size_t shapeParts = 0;                   ///< parts.size() when it was captured
+	};
+
+	/** @brief A boat lying in the shallows: it never moves, but the waves washing round it must not fill it. */
+	struct GroundedBoat
+	{
+		RE::ObjectRefHandle ref;
+		RE::FormID id = 0;
+		const RE::NiAVObject* node = nullptr;  ///< the 3D it was found with
+		RE::NiPoint3 origin;                   ///< centre of its bounds
+		RE::NiMatrix3 frame;                   ///< columns: horizontal axes along and across it, up
+		std::shared_ptr<const HullShape> shape;
 	};
 
 	/** @brief A small thing carried by the water around it. */
@@ -173,7 +211,7 @@ private:
 	std::unordered_set<RE::FormID> rejected;              ///< examined, not floating
 	std::unordered_map<RE::FormID, const char*> reasons;  ///< why a reference does not float (debug view)
 	std::unordered_map<RE::FormID, Rider> riders;         ///< by form ID
-	std::vector<HullMask> groundedBoats;                  ///< boats lying in the shallows: their insides stay dry too
+	std::vector<GroundedBoat> groundedBoats;              ///< their insides stay dry too
 	std::atomic<std::shared_ptr<const std::vector<HullMask>>> hullMasks;
 	mutable std::mutex reportMutex;
 	std::string selectionReport;

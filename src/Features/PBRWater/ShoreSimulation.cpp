@@ -37,10 +37,9 @@ namespace
 
 void ShoreSimulation::SetupResources()
 {
-	// The run-up integrates small accelerations: full precision. The wet state is plain levels and amounts.
+	// The state accumulates timers and levels over minutes: full precision. The wet state is plain levels and amounts.
 	state[0] = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashState0");
 	state[1] = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashState1");
-	previousFrame = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashPreviousFrame");
 	wet[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet0");
 	wet[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet1");
 	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::SwashCB");
@@ -51,9 +50,9 @@ void ShoreSimulation::SetupResources()
 void ShoreSimulation::ClearShaderCache()
 {
 	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\ShoreSimCS.hlsl", {}, "cs_5_0")));
-	ready = simCS && state[0] && state[1] && wet[0] && wet[1] && previousFrame && simCB;
+	ready = simCS && state[0] && state[1] && wet[0] && wet[1] && simCB;
 	if (!simCS)
-		logger::warn("[PBR Water] Swash shader failed to compile; shore waves do not run up the beach");
+		logger::warn("[PBR Water] Swash shader failed to compile; the swash leaves no foam or wet sand behind");
 }
 
 void ShoreSimulation::Reset()
@@ -68,8 +67,6 @@ void ShoreSimulation::Reset()
 		if (wet[i])
 			context->ClearUnorderedAccessViewFloat(wet[i]->uav.get(), dry);
 	}
-	if (previousFrame)
-		context->ClearUnorderedAccessViewFloat(previousFrame->uav.get(), empty);
 }
 
 void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings)
@@ -84,18 +81,13 @@ void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Setti
 		hasOrigin = false;
 	}
 
-	// What was displayed last frame becomes the motion-vector reference for this frame.
-	context->CopyResource(previousFrame->resource.get(), state[current]->resource.get());
-	previousOriginTexelX = originTexelX;
-	previousOriginTexelY = originTexelY;
-
 	// Whole texels, so scrolling never resamples (and never smears) the state.
 	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / texelSize)) - GridSize / 2;
 	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / texelSize)) - GridSize / 2;
 	if (!hasOrigin || std::abs(newOriginX - originTexelX) >= GridSize || std::abs(newOriginY - originTexelY) >= GridSize) {
 		Reset();
-		originTexelX = previousOriginTexelX = newOriginX;
-		originTexelY = previousOriginTexelY = newOriginY;
+		originTexelX = newOriginX;
+		originTexelY = newOriginY;
 		hasOrigin = true;
 	}
 
@@ -103,7 +95,7 @@ void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Setti
 	cb.shiftX = static_cast<int32_t>(newOriginX - originTexelX);
 	cb.shiftY = static_cast<int32_t>(newOriginY - originTexelY);
 	cb.gridSize = GridSize;
-	// A long hitch must not throw the tip across the beach in one step.
+	// A long hitch must not dry the sand or age the foam in one step.
 	cb.dt = std::clamp(dt, 0.0f, 0.1f);
 	cb.originX = static_cast<float>(newOriginX) * texelSize;
 	cb.originY = static_cast<float>(newOriginY) * texelSize;

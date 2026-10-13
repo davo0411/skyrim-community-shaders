@@ -69,12 +69,14 @@ public:
 	static std::shared_ptr<PBRWaterModel::FetchField> BakeFetch(const WaterCoverageView& coverage);
 
 	/**
-	 * @brief Main thread: keeps the shore field around the player current (wave rays, shoaling delay, beach
-	 * slopes). It is rebuilt on a worker whenever the player leaves its middle, the terrain or water data change
-	 * (cells load), or the sea's dominant waves change.
-	 * @param omega angular frequency of the dominant waves (rad/s)
+	 * @brief Main thread: keeps the shore field around the player current (the shore waves' arrival times, beach
+	 * slopes, exposure). It is rebuilt on a worker whenever the player leaves its middle, the terrain or water data
+	 * change (cells load), or the sea's dominant waves change period or direction.
+	 * @param shore      the shore wave components to trace
+	 * @param fetch      open water upwind, for the exposure to the swell (null: every shore is open)
+	 * @param fetchScale multiplies the baked fetch
 	 */
-	void UpdateShore(float playerX, float playerY, float omega, bool enabled);
+	void UpdateShore(float playerX, float playerY, const PBRWaterModel::ShoreParams& shore, std::shared_ptr<const PBRWaterModel::FetchField> fetch, float fetchScale, bool enabled);
 	std::shared_ptr<const PBRWaterModel::ShoreField> GetShore() const { return shore.load(std::memory_order_acquire); }
 	/** @brief Incremented every time a new shore field is published (render thread re-uploads on change). */
 	uint32_t GetShoreGeneration() const { return shoreGeneration.load(std::memory_order_acquire); }
@@ -109,7 +111,8 @@ private:
 	std::atomic<std::shared_ptr<const PBRWaterModel::ShoreField>> shore;
 	std::atomic_uint32_t shoreGeneration{ 0 };
 	std::atomic_uint32_t shoreEpoch{ 0 };  ///< bumped per worldspace: a build for an old one is never published
-	float shoreCentreX = 0.0f, shoreCentreY = 0.0f, shoreOmega = 0.0f;
+	float shoreCentreX = 0.0f, shoreCentreY = 0.0f;
+	PBRWaterModel::ShoreParams shoreTraced;  ///< the waves the current field was traced for
 	std::shared_ptr<const PBRWaterModel::Bathymetry> shoreLand, shoreCoarse;
 	std::shared_ptr<const CellLevels> shoreLevels, shoreLoaded;
 };

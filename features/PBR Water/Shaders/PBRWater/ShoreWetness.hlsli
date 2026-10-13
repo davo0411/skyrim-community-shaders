@@ -7,7 +7,7 @@
 // ShoreSimCS keeps, on a camera-centred grid, the highest water each point saw lately (draining slowly as the
 // sand dries), the foam the backwash left on the sand and the height of the water surface (waves and swash).
 // Here the lit surfaces read it: whatever the waves reached is wet (Wetness Effects), the foam lies on the sand
-// as a lace that thins out as its bubbles pop, and the caustics and the underwater wetness follow the waves
+// in rafts that break up as their bubbles burst, and the caustics and the underwater wetness follow the waves
 // instead of the flat still water level.
 // ============================================================================
 
@@ -81,8 +81,8 @@ namespace PBRWaterShore
 	static const float3 FoamAlbedo = 0.8;
 
 	/**
-	 * The foam lying on an upward-facing surface, 0..1: the backwash's foam as the same lace as on the water, whose
-	 * bubbles pop one after another as it ages.
+	 * The foam lying on an upward-facing surface, 0..1: the rafts of bubbles the backwash leaves, breaking up as they age
+	 * (PBRWater::BeachFoamPattern).
 	 * @param footprint world size of a pixel (anti-aliasing)
 	 */
 	float Foam(Shore s, float3 positionWS, float normalZ, float footprint)
@@ -93,7 +93,7 @@ namespace PBRWaterShore
 		{
 			float scale = max(SharedData::pbrWaterSettings.Wetness.z, 1.0);
 			float2 q = (positionWS.xy + FrameBuffer::CameraPosAdjust.xy) / scale;
-			foam = PBRWater::FoamLacePattern(q, saturate(amount), footprint / scale, 0.0);
+			foam = PBRWater::BeachFoamPattern(q, amount, footprint / scale);
 		}
 		return foam;
 	}

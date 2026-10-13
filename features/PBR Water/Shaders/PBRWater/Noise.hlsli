@@ -2,8 +2,8 @@
 #define __PBR_WATER_NOISE_HLSLI__
 
 // ============================================================================
-// PBR Water - procedural noise shared by foam, water clarity and wind, and the foam pattern (also drawn on
-// the sand the swash leaves, by the lit terrain).
+// PBR Water - procedural noise shared by foam, water clarity and wind, and the foam patterns (on the water, and on
+// the sand the swash leaves, drawn by the lit terrain).
 // ============================================================================
 
 namespace PBRWater
@@ -118,6 +118,31 @@ namespace PBRWater
 			foam = lerp(lace, coverage * coverage, distanceBlend);
 		}
 		return foam;
+	}
+
+	/**
+	 * The foam the backwash leaves on the sand, in [0, 1]: rafts of bubbles lying in clumps where the water dropped
+	 * them, with holes where bubbles have burst. On the moving water foam is drawn out into lace; on the sand nothing
+	 * stretches it, so as it ages the rafts shrink and break into patches and specks instead of thinning into filaments.
+	 * @param q          position in foam cells
+	 * @param amount     0..1 how much foam is left (fresh = 1)
+	 * @param pixelCells size of a pixel in foam cells (anti-aliasing)
+	 */
+	float BeachFoamPattern(float2 q, float amount, float pixelCells)
+	{
+		amount = saturate(amount);
+		// Clumps, their edges torn by a finer noise.
+		float2 warp = float2(ValueNoise(q * 0.9 + 3.1), ValueNoise(q * 0.9 + 17.7)) - 0.5;
+		float clumps = 0.7 * Fbm(q * 0.35 + warp * 0.6) + 0.3 * ValueNoise(q * 2.4 + warp * 2.0);
+		float feather = 0.04 + pixelCells * 1.5;
+		float threshold = lerp(0.9, 0.3, amount);
+		float rafts = smoothstep(threshold - feather, threshold + feather, clumps);
+		// Burst bubbles: round holes that grow as the foam ages.
+		float holeRadius = lerp(0.55, 0.15, amount);
+		float holes = 1.0 - smoothstep(holeRadius - feather, holeRadius + feather, BubbleField(q * 2.2 + 5.3, 0.0));
+		float foam = rafts * (1.0 - 0.8 * holes);
+		// Far away the pattern is sub-pixel: converge to its average instead of shimmering.
+		return lerp(foam, amount * amount * 0.6, saturate(pixelCells * 4.0 - 0.5));
 	}
 }
 

@@ -38,7 +38,14 @@ namespace Util
 	void DisableVanillaTAA();
 	float GetVerticalFOVRad();
 
+	/// Eye position from the renderer's shadow state. Render thread only: the renderer rewrites it during the frame.
 	RE::NiPoint3 GetEyePosition();
+
+	/**
+	 * Eye position for game-thread code: the player camera's root node (free camera included), else the player.
+	 * GetEyePosition() read from the game thread can return the shadow state mid-rewrite (e.g. zero).
+	 */
+	RE::NiPoint3 GetMainThreadEyePosition();
 
 	float2 ConvertToDynamic(float2 a_size, bool a_ignoreLock = false);
 

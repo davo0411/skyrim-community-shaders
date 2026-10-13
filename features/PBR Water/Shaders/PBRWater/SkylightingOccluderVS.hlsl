@@ -57,7 +57,7 @@ VS_OUTPUT main(uint id : SV_VertexID)
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping);
 	float3 displacement = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false).displacement;
 	if (ctx.beach > 0.0)
-		displacement.z = max(displacement.z, PBRWater::SwashSurface(ctx.elevation, PBRWater::SwashState(absXY, false).x));
+		displacement.z = max(displacement.z, PBRWater::SwashTop(ctx.elevation, PBRWater::SwashTip(positionWS, ctx, false).x));
 	float limit = PBRWater::DisplacementLimit();
 	displacement = clamp(displacement, -limit, limit);
 
