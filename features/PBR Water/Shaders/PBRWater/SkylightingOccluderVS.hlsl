@@ -53,7 +53,7 @@ VS_OUTPUT main(uint id : SV_VertexID)
 
 	float3 absPos = float3(absXY, water ? level : Eye.z);
 	float3 positionWS = absPos - FrameBuffer::CameraPosAdjust.xyz;
-	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * FlowDamping(absXY);
+	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * PBRWater::LoadedGridFade(absXY) * FlowDamping(absXY);
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping);
 	float3 displacement = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false).displacement;
 	if (ctx.beach > 0.0)

@@ -49,6 +49,11 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 
 	float3 sourceColor = sourceTex.Sample(sourceSampler, adjustedScreenPosition).xyz;
+	float3 finalColor = sourceColor;
+
+	// PBR Water filters its own aliasing (LEAN / Toksvig specular AA) and leaves the rest to TAA; this unclamped history
+	// (60-80% beyond ~20 m) dragged the travelling crests, foam and swash behind them.
+#	if !defined(PBR_WATER)
 	float2 motion = motionBufferTex.Sample(motionBufferSampler, adjustedScreenPosition).xy;
 	float2 motionScreenPosition = input.TexCoord + motion;
 	float2 motionAdjustedScreenPosition =
@@ -56,7 +61,6 @@ PS_OUTPUT main(PS_INPUT input)
 	float4 waterHistory =
 		waterHistoryTex.Sample(waterHistorySampler, motionAdjustedScreenPosition).xyzw;
 
-	float3 finalColor = sourceColor;
 	if (motionScreenPosition.x >= 0 && motionScreenPosition.y >= 0 && motionScreenPosition.x <= 1 &&
 		motionScreenPosition.y <= 1 && waterHistory.w > 0.0 && all(isfinite(waterHistory))) {
 		float historyFactor = 0.95;
@@ -77,6 +81,7 @@ PS_OUTPUT main(PS_INPUT input)
 		historyFactor *= waterHistory.w;
 		finalColor = lerp(sourceColor, historyColor, historyFactor);
 	}
+#	endif
 
 	float waterCoverage = WaterBlend::GetWaterCoverage(waterMask);
 	// Store premultiplied history so transparent clears filter without dark outlines

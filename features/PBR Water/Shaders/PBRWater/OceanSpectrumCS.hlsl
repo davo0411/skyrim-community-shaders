@@ -29,7 +29,7 @@ RWTexture2DArray<float4> Spectrum : register(u0);
 	float4 second = 0.0;
 	// The Nyquist row and column have no conjugate partner on the lattice; leave them (and k = 0) empty.
 	if (m != -half && n != -half && (m != 0 || n != 0)) {
-		float dk = 2.0 * OceanPi / Band[cascade].x;
+		float dk = Math::TAU / Band[cascade].x;
 		float2 k = float2(m, n) * dk;
 		float a = OceanAmplitude(k, dk, cascade);
 		float am = OceanAmplitude(-k, dk, cascade);
@@ -39,7 +39,7 @@ RWTexture2DArray<float4> Spectrum : register(u0);
 			float2 h0m = OceanNoise(-m, -n, cascade) * am;
 
 			// Frequency quantised to the loop period: the phase is a whole number of turns per loop.
-			float phase = 2.0 * OceanPi * frac(OceanDispersionSteps(kl) * Time.x);
+			float phase = Math::TAU * frac(OceanDispersionSteps(kl) * Time.x);
 			float s, c;
 			sincos(phase, s, c);
 			float2 h = CMul(h0, float2(c, -s)) + CMul(float2(h0m.x, -h0m.y), float2(c, s));

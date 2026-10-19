@@ -90,7 +90,7 @@ namespace PBRWater
 		float3 mid = (lo + hi) * 0.5;
 		float dist = max(length(mid), 1.0);
 
-		float fade = DisplacementDistanceFade(dist);
+		float fade = DisplacementFade(mid);
 		if (fade <= 0.0)
 			return 1.0;
 

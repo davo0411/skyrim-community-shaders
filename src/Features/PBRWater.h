@@ -2,7 +2,6 @@
 
 #include "Feature.h"
 #include "PBRWater/FloatingObjects.h"
-#include "PBRWater/HullMaskAtlas.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
@@ -36,7 +35,7 @@ struct PBRWater : Feature
 				T("feature.pbr_water.key_feature_2", "GPU tessellation of the water surface, stable with upscalers and frame generation"),
 				T("feature.pbr_water.key_feature_3", "PBR specular, Fresnel, light absorption and light transmitted through wave crests"),
 				T("feature.pbr_water.key_feature_7", "Water clarity that varies: drifting sediment, wave-stirred shallows, muddy rivers and silt kicked up by wading"),
-				T("feature.pbr_water.key_feature_4", "Shoreline breaking waves and foam on shores, crests, objects and wakes"),
+				T("feature.pbr_water.key_feature_4", "Shoreline breaking waves, surf foam and wakes"),
 				T("feature.pbr_water.key_feature_5", "Ripple simulation for every actor and physics object, replacing the vanilla wading mesh"),
 				T("feature.pbr_water.key_feature_6", "Swimmers, floating props, boats, ships and ice floes ride the rendered waves, with no patches or configuration") } };
 	}
@@ -67,7 +66,8 @@ struct PBRWater : Feature
 
 		// Shore
 		bool EnableShoreWaves = true;        ///< waves shoal, break and run up beaches
-		float SwashFoam = 1.0f;              ///< foam riding the swash and left on the sand
+		float ShoreWaveHeight = 1.0f;        ///< scale on the height of the waves reaching the shore
+		float SwashFoam = 1.0f;              ///< foam riding the swash up the beach
 		bool WetShores = true;               ///< the swash wets the sand and whatever it reaches (Wetness Effects)
 		bool UnderwaterFollowsWaves = true;  ///< the camera is under water when under the displaced surface
 
@@ -99,21 +99,15 @@ struct PBRWater : Feature
 
 		// Foam
 		float FoamAmount = 1.0f;
-		float ShoreFoamWidth = 0.35f;  ///< metres
-		float FoamPersistence = 1.5f;  ///< seconds a crest's foam trail lasts
-		float FoamScale = 0.2f;        ///< metres
+		float EdgeFoam = 1.0f;  ///< foam lingering at the water's edge
 		float BreakingFoam = 1.0f;
 		float WakeFoam = 1.0f;
 		float WakeFoamLifetime = 8.0f;  ///< seconds foam from wakes and splashes lasts
 		float SplashFoam = 1.0f;        ///< whitewater from bodies hitting the water
-		float WindStreaks = 1.0f;       ///< windrows: foam streaks in strong wind, slicks in light wind
+		float WindStreaks = 1.0f;       ///< windrows: slicks in light wind
 		float FoamAlbedo = 0.85f;
 		float FoamDrift = 1.0f;  ///< scales the wind's surface (Stokes) drift that carries foam and bubbles
 
-		// Whitecaps
-		float WhitecapAmount = 1.0f;
-		float WhitecapScale = 2.5f;   ///< metres
-		float WhitecapStreak = 3.0f;  ///< stretch along the wind
 		float BubbleAmount = 1.0f;
 
 		// Ripples
@@ -147,7 +141,6 @@ struct PBRWater : Feature
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
-	virtual void RegisterWeatherVariables() override;
 
 	/**
 	 * @brief Clamps every setting to its UI range. Saved files, Ctrl+click typed values and weather
@@ -202,20 +195,18 @@ struct PBRWater : Feature
 		float4 Surface1;
 		float4 Land0;                                 // xy texel (0,0) corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;                                 // x enabled, y vertex spacing (units)
-		float4 Foam2;                                 // x whitecap amount, y whitecap scale (units), z streak stretch, w bubble amount
 		float4 Foam3;                                 // xy foam drift (units, wrapped), zw extra bubble drift (units, wrapped)
 		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
-		float4 HullA[FloatingObjects::MaxHullMasks];  // xyz corner of the hull's maps, hull frame z = 0 (absolute units), w atlas slice
-		float4 HullB[FloatingObjects::MaxHullMasks];  // xyz hull frame x axis (unit), w texels per unit along it
-		float4 HullC[FloatingObjects::MaxHullMasks];  // xyz hull frame y axis (unit), w texels per unit along it
 		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), y deep-water phase speed of the mean frequency (units/s)
 		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
 		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
 		float4 Shore2;                                // xyz wave clock of each shore wave component (rad, wrapped), w peak period Tp (s)
 		float4 Shore3;                                // xyz the clocks last frame, w deep-water wavelength L0 (units)
-		float4 Shore4;                                // xyz angular frequency of each component (rad/s)
-		float4 Shore5;                                // xyz arrival time offset of the previous shore field (its reference minus the current one's, s)
+		float4 Shore4;                                // xyz angular frequency each component was traced for in the current shore field (rad/s)
+		float4 Shore5;                                // xyz clock shift applied when the current field took over (rad)
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
+		float4 Shore7;                                // xyz angular frequency each component was traced for in the previous shore field (rad/s)
+		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -223,7 +214,7 @@ struct PBRWater : Feature
 	struct alignas(16) SharedSettings
 	{
 		float4 SwashGrid;    // xy grid corner (absolute units), z 1 / extent (units), w enabled
-		float4 Wetness;      // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+		float4 Wetness;      // x wet shores enabled, yzw unused
 		float4 Skylighting;  // x the water surface is in Skylighting's occlusion maps, yzw unused
 	};
 	STATIC_ASSERT_ALIGNAS_16(SharedSettings);
@@ -294,6 +285,7 @@ private:
 		std::unique_ptr<Texture2D> times;     ///< arrival time of each component, still water level
 		std::unique_ptr<Texture2D> slowness;  ///< grad T of components 0 and 1
 		std::unique_ptr<Texture2D> beach;     ///< grad T of component 2, beach slope, exposure to the swell
+		std::unique_ptr<Texture2D> room;      ///< room for the wave train (width of the water against the wavelength)
 	};
 	/** @brief Render thread: uploads the shore fields the snapshot blends between, when they change. */
 	void UpdateShoreTextures();
@@ -341,7 +333,6 @@ private:
 	ShoreTextures previousShoreTextures;                          ///< render thread: the one it replaces, while they blend
 	std::shared_ptr<const PBRWaterModel::ShoreField> drawnShore;  ///< render thread: the field last frame's constants used
 	OceanSimulation ocean;                                        ///< render thread
-	HullMaskAtlas hullAtlas;                                      ///< render thread: the maps that keep the water out of the hulls near the camera
 
 	// Skylighting occluder (render thread)
 	static constexpr uint32_t OccluderQuads = 176;     ///< grid quads per side
@@ -369,9 +360,10 @@ private:
 	PBRWaterModel::OceanMirror mirror;
 	PBRWaterModel::ShoreParams shoreState;  ///< last frame's shore wave train (phases and eased frequency)
 	bool hasShoreState = false;
-	std::shared_ptr<const PBRWaterModel::ShoreField> currentShore;   ///< the shore field the waves follow
-	std::shared_ptr<const PBRWaterModel::ShoreField> previousShore;  ///< the one it is taking over from
-	float shoreBlend = 1.0f;                                         ///< 0..1 from previousShore to currentShore
+	std::shared_ptr<const PBRWaterModel::ShoreField> currentShore;    ///< the shore field the waves follow
+	std::shared_ptr<const PBRWaterModel::ShoreField> previousShore;   ///< the one it is taking over from
+	float shoreBlend = 1.0f;                                          ///< 0..1 share of currentShore's train (the rest is previousShore's)
+	std::array<double, PBRWaterModel::ShoreComponents> shoreShift{};  ///< clock shift applied when currentShore took over (rad)
 	float smoothedWindSpeed = -1.0f;
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;

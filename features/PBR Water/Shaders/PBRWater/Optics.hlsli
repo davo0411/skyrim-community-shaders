@@ -78,19 +78,6 @@ namespace PBRWater
 		float bottom;  // concentrated near the bed: sand and silt stirred up by waves and wading
 	};
 
-	float ClarityTime() { return Optics0.z; }
-
-	/// Drifting, plume-shaped patches in [0, 1]: 0 clearest, 1 murkiest.
-	float TurbidityPatches(float2 absXY)
-	{
-		float scale = max(Clarity0.w, 100.0);
-		float t = ClarityTime();
-		// Plumes drift downwind at a few centimetres per second and slowly change shape.
-		float2 q = absXY / scale - Params1.xy * (t * 0.04 * UnitsPerMetre / scale);
-		float2 warp = float2(Fbm2(q * 0.5 + float2(3.1, t * 0.003)), Fbm2(q * 0.5 + float2(-7.7, -t * 0.0027))) - 0.5;
-		return smoothstep(0.3, 0.72, Fbm(q + warp * 1.4));
-	}
-
 	/**
 	 * Sediment stirred up by the waves' orbital motion at the bed. Linear wave theory gives the near-bed
 	 * orbital velocity u_b = a w / sinh(k h); fine sand and silt start moving at ~0.1 m/s, so the surf
@@ -104,36 +91,31 @@ namespace PBRWater
 		float omega = max(Shore4.x, 0.3);
 		float amplitude = 0.5 * Optics0.w * MetresPerUnit * fetchRatio * damping;
 		// Eckart's explicit approximation of the dispersion relation w^2 = g k tanh(k h).
-		float k0h = omega * omega * h / 9.81;
+		float k0h = omega * omega * h / GravityMetres;
 		float kh = min(k0h / sqrt(max(SafeTanh(k0h), 1e-6)), 20.0);
 		float sinhKh = 0.5 * (exp(kh) - exp(-kh));
 		float bedVelocity = amplitude * omega / max(sinhKh, 1e-3);
 		return Clarity1.w * saturate(saturate((bedVelocity - 0.08) / 0.5) + 0.5 * shoreBreak);
 	}
 
+	/// Sediment spread through the whole column, with the sediment patches `patches` there (TurbidityPatches).
+	float MixedTurbidity(float patches, float flow)
+	{
+		return Clarity0.y * lerp(1.0 - Clarity0.z, 1.0 + 2.0 * Clarity0.z, patches) + Clarity2.x * flow + Clarity2.y;
+	}
+
 	/**
 	 * @param positionWS camera-relative position of the water column
+	 * @param patches    sediment patches there (TurbidityPatches, interpolated from the vertices)
 	 * @param depthUnits water depth there (units), used for wave resuspension
 	 * @param flow       0..1 river current strength
 	 */
-	/// Sediment spread through the whole column at absolute position `absXY`.
-	float MixedTurbidity(float2 absXY, float flow)
-	{
-		return Clarity0.y * lerp(1.0 - Clarity0.z, 1.0 + 2.0 * Clarity0.z, TurbidityPatches(absXY)) + Clarity2.x * flow + Clarity2.y;
-	}
-
-	Turbidity GetTurbidity(float3 positionWS, float depthUnits, float fetchRatio, float damping, float shoreBreak, float flow)
+	Turbidity GetTurbidity(float3 positionWS, float patches, float depthUnits, float fetchRatio, float damping, float shoreBreak, float flow)
 	{
 		Turbidity t;
-		t.mixed = MixedTurbidity(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, flow);
+		t.mixed = MixedTurbidity(patches, flow);
 		t.bottom = ResuspensionTurbidity(depthUnits, fetchRatio, damping, shoreBreak) + Clarity2.z * RippleSilt(positionWS);
 		return t;
-	}
-
-	/// Concentration of the bottom layer at `heightAboveBed` relative to the bed (Rouse-like decay).
-	float BottomLayerProfile(float heightAboveBed)
-	{
-		return exp(-max(heightAboveBed, 0.0) / max(Clarity2.w, 1.0));
 	}
 
 	/// Mean bottom-layer concentration over a column `depth` deep.
@@ -142,11 +124,6 @@ namespace PBRWater
 		float H = max(Clarity2.w, 1.0);
 		float d = max(depth, 1e-3);
 		return H / d * (1.0 - exp(-d / H));
-	}
-
-	float TurbidityAt(Turbidity t, float heightAboveBed)
-	{
-		return t.mixed + t.bottom * BottomLayerProfile(heightAboveBed);
 	}
 
 	float ColumnTurbidity(Turbidity t, float depth)
@@ -194,7 +171,7 @@ namespace PBRWater
 	/// Anchoring it to the body keeps every water form's own brightness through the day.
 	float3 SedimentBodyColour(float3 waterBodyLinear)
 	{
-		float3 sediment = max(Color::IrradianceToLinear(Color::Water(Clarity1.xyz)), 1e-4);
+		float3 sediment = max(ColorManagement::SceneToLinear(Clarity1.xyz), 1e-4);
 		return sediment * (2.0 * Color::RGBToLuminance(max(waterBodyLinear, 0.0)) / max(Color::RGBToLuminance(sediment), 1e-4));
 	}
 

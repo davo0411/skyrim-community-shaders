@@ -21,7 +21,7 @@
 //               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
 //               roughens the surface.
 //   Foam      : procedural cellular foam advected with the waves, thresholded by a physically
-//               motivated coverage (shore depth, wave folding, breaking, wakes, whitecaps).
+//               motivated coverage (breaking shore waves, the swash front, wakes).
 // ============================================================================
 
 namespace PBRWater
@@ -39,23 +39,13 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Wind speed (m/s) just above the water at absolute position `absXY`. Gusts are patches of stronger
-	 * and weaker wind carried downwind at the wind speed, stretched along the wind; close to the upwind
-	 * shore (short fetch) the water lies in the lee, where the wind has not yet reached the surface.
+	 * Wind speed (m/s) just above the water, with the gust factor `gust` there (WindGust). Close to the upwind shore
+	 * (short fetch) the water lies in the lee, where the wind has not yet reached the surface.
 	 */
-	float LocalWindSpeed(float2 absXY, float fetchMetres)
+	float LocalWindSpeed(float gust, float fetchMetres)
 	{
-		float U = Params0.y;
-		float2 along = Params1.xy;
-		float2 across = float2(-along.y, along.x);
-		float scale = max(Surface0.z, 100.0);
-		float t = ClarityTime();
-		float2 q = float2(dot(absXY, along) / (scale * 1.8), dot(absXY, across) / scale);
-		q.x -= t * U * UnitsPerMetre / (scale * 1.8);
-		float gusts = smoothstep(0.25, 0.75, Fbm2(q + float2(t * 0.01, 3.7)));
-		float gust = lerp(1.0, 0.35 + 1.3 * gusts, saturate(Surface0.y));
 		float shelter = sqrt(saturate(fetchMetres / 150.0));
-		return U * gust * lerp(0.25, 1.0, shelter);
+		return Params0.y * gust * lerp(0.25, 1.0, shelter);
 	}
 
 	/// Mean square slope of the ripples too small for the waves and normal maps: the capillary share of the
@@ -74,14 +64,14 @@ namespace PBRWater
 	/**
 	 * Windrows: Langmuir circulation sweeps whatever floats into lines along the wind, spaced at about
 	 * twice the dominant wavelength (Craik & Leibovich 1976). Returns 0..1 how close `absXY` is to a line;
-	 * the lines meander and break up along their length. From a fresh breeze on they carry foam; in light
-	 * winds they collect natural surface films instead, which damp the capillary ripples into glassy slicks.
+	 * the lines meander and break up along their length. In light winds they collect natural surface films,
+	 * which damp the capillary ripples into glassy slicks.
 	 */
 	float WindrowPattern(float2 absXY, float peakOmega)
 	{
 		if (Surface1.x <= 0.0 || Params0.y < 1.5)
 			return 0.0;
-		float wavelength = 6.2831853 * Gravity() / max(peakOmega * peakOmega, 1e-4);
+		float wavelength = Math::TAU * Gravity() / max(peakOmega * peakOmega, 1e-4);
 		float spacing = max(2.0 * wavelength, 3.0 * UnitsPerMetre);
 		float2 along = Params1.xy;
 		float2 across = float2(-along.y, along.x);
@@ -95,12 +85,6 @@ namespace PBRWater
 		row *= row;
 		float breakup = smoothstep(0.3, 0.8, ValueNoise(float2(floor(u) * 7.31, v * 3.0)));
 		return row * breakup;
-	}
-
-	/// Foam gathered into the windrows, well marked from a fresh breeze on.
-	float WindrowFoam(float pattern)
-	{
-		return pattern * saturate((Params0.y - 5.0) / 10.0) * Surface1.x * saturate(Params2.y * 10.0 + 0.3);
 	}
 
 	/// Slicks: in light winds (~2-7 m/s) the windrows hold surface films that damp the ripples (0..1).
@@ -165,47 +149,38 @@ namespace PBRWater
 	 * @param footprint world size of a pixel (anti-aliasing)
 	 * @param time      animation time (bubbles slowly churn and pop)
 	 */
-	float FoamLace(float2 p, float coverage, float footprint, float time)
+	/// Largest foam pattern cell (units); the foam mixes sizes from it down to a tenth of it.
+	static const float FoamCellCoarse = 0.2 * UnitsPerMetre;
+
+	/// Size (units) of foam pattern cell `level`, 0 (0.2 m) .. 3 (0.02 m), geometric.
+	float FoamCellSize(float level)
 	{
-		float scale = max(Foam0.w, 1.0);
-		return FoamLacePattern(p / scale, coverage, footprint / scale, time);
+		return FoamCellCoarse * exp2(-1.1073 * level);  // 10^(-level / 3)
 	}
 
-	/**
-	 * Whitecaps: the foam a breaking crest leaves behind. Where it lies comes from the breaking itself
-	 * (`coverage`: 1 where the crest breaks now, thinning over the trail time); the pattern decides how much
-	 * of that area is foam. A fresh break is dense foam with a few holes; as it ages it tears into streaks
-	 * along the wind (anisotropic, domain-warped fBm) and thins out, so a trail never reads as a flat white
-	 * decal. The noise also cuts the patch outline, which hides the trail texture's texels.
-	 * @param p        Lagrangian absolute position (drift already applied)
-	 * @param coverage 0..1 breaking intensity: the crest folding now and the trail it leaves
-	 */
-	float Whitecaps(float2 p, float coverage, float footprint, float time)
+	float FoamLace(float2 p, float coverage, float footprint, float time)
 	{
-		coverage = saturate(coverage);
-		if (coverage <= 0.01)
-			return 0.0;
-		float scale = max(Foam2.y, 1.0);
-		float2 wind = Params1.xy;
-		float2 q = float2(dot(p, wind), dot(p, float2(-wind.y, wind.x))) / scale;
-		q.x /= max(Foam2.z, 1.0);  // streaks: longer along the wind than across it
-
-		float2 warp = float2(Fbm(q * 0.7 + float2(time * 0.05, 0.0)), Fbm(q * 0.7 + 17.3 - float2(0.0, time * 0.04))) - 0.5;
-		float coarse = Fbm(q * 1.3 + warp * 1.4);
-		float fine = Fbm(q * 4.1 + warp * 2.0 + 5.7);
-		float n = 0.65 * coarse + 0.35 * fine;
-
-		// The share of the area that is foam falls as the trail ages: fBm sits around 0.5 +- 0.15, so the
-		// threshold sweeps from nearly all (fresh) to a few streaks (old).
-		float pixelCells = footprint / scale;
-		float feather = 0.03 + pixelCells * 1.5;
-		float threshold = lerp(0.8, 0.38, coverage);
-		float foam = smoothstep(threshold - feather, threshold + feather, n);
-		// Old foam is a thin film: less opaque; all of it is mottled by the fine pattern.
-		float density = lerp(0.45, 1.0, coverage) * (0.6 + 0.4 * saturate(fine * 2.5 - 0.6));
-		// Far away the streaks are sub-pixel: converge to their average.
-		float average = density * smoothstep(0.1, 1.0, coverage);
-		return lerp(foam * density, average, saturate(pixelCells * 3.0 - 0.5));
+		// FoamLacePattern's clumps raise the coverage by at most 1.55x and draw nothing below 0.002: most of the water has
+		// no foam, and skips the pattern's noise altogether.
+		[branch] if (coverage * 1.55 <= 0.002) return 0.0;
+		// Patches of foam of four sizes, 0.2 m cells down to 0.02 m, drifting into each other, so the foam is never one
+		// stamp repeated across every breaker. Each pixel blends the two neighbouring sizes, each only evaluated where it
+		// shows.
+		float level = saturate(Fbm2(p / (11.0 * FoamCellCoarse) + 3.1) * 1.3 - 0.15) * 2.999;
+		float index = floor(level);
+		float t = smoothstep(0.3, 0.7, level - index);
+		float a = 0.0, b = 0.0;
+		[branch] if (t < 0.999)
+		{
+			float size = FoamCellSize(index);
+			a = FoamLacePattern(p / size + index * 17.3, coverage, footprint / size, time);
+		}
+		[branch] if (t > 0.001)
+		{
+			float size = FoamCellSize(index + 1.0);
+			b = FoamLacePattern(p / size + (index + 1.0) * 17.3, coverage, footprint / size, time);
+		}
+		return lerp(a, b, t);
 	}
 
 	/**
@@ -218,10 +193,10 @@ namespace PBRWater
 	 */
 	float Bubbles(float2 p, float density, float footprint, float time)
 	{
-		density = saturate(density * Foam2.w);
+		density = saturate(density * Foam0.y);
 		if (density <= 0.002)
 			return 0.0;
-		float cellSize = max(Foam0.w * 0.18, 4.0);
+		const float cellSize = 4.0;
 		float2 q = p / cellSize;
 		float2 cell = floor(q);
 		float specks = 0.0;
@@ -233,10 +208,11 @@ namespace PBRWater
 				float2 h = Hash22(c);
 				float rate = 0.25 + 0.5 * Hash12(c + 3.7);
 				float life = frac(time * rate + h.x);  // 0 born .. 1 popped
-				float2 wander = float2(sin(time * (0.7 + h.y) + h.x * 6.28), cos(time * (0.9 + h.x) + h.y * 6.28)) * 0.25;
+				float2 wander = float2(sin(time * (0.7 + h.y) + h.x * Math::TAU), cos(time * (0.9 + h.x) + h.y * Math::TAU)) * 0.25;
 				float2 centre = c + 0.5 + (h - 0.5) * 0.7 + wander;
-				float radius = (0.08 + 0.14 * Hash12(c + 9.1)) * sin(life * 3.14159);
-				float present = step(Hash12(c + 1.3), density);  // fewer bubbles in less aerated water
+				// Fewer and smaller bubbles in less aerated water, so a bubbly patch thins out at its edge.
+				float present = smoothstep(0.0, 0.15, density - Hash12(c + 1.3));
+				float radius = (0.08 + 0.14 * Hash12(c + 9.1)) * sin(life * Math::PI) * lerp(0.5, 1.0, present);
 				float d = length(q - centre);
 				specks += present * smoothstep(radius, radius * 0.4, d);
 			}
@@ -277,37 +253,41 @@ namespace PBRWater
 		float3 normal;
 		float roughness;
 		float jacobian;
-		float crestFoam;   // crest foam coverage including its decaying trail
-		float shoreBreak;  // a shore wave breaking here
-		float shoreMask;   // inner surf zone
-		float beach;       // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
-		float breakStage;  // 0..1 how far the shore waves here have got with breaking (debug)
-		float swashFoam;   // foam riding the swash over the beach
-		float rippleFoam;
+		float shoreBreak;   // a shore wave breaking here
+		float beach;        // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
+		float train;        // 0..1 share of the shore wave train (debug)
+		float room;         // 0..1 room the shore field gives the train here (debug)
+		float exposure;     // 0..1 exposure to the swell (debug)
+		float levelError;   // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
+		float breakStage;   // 0..1 how far the shore waves here have got with breaking (debug)
+		float swashFoam;    // foam riding the front of the swash up the beach
+		float edgeFoam;     // foam lingering in the thin water at the water's edge
+		float residueFoam;  // foam the drained swash left on the sand (shown where the ground is dry)
+		float rippleFoam;   // air churned in by bodies moving through the water
 		float depth;
-		float height;         // water surface above the still water at this pixel (units): waves, without the swash
-		float elevation;      // bed above the still water at this pixel (units, -1e6 unknown)
-		float bedSlope;       // |grad| of the bed
-		float shoreDistance;  // horizontal distance to the waterline of the bed (units), large when unknown
+		float height;     // water surface above the still water at this pixel (units): waves, without the swash
+		float elevation;  // bed above the still water at this pixel (units, -1e6 unknown)
+		float bedSlope;   // |grad| of the bed
 		float fetchMetres;
 		float footprint;
-		float turbidity;       // column sediment, filled in by the water column shading
-		float windSpeed;       // local wind at the surface (m/s)
-		float windrows;        // foam gathered into streaks along the wind
-		float3 dominantWaves;  // x height, yz slope of the dominant waves (sun shadows)
-		float dominantK;       // their wavenumber (1/unit)
-		float2 waveDir;        // the direction they travel in (wind, or towards the beach)
+		float turbidity;  // column sediment, filled in by the water column shading
+		float windSpeed;  // local wind at the surface (m/s)
+		float2 waveDir;   // the direction the waves travel in (wind, or towards the beach)
 	};
+
+	/// The debug view (Settings::DebugView) that compares the shore field's water level with this water's.
+	static const uint DebugShoreLevel = 12;
 
 	/**
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
 	 * @param waveParam  xyz undisplaced camera-relative position, w flow damping
-	 * @param shoreState the vertex shader's swash (SurfaceDisplacement::shore): x tip, y its rise speed
+	 * @param shoreState the vertex shader's swash (SurfaceDisplacement::shore): x tip, y swash mark
+	 * @param gust       wind gust factor (WindGust, interpolated from the vertices)
 	 * @param detailNormal vanilla normal-map normal (z up)
 	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
 	 *                       blended amplitude
 	 */
-	SurfaceShading ShadeSurface(float4 waveParam, float4 shoreState, float3 detailNormal, float detailVariance)
+	SurfaceShading ShadeSurface(float4 waveParam, float4 shoreState, float gust, float3 detailNormal, float detailVariance)
 	{
 		SurfaceShading o;
 
@@ -320,8 +300,7 @@ namespace PBRWater
 		float3 ripple = RippleSlopeFoam(waveParam.xyz, ctx.depth);
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
-		float fetchMetres = SampleFetchMetres(absXY);
-		float wind = LocalWindSpeed(absXY, fetchMetres);
+		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
 		// River currents and rain ripple it whatever the wind.
 		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
@@ -347,100 +326,78 @@ namespace PBRWater
 		float mapVariance = detailVariance * detailScale * detailScale;
 		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance + windVariance + mapVariance);
 		o.windSpeed = wind;
-		o.windrows = WindrowFoam(windrows);
 		o.jacobian = waves.jacobian;
 
-		// Whitecaps: the dominant waves' crests breaking now and the trail they leave (thinning over the trail
-		// time and drifting with the surface current), kept per cascade in the assemble pass.
-		o.crestFoam = saturate(waves.crestTrail);
-
 		o.shoreBreak = waves.shoreBreak;
-		o.shoreMask = waves.shoreMask;
 		o.beach = ctx.beach;
+		o.train = ctx.train;
+		o.room = ctx.shore.room;
+		o.exposure = ctx.shore.exposure;
+		o.levelError = 0.0;
+		[branch] if ((uint)Draw0.z == DebugShoreLevel)
+			o.levelError = ShoreLevel(absXY) - (waveParam.z + FrameBuffer::CameraPosAdjust.z);
 		o.breakStage = waves.breakStage;
 
-		// The swash over the beach: dense foam rides the front of each uprush, and drains away as lace on the
-		// backwash. What it leaves on the sand is drawn with the terrain (Lighting), as the water is gone. The tip comes
-		// from the vertices (it varies smoothly), the bed per pixel. The foam band moves with the tip; the pattern in it
-		// stays put and churns (carrying it with the tip would shear it wherever the run-up varies along the shore).
+		// The swash over the beach: foam rides the front of each uprush. What it leaves on the sand is drawn with the
+		// terrain (Lighting), as the water is gone. The tip comes from the vertices (it varies smoothly), the bed per
+		// pixel. The foam band moves with the tip; the pattern in it stays put and churns (carrying it with the tip would
+		// shear it wherever the run-up varies along the shore).
 		o.swashFoam = 0.0;
 		if (ctx.beach > 0.0) {
 			float cover = shoreState.x - ctx.elevation;  // how far under the tip level the bed lies (units)
-			// A band a few metres behind the tip, whatever the beach slope.
+			// A band a few metres behind the tip, whatever the beach slope, its leading edge feathered over a metre.
 			float band = max(3.0 * UnitsPerMetre * ctx.shore.slope, 3.0);
-			float front = smoothstep(-2.0, 2.0, cover) * smoothstep(band, 0.0, cover);
-			float rising = saturate(shoreState.y / 15.0);
-			o.swashFoam = ctx.beach * front * lerp(0.35, 1.0, rising);
+			float lead = max(0.5 * UnitsPerMetre * ctx.shore.slope, 1.0);
+			float front = smoothstep(-lead, lead, cover) * smoothstep(band, 0.0, cover);
+			o.swashFoam = ctx.beach * front * 0.75 * BreakerFoam(ctx);
 		}
+		// The foam the drained crests left on the sand up to the swash mark, until the next uprush covers it.
+		o.residueFoam = 0.0;
+		[branch] if (ctx.beach > 0.0 && ctx.hasTerrain > 0.5 && ctx.elevation < shoreState.y)
+			o.residueFoam = SwashCrests(waveParam.xyz, ctx, false, ctx.elevation).z * BreakerFoam(ctx);
 		o.rippleFoam = ripple.z;
+
+		// Foam lingering at the water's edge, in the last few centimetres of water over the bed - from the terrain heights,
+		// never the depth buffer (that put foam in the shape of whatever stood in the water). A band of about the same
+		// width on a gentle beach and a steep bank (its depth follows the bed's slope); always there a little, and fresh
+		// where a wave has just broken or run up, so on a stream or a pond it is a faint rim and in the surf a wide one.
+		o.edgeFoam = 0.0;
+		[branch] if (ctx.hasTerrain > 0.5 && Foam0.x > 0.0)
+		{
+			float thickness = max(waves.displacement.z, SwashTop(ctx.elevation, shoreState.x)) - ctx.elevation;
+			float activity = saturate(max(o.shoreBreak, o.swashFoam) * 2.0);
+			float width = (0.4 + 1.2 * activity) * UnitsPerMetre;  // horizontal
+			float depthWidth = clamp(width * length(ctx.terrainGrad), 0.03 * UnitsPerMetre, 0.3 * UnitsPerMetre);
+			// Both edges feathered: in from the waterline over a few centimetres, out into the deeper water over the band.
+			float band = smoothstep(0.0, 0.04 * UnitsPerMetre, thickness) * (1.0 - smoothstep(0.2 * depthWidth, depthWidth, thickness));
+			o.edgeFoam = band * lerp(0.4, 1.0, activity) * Foam0.x;
+		}
 		o.depth = ctx.depth;
 		o.height = waves.displacement.z;
 		o.elevation = ctx.hasTerrain > 0.5 ? ctx.elevation : -1e6;
 		o.bedSlope = length(ctx.terrainGrad);
-		// Depth over the bed's slope: how far the shoreline is, so the contact band has the same width on a gentle
-		// beach and at a cliff foot.
-		o.shoreDistance = ctx.hasTerrain > 0.5 ? ctx.depth / max(length(ctx.terrainGrad), 0.02) : 1e6;
-		o.fetchMetres = fetchMetres;
+		o.fetchMetres = ctx.fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
-		o.dominantWaves = waves.dominant;
-		o.dominantK = waves.dominantK;
 		float2 shoreDir = SafeNormalize(float3(ctx.shore.slownessX.x, ctx.shore.slownessY.x, 0.0), float3(Params1.xy, 0.0)).xy;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, shoreDir, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
 	}
 
-	/**
-	 * Sun shadows the waves cast on each other, from the dominant waves at this pixel alone (no texture reads).
-	 * Along the sun's azimuth they are locally a sinusoid A cos(k x + phi), fitted to their height h and slope h' here:
-	 * A = |(h, h' / k)|, phi = atan2(-h' / k, h). The ray to the sun rises at tan(e) = m A k; the next crest stands
-	 * highest above it at cos(u) = sqrt(1 - m^2), sin(u) = -m, and shadows this point when
-	 *     sqrt(1 - m^2) - cos(phi) - m (u - phi) > 0.
-	 * Nothing is shadowed once the sun is higher than the steepest slope (m >= 1), and where the waves are filtered
-	 * away (far off, or calm) A shrinks and the shadows go with it.
-	 */
-	float WaveSunShadow(SurfaceShading s, float3 toSun)
+	/// Foam coverage: x surface foam on the breaking shore waves, the front of the swash and the water's edge, y aeration:
+	/// the air the breakers and anything moving through the water churn in (bubbles). Only where a wave is breaking now
+	/// (the surf zone between the breakers is not blanketed) and along the edge. The sources overlap (a breaking crest
+	/// runs into the edge band): the densest one counts, never their sum, which doubled the foam where they met. The
+	/// calm edge rim makes no bubbles (it drew a ring of them a set distance off every shore), and the churn saturates
+	/// softly so a wake fades out at its rim instead of ending in a circle.
+	float2 FoamCoverage(SurfaceShading s)
 	{
-		float shadow = 1.0;
-		float horizontal = length(toSun.xy);
-		[branch] if (toSun.z > 0.0 && horizontal > 1e-3 && s.dominantK > 1e-5)
-		{
-			float2 sunDir = toSun.xy / horizontal;
-			// Along the sun's azimuth the waves are as much longer as they cross it at an angle.
-			float k = s.dominantK * max(abs(dot(s.waveDir, sunDir)), 0.3);
-			float h = s.dominantWaves.x;
-			float slope = dot(s.dominantWaves.yz, sunDir) / k;
-			float amplitude = sqrt(h * h + slope * slope);
-			float m = toSun.z / horizontal / max(amplitude * k, 1e-6);
-			if (m < 1.0) {
-				float phi = atan2(-slope, h);
-				float ahead = frac((-asin(m) - phi) / 6.2831853) * 6.2831853;     // phase to the next crest's highest point
-				float clearance = m * ahead + h / amplitude - sqrt(1.0 - m * m);  // ray above that crest, in units of A
-				shadow = saturate(0.5 + clearance / 0.3);
-			}
-		}
-		return shadow;
+		float breaking = saturate(max(s.shoreBreak * Shore1.x, s.swashFoam * Shore1.y) * Foam0.z);
+		float churn = 1.0 - exp(-2.0 * s.rippleFoam * Foam1.z);
+		return float2(max(breaking, saturate(s.edgeFoam * Foam0.z)), max(breaking, churn));
 	}
 
-	/// Foam coverage from all sources. `contact` is 0..1 how close the waterline of something rising out of the
-	/// water is (shores, rocks, piers, wading legs ...); 0 when unknown.
-	/// x surface foam (contact band, breaking shore waves, swash, windrows), y whitecaps (folding crests),
-	/// z aeration from splashes and wakes: churned water is full of bubbles but leaves little foam.
-	float3 FoamCoverage(SurfaceShading s, float contact)
-	{
-		// A band along the waterline of rocks, piers and legs. On a beach the shore's foam comes from the waves
-		// themselves (breaking crests, the swash), so the waterline is not ringed with standing foam.
-		float band = contact * (1.0 - s.beach);
-		// Breaking shore waves: dense foam on the crests that break, a lace of old foam between them in the surf zone.
-		float breaking = (s.shoreBreak + 0.3 * s.shoreMask) * Shore1.x + s.swashFoam * Shore1.y;
-		float aeration = saturate(s.rippleFoam * Foam1.z * 3.0);
-		float surface = saturate((band + breaking + s.windrows) * Foam0.z);
-		// The amount already sets how much of the sea breaks; this only switches it off at zero.
-		float whitecap = saturate(s.crestFoam) * saturate(Foam2.x * 4.0);
-		return float3(surface, whitecap, aeration);
-	}
-
-	float3 DebugView(uint mode, SurfaceShading s, float foam, float3 waveState)
+	float3 DebugView(uint mode, SurfaceShading s, float foam, float waveHeight)
 	{
 		switch (mode) {
 		case 1:
@@ -456,7 +413,7 @@ namespace PBRWater
 			return s.roughness.xxx;
 		case 6:
 			// Height in units of Hs / 2: crests red, troughs green.
-			return float3(saturate(2.0 * waveState.x / max(Optics0.w, 1.0)) * 0.5 + 0.5, saturate(-2.0 * waveState.x / max(Optics0.w, 1.0)), 0.0);
+			return float3(saturate(2.0 * waveHeight / max(Optics0.w, 1.0)) * 0.5 + 0.5, saturate(-2.0 * waveHeight / max(Optics0.w, 1.0)), 0.0);
 		case 7:
 			{
 				// Fetch on a log scale: blue 100 m (pond, river), green ~3 km (bay, harbour), red 100 km+ (open sea).
@@ -467,8 +424,20 @@ namespace PBRWater
 			// Water clarity: blue clear, brown murky.
 			return lerp(float3(0.05, 0.25, 0.6), float3(0.55, 0.35, 0.1), saturate(s.turbidity / 2.0)) * (0.4 + 0.6 * saturate(s.turbidity));
 		case 9:
-			// Local wind: black calm, white 15 m/s; foam streaks in red.
-			return float3(max(saturate(s.windSpeed / 15.0), saturate(s.windrows * 2.0)), saturate(s.windSpeed / 15.0).xx);
+			// Local wind: black calm, white 15 m/s.
+			return saturate(s.windSpeed / 15.0).xxx;
+		case 10:
+			// Shore field: share of the shore wave train (red), room for it (green), exposure to the swell (blue).
+			return float3(s.train, s.room, s.exposure);
+		case 11:
+			// Direction the waves travel in (red east, green north).
+			return float3(s.waveDir * 0.5 + 0.5, 0.0);
+		case DebugShoreLevel:
+			// The shore field's water level against this water's: green within 0.5 m, red where the field's is lower (it
+			// sees this water as land), blue where higher; black outside the field.
+			if (s.levelError < -1e8)
+				return 0.0;
+			return float3(saturate(-s.levelError / 140.0 - 0.25), 1.0 - saturate(abs(s.levelError) / 35.0), saturate(s.levelError / 140.0 - 0.25));
 		default:
 			return 0.0;
 		}

@@ -58,117 +58,6 @@ namespace
 		return m;
 	}
 
-	/// Frame of something lying along `axis`: horizontal axes along and across it, then up.
-	RE::NiMatrix3 HorizontalFrame(const RE::NiPoint3& axis)
-	{
-		RE::NiPoint3 along = { axis.x, axis.y, 0.0f };
-		const float length = along.Length();
-		along = length > 1e-3f ? along / length : RE::NiPoint3{ 1.0f, 0.0f, 0.0f };
-		const RE::NiPoint3 up = { 0.0f, 0.0f, 1.0f };
-		return FromColumns(along, up.Cross(along), up);
-	}
-
-	/// A reference making up a hull: its 3D, where that stands with the hull at rest, and its object bounds.
-	struct PlacedRef
-	{
-		RE::NiAVObject* node = nullptr;
-		RE::NiTransform rest;
-		RE::NiPoint3 boundMin;
-		RE::NiPoint3 boundMax;
-	};
-
-	/**
-	 * Appends the lit, rigid triangle meshes under `object` (placed in the world by `toWorld`) to `pieces`, in the
-	 * hull frame `worldToHull` about `origin`. Hidden nodes, effect and water meshes, and skinned, dynamic and
-	 * instanced meshes are left out.
-	 */
-	void CollectHullPieces(RE::NiAVObject* object, const RE::NiTransform& toWorld, const RE::NiMatrix3& worldToHull, const RE::NiPoint3& origin, std::vector<FloatingObjects::HullPiece>& pieces)
-	{
-		if (!object || object->GetAppCulled())
-			return;
-		if (auto* node = object->AsNode()) {
-			for (auto& child : node->GetChildren()) {
-				if (child)
-					CollectHullPieces(child.get(), toWorld * child->local, worldToHull, origin, pieces);
-			}
-			return;
-		}
-		auto* geometry = object->AsGeometry();
-		auto* triShape = object->AsTriShape();
-		if (!geometry || !triShape)
-			return;
-		const auto type = geometry->GetType().get();
-		if (type != RE::BSGeometry::Type::kTriShape && type != RE::BSGeometry::Type::kMeshLODTriShape)
-			return;
-		const auto& data = geometry->GetGeometryRuntimeData();
-		auto* property = static_cast<RE::BSShaderProperty*>(data.shaderProperty.get());
-		const auto* buffers = data.rendererData;
-		if (!property || property->GetMaterialType() != RE::BSShaderMaterial::Type::kLighting || data.skinInstance.get() || !buffers || !buffers->vertexBuffer || !buffers->indexBuffer)
-			return;
-		using Vertex = RE::BSGraphics::Vertex;
-		const auto& desc = data.vertexDesc;
-		if (!desc.HasFlag(Vertex::VF_VERTEX) || desc.HasFlag(Vertex::VF_SKINNED) || desc.HasFlag(Vertex::VF_INSTANCEDATA))
-			return;
-
-		FloatingObjects::HullPiece piece;
-		piece.triangles = triShape->GetTrishapeRuntimeData().triangleCount;
-		// The descriptor's low nibble is the vertex size in dwords.
-		piece.stride = static_cast<uint32_t>(reinterpret_cast<const uint64_t&>(desc) & 0xF) * 4;
-		piece.positionOffset = desc.GetAttributeOffset(Vertex::VA_POSITION);
-		piece.halfPositions = !desc.HasFlag(Vertex::VF_FULLPREC);
-		if (piece.triangles == 0 || piece.positionOffset + (piece.halfPositions ? 8u : 12u) > piece.stride)
-			return;
-		piece.vertices.copy_from(reinterpret_cast<ID3D11Buffer*>(buffers->vertexBuffer));
-		piece.indices.copy_from(reinterpret_cast<ID3D11Buffer*>(buffers->indexBuffer));
-
-		// Mesh space -> hull frame: worldToHull (toWorld(v) - origin).
-		const RE::NiMatrix3 linear = worldToHull * toWorld.rotate;
-		const RE::NiPoint3 offset = worldToHull * (toWorld.translate - origin);
-		const float translation[3] = { offset.x, offset.y, offset.z };
-		for (int r = 0; r < 3; ++r) {
-			for (int c = 0; c < 3; ++c)
-				piece.meshToHull[r][c] = linear.entry[r][c] * toWorld.scale;
-			piece.meshToHull[r][3] = translation[r];
-		}
-		pieces.push_back(std::move(piece));
-	}
-
-	/**
-	 * The shape of a hull made of `refs`, in the hull frame `frame` (columns: its axes in the world) about `origin`, or
-	 * null when it has nothing to draw. The maps cover the object bounds of its references and a margin of open water.
-	 */
-	std::shared_ptr<const FloatingObjects::HullShape> CaptureHullShape(const std::vector<PlacedRef>& refs, const RE::NiPoint3& origin, const RE::NiMatrix3& frame)
-	{
-		auto shape = std::make_shared<FloatingObjects::HullShape>();
-		const RE::NiMatrix3 worldToHull = frame.Transpose();
-		constexpr float Big = std::numeric_limits<float>::max();
-		RE::NiPoint3 lo{ Big, Big, Big };
-		RE::NiPoint3 hi{ -Big, -Big, -Big };
-		for (const auto& ref : refs) {
-			CollectHullPieces(ref.node, ref.rest, worldToHull, origin, shape->pieces);
-			// Lights and markers have no bounds.
-			const RE::NiPoint3 extent = ref.boundMax - ref.boundMin;
-			if (!(extent.x > 1.0f && extent.y > 1.0f && extent.z > 1.0f))
-				continue;
-			for (int corner = 0; corner < 8; ++corner) {
-				const RE::NiPoint3 local = { (corner & 1) ? ref.boundMax.x : ref.boundMin.x, (corner & 2) ? ref.boundMax.y : ref.boundMin.y, (corner & 4) ? ref.boundMax.z : ref.boundMin.z };
-				const RE::NiPoint3 p = worldToHull * (ref.rest * local - origin);
-				lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
-				hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
-			}
-		}
-		if (shape->pieces.empty() || !(hi.x > lo.x && hi.y > lo.y))
-			return nullptr;
-		const float marginX = 0.04f * (hi.x - lo.x) + 8.0f;
-		const float marginY = 0.04f * (hi.y - lo.y) + 8.0f;
-		shape->minX = lo.x - marginX;
-		shape->maxX = hi.x + marginX;
-		shape->minY = lo.y - marginY;
-		shape->maxY = hi.y + marginY;
-		shape->maxZ = hi.z + 8.0f;
-		return shape;
-	}
-
 	float Smoothstep(float e0, float e1, float x)
 	{
 		const float t = std::clamp((x - e0) / std::max(e1 - e0, 1e-3f), 0.0f, 1.0f);
@@ -259,6 +148,14 @@ namespace
 			return RE::BSVisit::BSVisitControl::kContinue;
 		});
 		return dynamic;
+	}
+
+	/// Things that can be picked up: they lie loose wherever they were put or dropped, havok-settled or not.
+	bool IsLooseItemType(RE::FormType type)
+	{
+		using enum RE::FormType;
+		return type == Misc || type == Weapon || type == Armor || type == Ingredient || type == AlchemyItem || type == Book ||
+		       type == Scroll || type == Ammo || type == KeyMaster || type == SoulGem;
 	}
 
 	/// A loose prop: all of its collision is dynamic. Hulls often carry a few dynamic parts (ropes,
@@ -512,11 +409,16 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 	};
 
 	std::vector<RE::TESObjectREFR*> refs;
+	std::vector<RE::TESObjectREFR*> bodies;
 	std::unordered_set<RE::FormID> present;
 	tes->ForEachReferenceInRange(player, settings.range, [&](RE::TESObjectREFR* ref) {
-		if (ref && !ref->IsDisabled() && !ref->IsDeleted() && ref->Is3DLoaded() && !ref->As<RE::Actor>()) {
-			refs.push_back(ref);
-			present.insert(ref->GetFormID());
+		if (ref && !ref->IsDisabled() && !ref->IsDeleted() && ref->Is3DLoaded()) {
+			if (!ref->As<RE::Actor>()) {
+				refs.push_back(ref);
+				present.insert(ref->GetFormID());
+			} else if (ref->IsDead()) {
+				bodies.push_back(ref);
+			}
 		}
 		return RE::BSContainer::ForEachResult::kContinue;
 	});
@@ -546,7 +448,6 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 	std::vector<RE::TESObjectREFR*> fresh;
 	std::vector<Candidate> hulls;
 	std::vector<WorldBox> anchors;  // fixed structure standing in the water: piles, grounded pier sections
-	std::erase_if(groundedBoats, [&](const GroundedBoat& boat) { return boat.origin.GetDistance(player->GetPosition()) > settings.range; });
 	const float riderReach = std::max(snapshot.VerticalBound(), 1.5f * UnitsPerMetre) + 20.0f;
 	for (auto* ref : refs) {
 		const auto id = ref->GetFormID();
@@ -653,16 +554,6 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 		// Not resting on the bottom (the bed may graze the keel, but not rise into the hull)...
 		if (const char* grounded = GroundedReason(tes, snapshot, box, flatZ)) {
 			anchors.push_back(box);
-			if (IsBoatModel(path) && length < 25.0f * UnitsPerMetre) {
-				// A boat lying in the shallows: waves washing round it must not fill it.
-				GroundedBoat boat;
-				boat.ref = ref->GetHandle();
-				boat.id = id;
-				boat.node = node;
-				boat.origin = box.centre;
-				boat.frame = HorizontalFrame(box.axis[0]);
-				groundedBoats.push_back(std::move(boat));
-			}
 			Reject(id, grounded);
 			continue;
 		}
@@ -851,6 +742,28 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			reasons.try_emplace(id, "not a hull");
 		}
 	}
+
+	// Loose things lying on the hulls near the player: havok clutter (settled or not), dropped items and the dead.
+	// They are carried with the deck every frame (CarryCargo).
+	cargo.clear();
+	auto addCargo = [&](RE::TESObjectREFR* ref, bool candidate) {
+		if (!candidate || owner.contains(ref->GetFormID()) || riders.contains(ref->GetFormID()) ||
+			ref->GetPosition().GetSquaredDistance(player->GetPosition()) > CollisionRange * CollisionRange)
+			return;
+		for (auto& [hullId, f] : floaters) {
+			if (insideFootprint(f, ref->GetPosition(), FootprintMargin) && ref->GetPosition().z > f.flatZ - f.draft - 10.0f) {
+				cargo.push_back(ref->GetHandle());
+				return;
+			}
+		}
+	};
+	for (auto* ref : refs) {
+		auto* base = ref->GetBaseObject();
+		auto* node = ref->Get3D();
+		addCargo(ref, base && node && (IsLooseItemType(base->GetFormType()) || FindDynamicBody(node)));
+	}
+	for (auto* ref : bodies)
+		addCargo(ref, true);
 
 	// Keep loose props on the hulls near the player awake, so they react as the deck moves under them.
 	for (auto* ref : refs) {
@@ -1043,15 +956,59 @@ void FloatingObjects::CarryActors(std::vector<Floater*>& moved, const std::vecto
 	}
 }
 
+void FloatingObjects::CarryCargo(const std::vector<Floater*>& moved, const std::vector<RE::NiPoint3>& previousOffsets, const std::vector<RE::NiMatrix3>& previousRotations)
+{
+	const float scale = RE::bhkWorld::GetWorldScale();
+	for (const auto& handle : cargo) {
+		const auto refPtr = handle.get();
+		auto* ref = refPtr.get();
+		auto* node = ref && !ref->IsDisabled() ? ref->Get3D() : nullptr;
+		if (!node)
+			continue;
+		// Where it lies in the hull's rest frame, from last frame's motion (the 3D follows its bodies).
+		const RE::NiPoint3 position = node->world.translate;
+		for (size_t i = 0; i < moved.size(); ++i) {
+			const Floater& f = *moved[i];
+			const RE::NiPoint3 local = previousRotations[i].Transpose() * (position - f.pivot - previousOffsets[i]);
+			if (std::abs(local.Dot(f.axisX)) > f.halfLength + 10.0f || std::abs(local.Dot(f.axisY)) > f.halfWidth + 10.0f ||
+				local.z < -f.draft - 10.0f || local.z > f.freeboard + 100.0f)
+				continue;
+			const RE::NiPoint3 delta = f.pivot + f.offset + f.rotation * local - position;
+			if (delta.SqrLength() < 1e-6f)
+				break;
+			// The deck moves under it by setting its 3D, which never pushes what lies on it: move it along, every one of
+			// its bodies (a ragdoll has many) and, for what havok does not drive (settled clutter), the reference.
+			bool simulated = false;
+			RE::BSVisit::TraverseScenegraphCollision(node, [&](RE::bhkNiCollisionObject* object) -> RE::BSVisit::BSVisitControl {
+				auto* body = object->body.get() ? object->body.get()->AsBhkRigidBody() : nullptr;
+				auto* rigid = body ? body->GetRigidBody() : nullptr;
+				if (rigid && rigid->motion.type.get() != RE::hkpMotion::MotionType::kFixed) {
+					RE::hkVector4 p;
+					body->GetPosition(p);
+					float q[4];
+					_mm_storeu_ps(q, p.quad);
+					RE::hkVector4 next(q[0] + delta.x * scale, q[1] + delta.y * scale, q[2] + delta.z * scale, 0.0f);
+					body->SetPosition(next);
+					simulated = simulated || IsDynamicMotion(rigid);
+				}
+				return RE::BSVisit::BSVisitControl::kContinue;
+			});
+			if (!simulated)
+				ref->SetPosition(ref->GetPosition() + delta);
+			++stats.cargo;
+			break;
+		}
+	}
+}
+
 void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, float dt)
 {
 	stats = {};
 	auto* player = RE::PlayerCharacter::GetSingleton();
 	auto* tes = RE::TES::GetSingleton();
 	if (!settings.enabled || !player || !tes) {
-		if (!floaters.empty() || !riders.empty() || !groundedBoats.empty())
+		if (!floaters.empty() || !riders.empty())
 			Reset();
-		hullMasks.store(nullptr, std::memory_order_release);
 		return;
 	}
 	if (!bobbingLoaded)
@@ -1133,10 +1090,10 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 			}
 		}
 		CarryActors(nearPlayer, actors, previousOffsets, previousRotations);
+		CarryCargo(nearPlayer, previousOffsets, previousRotations);
 	}
 
 	UpdateRiders(snapshot, settings, camera);
-	PublishHullMasks(camera);
 
 	std::string report = "Select a reference in the console to see why it floats or stays put";
 	if (const auto selected = RE::Console::GetSelectedRef())
@@ -1202,80 +1159,6 @@ void FloatingObjects::UpdateRiders(const PBRWaterModel::WaveSnapshot& snapshot, 
 		++stats.riders;
 		++it;
 	}
-}
-
-void FloatingObjects::PublishHullMasks(const RE::NiPoint3& camera)
-{
-	// A boat in the shallows that unloaded or got new 3D is examined again by the next scan.
-	std::erase_if(groundedBoats, [&](const GroundedBoat& boat) {
-		const auto ref = boat.ref.get();
-		if (ref && !ref->IsDisabled() && ref->Get3D() == boat.node)
-			return false;
-		rejected.erase(boat.id);
-		reasons.erase(boat.id);
-		return true;
-	});
-
-	struct Nearby
-	{
-		float distance = 0.0f;
-		Floater* floater = nullptr;
-		GroundedBoat* boat = nullptr;
-	};
-	std::vector<Nearby> nearby;
-	for (auto& [hullId, f] : floaters) {
-		// Ships: closed hulls and decks far above the water.
-		if (2.0f * f.halfLength <= 25.0f * UnitsPerMetre)
-			nearby.push_back({ (f.pivot + f.offset).GetDistance(camera), &f, nullptr });
-	}
-	for (auto& boat : groundedBoats)
-		nearby.push_back({ boat.origin.GetDistance(camera), nullptr, &boat });
-	std::sort(nearby.begin(), nearby.end(), [](const Nearby& a, const Nearby& b) { return a.distance < b.distance; });
-
-	auto masks = std::make_shared<std::vector<HullMask>>();
-	for (const auto& candidate : nearby) {
-		if (masks->size() >= MaxHullMasks)
-			break;
-		HullMask mask;
-		if (Floater* f = candidate.floater) {
-			// The hull is rigid: its shape is captured once in its rest frame (about the waterline centre), and again
-			// only when parts join it. This frame's motion carries that frame.
-			const RE::NiMatrix3 restFrame = FromColumns(f->axisX, f->axisY, { 0.0f, 0.0f, 1.0f });
-			if (!f->shape || f->shapeParts != f->parts.size()) {
-				std::vector<PlacedRef> refs;
-				auto add = [&](const Part& part) {
-					const auto ref = part.ref.get();
-					auto* node = ref ? ref->Get3D() : nullptr;
-					if (!node || node != part.node)
-						return;
-					RE::NiTransform rest;
-					rest.rotate = part.restRot;
-					rest.translate = part.restPos;
-					rest.scale = node->local.scale;
-					refs.push_back({ node, rest, ref->GetBoundMin(), ref->GetBoundMax() });
-				};
-				add(f->hull);
-				for (const auto& part : f->parts)
-					add(part);
-				f->shape = CaptureHullShape(refs, f->pivot, restFrame);
-				f->shapeParts = f->parts.size();
-			}
-			const RE::NiMatrix3 frame = f->rotation * restFrame;
-			mask = { f->shape, f->pivot + f->offset, Column(frame, 0), Column(frame, 1) };
-		} else {
-			GroundedBoat& boat = *candidate.boat;
-			if (!boat.shape) {
-				// Its 3D is the one it was found with (checked above), standing where the engine placed it.
-				const auto ref = boat.ref.get();
-				if (auto* node = ref ? ref->Get3D() : nullptr)
-					boat.shape = CaptureHullShape({ { node, node->world, ref->GetBoundMin(), ref->GetBoundMax() } }, boat.origin, boat.frame);
-			}
-			mask = { boat.shape, boat.origin, Column(boat.frame, 0), Column(boat.frame, 1) };
-		}
-		if (mask.shape)
-			masks->push_back(std::move(mask));
-	}
-	hullMasks.store(std::move(masks), std::memory_order_release);
 }
 
 std::string FloatingObjects::Describe(const RE::TESObjectREFR* ref) const
@@ -1352,8 +1235,7 @@ void FloatingObjects::Reset()
 	rejected.clear();
 	reasons.clear();
 	riders.clear();
-	groundedBoats.clear();
-	hullMasks.store(nullptr, std::memory_order_release);
+	cargo.clear();
 	scanTimer = 0.0f;
 	stats = {};
 }

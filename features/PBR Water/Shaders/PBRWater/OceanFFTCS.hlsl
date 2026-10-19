@@ -11,6 +11,8 @@
 // FFT_SIZE and FFT_LOG2 are compile-time defines (128, 256 or 512).
 // ============================================================================
 
+#include "Common/Math.hlsli"
+
 #ifndef FFT_SIZE
 #	define FFT_SIZE 256
 #	define FFT_LOG2 8
@@ -53,7 +55,7 @@ uint3 Address(uint index, uint lineIndex, uint slice)
 		uint p = 1u << stage;
 		uint k = t & (p - 1);
 		float2 w;
-		sincos(3.14159265 * (float)k / (float)p, w.y, w.x);
+		sincos(Math::PI * (float)k / (float)p, w.y, w.x);
 		float4 u0 = Line[src][t];
 		float4 u1 = TwiddleMul(Line[src][t + FFT_HALF], w);
 		uint j = (t << 1) - k;

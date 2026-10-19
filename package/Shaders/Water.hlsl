@@ -22,13 +22,13 @@ namespace HorizonFix
 #	if defined(VSHADER)
 struct VS_INPUT
 {
-	float4 Position : POSITION0;
+	float4 Position: POSITION0;
 };
 #	endif
 
 struct VS_OUTPUT
 {
-	float4 Position : SV_POSITION0;
+	float4 Position: SV_POSITION0;
 };
 
 #	ifdef VSHADER
@@ -48,7 +48,7 @@ typedef VS_OUTPUT PS_INPUT;
 
 struct PS_OUTPUT
 {
-	float4 Color : SV_Target0;
+	float4 Color: SV_Target0;
 };
 
 #	ifdef PSHADER
@@ -83,7 +83,7 @@ PS_OUTPUT main(PS_INPUT input)
 
 #	include "Common/SharedData.hlsli"
 
-#	if defined(VSHADER)
+#	if defined(VSHADER) || defined(HSHADER) || defined(DSHADER)
 struct VS_INPUT
 {
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)
@@ -108,9 +108,9 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
 #	if defined(SPECULAR) || defined(UNDERWATER)
-	float4 HPosition : SV_POSITION0;
+	float4 HPosition: SV_POSITION0;
 #		if !defined(UNIFIED_WATER)
-	float4 FogParam : COLOR0;
+	float4 FogParam: COLOR0;
 #		endif
 	float4 WPosition: TEXCOORD0;
 	float4 TexCoord1: TEXCOORD1;
@@ -119,44 +119,44 @@ struct VS_OUTPUT
 	float4 TexCoord3: TEXCOORD3;
 #		endif
 #		if defined(FLOWMAP)
-	nointerpolation float2 TexCoord4 : TEXCOORD4;
+	nointerpolation float2 TexCoord4: TEXCOORD4;
 #		endif
 #		if NUM_SPECULAR_LIGHTS == 0
-	float4 MPosition : TEXCOORD5;
+	float4 MPosition: TEXCOORD5;
 #		endif
 #	endif
 
 #	if defined(SIMPLE)
-	float4 HPosition : SV_POSITION0;
-	float4 FogParam : COLOR0;
-	float4 WPosition : TEXCOORD0;
-	float4 TexCoord1 : TEXCOORD1;
-	float4 TexCoord2 : TEXCOORD2;
-	float4 MPosition : TEXCOORD5;
+	float4 HPosition: SV_POSITION0;
+	float4 FogParam: COLOR0;
+	float4 WPosition: TEXCOORD0;
+	float4 TexCoord1: TEXCOORD1;
+	float4 TexCoord2: TEXCOORD2;
+	float4 MPosition: TEXCOORD5;
 #	endif
 
 #	if defined(LOD)
-	float4 HPosition : SV_POSITION0;
-	float4 FogParam : COLOR0;
-	float4 WPosition : TEXCOORD0;
-	float4 TexCoord1 : TEXCOORD1;
+	float4 HPosition: SV_POSITION0;
+	float4 FogParam: COLOR0;
+	float4 WPosition: TEXCOORD0;
+	float4 TexCoord1: TEXCOORD1;
 #	endif
 
 #	if defined(STENCIL)
-	float4 HPosition : SV_POSITION0;
-	float4 WorldPosition : POSITION1;
-	float4 PreviousWorldPosition : POSITION2;
+	float4 HPosition: SV_POSITION0;
+	float4 WorldPosition: POSITION1;
+	float4 PreviousWorldPosition: POSITION2;
 #	endif
 
-	float4 NormalsScale : TEXCOORD8;
+	float4 NormalsScale: TEXCOORD8;
 
 #	if defined(PBR_WATER) && !defined(STENCIL)
-	float4 WaveParam : TEXCOORD9;   // xyz undisplaced camera-relative position, w wave damping (flow)
-	float3 WaveState : TEXCOORD10;  // x vertical displacement of the water surface (without the waterline lift), y jacobian, z shore breaking
-	float3 Barycentric : TEXCOORD11;
+	float4 WaveParam: TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
+	float2 SurfaceNoise: TEXCOORD10;  // x sediment patches (TurbidityPatches), y wind gust factor (WindGust)
+	float3 Barycentric: TEXCOORD11;
 #	endif
 #	if defined(PBR_WATER)
-	float4 ShoreState : TEXCOORD12;  // x swash tip, y its rise speed (units/s), z water surface, w bed (units above the still water; DisplaceSurface)
+	float4 ShoreState: TEXCOORD12;  // x swash tip, y swash mark (units above the still water), z waves without the swash (units above the still water), w still water level (camera-relative z; DisplaceSurface)
 #	endif
 };
 
@@ -260,7 +260,8 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 		vsout.ShoreState = surface.shore;
 #			if !defined(STENCIL)
 		vsout.WaveParam = float4(scrollWorldPos.xyz, flowDamping);
-		vsout.WaveState = float3(surface.shore.z, surface.jacobian, surface.shoreBreak);
+		float2 absXY = scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy;
+		vsout.SurfaceNoise = float2(PBRWater::TurbidityPatches(absXY), PBRWater::WindGust(absXY));
 		vsout.Barycentric = 1.0 / 3.0;
 #			endif
 	}
@@ -439,7 +440,7 @@ VS_INPUT UnpackControlPoint(VS_OUTPUT cp)
 struct HS_CONSTANT_OUTPUT
 {
 	float Edge[3] : SV_TessFactor;
-	float Inside : SV_InsideTessFactor;
+	float Inside: SV_InsideTessFactor;
 };
 #	endif
 
@@ -487,12 +488,12 @@ typedef VS_OUTPUT PS_INPUT;
 struct PS_OUTPUT
 {
 #	if defined(UNDERWATER) || defined(SIMPLE) || defined(LOD) || defined(SPECULAR)
-	float4 Lighting : SV_Target0;
+	float4 Lighting: SV_Target0;
 #	endif
 
 #	if defined(STENCIL)
-	float4 WaterMask : SV_Target0;
-	float2 MotionVector : SV_Target1;
+	float4 WaterMask: SV_Target0;
+	float2 MotionVector: SV_Target1;
 #	endif
 };
 
@@ -1300,18 +1301,15 @@ PS_OUTPUT main(PS_INPUT input)
 	PS_OUTPUT psout;
 
 #		if defined(PBR_WATER)
-	// No water inside small open hulls: the colour and stencil passes agree, so the water mask does too.
+	// Dry: the bed rises above the waves and the swash, where DisplaceSurface held the mesh just above it. Both passes
+	// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
 #			if defined(STENCIL)
-	if (PBRWater::InsideDryHull(input.WorldPosition.xyz))
+	if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
 		discard;
-#			elif !defined(LOD)
-	if (PBRWater::InsideDryHull(input.WPosition.xyz))
+#			else
+	if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
 		discard;
 #			endif
-	// Dry: the bed rises above the water surface and the swash, where DisplaceSurface held the mesh just above it. Per
-	// vertex, so both passes agree; the colour pass then finds the waterline per pixel against the ground behind it.
-	if (input.ShoreState.z < input.ShoreState.w - 0.1 * PBRWater::UnitsPerMetre)
-		discard;
 #		endif
 
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
@@ -1398,7 +1396,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal = waterData.normal;
 
 #			if defined(PBR_WATER)
-	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.ShoreState, normal, waterData.detailVariance);
+	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.ShoreState, input.SurfaceNoise.y, normal, waterData.detailVariance);
 	normal = pbrSurface.normal;
 	float pbrRoughness = pbrSurface.roughness;
 #			else
@@ -1475,12 +1473,6 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
-#				if defined(PBR_WATER) && !defined(UNDERWATER)
-	// At a low sun the crests shadow the troughs behind them (no texture reads).
-	float pbrWaveShadow = PBRWater::WaveSunShadow(pbrSurface, SunDir.xyz);
-	dirShadow *= pbrWaveShadow;
-	surfaceShadow *= pbrWaveShadow;
-#				endif
 
 	float3 dirColor;
 	float3 ambientColor;
@@ -1536,8 +1528,7 @@ PS_OUTPUT main(PS_INPUT input)
 				lightShadow = LightLimitFix::GetLocalShadow(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
 
 #					if defined(PBR_WATER)
-			const bool isPointLightLinear = light.lightFlags & LightLimitFix::LightFlags::Linear;
-			float3 lightColor = Color::PointLight(light.color.xyz, isPointLightLinear) * light.fade *
+			float3 lightColor = Color::PointLight(light.color.xyz) * light.fade *
 			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
 									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius, lightDist)) *
 			                    PBRWater::Light1.w;
@@ -1659,12 +1650,12 @@ PS_OUTPUT main(PS_INPUT input)
 	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
 	float pbrFlow = saturate((1.0 - input.WaveParam.w) / max(PBRWater::Foam1.w, 0.01));
 	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
-	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.shoreBreak, pbrFlow);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.shoreBreak, pbrFlow);
 	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
-	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(Color::Water(ShallowColor.xyz), FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
+	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
 
 	// Body colour: the water form's, shifted towards the sediment colour as sediment takes over.
-	float3 pbrBodyLinear = Color::IrradianceToLinear(diffuseOutput.refractionDiffuseColor);
+	float3 pbrBodyLinear = ColorManagement::SceneToLinear(diffuseOutput.refractionDiffuseColor);
 	pbrBodyLinear = PBRWater::BodyColour(pbrBodyLinear, PBRWater::SedimentBodyColour(pbrBodyLinear), pbrOptics);
 
 	// Transmission (Beer-Lambert along the refracted path, in linear light). What is seen through the water
@@ -1677,45 +1668,28 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 pbrTransmittance = 0.0;
 	float3 pbrBottomLight = 1.0;
 #							endif
-	float3 pbrTransmitted = Color::IrradianceToGamma(Color::IrradianceToLinear(diffuseOutput.refractionColor) * pbrTransmittance * pbrBottomLight +
-													 pbrBodyLinear * (1.0 - pbrTransmittance));
+	float3 pbrTransmitted = ColorManagement::LinearToScene(ColorManagement::SceneToLinear(diffuseOutput.refractionColor) * pbrTransmittance * pbrBottomLight +
+														   pbrBodyLinear * (1.0 - pbrTransmittance));
 
 	// Sunlight transmitted through thin wave crests, coloured by the water it crosses.
-	float pbrCrest = saturate(input.WaveState.x / max(PBRWater::Optics0.w * 0.5, 1.0));
+	float pbrCrest = saturate(input.ShoreState.z / max(PBRWater::Optics0.w * 0.5, 1.0));
 	float3 pbrSunLight, pbrSkyLight;
 	ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
 	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
 	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness) * PBRWater::Light0.y;
 
-	// Foam: shores, intersections, folding crests, breaking shore waves, wakes.
-	// Contact foam along the waterline, in world space so it never follows the camera: the terrain bed rising to
-	// the surface (shores), and whatever is seen through the surface when it stands on a bed close below (rocks,
-	// piles, feet in the surf). Something in deep water - a swimmer, a hull - is not a contact: its churn comes
-	// from the ripple simulation.
-	float pbrThickness = 1e6;
-	float pbrBand = max(PBRWater::Foam0.x, 1.0);
-	float pbrContact = exp(-max(pbrSurface.shoreDistance, 0.0) / pbrBand);
-#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
-	pbrThickness = pbrBottomDepth;
-	// How far what is seen through the water rises above the bed: the bed itself (already the shoreline band)
-	// does not count, nor does anything standing in deep water.
-	float pbrRise = pbrSurface.depth > 1e5 ? pbrBand : pbrSurface.depth - pbrThickness;
-	float pbrOnBed = smoothstep(0.3 * pbrBand, 0.8 * pbrBand, pbrRise) * saturate(1.0 - pbrRise / (3.0 * pbrBand));
-	pbrContact = max(pbrContact, exp(-pbrThickness / pbrBand) * pbrOnBed);
-#							endif
-	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface, pbrContact);
+	// Foam: breaking shore waves and the front of the swash. Nothing is drawn from what the depth buffer shows through
+	// the water: that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from below.
+	float2 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface);
 	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
 	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
-	float pbrSurfaceFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
-	float pbrWhitecap = PBRWater::Whitecaps(pbrFoamPosition, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
-	float pbrFoam = saturate(pbrSurfaceFoam + pbrWhitecap);
+	float pbrFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
 	// Bubble specks come from foam and from air churned in by anything moving through the water.
-	float pbrAeration = max(max(pbrFoamCoverage.x, pbrFoamCoverage.y), pbrFoamCoverage.z);
-	float pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrAeration, pbrSurface.footprint, PBRWater::Foam1.y);
+	float pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)
-	pbrFoamAmbient = Color::IrradianceToGamma(Color::IrradianceToLinear(pbrFoamAmbient) * skylightingDiffuse);
+	pbrFoamAmbient = ColorManagement::LinearToScene(ColorManagement::SceneToLinear(pbrFoamAmbient) * skylightingDiffuse);
 #							endif
 	// Foam lies on the moving surface: light it with the wave normal bumped by its own relief, so it
 	// shades with the slopes and catches the sun on its bubbles instead of reading as a flat decal.
@@ -1724,8 +1698,6 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 pbrFoamColor = pbrFoamDir * dirShadow * pbrFoamSun + pbrFoamAmbient * (0.55 + 0.45 * saturate(pbrFoamNormal.z));
 	// Drifting bubble specks just under the surface.
 	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.8, pbrBubbles * 0.6);
-	// Fresh whitecaps are brighter than the settled surface foam.
-	pbrFoamColor *= lerp(1.0, 1.15, saturate(pbrWhitecap / max(pbrFoam, 1e-3)));
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
@@ -1741,11 +1713,15 @@ PS_OUTPUT main(PS_INPUT input)
 		pbrBed = input.WPosition.z + viewDirection.z * pbrPathLength - input.WaveParam.z;
 #							endif
 	float pbrFilm = max(pbrSurface.height, PBRWater::SwashTop(pbrBed, input.ShoreState.x)) - pbrBed;
+#							if !defined(REFRACTIONS)
 	if (pbrFilm <= 0.0)
 		discard;
+#							endif
+	// With refractions, dry pixels show the ground instead (pbrEdge = 0): the stencil pass put them in the water mask,
+	// and ISWaterBlend composites whatever this target holds there - after a discard, an old frame's water.
 	float pbrEdge = smoothstep(0.0, 0.06 * PBRWater::UnitsPerMetre, pbrFilm);
 	pbrSunGlint *= pbrEdge;
-	pbrFoam *= smoothstep(0.0, 0.01 * PBRWater::UnitsPerMetre, pbrFilm);
+	pbrFoam *= smoothstep(0.0, 0.04 * PBRWater::UnitsPerMetre, pbrFilm);
 	// Wet foam keeps part of the water's glint.
 	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + pbrSunGlint * (1.0 - 0.7 * pbrFoam);
 #						else
@@ -1803,19 +1779,28 @@ PS_OUTPUT main(PS_INPUT input)
 
 #						if defined(PBR_WATER)
 	float3 finalColor = finalColorPreFog;
+	// Debug views go through the same per-pixel waterline as the water: drawn over the whole coverage, they showed the
+	// coarser, triangle-shaped region the passes keep (where the ground shows) as hard corners that are never on screen.
+	if (PBRWater::Draw0.z > 0.5)
+		finalColor = PBRWater::DebugView((uint)PBRWater::Draw0.z, pbrSurface, pbrFoam, input.ShoreState.z);
 #							if defined(REFRACTIONS)
 	// The thinnest water shows the ground it covers (as it is, already lit and fogged).
 	float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
 	finalColor = lerp(pbrGround, finalColor, pbrEdge);
+	// The foam the drained swash left on the sand, where the ground shows: it stays put and only slowly churns.
+	[branch] if (pbrSurface.residueFoam > 0.002)
+	{
+		float pbrResidue = PBRWater::FoamLace(input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy, saturate(pbrSurface.residueFoam * PBRWater::Shore1.y * PBRWater::Foam0.z),
+			pbrSurface.footprint, PBRWater::Foam1.y * 0.15);
+		finalColor = lerp(finalColor, pbrFoamColor, pbrResidue * (1.0 - pbrEdge) * 0.9);
+	}
 #							endif
-	if (PBRWater::Draw0.z > 0.5)
-		finalColor = PBRWater::DebugView((uint)PBRWater::Draw0.z, pbrSurface, pbrFoam, input.WaveState);
 #						else
 	float3 refractionColor = diffuseOutput.refractionColor;
 
 	float fogFactor = min(FogParam.w, pow(saturate(-diffuseOutput.depth * FogParam.y - FogParam.x), FogParam.z));
 	float3 fogColor = lerp(ColorManagement::SRGBToWorking(FogNearColor.xyz), ColorManagement::SRGBToWorking(FogFarColor.xyz), fogFactor);
-#						if defined(EXP_HEIGHT_FOG)
+#							if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled && ExponentialHeightFog::ShouldDisableVanillaFog()) {
 		fogFactor = 0;
 	}
@@ -1824,7 +1809,7 @@ PS_OUTPUT main(PS_INPUT input)
 	if (SharedData::iblSettings.EnableIBL) {
 		fogColor = ImageBasedLighting::GetFogIBLColor(fogColor);
 	}
-#						endif
+#							endif
 	refractionColor = lerp(refractionColor, fogColor, fogFactor);
 
 	float3 finalColor = lerp(refractionColor, finalColorPreFog, waterOpacity);
@@ -1855,6 +1840,11 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal =
 		normalize(cross(ddx_coarse(input.WorldPosition.xyz), ddy_coarse(input.WorldPosition.xyz)));
 	float VdotN = dot(viewDirection, normal);
+#			if defined(PBR_WATER)
+	// The mask also marks the water for ISWaterBlend and the upscaler: on a wave face seen edge-on or from behind
+	// (the coarse derivatives span a crest) it rounded to 0 in the UNORM target and punched 2x2 holes in the water.
+	VdotN = max(abs(VdotN), 2.0 / 255.0);
+#			endif
 	psout.WaterMask = float4(0, 0, VdotN, 0);
 
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.PreviousWorldPosition);

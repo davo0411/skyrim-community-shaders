@@ -1,6 +1,8 @@
 #ifndef __PBR_WATER_OCEAN_SPECTRUM_HLSLI__
 #define __PBR_WATER_OCEAN_SPECTRUM_HLSLI__
 
+#include "Common/Math.hlsli"
+
 // ============================================================================
 // PBR Water - FFT ocean spectrum, shared by the ocean compute shaders.
 //
@@ -15,16 +17,13 @@
 
 cbuffer OceanCB : register(b0)
 {
-	float4 Wind;         // xy wind direction, z open-sea peak omega (rad/s), w height scale
-	float4 Spread;       // x Mitsuyasu exponent at the peak, y choppiness (lambda), z swell alpha, w swell peak omega (rad/s)
-	float4 Swell;        // xy swell direction, z gravity (m/s^2), w omega0 = 2 pi / loop period (rad/s)
-	float4 Time;         // x loop fraction (0..1), y fft size, z units per metre, w unused
-	float4 Band[4];      // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
-	float4 Foam0;        // x dt (s), y foam trail retained this step, zw unused
-	float4 FoamBand[4];  // x Jacobian below which the band's own crests break, yz foam drift this step (uv), w 1 / soft edge
+	float4 Wind;     // xy wind direction, z open-sea peak omega (rad/s), w height scale
+	float4 Spread;   // x Mitsuyasu exponent at the peak, y choppiness (lambda), z swell alpha, w swell peak omega (rad/s)
+	float4 Swell;    // xy swell direction, z gravity (m/s^2), w omega0 = 2 pi / loop period (rad/s)
+	float4 Time;     // x loop fraction (0..1), y fft size, z units per metre, w unused
+	float4 Band[4];  // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
 };
 
-static const float OceanPi = 3.14159265;
 static const float OceanJonswapAlpha = 0.0081;
 static const float OceanJonswapGamma = 3.3;
 static const float OceanSwellGamma = 7.0;
@@ -119,7 +118,7 @@ float2 OceanNoise(int m, int n, uint cascade)
 	float u2 = (float)(h2 >> 8) * (1.0 / 16777216.0);
 	float r = sqrt(-2.0 * log(u1)) * 0.70710678;
 	float s, c;
-	sincos(6.2831853 * u2, s, c);
+	sincos(Math::TAU * u2, s, c);
 	return float2(r * c, r * s);
 }
 

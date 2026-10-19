@@ -823,9 +823,6 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 
 #	if defined(PBR_WATER)
 #		include "PBRWater/ShoreWetness.hlsli"
-#		if !defined(SKINNED) && !defined(SKIN) && !defined(HAIR) && !defined(EYE) && !defined(FACEGEN) && !defined(FACEGEN_RGB_TINT)
-#			define PBRW_SHORE_FOAM
-#		endif
 #	endif
 
 #	if defined(EYE)
@@ -2178,14 +2175,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float waterHeight = waterData.w;
 
 #	if defined(PBR_WATER)
-	// PBR Water: the water at the shore rises and falls with the waves, and leaves wetness and foam where it reached.
+	// PBR Water: the water at the shore rises and falls with the waves, and leaves the shore wet where it reached.
 	PBRWaterShore::Shore shoreWater = PBRWaterShore::Sample(input.WorldPosition.xyz, waterHeight);
 	float stillWaterHeight = waterHeight;
 	waterHeight += shoreWater.surface;
 	waterData.w = waterHeight;
-#	endif
-#	if defined(PBRW_SHORE_FOAM)
-	float shoreFoam = PBRWaterShore::Foam(shoreWater, input.WorldPosition.xyz, worldNormal.z, length(fwidth(input.WorldPosition.xy)));
 #	endif
 
 	float waterRoughnessSpecular = 1;
@@ -2302,10 +2296,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// sharply without this floor.
 	static const float wetnessMinPuddleRoughness = 0.05;
 	waterRoughnessSpecular = max(saturate(1.0 - wetnessGlossinessSpecular), wetnessMinPuddleRoughness);
-#		if defined(PBRW_SHORE_FOAM)
-	// Foam lying on the wet sand is matte.
-	waterRoughnessSpecular = lerp(waterRoughnessSpecular, 1.0, shoreFoam);
-#		endif
 #	endif
 
 	float3 dirLightColor = Color::DirectionalLight(DirLightColor.xyz);
@@ -2801,11 +2791,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float wetnessDarkeningAmount = porosity * wetnessGlossinessAlbedo;
 	material.BaseColor = lerp(material.BaseColor, pow(abs(material.BaseColor), 1.0 + wetnessDarkeningAmount), 0.5);
 #		endif
-#	endif
-
-#	if defined(PBRW_SHORE_FOAM)
-	// The foam the backwash left on the sand.
-	material.BaseColor = lerp(material.BaseColor, Color::Diffuse(PBRWaterShore::FoamAlbedo), shoreFoam);
 #	endif
 
 	float4 color = 0;

@@ -68,15 +68,6 @@ void OceanSimulation::SetupResources()
 {
 	constants = std::make_unique<ConstantBuffer>(ConstantBufferDesc<OceanCB>(), "PBRWater::OceanCB");
 
-	D3D11_SAMPLER_DESC samplerDesc{};
-	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-	samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-	samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-	samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&samplerDesc, wrapSampler.put()));
-	Util::SetResourceName(wrapSampler.get(), "PBRWater::OceanWrapSampler");
-
 	CreateTextures(256);
 	CompileShaders();
 }
@@ -95,8 +86,6 @@ void OceanSimulation::CreateTextures(uint32_t size)
 	surface = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanSurface");
 	// Same description as the displacement so the whole mip chain can be copied in one call.
 	previousDisplacement = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanPreviousDisplacement");
-	for (uint32_t i = 0; i < 2; ++i)
-		foam[i] = CreateArray(size, Cascades, DXGI_FORMAT_R16_FLOAT, 1, true, i == 0 ? "PBRWater::OceanFoam0" : "PBRWater::OceanFoam1");
 	Reset();
 }
 
@@ -113,7 +102,7 @@ void OceanSimulation::CompileShaders()
 	fftRowsCS = compile(L"Data\\Shaders\\PBRWater\\OceanFFTCS.hlsl", { { "FFT_SIZE", size.c_str() }, { "FFT_LOG2", log2.c_str() } });
 	fftColumnsCS = compile(L"Data\\Shaders\\PBRWater\\OceanFFTCS.hlsl", { { "FFT_SIZE", size.c_str() }, { "FFT_LOG2", log2.c_str() }, { "VERTICAL", "" } });
 	assembleCS = compile(L"Data\\Shaders\\PBRWater\\OceanAssembleCS.hlsl", {});
-	ready = spectrumCS && fftRowsCS && fftColumnsCS && assembleCS && displacement && constants && wrapSampler;
+	ready = spectrumCS && fftRowsCS && fftColumnsCS && assembleCS && displacement && constants;
 	if (!ready)
 		logger::warn("[PBR Water] FFT ocean shaders failed to compile; open water stays flat");
 }
@@ -127,15 +116,9 @@ void OceanSimulation::ClearShaderCache()
 void OceanSimulation::Reset()
 {
 	hasHistory = false;
-	auto context = globals::d3d::context;
-	const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	for (auto& f : foam) {
-		if (f)
-			context->ClearUnorderedAccessViewFloat(f->uav.get(), zero);
-	}
 }
 
-void OceanSimulation::Update(const WaveSnapshot& snapshot, float dt, const Settings& settings)
+void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& settings)
 {
 	if (ValidResolution(settings.resolution) != resolution) {
 		CreateTextures(settings.resolution);
@@ -161,17 +144,9 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, float dt, const Setti
 		loop += 1.0;
 	cb.Time = { static_cast<float>(loop), static_cast<float>(resolution), static_cast<float>(UnitsPerMetre), 0.0f };
 
-	const float step = std::max(dt, 0.0f);
-	const float retained = settings.foamTrail > 0.0f ? std::exp(-step / settings.foamTrail) : 0.0f;
-	cb.Foam0 = { step, retained, 0.0f, 0.0f };
 	for (uint32_t c = 0; c < Cascades; ++c) {
 		const CascadeBand& band = ocean.cascades[c];
 		cb.Band[c] = { band.length, band.kLow, band.kHigh, band.kFadeStart };
-		// Each cascade's own breaking crests leave the trail; the shaders keep only the bands that carry the
-		// dominant waves at a location, so short chop never sprinkles the sea with flecks of foam.
-		const auto& breaking = settings.breaking[c];
-		const float tile = band.length * static_cast<float>(UnitsPerMetre);
-		cb.FoamBand[c] = { breaking.threshold, snapshot.foamDriftVelocity[0] * step / tile, snapshot.foamDriftVelocity[1] * step / tile, breaking.invWidth };
 	}
 	constants->Update(cb);
 
@@ -181,8 +156,8 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, float dt, const Setti
 
 	ID3D11Buffer* cbs[1] = { constants->CB() };
 	context->CSSetConstantBuffers(0, 1, cbs);
-	ID3D11ShaderResourceView* nullSrvs[2] = { nullptr, nullptr };
-	ID3D11UnorderedAccessView* nullUavs[4] = { nullptr, nullptr, nullptr, nullptr };
+	ID3D11ShaderResourceView* nullSrvs[1] = { nullptr };
+	ID3D11UnorderedAccessView* nullUavs[3] = { nullptr, nullptr, nullptr };
 	const uint32_t groups = (resolution + 7) / 8;
 
 	// 1. Spectrum at the current time.
@@ -208,26 +183,20 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, float dt, const Setti
 	fft(fftRowsCS.get(), *spectrum[0], *spectrum[1]);
 	fft(fftColumnsCS.get(), *spectrum[1], *spectrum[0]);
 
-	// 3. Unpack, foam trails.
+	// 3. Unpack.
 	{
-		const uint32_t next = foamIndex ^ 1;
-		ID3D11ShaderResourceView* srvs[2] = { spectrum[0]->srv.get(), foam[foamIndex]->srv.get() };
-		ID3D11UnorderedAccessView* uavs[4] = { displacement->uav.get(), derivatives->uav.get(), surface->uav.get(), foam[next]->uav.get() };
-		ID3D11SamplerState* sampler = wrapSampler.get();
-		context->CSSetShaderResources(0, 2, srvs);
-		context->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
-		context->CSSetSamplers(0, 1, &sampler);
+		ID3D11ShaderResourceView* srv = spectrum[0]->srv.get();
+		ID3D11UnorderedAccessView* uavs[3] = { displacement->uav.get(), derivatives->uav.get(), surface->uav.get() };
+		context->CSSetShaderResources(0, 1, &srv);
+		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
 		context->CSSetShader(assembleCS.get(), nullptr, 0);
 		context->Dispatch(groups, groups, Cascades);
-		context->CSSetShaderResources(0, 2, nullSrvs);
-		context->CSSetUnorderedAccessViews(0, 4, nullUavs, nullptr);
-		foamIndex = next;
+		context->CSSetShaderResources(0, 1, nullSrvs);
+		context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
 	}
 
 	ID3D11Buffer* nullCb = nullptr;
-	ID3D11SamplerState* nullSampler = nullptr;
 	context->CSSetConstantBuffers(0, 1, &nullCb);
-	context->CSSetSamplers(0, 1, &nullSampler);
 	context->CSSetShader(nullptr, nullptr, 0);
 
 	context->GenerateMips(displacement->srv.get());

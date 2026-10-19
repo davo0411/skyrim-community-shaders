@@ -4,27 +4,16 @@
 //   Displacement : xyz Lagrangian displacement (units), w dDx/dy
 //   Derivatives  : xy height slopes dDz/dx, dDz/dy; zw compression dDx/dx, dDy/dy
 //   Surface      : xy squared slopes (LEAN moments: mip-filtered, they keep the variance of the slopes a
-//                  pixel averages away), z crest foam trail, w |laplacian of the height| (1/unit, tessellation)
-//
-// Crest foam: where one of the band's own crests breaks it leaves foam that thins over the trail time and
-// drifts with the surface current. A crest breaks when it compresses past the band's threshold, set on the
-// CPU from the share of its waves that break (Banner, Babanin & Young 2000, from the band's significant
-// steepness): only the most compressed fronts of the steepest crests. The shaders keep a band's trail only
-// where it carries the dominant waves, so whitecaps sit on the big breakers and short chop never sprinkles
-// the sea with flecks. The foam lives in the cascade's tile, i.e. in Lagrangian coordinates, so it rides the
-// waves it came from.
+//                  pixel averages away), z unused, w |laplacian of the height| (1/unit, tessellation)
 // ============================================================================
 
 #include "PBRWater/OceanSpectrum.hlsli"
 
-Texture2DArray<float4> Spatial : register(t0);      // after the inverse FFT, two slices per cascade
-Texture2DArray<float> FoamPrevious : register(t1);  // trail of the previous frame
-SamplerState WrapSampler : register(s0);
+Texture2DArray<float4> Spatial : register(t0);  // after the inverse FFT, two slices per cascade
 
 RWTexture2DArray<float4> Displacement : register(u0);
 RWTexture2DArray<float4> Derivatives : register(u1);
 RWTexture2DArray<float4> Surface : register(u2);
-RWTexture2DArray<float> FoamCurrent : register(u3);
 
 float2 SlopesAt(int2 p, uint size, uint cascade)
 {
@@ -45,7 +34,6 @@ float2 SlopesAt(int2 p, uint size, uint cascade)
 	float shear = first.w;
 	float2 slopes = second.xy;
 	float2 compression = second.zw;
-	float jacobian = (1.0 + compression.x) * (1.0 + compression.y) - shear * shear;
 
 	// Laplacian of the height from the neighbouring slopes (periodic tile).
 	float texel = Band[cascade].x * unitsPerMetre / (float)size;
@@ -54,14 +42,7 @@ float2 SlopesAt(int2 p, uint size, uint cascade)
 	float dyy = SlopesAt(p + int2(0, 1), size, cascade).y - SlopesAt(p - int2(0, 1), size, cascade).y;
 	float curvature = abs(dxx + dyy) / (2.0 * texel);
 
-	// This band's crest breaking here: compressed past its threshold, with a soft edge.
-	float folding = saturate((FoamBand[cascade].x - jacobian) * FoamBand[cascade].w);
-	float2 uv = (float2(id.xy) + 0.5) / (float)size - FoamBand[cascade].yz;
-	float trail = FoamPrevious.SampleLevel(WrapSampler, float3(uv, cascade), 0) * Foam0.y;
-	float foam = saturate(max(trail, folding));
-
-	FoamCurrent[id] = foam;
 	Displacement[id] = float4(displacement, shear);
 	Derivatives[id] = float4(slopes, compression);
-	Surface[id] = float4(slopes * slopes, foam, curvature);
+	Surface[id] = float4(slopes * slopes, 0.0, curvature);
 }

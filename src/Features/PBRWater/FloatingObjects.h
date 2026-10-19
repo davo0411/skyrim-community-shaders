@@ -34,10 +34,6 @@
  * or just under the surface move with the orbital motion of the water around them, which fades with depth,
  * and are kept under the surface when a trough passes over them.
  *
- * Small hulls (rowboats, rafts) and boats lying in the shallows near the camera publish their shape and where
- * it is this frame, so the water stays out of a hull until it rises over the gunwale (HullMaskAtlas). The shape
- * is the hull's own render meshes in its frame, captured once: the hull is rigid and only moves as a whole.
- *
  * Nothing is written to the save game: the references keep their placed positions, collision becomes
  * keyframed through the 3D only, and every object is put back in place before the game saves.
  */
@@ -60,48 +56,12 @@ public:
 		uint32_t floaters = 0;  ///< hulls
 		uint32_t parts = 0;     ///< references moving with them (merged hull parts and attached objects)
 		uint32_t carried = 0;   ///< actors on board this frame
+		uint32_t cargo = 0;     ///< loose things (clutter, dropped items, bodies) carried on a deck this frame
 		uint32_t riders = 0;    ///< small things carried by the water (fish, plants, debris)
 	};
 
-	/** @brief One render piece of a hull: an engine triangle mesh and where it sits in the hull's frame. */
-	struct HullPiece
-	{
-		winrt::com_ptr<ID3D11Buffer> vertices;  ///< the engine's own buffers, held for the render thread
-		winrt::com_ptr<ID3D11Buffer> indices;   ///< 16-bit triangle list
-		uint32_t triangles = 0;
-		uint32_t stride = 0;          ///< bytes between vertices
-		uint32_t positionOffset = 0;  ///< bytes from a vertex to its position
-		bool halfPositions = false;   ///< the position is stored as half floats rather than full precision
-		float meshToHull[3][4] = {};  ///< rows of the affine transform from mesh space to the hull frame
-	};
-
-	/**
-	 * @brief A hull's rigid shape: its render pieces in the hull frame (x along the hull, y across it, z up) and
-	 * the extent the water shader's maps cover. Immutable once published.
-	 */
-	struct HullShape
-	{
-		std::vector<HullPiece> pieces;
-		float minX = 0.0f, minY = 0.0f;  ///< extent of the maps in the hull frame, with a margin of open water (units)
-		float maxX = 0.0f, maxY = 0.0f;
-		float maxZ = 0.0f;  ///< top of the hull (hull frame z, units)
-	};
-
-	/** @brief A hull whose inside stays dry: its shape and its frame this frame. */
-	struct HullMask
-	{
-		std::shared_ptr<const HullShape> shape;
-		RE::NiPoint3 origin;  ///< hull frame origin (absolute units)
-		RE::NiPoint3 axisX;   ///< hull frame axes in the world (unit); z is their cross product
-		RE::NiPoint3 axisY;
-	};
-	static constexpr uint32_t MaxHullMasks = 8;
-
 	/** @brief Main thread, once per frame after the wave snapshot is published. */
 	void Update(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, float dt);
-
-	/** @brief Any thread: the hulls near the camera whose insides stay dry, nearest first (at most MaxHullMasks). */
-	std::shared_ptr<const std::vector<HullMask>> GetHullMasks() const { return hullMasks.load(std::memory_order_acquire); }
 
 	/** @brief Any thread: what the detection made of the reference selected in the console (debug view). */
 	std::string GetSelectionReport() const
@@ -162,20 +122,6 @@ private:
 		float loadSink = 0.0f;  ///< from the actors on board (units, rad)
 		float loadPitch = 0.0f;
 		float loadRoll = 0.0f;
-
-		std::shared_ptr<const HullShape> shape;  ///< captured once it is among the hulls near the camera
-		size_t shapeParts = 0;                   ///< parts.size() when it was captured
-	};
-
-	/** @brief A boat lying in the shallows: it never moves, but the waves washing round it must not fill it. */
-	struct GroundedBoat
-	{
-		RE::ObjectRefHandle ref;
-		RE::FormID id = 0;
-		const RE::NiAVObject* node = nullptr;  ///< the 3D it was found with
-		RE::NiPoint3 origin;                   ///< centre of its bounds
-		RE::NiMatrix3 frame;                   ///< columns: horizontal axes along and across it, up
-		std::shared_ptr<const HullShape> shape;
 	};
 
 	/** @brief A small thing carried by the water around it. */
@@ -195,12 +141,12 @@ private:
 
 	void Scan(const Settings& settings, const PBRWaterModel::WaveSnapshot& snapshot);
 	void UpdateRiders(const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, const RE::NiPoint3& camera);
-	void PublishHullMasks(const RE::NiPoint3& camera);
 	void Reject(RE::FormID id, const char* reason);
 	/** @brief Main thread: what the detection made of a reference. */
 	std::string Describe(const RE::TESObjectREFR* ref) const;
 	void UpdateFloater(Floater& floater, const PBRWaterModel::WaveSnapshot& snapshot, const Settings& settings, float dt, const RE::NiPoint3& camera);
 	void CarryActors(std::vector<Floater*>& moved, const std::vector<RE::Actor*>& actors, const std::vector<RE::NiPoint3>& previousOffsets, const std::vector<RE::NiMatrix3>& previousRotations);
+	void CarryCargo(const std::vector<Floater*>& moved, const std::vector<RE::NiPoint3>& previousOffsets, const std::vector<RE::NiMatrix3>& previousRotations);
 	void Release(Floater& floater);
 	static bool IsIntact(const Floater& floater);
 	void LoadBobbingFrameworkExclusions();
@@ -211,8 +157,7 @@ private:
 	std::unordered_set<RE::FormID> rejected;              ///< examined, not floating
 	std::unordered_map<RE::FormID, const char*> reasons;  ///< why a reference does not float (debug view)
 	std::unordered_map<RE::FormID, Rider> riders;         ///< by form ID
-	std::vector<GroundedBoat> groundedBoats;              ///< their insides stay dry too
-	std::atomic<std::shared_ptr<const std::vector<HullMask>>> hullMasks;
+	std::vector<RE::ObjectRefHandle> cargo;               ///< loose things lying on the hulls near the player (found by each scan)
 	mutable std::mutex reportMutex;
 	std::string selectionReport;
 	std::unordered_set<RE::FormID> bobbingExcluded;  ///< animated by Bobbing Framework

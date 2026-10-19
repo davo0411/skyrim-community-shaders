@@ -1,6 +1,7 @@
 #include "RippleSimulation.h"
 
 #include "Utils/D3D.h"
+#include "WaveModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -152,7 +153,7 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	sourceBuffer->Update(gpuSources.data(), sizeof(gpuSources));
 
 	// Fixed time step for a stable explicit integrator; C^2 = (c dt / dx)^2 must stay <= 0.5 in 2D.
-	const float speedUnits = settings.waveSpeed * 70.0f;
+	const float speedUnits = settings.waveSpeed * static_cast<float>(PBRWaterModel::UnitsPerMetre);
 	SimCB base{};
 	base.gridSize = GridSize;
 	base.waveSpeed2 = std::min(std::pow(speedUnits * FixedStep / texelSize, 2.0f), 0.45f);

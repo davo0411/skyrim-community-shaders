@@ -5,24 +5,20 @@
 // PBR Water - the shore as the waves leave it, for the lit terrain and objects (Lighting.hlsl).
 //
 // ShoreSimCS keeps, on a camera-centred grid, the highest water each point saw lately (draining slowly as the
-// sand dries), the foam the backwash left on the sand and the height of the water surface (waves and swash).
-// Here the lit surfaces read it: whatever the waves reached is wet (Wetness Effects), the foam lies on the sand
-// in rafts that break up as their bubbles burst, and the caustics and the underwater wetness follow the waves
-// instead of the flat still water level.
+// sand dries) and the height of the water surface (waves and swash). Here the lit surfaces read it: whatever the
+// waves reached is wet (Wetness Effects), and the caustics and the underwater wetness follow the waves instead of
+// the flat still water level.
 // ============================================================================
-
-#include "PBRWater/Noise.hlsli"
 
 namespace PBRWaterShore
 {
-	Texture2D<float4> SwashWetTexture : register(t123);  // x wet level, y foam the backwash left, z its deposit, w water surface (units above the still water)
+	Texture2D<float4> SwashWetTexture : register(t123);  // x wet level, yz unused, w water surface (units above the still water)
 
 	struct Shore
 	{
 		bool valid;
 		float weight;    ///< 0..1 fades out towards the edge of the grid
 		float wetLevel;  ///< highest water lately, draining as the sand dries (units above the still water)
-		float foam;      ///< 0..1 foam the backwash left here
 		float surface;   ///< water surface above the still water (units)
 	};
 
@@ -50,7 +46,6 @@ namespace PBRWaterShore
 		s.valid = false;
 		s.weight = 0.0;
 		s.wetLevel = 0.0;
-		s.foam = 0.0;
 		s.surface = 0.0;
 
 		const float4 grid = SharedData::pbrWaterSettings.SwashGrid;
@@ -63,7 +58,6 @@ namespace PBRWaterShore
 			s.valid = true;
 			s.weight = e.x * e.y;
 			s.wetLevel = wet.x;
-			s.foam = wet.y * s.weight;
 			s.surface = wet.w * s.weight;
 		}
 		return s;
@@ -75,27 +69,6 @@ namespace PBRWaterShore
 		float above = positionZ - (stillWater + s.wetLevel);
 		float wet = saturate(1.0 - above / max(range, 1.0)) * s.weight;
 		return s.valid && SharedData::pbrWaterSettings.Wetness.x > 0.5 ? wet : 0.0;
-	}
-
-	/// Albedo of sea foam (texture value): fresh, dense foam reflects ~55% of visible light (Whitlock et al. 1982).
-	static const float3 FoamAlbedo = 0.8;
-
-	/**
-	 * The foam lying on an upward-facing surface, 0..1: the rafts of bubbles the backwash leaves, breaking up as they age
-	 * (PBRWater::BeachFoamPattern).
-	 * @param footprint world size of a pixel (anti-aliasing)
-	 */
-	float Foam(Shore s, float3 positionWS, float normalZ, float footprint)
-	{
-		float amount = s.foam * SharedData::pbrWaterSettings.Wetness.y * saturate(normalZ * 2.5 - 1.0);
-		float foam = 0.0;
-		[branch] if (amount > 0.002)
-		{
-			float scale = max(SharedData::pbrWaterSettings.Wetness.z, 1.0);
-			float2 q = (positionWS.xy + FrameBuffer::CameraPosAdjust.xy) / scale;
-			foam = PBRWater::BeachFoamPattern(q, amount, footprint / scale);
-		}
-		return foam;
 	}
 }
 
