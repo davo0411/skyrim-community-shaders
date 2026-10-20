@@ -265,7 +265,66 @@ sets how fine an edge must be for a sub-pixel chord error. Edges drop to 1 where
 sea is calm, and patches outside the (displacement-padded) frustum are culled. The domain shader reads each
 cascade from the mip whose texels match the vertex spacing the tessellation aims for at that distance
 (`TessellatedSpacing`, a function of position only, so neighbouring patches agree and shared edges never
-crack), so waves the mesh cannot carry are averaged out instead of aliasing.
+crack), so waves the mesh cannot carry are averaged out instead of aliasing. The curvature term never asks for
+triangles smaller than the target size: below about 8 x 8 pixels a triangle wastes the rasterizer's tiles and the
+pixel shader's 2 x 2 quads (Fatahalian et al. 2010), more than the extra silhouette detail gains.
+
+### Tessellation cost
+
+The domain shader runs the whole vertex program on every generated vertex, in both the stencil and the colour pass,
+so its cost is per generated vertex; the hull shader runs once per patch, and the patches are the water meshes' own
+triangles. Measured with `d3dcompiler_47` (static instruction slots of the domain shader, colour / stencil pass, and
+its texture operations):
+
+| Change                                                                                                                            | Colour    | Stencil   |
+| --------------------------------------------------------------------------------------------------------------------------------- | --------- | --------- |
+| Before                                                                                                                            | 2815 (46) | 3001 (51) |
+| The swash's wave groups: 3 value noises per evaluation instead of 12 (`ShoreGroupSlices`; the stencil pass evaluates it twice)    | -441      | -753      |
+| The exact terrain and its gradient from one 4 x 4 block of texels (`BilinearLoadGrad`: 12 loads and 1 `GetDimensions`, not 20, 5) | -45 (-8)  | -46 (-8)  |
+| Surface noise baked once per frame (`SurfaceNoiseCS`, t126): one bilinear lookup instead of ~30 value noises (433 slots)          | (433)     | -         |
+| After                                                                                                                             | 2343 (39) | 2202 (43) |
+
+The noise's direct evaluation stays as the fallback beyond the bake, so it still counts statically; near the camera,
+where the tessellator puts its vertices, the colour pass runs 433 slots fewer than the table shows. The bake is a
+128^2 grid around the camera with four texels across a cell of the noise's finest octave (the gusts' second octave,
+half Gust Size; the sediment patches' third, a quarter of Patch Size): 5 m texels at the defaults, so it covers 630 m,
+the tessellated water. Its bilinear lookup is within 0.7 % rms of the direct evaluation for the gusts and 0.2 % for
+the sediment patches (at most 4 % of their range). It costs what 16k vertices did, so it pays for itself whenever
+the tessellator generates more than that per frame. The terrain and swash changes give the same values as before (to
+rounding).
+
+What the research says, and what it means here:
+
+-   **Small triangles are the expensive part.** Rasterizers walk 8 x 8 pixel tiles and shade 2 x 2 quads, so
+    triangles much below 8 pixels a side waste both (Fatahalian et al., _Reducing Shading on GPUs using
+    Quad-Fragment Merging_, SIGGRAPH 2010). Hence the target-size floor on the curvature term above.
+-   **Moderate factors.** AMD's GCN guidance capped tessellation factors at 15 (Unity HDRP still applies it on GCN
+    consoles, `MAX_TESSELLATION_FACTORS 15`); NVIDIA and AMD's GDC 2010 "Tessellation Performance" talk advises
+    tessellating only where it improves the image, drawing untessellated where the factor would be ~1, and culling
+    patches outside the frustum by setting their factors to 0 (~30% in their example). PBR Water does all of these
+    except the cap.
+-   **Per-vertex work belongs in the vertex shader.** Unity HDRP's tessellation computes every per-vertex attribute
+    in the vertex shader and only interpolates them in the domain shader, which re-evaluates displacement alone; the
+    vertex shader's results are shared through the post-transform cache, the hull shader's per-edge work is not.
+-   **Shipped ocean renderers do not use hardware tessellation.** Crest renders a camera-centred LOD mesh
+    (CDClipmaps: clipmaps with CDLOD's continuous morphing, Strugar 2010; Losasso & Hoppe 2004), GodotOceanWaves a
+    camera-snapped clipmap mesh (329k vertices at high quality) whose vertex shader only samples the displacement
+    cascades, the projected grid spaces vertices evenly on screen instead of in the world (Johanson 2004), and Unreal's
+    water plugin draws instanced tiles from a quadtree with concentric LODs (`FWaterQuadTree`); Unreal 5 removed
+    hardware tessellation altogether.
+
+**The base meshes limit the tessellator.** The tessellator subdivides each mesh triangle uniformly at the density
+of its densest edge, and caps that at 64 segments. Unified Water's distant tiles are a single quad (`WaterMesh.nif`: 4
+vertices, scaled to 1-n cells); if the loaded cells' water is as coarse (Debug shows the tessellated draws' patch
+count and vertex spacing each frame), every patch is half a cell, 29 x 58 m: the half under the camera is subdivided
+as finely everywhere as its nearest edge needs, so most of its vertices land where they are not needed, and next to the
+camera 64 segments are still 0.9 m apart. The bigger saving from here is structural, not in the shaders:
+
+1. Give the tessellator small patches: a 16 x 16 grid per cell (3.6 m patches; the untessellated path gets waves too)
+   with the edge factors computed per vertex in the vertex shader (once per vertex instead of twice per edge) and
+   culled per patch, including patches under the terrain.
+2. Or follow Crest and GodotOceanWaves: replace the cells' water with one camera-centred CDLOD mesh with a cheap
+   vertex program, and no hardware tessellation.
 
 ## Shading
 
@@ -279,8 +338,9 @@ crack), so waves the mesh cannot carry are averaged out instead of aliasing.
     length measured from the depth buffer to the _displaced_ surface. Reflections no longer vanish in
     shallow water.
 -   Wave subsurface scattering (Atlas, GDC 2019).
--   Drifting sediment patches and wind gusts are tens of metres across, so the vertices evaluate their noise
-    (`TurbidityPatches`, `WindGust`) and the pixels interpolate it (`SurfaceNoise`).
+-   Drifting sediment patches and wind gusts are tens of metres across: their noise (`TurbidityPatches`, `WindGust`)
+    is baked once per frame around the camera (`SurfaceNoiseCS`), the vertices read it (`PBRWater::SurfaceNoise`,
+    evaluating it themselves beyond the bake) and the pixels interpolate it.
 -   Foam is a _coverage_ field turned into a pattern by the "black point fade" of Crest (wave-harmonic/crest, MIT;
     also Sea of Thieves): the foam texture is thresholded at `1 - coverage`, so as coverage drops the bubbles in the
     foam grow and merge, and dense foam thins into lace and then specks instead of fading uniformly
@@ -404,9 +464,10 @@ configured: no JSON, no patched meshes, no plugin records.
 
 -   Settings > PBR Water > Debug: wireframe overlay / wireframe only, and debug views (shore field: train share / room / exposure, wave direction, normals, foam,
     depth/shore, crest compression, roughness, wave height, fetch), plus live sea-state values and whether
-    the GPU ocean and the gameplay mirror are running.
+    the GPU ocean and the gameplay mirror are running, and last frame's water draws: how many were tessellated, with
+    how many patches (the meshes' triangles) and what vertex spacing.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
--   The GPU work is wrapped in perf events (`PBR Water - Simulation`, `- Ocean FFT`, `- Ripples`, `- Swash`,
+-   The GPU work is wrapped in perf events (`PBR Water - Simulation`, `- Ocean FFT`, `- Ripples`, `- Surface Noise`, `- Swash`,
     `- Skylighting Occluder`, `- Draw` per water draw), so RenderDoc, Nsight and the devbench
     `communityshaders.nvperf` ranges time each pass on its own.
 -   Shader changes can be A/B timed on one captured frame: swap the water VS/PS in a RenderDoc replay and read
@@ -509,6 +570,12 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Hasselmann et al. (1973) JONSWAP; Pierson & Moskowitz (1964); Monahan & O'Muircheartaigh (1980) whitecaps
 -   Olano & Baker, _LEAN Mapping_ (2010)
 -   Ang, _The Technical Art of Sea of Thieves_ (SIGGRAPH 2018 Talks) - foam and scattering breakdown
+-   Fatahalian et al., _Reducing Shading on GPUs using Quad-Fragment Merging_ (SIGGRAPH 2010) - small-triangle cost
+-   NVIDIA & AMD, _Tessellation Performance_ (GDC 2010); Cantlay, _DirectX 11 Terrain Tessellation_ (NVIDIA 2011) -
+    factor budgets, patch culling
+-   Unity HDRP `TessellationShare.hlsl` - the GCN factor cap, per-vertex attributes interpolated in the domain shader
+-   Johanson, _Real-time Water Rendering: Introducing the Projected Grid Concept_ (Lund 2004); Strugar, _CDLOD_
+    (2010); Losasso & Hoppe, _Geometry Clipmaps_ (SIGGRAPH 2004) - ocean mesh LOD without hardware tessellation
 -   Crest Ocean System (wave-harmonic/crest, MIT) - foam texture black-point fade, saturated foam growth, bubble layer
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Atlas (GDC 2019, above) - subsurface term

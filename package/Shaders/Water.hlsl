@@ -261,7 +261,7 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 #			if !defined(STENCIL)
 		vsout.WaveParam = float4(scrollWorldPos.xyz, flowDamping);
 		float2 absXY = scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy;
-		vsout.SurfaceNoise = float2(PBRWater::TurbidityPatches(absXY), PBRWater::WindGust(absXY));
+		vsout.SurfaceNoise = PBRWater::SurfaceNoise(absXY);
 		vsout.Barycentric = 1.0 / 3.0;
 #			endif
 	}
