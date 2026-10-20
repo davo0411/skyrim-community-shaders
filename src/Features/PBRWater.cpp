@@ -571,6 +571,8 @@ void PBRWater::DrawSettings()
 				PBRWaterModel::CascadeWhitecaps(o, 1, settings.WhitecapAmount).threshold, PBRWaterModel::CascadeWhitecaps(o, 2, settings.WhitecapAmount).threshold);
 			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
+		ImGui::Text("Water draws last frame: %u, %u tessellated with %u patches, %.1f-%.1f m vertex spacing", lastDrawStats.draws, lastDrawStats.tessellated,
+			lastDrawStats.patches, lastDrawStats.minSpacing / UnitsPerMetre, lastDrawStats.maxSpacing / UnitsPerMetre);
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
 		ImGui::Text("Shore field: %s%s, swash: %s", environment.GetShore() ? "ready" : "none", environment.IsBuildingShore() ? " (building)" : "", frameData.Swash0.w > 0.5f ? "running" : "idle");
 		const auto floatingStats = floating.GetStats();
@@ -652,6 +654,29 @@ void PBRWater::SetupResources()
 	ocean.SetupResources();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 
+	{
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = SurfaceNoiseSize;
+		desc.Height = SurfaceNoiseSize;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		noiseTexture = std::make_unique<Texture2D>(desc, "PBRWater::SurfaceNoise");
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = desc.Format;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+		noiseTexture->CreateSRV(srvDesc);
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = desc.Format;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+		noiseTexture->CreateUAV(uavDesc);
+	}
+	CompileSurfaceNoise();
+
 	// The foam texture takes a few hundred milliseconds to bake: off the render thread, uploaded when done.
 	if (!foamTexture && !foamBake.valid())
 		foamBake = std::async(std::launch::async, [] { return PBRWaterFoam::Bake(); });
@@ -662,6 +687,7 @@ void PBRWater::ClearShaderCache()
 	ripples.ClearShaderCache();
 	swash.ClearShaderCache();
 	CompileOccluder();
+	CompileSurfaceNoise();
 	ocean.ClearShaderCache();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 	tessellationFailureLogged = false;
@@ -859,6 +885,7 @@ void PBRWater::Prepass()
 	}
 
 	UpdateFrameConstants();
+	UpdateSurfaceNoise();
 	UpdateSwash(dt);
 	ApplyCameraWater();
 }
@@ -996,6 +1023,41 @@ PBRWater::SharedSettings PBRWater::GetCommonBufferData() const
 	const bool occluding = occluderFrame != UINT32_MAX && globals::state->frameCount - occluderFrame <= 1;
 	data.Skylighting = { occluding ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 	return data;
+}
+
+void PBRWater::CompileSurfaceNoise()
+{
+	noiseCS = nullptr;
+	if (auto* cs = reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SurfaceNoiseCS.hlsl", {}, "cs_5_0")))
+		noiseCS.attach(cs);
+	else
+		logger::warn("[PBR Water] Surface noise shader failed to compile; the vertices evaluate the noise themselves");
+}
+
+void PBRWater::UpdateSurfaceNoise()
+{
+	if (!gpuBuffer || !noiseCS || !noiseTexture || frameData.Noise0.z <= 0.0f) {
+		frameData.Noise0.w = 0.0f;
+		return;
+	}
+	PerfScope perf("PBR Water - Surface Noise");
+	auto context = globals::d3d::context;
+	GpuData d = frameData;
+	d.Tess0.x = 0.0f;
+	gpuBuffer->Update(d);
+	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
+	ID3D11UnorderedAccessView* uav = noiseTexture->uav.get();
+	context->CSSetConstantBuffers(7, 1, cbs);
+	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+	context->CSSetShader(noiseCS.get(), nullptr, 0);
+	context->Dispatch(SurfaceNoiseSize / 8, SurfaceNoiseSize / 8, 1);
+	ID3D11UnorderedAccessView* nullUav = nullptr;
+	ID3D11Buffer* nullCb = nullptr;
+	context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+	context->CSSetConstantBuffers(7, 1, &nullCb);
+	context->CSSetShader(nullptr, nullptr, 0);
+	// The draws read what was just baked.
+	frameData.Noise0.w = 1.0f;
 }
 
 void PBRWater::CompileOccluder()
@@ -1294,6 +1356,20 @@ void PBRWater::UpdateFrameConstants()
 
 	// Wind and rain on the surface.
 	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
+	{
+		// The surface noise bake around the camera (UpdateSurfaceNoise): four texels across a cell of the noise's finest
+		// octave (the gusts' second, half their size; the sediment patches' third, a quarter of theirs), between 0.5 m and
+		// 16 m. 128^2 texels cost what as many vertices did, and cover the tessellated water (640 m at the defaults). In
+		// whole texels, so the samples stay put as the camera moves.
+		const float finest = std::min(settings.GustSize / 2.03f, settings.TurbidityPatchSize / 4.12f) * UnitsPerMetre;
+		const float texel = std::clamp(finest / 4.0f, 0.5f * UnitsPerMetre, 16.0f * UnitsPerMetre);
+		const auto& cameraPos = globals::game::frameBufferCached.GetCameraPosAdjust();
+		const float half = 0.5f * static_cast<float>(SurfaceNoiseSize);
+		const float originX = (std::floor(cameraPos.x / texel) - half) * texel;
+		const float originY = (std::floor(cameraPos.y / texel) - half) * texel;
+		// w is set once this frame's bake has run.
+		d.Noise0 = { originX, originY, 1.0f / (texel * static_cast<float>(SurfaceNoiseSize)), 0.0f };
+	}
 	d.Surface1 = { settings.WindStreaks, 0.0f, settings.UseFetch ? settings.FetchScale : 1.0f, 0.0f };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
@@ -1361,12 +1437,28 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	{
 		// Vertex spacing of this mesh, for filtering waves the untessellated grid cannot carry.
 		float spacing = 0.0f;
+		uint32_t triangleCount = 0;
 		if (const auto triShape = pass->geometry->AsTriShape()) {
-			const float triangles = static_cast<float>(triShape->GetTrishapeRuntimeData().triangleCount);
+			triangleCount = triShape->GetTrishapeRuntimeData().triangleCount;
+			const float triangles = static_cast<float>(triangleCount);
 			if (triangles > 0.0f)
 				spacing = pass->geometry->worldBound.radius * std::numbers::sqrt2_v<float> / std::max(std::sqrt(triangles * 0.5f), 1.0f);
 		}
 		d.Draw0.x = spacing;
+
+		// What the tessellator is given (Debug section): its patches are the meshes' own triangles.
+		if (state->frameCount != drawStatsFrame) {
+			lastDrawStats = drawStats;
+			drawStats = {};
+			drawStatsFrame = state->frameCount;
+		}
+		++drawStats.draws;
+		if (tessellate) {
+			++drawStats.tessellated;
+			drawStats.patches += triangleCount;
+			drawStats.minSpacing = drawStats.tessellated == 1 ? spacing : std::min(drawStats.minSpacing, spacing);
+			drawStats.maxSpacing = std::max(drawStats.maxSpacing, spacing);
+		}
 	}
 	gpuBuffer->Update(d);
 
@@ -1488,6 +1580,7 @@ void PBRWater::GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srv
 	srvs[13] = shore && d.Swash0.w > 0.5f ? swash.GetWetSRV() : nullptr;
 	srvs[14] = shore ? shoreTextures.room->srv.get() : nullptr;
 	srvs[15] = foamTexture ? foamTexture->srv.get() : nullptr;
+	srvs[16] = d.Noise0.w > 0.5f && noiseTexture ? noiseTexture->srv.get() : nullptr;
 }
 
 void PBRWater::RestoreDraw()

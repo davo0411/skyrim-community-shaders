@@ -83,6 +83,7 @@ namespace PBRWater
 		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, zw unused
 		float4 Shore6;                   // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                    // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
+		float4 Noise0;                   // xy surface noise grid corner (absolute units), z 1 / its extent (units), w baked (SurfaceNoiseCS)
 	}
 
 	Texture2D<float4> RippleTexture : register(t110);     // x height, y height one step earlier, z foam, w silt
@@ -99,6 +100,7 @@ namespace PBRWater
 	Texture2D<float4> ShoreFieldPrevious : register(t122);              // ShoreField0 of the field being replaced (Shore0.y < 1)
 	Texture2D<float4> SwashWetTexture : register(t123);                 // x wet level, yz unused, w water surface height (units above the still water)
 	Texture2D<float> ShoreRoomTexture : register(t124);                 // 0..1 room for the shore wave train: the width of the water against the wavelength
+	Texture2D<float2> SurfaceNoiseTexture : register(t126);             // x TurbidityPatches, y WindGust around the camera (SurfaceNoiseCS)
 	SamplerState LinearClampSampler : register(s12);
 	SamplerState OceanSampler : register(s13);  // anisotropic, wrap
 
@@ -173,6 +175,39 @@ namespace PBRWater
 		return lerp(lerp(z00, z10, f.x), lerp(z01, z11, f.x), f.y);
 	}
 
+	/**
+	 * BilinearLoad at `uv` and, when `withGradient`, its central differences one texel either way, `diff` = (B(+x) - B(-x),
+	 * B(+y) - B(-y)): the five lookups share one 4 x 4 block of texels (12 loads and one GetDimensions instead of 20 and 5).
+	 */
+	float BilinearLoadGrad(Texture2D<float> t, float2 uv, bool withGradient, out float2 diff)
+	{
+		uint w, h;
+		t.GetDimensions(w, h);
+		float2 p = uv * float2(w, h) - 0.5;
+		int2 i0 = int2(floor(p));
+		float2 f = p - i0;
+		int2 hi = int2(w, h) - 1;
+		int2 a = clamp(i0, 0, hi);
+		int2 b = clamp(i0 + 1, 0, hi);
+		float z00 = t.Load(int3(a.x, a.y, 0));
+		float z10 = t.Load(int3(b.x, a.y, 0));
+		float z01 = t.Load(int3(a.x, b.y, 0));
+		float z11 = t.Load(int3(b.x, b.y, 0));
+		diff = 0.0;
+		[branch] if (withGradient)
+		{
+			int2 m = clamp(i0 - 1, 0, hi);
+			int2 n = clamp(i0 + 2, 0, hi);
+			float zm0 = t.Load(int3(m.x, a.y, 0)), zm1 = t.Load(int3(m.x, b.y, 0));
+			float zn0 = t.Load(int3(n.x, a.y, 0)), zn1 = t.Load(int3(n.x, b.y, 0));
+			float z0m = t.Load(int3(a.x, m.y, 0)), z1m = t.Load(int3(b.x, m.y, 0));
+			float z0n = t.Load(int3(a.x, n.y, 0)), z1n = t.Load(int3(b.x, n.y, 0));
+			diff.x = lerp(lerp(z10, zn0, f.x), lerp(z11, zn1, f.x), f.y) - lerp(lerp(zm0, z00, f.x), lerp(zm1, z01, f.x), f.y);
+			diff.y = lerp(lerp(z01, z11, f.x), lerp(z0n, z1n, f.x), f.y) - lerp(lerp(z0m, z1m, f.x), lerp(z00, z10, f.x), f.y);
+		}
+		return lerp(lerp(z00, z10, f.x), lerp(z01, z11, f.x), f.y);
+	}
+
 	float SampleTerrainZ(float2 absXY)
 	{
 		float2 uv = absXY * Terrain0.xy + Terrain0.zw;
@@ -215,13 +250,10 @@ namespace PBRWater
 		grad = 0.0;
 		[branch] if (share > 0.0)
 		{
-			z = BilinearLoad(LoadedTerrainTexture, landUV);
-			if (withGradient) {
-				float2 t = Land1.y * Land0.zw;
-				float zx = BilinearLoad(LoadedTerrainTexture, landUV + float2(t.x, 0)) - BilinearLoad(LoadedTerrainTexture, landUV - float2(t.x, 0));
-				float zy = BilinearLoad(LoadedTerrainTexture, landUV + float2(0, t.y)) - BilinearLoad(LoadedTerrainTexture, landUV - float2(0, t.y));
-				grad = float2(zx, zy) / (2.0 * Land1.y);
-			}
+			// The grid's texels are its vertices, Land1.y apart: the central differences are one texel either way.
+			float2 diff;
+			z = BilinearLoadGrad(LoadedTerrainTexture, landUV, withGradient, diff);
+			grad = diff / (2.0 * Land1.y);
 		}
 		[branch] if (coarse && share < 1.0)
 		{
@@ -584,6 +616,34 @@ namespace PBRWater
 		float t = frac(s);
 		t = t * t * (3.0 - 2.0 * t);
 		float n = lerp(ValueNoise(q + slice * 17.31), ValueNoise(q + (slice + 1.0) * 17.31), t);
+		return lerp(0.45, 1.55, n);
+	}
+
+	/// ShoreGroup at one point of the coast, for arrival times from `latest` back to less than one group slice (~7 periods)
+	/// before it: the noise of the three slices they can fall in, evaluated once (the swash reads six crests).
+	struct ShoreGroupSlices
+	{
+		float2 q;      // coast point in noise cells
+		float slice;   // the slice `latest` falls in
+		float3 noise;  // the value noise of slices slice - 1, slice and slice + 1
+	};
+
+	ShoreGroupSlices ShoreGroupAt(float2 coast, float latest)
+	{
+		ShoreGroupSlices o;
+		o.q = coast / max(3.0 * Shore3.w, 1.0);
+		o.slice = floor(latest / max(7.0 * Shore2.w, 1.0));
+		o.noise = float3(ValueNoise(o.q + (o.slice - 1.0) * 17.31), ValueNoise(o.q + o.slice * 17.31), ValueNoise(o.q + (o.slice + 1.0) * 17.31));
+		return o;
+	}
+
+	/// ShoreGroup(coast, arrival) from the slices around it (ShoreGroupAt); `arrival` no later than their `latest`.
+	float ShoreGroup(ShoreGroupSlices g, float arrival)
+	{
+		float s = arrival / max(7.0 * Shore2.w, 1.0);
+		float t = frac(s);
+		t = t * t * (3.0 - 2.0 * t);
+		float n = floor(s) >= g.slice ? lerp(g.noise.y, g.noise.z, t) : lerp(g.noise.x, g.noise.y, t);
 		return lerp(0.45, 1.55, n);
 	}
 
@@ -1016,6 +1076,21 @@ namespace PBRWater
 		return lerp(1.0, 0.35 + 1.3 * gusts, saturate(Surface0.y));
 	}
 
+	/**
+	 * The low-frequency surface noise at absolute `absXY`: x TurbidityPatches, y WindGust. Around the camera it is read
+	 * from this frame's bake (SurfaceNoiseCS: the noise once per texel instead of once per vertex, which with tessellation
+	 * is every generated vertex in every pass); beyond it, and until the bake is ready, it is evaluated here.
+	 */
+	float2 SurfaceNoise(float2 absXY)
+	{
+		float2 noise;
+		float2 uv = (absXY - Noise0.xy) * Noise0.z;
+		[branch] if (Noise0.w > 0.5 && all(uv > 0.002) && all(uv < 0.998))
+			noise = SurfaceNoiseTexture.SampleLevel(LinearClampSampler, uv, 0);
+		else noise = float2(TurbidityPatches(absXY), WindGust(absXY));
+		return noise;
+	}
+
 	// ------------------------------------------------------------------------
 	// Interactive ripples (GPU wave-equation simulation centred on the camera)
 	// ------------------------------------------------------------------------
@@ -1128,6 +1203,7 @@ namespace PBRWater
 			float deepHeight = ShoreHeightRatio * ctx.shoreHeight * MetresPerUnit * ctx.damping;
 			// The crest that arrived tau ago reached the waterline (its wave set's clock) a travel time later.
 			float arrival = Shore0.z + ctx.shore.travelTime;
+			ShoreGroupSlices groups = ShoreGroupAt(coast, arrival - sinceLast);
 
 			// The crests of the last periods; the oldest fade out before they leave the window, so the tip never pops. The
 			// newest crest's own path continues below the still water after it drained.
@@ -1139,7 +1215,7 @@ namespace PBRWater
 			[unroll] for (uint j = 0; j < candidates; j++)
 			{
 				float tau = sinceLast + j * period;
-				float H = deepHeight * ShoreGroup(coast, arrival - tau);
+				float H = deepHeight * ShoreGroup(groups, arrival - tau);
 				float runup = runupPerHeight * sqrt(H * deepLength);
 				float w0 = sqrt(2.0 * decel * runup);
 				float fade = saturate((window - tau) / period);

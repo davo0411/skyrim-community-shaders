@@ -210,6 +210,7 @@ struct PBRWater : Feature
 		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
+		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -265,7 +266,8 @@ struct PBRWater : Feature
 	};
 
 private:
-	static constexpr uint32_t WaterSRVCount = 16;  ///< t110-t125
+	static constexpr uint32_t WaterSRVCount = 17;      ///< t110-t126
+	static constexpr uint32_t SurfaceNoiseSize = 128;  ///< texels per side of the surface noise bake
 
 	void UpdateFrameConstants();
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
@@ -279,7 +281,7 @@ private:
 	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed, bool exterior) const;
 	/** @brief FFT size for the WaveResolution setting. */
 	uint32_t WaveResolutionSize() const;
-	/** @brief Render thread: the SRVs of slots t110-t125. */
+	/** @brief Render thread: the SRVs of slots t110-t126. */
 	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[WaterSRVCount]) const;
 	/** @brief One shore field on the GPU. */
 	struct ShoreTextures
@@ -306,6 +308,10 @@ private:
 	void CompileOccluder();
 	/** @brief Render thread: uploads the foam texture once its bake (started in SetupResources) is done. */
 	void UpdateFoamTexture();
+	/** @brief Render thread: compiles the surface noise bake's compute shader. */
+	void CompileSurfaceNoise();
+	/** @brief Render thread: bakes this frame's surface noise around the camera (needs this frame's constants). */
+	void UpdateSurfaceNoise();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
 	GpuData frameData{};
@@ -315,6 +321,8 @@ private:
 	std::unique_ptr<Texture2D> fetchTexture;
 	std::unique_ptr<Texture2D> foamTexture;                  ///< t125: the baked foam pattern (FoamPattern.h)
 	std::future<std::vector<PBRWaterFoam::Level>> foamBake;  ///< its bake, on a worker at start-up
+	std::unique_ptr<Texture2D> noiseTexture;                 ///< t126: this frame's surface noise around the camera (SurfaceNoiseCS)
+	winrt::com_ptr<ID3D11ComputeShader> noiseCS;
 	uint32_t uploadedFetchGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::FetchField> uploadedFetch;
 	std::unique_ptr<Texture2D> landTexture;
@@ -392,5 +400,16 @@ private:
 	std::array<ID3D11SamplerState*, 2> savedPSSamplers{};
 	bool samplersSaved = false;
 	bool tessellationFailureLogged = false;
+	/// The water draws of one frame, for the Debug section.
+	struct DrawStats
+	{
+		uint32_t draws = 0;
+		uint32_t tessellated = 0;
+		uint32_t patches = 0;                        ///< triangles of the tessellated draws: the tessellator's patches
+		float minSpacing = 0.0f, maxSpacing = 0.0f;  ///< their meshes' vertex spacing (units)
+	};
+	DrawStats drawStats;      ///< this frame so far
+	DrawStats lastDrawStats;  ///< the last complete frame
+	uint32_t drawStatsFrame = UINT32_MAX;
 	uint32_t tessellationMissingSince = UINT32_MAX;
 };

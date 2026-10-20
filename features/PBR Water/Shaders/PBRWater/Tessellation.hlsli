@@ -79,7 +79,9 @@ namespace PBRWater
 	/// it agree. Two terms:
 	///  - curvature: enough segments that the chord error of the local wave curvature stays below a
 	///    fraction of a pixel (sagitta = curvature * segment^2 / 8), so sharp crests are dense and
-	///    troughs / calm water stay coarse;
+	///    troughs / calm water stay coarse, but never finer than the target triangle size: smaller
+	///    triangles waste the rasterizer (8 x 8 pixel tiles) and the pixel shader's 2 x 2 quads more
+	///    than their silhouette gains;
 	///  - a coarse on-screen baseline (finer inside the ripple simulation, which has no analytic
 	///    curvature to measure), so nothing is ever more than a few target triangles across.
 	float EdgeTessFactor(float3 a, float3 b)
@@ -103,7 +105,8 @@ namespace PBRWater
 		// the steep front of the breaking shore waves.
 		float curvature = SurfaceCurvature(mid, ctx, e, targetPixels / pixelsPerUnit);
 		float errorPixels = targetPixels * 0.05;  // 0.5 px at the default 10 px target
-		float curvatureFactor = len * sqrt(curvature * pixelsPerUnit / (8.0 * errorPixels));
+		float edgePixels = len * pixelsPerUnit;
+		float curvatureFactor = min(len * sqrt(curvature * pixelsPerUnit / (8.0 * errorPixels)), edgePixels / targetPixels);
 
 		float2 rippleUV = (mid.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
 		bool inRipples = Ripple0.w > 0.5 && all(rippleUV > 0.0) && all(rippleUV < 1.0);
@@ -111,7 +114,7 @@ namespace PBRWater
 		// the largest run-up on beaches.
 		bool atWaterline = ctx.hasTerrain > 0.5 && ctx.elevation > -2.0 * UnitsPerMetre && ctx.elevation < max(Shore0.w * ctx.beach, 0.5 * UnitsPerMetre);
 		float baselinePixels = targetPixels * ((inRipples || atWaterline) ? 1.0 : 4.0);
-		float screenFactor = len * pixelsPerUnit / baselinePixels;
+		float screenFactor = edgePixels / baselinePixels;
 
 		return clamp(max(curvatureFactor, screenFactor), 1.0, Tess0.z);
 	}
