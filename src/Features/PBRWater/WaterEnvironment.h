@@ -94,10 +94,11 @@ public:
 	static std::shared_ptr<PBRWaterModel::FetchField> BakeFetch(const WaterCoverageView& coverage);
 
 	/**
-	 * @brief Main thread: keeps the shore field around the player current (the shore waves' arrival times, beach
-	 * slopes, exposure). It is rebuilt on a worker whenever the player leaves its middle, the terrain or water data
-	 * change (cells load), or the sea's dominant waves change period or direction.
-	 * @param shore      the shore wave components to trace
+	 * @brief Main thread: keeps the shore field around the player current (the coastline map: the shore waves' travel
+	 * times to the waterline, beach slopes, exposure, room). It is rebuilt on a worker whenever the player leaves its
+	 * middle, the terrain or water data change (cells load), or the sea's dominant waves change period or the swell its
+	 * direction.
+	 * @param shore      the shore waves to trace
 	 * @param fetch      open water upwind, for the exposure to the swell (null: every shore is open)
 	 * @param fetchScale multiplies the baked fetch
 	 */

@@ -2,6 +2,7 @@
 #define __PBR_WATER_SHADING_HLSLI__
 
 #include "Common/BRDF.hlsli"
+#include "PBRWater/Foam.hlsli"
 #include "PBRWater/Optics.hlsli"
 
 // ============================================================================
@@ -20,8 +21,8 @@
 //   Wind      : micro-roughness from the local wind (Cox & Munk 1954): gusts sweep across the water as
 //               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
 //               roughens the surface.
-//   Foam      : procedural cellular foam advected with the waves, thresholded by a physically
-//               motivated coverage (breaking shore waves, the swash front, wakes).
+//   Foam      : a coverage from every source (Jacobian whitecaps, breaking shore waves, the swash front, the
+//               water's edge, wakes) drawn with the baked foam texture (PBRWater/Foam.hlsli).
 // ============================================================================
 
 namespace PBRWater
@@ -135,91 +136,18 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 	// Foam
 	//
-	// Foam is a coverage field (how much of the surface is aerated) turned into a pattern with a
-	// soft threshold, as in Crest (wave-harmonic/crest, MIT) and Sea of Thieves: as coverage drops
-	// the bubbles in the foam grow and merge, so dense foam thins into lace and then into specks
-	// instead of fading uniformly. The pattern is procedural: round bubbles of random size on a
-	// jittered grid, with walls bent by a domain warp so no straight cell edges survive.
+	// Every source gives a coverage (how much of the surface is foam); PBRWaterFoam (Foam.hlsli) draws it with the baked
+	// foam texture, thresholded at the coverage (Crest's black-point fade) and churned by Fluid Flux's flow advection.
 	// ------------------------------------------------------------------------
 
-	/**
-	 * Surface foam in [0, 1] for a local coverage.
-	 * @param p         Lagrangian (undisplaced) absolute position, so foam rides the wave orbits
-	 * @param coverage  fraction of the surface that is foam, 0..1
-	 * @param footprint world size of a pixel (anti-aliasing)
-	 * @param time      animation time (bubbles slowly churn and pop)
-	 */
-	/// Largest foam pattern cell (units); the foam mixes sizes from it down to a tenth of it.
-	static const float FoamCellCoarse = 0.2 * UnitsPerMetre;
-
-	/// Size (units) of foam pattern cell `level`, 0 (0.2 m) .. 3 (0.02 m), geometric.
-	float FoamCellSize(float level)
-	{
-		return FoamCellCoarse * exp2(-1.1073 * level);  // 10^(-level / 3)
-	}
-
-	float FoamLace(float2 p, float coverage, float footprint, float time)
-	{
-		// FoamLacePattern's clumps raise the coverage by at most 1.55x and draw nothing below 0.002: most of the water has
-		// no foam, and skips the pattern's noise altogether.
-		[branch] if (coverage * 1.55 <= 0.002) return 0.0;
-		// Patches of foam of four sizes, 0.2 m cells down to 0.02 m, drifting into each other, so the foam is never one
-		// stamp repeated across every breaker. Each pixel blends the two neighbouring sizes, each only evaluated where it
-		// shows.
-		float level = saturate(Fbm2(p / (11.0 * FoamCellCoarse) + 3.1) * 1.3 - 0.15) * 2.999;
-		float index = floor(level);
-		float t = smoothstep(0.3, 0.7, level - index);
-		float a = 0.0, b = 0.0;
-		[branch] if (t < 0.999)
-		{
-			float size = FoamCellSize(index);
-			a = FoamLacePattern(p / size + index * 17.3, coverage, footprint / size, time);
-		}
-		[branch] if (t > 0.001)
-		{
-			float size = FoamCellSize(index + 1.0);
-			b = FoamLacePattern(p / size + (index + 1.0) * 17.3, coverage, footprint / size, time);
-		}
-		return lerp(a, b, t);
-	}
-
-	/**
-	 * Bubbles: discrete specks of air carried just under the surface. Each grid cell holds one bubble
-	 * that drifts on its own path, rises, and pops after a random lifetime, so the layer is always
-	 * moving. `density` is how aerated the water is (foam, wakes, breaking waves). Only the specks are
-	 * drawn: no milky layer tints the water, and specks too small to see fade out instead of averaging into
-	 * a white haze.
-	 * @return speck coverage
-	 */
-	float Bubbles(float2 p, float density, float footprint, float time)
-	{
-		density = saturate(density * Foam0.y);
-		if (density <= 0.002)
-			return 0.0;
-		const float cellSize = 4.0;
-		float2 q = p / cellSize;
-		float2 cell = floor(q);
-		float specks = 0.0;
-		[unroll] for (int y = -1; y <= 1; y++)
-		{
-			[unroll] for (int x = -1; x <= 1; x++)
-			{
-				float2 c = cell + float2(x, y);
-				float2 h = Hash22(c);
-				float rate = 0.25 + 0.5 * Hash12(c + 3.7);
-				float life = frac(time * rate + h.x);  // 0 born .. 1 popped
-				float2 wander = float2(sin(time * (0.7 + h.y) + h.x * Math::TAU), cos(time * (0.9 + h.x) + h.y * Math::TAU)) * 0.25;
-				float2 centre = c + 0.5 + (h - 0.5) * 0.7 + wander;
-				// Fewer and smaller bubbles in less aerated water, so a bubbly patch thins out at its edge.
-				float present = smoothstep(0.0, 0.15, density - Hash12(c + 1.3));
-				float radius = (0.08 + 0.14 * Hash12(c + 9.1)) * sin(life * Math::PI) * lerp(0.5, 1.0, present);
-				float d = length(q - centre);
-				specks += present * smoothstep(radius, radius * 0.4, d);
-			}
-		}
-		float pixelCells = footprint / cellSize;
-		return saturate(specks) * saturate(1.5 - pixelCells * 2.0);
-	}
+	/// Size of the foam texture's tile (units): FoamPattern bakes PBRWaterFoam::BubblesPerTile large bubbles of 20 cm
+	/// across it, with bubbles 2.7 times smaller in the walls between them.
+	static const float FoamTile = 0.2 * UnitsPerMetre * PBRWaterFoam::BubblesPerTile;
+	/// Fluid Flux's advection: the pattern slides 30 cm downwind and back every five seconds, so it churns in place.
+	static const float FoamAdvectionRate = 0.2;  // cycles per second
+	static const float FoamAdvectionSlide = 0.3 * UnitsPerMetre;
+	/// Depth the bubble specks are seen at under the surface (units), for their parallax.
+	static const float BubbleDepth = 0.3 * UnitsPerMetre;
 
 	/**
 	 * World-space xy gradient of a per-pixel scalar from its screen derivatives and those of the
@@ -253,6 +181,7 @@ namespace PBRWater
 		float3 normal;
 		float roughness;
 		float jacobian;
+		float crestFoam;    // whitecap foam coverage (Jacobian foam of the cascades carrying the dominant waves)
 		float shoreBreak;   // a shore wave breaking here
 		float beach;        // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
 		float train;        // 0..1 share of the shore wave train (debug)
@@ -327,6 +256,8 @@ namespace PBRWater
 		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance + windVariance + mapVariance);
 		o.windSpeed = wind;
 		o.jacobian = waves.jacobian;
+		// Whitecaps: the Jacobian foam of the cascades carrying the dominant waves here (OceanAssembleCS).
+		o.crestFoam = saturate(waves.crestTrail);
 
 		o.shoreBreak = waves.shoreBreak;
 		o.beach = ctx.beach;
@@ -379,22 +310,25 @@ namespace PBRWater
 		o.fetchMetres = ctx.fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
-		float2 shoreDir = SafeNormalize(float3(ctx.shore.slownessX.x, ctx.shore.slownessY.x, 0.0), float3(Params1.xy, 0.0)).xy;
-		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, shoreDir, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
+		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
 	}
 
-	/// Foam coverage: x surface foam on the breaking shore waves, the front of the swash and the water's edge, y aeration:
-	/// the air the breakers and anything moving through the water churn in (bubbles). Only where a wave is breaking now
-	/// (the surf zone between the breakers is not blanketed) and along the edge. The sources overlap (a breaking crest
-	/// runs into the edge band): the densest one counts, never their sum, which doubled the foam where they met. The
-	/// calm edge rim makes no bubbles (it drew a ring of them a set distance off every shore), and the churn saturates
-	/// softly so a wake fades out at its rim instead of ending in a circle.
-	float2 FoamCoverage(SurfaceShading s)
+	/// Foam coverage: x surface foam on the whitecaps, the breaking shore waves, the front of the swash and the water's
+	/// edge, y aeration: the air the breakers and anything moving through the water churn in (bubbles), z the whitecaps'
+	/// share of x (fresh whitecaps are brighter). On the shore only where a wave is breaking now (the surf zone between
+	/// the breakers is not blanketed) and along the edge. The sources overlap (a breaking crest runs into the edge band, a
+	/// whitecap into the surf): the densest one counts, never their sum, which doubled the foam where they met. The calm
+	/// edge rim makes no bubbles (it drew a ring of them a set distance off every shore), and the churn saturates softly
+	/// so a wake fades out at its rim instead of ending in a circle. The whitecap amount is in the foam's growth already
+	/// (OceanAssembleCS).
+	float3 FoamCoverage(SurfaceShading s)
 	{
 		float breaking = saturate(max(s.shoreBreak * Shore1.x, s.swashFoam * Shore1.y) * Foam0.z);
+		float whitecap = saturate(s.crestFoam * Foam0.z);
 		float churn = 1.0 - exp(-2.0 * s.rippleFoam * Foam1.z);
-		return float2(max(breaking, saturate(s.edgeFoam * Foam0.z)), max(breaking, churn));
+		float surface = max(max(breaking, whitecap), saturate(s.edgeFoam * Foam0.z));
+		return float3(surface, max(max(breaking, whitecap), churn), whitecap / max(surface, 1e-3));
 	}
 
 	float3 DebugView(uint mode, SurfaceShading s, float foam, float waveHeight)

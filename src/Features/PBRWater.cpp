@@ -12,6 +12,7 @@
 
 #include <DirectXPackedVector.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 #define I18N_KEY_PREFIX "feature.pbr_water."
@@ -41,6 +42,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		RiverWaveDamping,
 		EnableShoreWaves,
 		ShoreWaveHeight,
+		ShoreVariation,
 		SwashFoam,
 		Roughness,
 		SunSpecular,
@@ -75,6 +77,8 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		SplashFoam,
 		FoamAlbedo,
 		FoamDrift,
+		WhitecapAmount,
+		WhitecapLifetime,
 		BubbleAmount,
 		EnableRipples,
 		PhysicsObjectRipples,
@@ -121,6 +125,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		RiverWaveDamping,
 		EnableShoreWaves,
 		ShoreWaveHeight,
+		ShoreVariation,
 		SwashFoam,
 		Roughness,
 		SunSpecular,
@@ -155,6 +160,8 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		SplashFoam,
 		FoamAlbedo,
 		FoamDrift,
+		WhitecapAmount,
+		WhitecapLifetime,
 		BubbleAmount,
 		EnableRipples,
 		PhysicsObjectRipples,
@@ -259,6 +266,7 @@ void PBRWater::SanitizeSettings()
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
 	clamp(s.RiverWaveDamping, 0.0f, 1.0f, d.RiverWaveDamping);
 	clamp(s.ShoreWaveHeight, 0.0f, Huge, d.ShoreWaveHeight);
+	clamp(s.ShoreVariation, 0.0f, 1.0f, d.ShoreVariation);
 	clamp(s.SwashFoam, 0.0f, Huge, d.SwashFoam);
 	clamp(s.FetchScale, 0.01f, Huge, d.FetchScale);
 	clamp(s.Roughness, 0.001f, 1.0f, d.Roughness);
@@ -294,6 +302,8 @@ void PBRWater::SanitizeSettings()
 	clamp(s.SplashFoam, 0.0f, Huge, d.SplashFoam);
 	clamp(s.FoamAlbedo, 0.0f, Huge, d.FoamAlbedo);
 	clamp(s.FoamDrift, 0.0f, Huge, d.FoamDrift);
+	clamp(s.WhitecapAmount, 0.0f, Huge, d.WhitecapAmount);
+	clamp(s.WhitecapLifetime, 0.05f, Huge, d.WhitecapLifetime);
 	clamp(s.BubbleAmount, 0.0f, Huge, d.BubbleAmount);
 	clamp(s.RippleExtent, 1.0f, Huge, d.RippleExtent);
 	clamp(s.RippleHeight, 0.0f, Huge, d.RippleHeight);
@@ -367,11 +377,14 @@ void PBRWater::DrawSettings()
 	if (ImGui::TreeNodeEx(T(TKEY("shore"), "Shoreline"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::Checkbox(T(TKEY("enable_shore_waves"), "Shore Waves"), &settings.EnableShoreWaves);
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("enable_shore_waves_tooltip"), "The sea's own waves slow down over the shoaling bed, turn towards the shore, steepen and break, and each one runs up the beach and drains back, leaving foam and wet sand. Only on beaches where waves break: they surge against rock faces and cliffs instead. Needs Depth-Aware Waves."));
+			ImGui::TextUnformatted(T(TKEY("enable_shore_waves_tooltip"), "Waves roll in towards the shore, slow down and close up over the shoaling bed, steepen, pitch forward and break into foaming bores, and each one runs up the beach and drains back, leaving wet sand. Only on beaches where waves break: they surge against rock faces and cliffs instead. Needs Depth-Aware Waves."));
 		if (settings.EnableShoreWaves) {
 			ImGui::SliderFloat(T(TKEY("shore_wave_height"), "Shore Wave Height"), &settings.ShoreWaveHeight, 0.0f, 3.0f, "%.2f");
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::TextUnformatted(T(TKEY("shore_wave_height_tooltip"), "Scales the waves reaching the shore. They are the open sea's swell and wind sea, so Swell Height, Wave Height and the wind still set how big they start out; this scales them where they break and run up."));
+			ImGui::SliderFloat(T(TKEY("shore_variation"), "Variation Along the Coast"), &settings.ShoreVariation, 0.0f, 1.0f, "%.2f");
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("shore_variation_tooltip"), "How much the crests' arrival varies along the coast, so each stretch of beach sees its waves break at its own time instead of the whole shore at once."));
 			ImGui::SliderFloat(T(TKEY("swash_foam"), "Swash Foam"), &settings.SwashFoam, 0.0f, 3.0f, "%.2f");
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::TextUnformatted(T(TKEY("swash_foam_tooltip"), "Foam riding each wave up the beach."));
@@ -441,7 +454,13 @@ void PBRWater::DrawSettings()
 	if (ImGui::TreeNodeEx(T(TKEY("foam"), "Surface Foam"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::SliderFloat(T(TKEY("foam_amount"), "Foam Amount"), &settings.FoamAmount, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("foam_amount_tooltip"), "Foam where shore waves break and run up the beach."));
+			ImGui::TextUnformatted(T(TKEY("foam_amount_tooltip"), "Foam on the whitecaps and where shore waves break and run up the beach."));
+		ImGui::SliderFloat(T(TKEY("whitecap_amount"), "Whitecaps"), &settings.WhitecapAmount, 0.0f, 3.0f, "%.2f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("whitecap_amount_tooltip"), "How much of the open sea whitecaps. Foam grows wherever a crest is squeezed together (Jacobian foam), and the wind sets how squeezed it has to be: whitecaps cover more of the sea the stronger the wind (Monahan 1980). 1 is as measured."));
+		ImGui::SliderFloat(T(TKEY("whitecap_lifetime"), "Whitecap Lifetime"), &settings.WhitecapLifetime, 0.2f, 10.0f, "%.1f s");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("whitecap_lifetime_tooltip"), "How long the foam of a breaking crest takes to fade, and so how long a trail it leaves behind the wave."));
 		ImGui::SliderFloat(T(TKEY("breaking_foam"), "Breaking Wave Foam"), &settings.BreakingFoam, 0.0f, 3.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("edge_foam"), "Edge Foam"), &settings.EdgeFoam, 0.0f, 3.0f, "%.2f");
 		if (auto _tt = Util::HoverTooltipWrapper())
@@ -547,7 +566,9 @@ void PBRWater::DrawSettings()
 		if (const auto snap = snapshot.load(std::memory_order_acquire); snap && snap->ocean) {
 			const auto& o = *snap->ocean;
 			ImGui::Text("Wind %.1f m/s, peak period %.1f s, Hs %.2f m, choppiness %.2f", o.windSpeed, TwoPi / o.peakOmega, o.significantHeight / UnitsPerMetre, o.choppiness);
-			ImGui::Text("Mean square slope %.3f", o.meanSquareSlope);
+			ImGui::Text("Whitecaps %.1f%%, mean square slope %.3f", o.whitecapCoverage * 100.0f, o.meanSquareSlope);
+			ImGui::Text("Whitecap thresholds per band (Jacobian): %.2f %.2f %.2f", PBRWaterModel::CascadeWhitecaps(o, 0, settings.WhitecapAmount).threshold,
+				PBRWaterModel::CascadeWhitecaps(o, 1, settings.WhitecapAmount).threshold, PBRWaterModel::CascadeWhitecaps(o, 2, settings.WhitecapAmount).threshold);
 			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
@@ -630,6 +651,10 @@ void PBRWater::SetupResources()
 	}
 	ocean.SetupResources();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
+
+	// The foam texture takes a few hundred milliseconds to bake: off the render thread, uploaded when done.
+	if (!foamTexture && !foamBake.valid())
+		foamBake = std::async(std::launch::async, [] { return PBRWaterFoam::Bake(); });
 }
 
 void PBRWater::ClearShaderCache()
@@ -645,6 +670,47 @@ void PBRWater::ClearShaderCache()
 void PBRWater::Reset()
 {
 	frameDataFrame = UINT32_MAX;
+}
+
+void PBRWater::UpdateFoamTexture()
+{
+	if (foamTexture || !foamBake.valid() || foamBake.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+		return;
+	std::vector<PBRWaterFoam::Level> levels;
+	try {
+		levels = foamBake.get();
+	} catch (...) {
+		logger::warn("[PBR Water] Failed to bake the foam texture; the water draws no foam pattern");
+		return;
+	}
+	if (levels.empty())
+		return;
+
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = levels[0].size;
+	desc.Height = levels[0].size;
+	desc.MipLevels = static_cast<UINT>(levels.size());
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_R8G8_UNORM;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_IMMUTABLE;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	std::vector<D3D11_SUBRESOURCE_DATA> init(levels.size());
+	for (size_t i = 0; i < levels.size(); ++i) {
+		init[i].pSysMem = levels[i].texels.data();
+		init[i].SysMemPitch = levels[i].size * 2;
+	}
+	winrt::com_ptr<ID3D11Texture2D> texture;
+	if (FAILED(globals::d3d::device->CreateTexture2D(&desc, init.data(), texture.put()))) {
+		logger::warn("[PBR Water] Failed to create the foam texture");
+		return;
+	}
+	foamTexture = std::make_unique<Texture2D>(texture.detach(), "PBRWater::FoamPattern");
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	srvDesc.Format = desc.Format;
+	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = desc.MipLevels;
+	foamTexture->CreateSRV(srvDesc);
 }
 
 void PBRWater::UpdateFetchTexture()
@@ -746,6 +812,7 @@ uint32_t PBRWater::WaveResolutionSize() const
 void PBRWater::Prepass()
 {
 	PerfScope perf("PBR Water - Simulation");
+	UpdateFoamTexture();
 	UpdateFetchTexture();
 	UpdateLandTexture();
 
@@ -764,8 +831,13 @@ void PBRWater::Prepass()
 	if (const auto snap = snapshot.load(std::memory_order_acquire)) {
 		OceanSimulation::Settings oceanSettings;
 		oceanSettings.resolution = WaveResolutionSize();
+		if (snap->ocean) {
+			for (uint32_t c = 0; c < PBRWaterModel::NumCascades; ++c)
+				oceanSettings.whitecaps[c] = PBRWaterModel::CascadeWhitecaps(*snap->ocean, c, settings.WhitecapAmount);
+		}
+		oceanSettings.foamDecay = settings.WhitecapLifetime;
 		PerfScope oceanPerf("PBR Water - Ocean FFT");
-		ocean.Update(*snap, oceanSettings);
+		ocean.Update(*snap, dt, oceanSettings);
 	}
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 
@@ -812,25 +884,22 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 		return result;
 
 	const size_t count = static_cast<size_t>(field->width) * field->height;
-	// Full precision for the arrival times: they become the waves' phase (omega T, tens of radians), where half floats
-	// would step it visibly. The slownesses (0.05-1 s/m) and the rest are fine as halves.
+	// Full precision for the travel times and distances: they become the waves' phase (omega tau, tens of radians) and the
+	// nearest point of the coast, where half floats would step them visibly. The slownesses (0.05-1 s/m) and the rest
+	// are fine as halves.
 	std::vector<float> times(count * 4);
-	std::vector<uint16_t> slowness(count * 4), beach(count * 4), room(count);
+	std::vector<uint16_t> rays(count * 4), room(count);
 	auto half = [](float v) { return DirectX::PackedVector::XMConvertFloatToHalf(v); };
 	for (size_t i = 0; i < count; ++i) {
-		times[i * 4 + 0] = field->travelTime[0][i];
-		times[i * 4 + 1] = field->travelTime[1][i];
-		times[i * 4 + 2] = field->travelTime[2][i];
+		times[i * 4 + 0] = field->travelTime[i];
+		times[i * 4 + 1] = field->distance[i];
+		times[i * 4 + 2] = 0.0f;
 		// No water in reach: a sentinel the shaders test for (NaN would spread through the bilinear filter).
 		times[i * 4 + 3] = std::isfinite(field->level[i]) ? field->level[i] : -1.0e9f;
-		slowness[i * 4 + 0] = half(field->slownessX[0][i]);
-		slowness[i * 4 + 1] = half(field->slownessY[0][i]);
-		slowness[i * 4 + 2] = half(field->slownessX[1][i]);
-		slowness[i * 4 + 3] = half(field->slownessY[1][i]);
-		beach[i * 4 + 0] = half(field->slownessX[2][i]);
-		beach[i * 4 + 1] = half(field->slownessY[2][i]);
-		beach[i * 4 + 2] = half(field->slope[i]);
-		beach[i * 4 + 3] = half(field->exposure[i]);
+		rays[i * 4 + 0] = half(field->slownessX[i]);
+		rays[i * 4 + 1] = half(field->slownessY[i]);
+		rays[i * 4 + 2] = half(field->slope[i]);
+		rays[i * 4 + 3] = half(field->exposure[i]);
 		room[i] = half(field->room[i]);
 	}
 
@@ -859,10 +928,9 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 		return texture2D;
 	};
 	result.times = create(DXGI_FORMAT_R32G32B32A32_FLOAT, times.data(), static_cast<UINT>(field->width * 4 * sizeof(float)), "PBRWater::ShoreTimes");
-	result.slowness = create(DXGI_FORMAT_R16G16B16A16_FLOAT, slowness.data(), static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreSlowness");
-	result.beach = create(DXGI_FORMAT_R16G16B16A16_FLOAT, beach.data(), static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreBeach");
+	result.rays = create(DXGI_FORMAT_R16G16B16A16_FLOAT, rays.data(), static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreRays");
 	result.room = create(DXGI_FORMAT_R16_FLOAT, room.data(), static_cast<UINT>(field->width * sizeof(uint16_t)), "PBRWater::ShoreRoom");
-	if (result.times && result.slowness && result.beach && result.room)
+	if (result.times && result.rays && result.room)
 		result.field = std::move(field);
 	else
 		result = {};
@@ -1130,46 +1198,31 @@ void PBRWater::UpdateFrameConstants()
 		d.Params1 = { std::cos(snap->windDirection), std::sin(snap->windDirection), settings.DisplacementFadeStart, settings.DisplacementFadeEnd };
 		d.Params2 = { o.choppiness, 0.0f, active ? o.displacementBound : 0.0f, static_cast<float>(std::max(ocean.GetMipCount(), 1u) - 1) };
 		d.RefCamPos = { static_cast<float>(snap->refX), static_cast<float>(snap->refY), static_cast<float>(snap->refZ), 0.0f };
-		// Shore waves need the shore fields the snapshot cross-fades between on the GPU. The clocks run at this frame's
-		// (eased) frequencies, but each field's spatial phase omega T uses the frequencies it was traced for: with the
-		// eased ones, T (up to a minute across the field) turned every change of the sea into crests racing, stalling or
-		// running backwards until the frequency settled. A field is rebuilt when they differ by more than a few percent.
+		// Shore waves need the coastline maps the snapshot blends between on the GPU. The clock runs at this frame's
+		// (eased) frequency, but each map's lag omega tau uses the frequency it was traced for: with the eased one, tau
+		// (up to a minute far out) turned every change of the sea into crests racing or stalling until the frequency
+		// settled. A map is rebuilt when they differ by more than a few percent.
 		const auto& shore = snap->shore;
 		const bool shoreReady = shore.enabled && snap->shoreField && shoreTextures.field == snap->shoreField;
 		const bool blending = shoreReady && snap->shoreBlend < 1.0f && snap->shorePrevious && previousShoreTextures.field == snap->shorePrevious;
 		d.Shore0 = { shoreReady ? 1.0f : 0.0f, blending ? snap->shoreBlend : 1.0f, static_cast<float>(shore.groupTime), shore.enabled ? shore.maxRunup : 0.0f };
 		d.Shore1 = { settings.BreakingFoam, settings.SwashFoam, shore.swellHeight, shore.windSeaHeight };
-		// Clocks now and as last frame drew them (motion vectors), last frame's moved onto this frame's field reference
-		// when the field changed (as MainThreadUpdate moved the clocks); the first frame has no motion.
-		float clocks[PBRWaterModel::ShoreComponents], lastClocks[PBRWaterModel::ShoreComponents];
+		// The clock now and as last frame drew it (motion vectors); the first frame has no motion.
+		const float clock = static_cast<float>(shore.phase);
 		const bool consecutive = lastFrame != UINT32_MAX && frame == lastFrame + 1 && frameData.Shore2.w > 0.0f;
-		const float* previousClocks = &frameData.Shore2.x;
-		for (uint32_t c = 0; c < PBRWaterModel::ShoreComponents; ++c) {
-			clocks[c] = static_cast<float>(shore.phase[c]);
-			lastClocks[c] = consecutive ? previousClocks[c] : clocks[c];
-			if (consecutive && drawnShore && shoreReady && drawnShore != snap->shoreField)
-				lastClocks[c] += static_cast<float>(snap->shoreField->omega[c] * (drawnShore->referenceTime[c] - snap->shoreField->referenceTime[c]));
-		}
-		d.Shore2 = { clocks[0], clocks[1], clocks[2], shore.period };
-		d.Shore3 = { lastClocks[0], lastClocks[1], lastClocks[2], shore.deepLength };
-		const auto& traced = shoreReady ? snap->shoreField->omega : shore.componentOmega;
-		d.Shore4 = { traced[0], traced[1], traced[2], 0.0f };
+		d.Shore2 = { clock, consecutive ? frameData.Shore2.x : clock, shore.omega, shore.period };
+		d.Shore3 = { shore.variation, shore.variationTime, 0.0f, shore.deepLength };
+		d.Shore4 = { shoreReady ? snap->shoreField->omega : shore.omega, blending ? snap->shorePrevious->omega : shore.omega, 0.0f, 0.0f };
 		auto fieldMap = [](const PBRWaterModel::ShoreField& f) {
 			return float4{ f.minX - 0.5f * f.step, f.minY - 0.5f * f.step, 1.0f / (static_cast<float>(f.width) * f.step), 1.0f / (static_cast<float>(f.height) * f.step) };
 		};
 		if (shoreReady) {
-			const auto& f = *snap->shoreField;
-			d.ShoreMap = fieldMap(f);
-			if (blending) {
-				const auto& p = *snap->shorePrevious;
-				d.Shore5 = { static_cast<float>(snap->shoreShift[0]), static_cast<float>(snap->shoreShift[1]), static_cast<float>(snap->shoreShift[2]), 0.0f };
-				d.Shore6 = fieldMap(p);
-				d.Shore7 = { p.omega[0], p.omega[1], p.omega[2], 0.0f };
-			}
+			d.ShoreMap = fieldMap(*snap->shoreField);
+			if (blending)
+				d.Shore6 = fieldMap(*snap->shorePrevious);
 			// Last frame's wet grid, until this frame's step (UpdateSwash) replaces it.
 			d.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), swash.IsReady() ? 1.0f : 0.0f };
 		}
-		drawnShore = shoreReady ? snap->shoreField : nullptr;
 
 		// Fetch
 		if (uploadedFetch && fetchTexture && snap->exterior && settings.UseFetch) {
@@ -1429,11 +1482,12 @@ void PBRWater::GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srv
 	srvs[8] = ocean.GetPreviousDisplacementSRV();
 	const bool shore = d.Shore0.x > 0.5f && shoreTextures.field;
 	srvs[9] = shore ? shoreTextures.times->srv.get() : nullptr;
-	srvs[10] = shore ? shoreTextures.slowness->srv.get() : nullptr;
-	srvs[11] = shore ? shoreTextures.beach->srv.get() : nullptr;
+	srvs[10] = shore ? shoreTextures.rays->srv.get() : nullptr;
+	srvs[11] = nullptr;
 	srvs[12] = shore && d.Shore0.y < 1.0f && previousShoreTextures.field ? previousShoreTextures.times->srv.get() : nullptr;
 	srvs[13] = shore && d.Swash0.w > 0.5f ? swash.GetWetSRV() : nullptr;
 	srvs[14] = shore ? shoreTextures.room->srv.get() : nullptr;
+	srvs[15] = foamTexture ? foamTexture->srv.get() : nullptr;
 }
 
 void PBRWater::RestoreDraw()
@@ -1539,9 +1593,11 @@ void PBRWater::MainThreadUpdate()
 		next->foamDrift[3] = static_cast<float>(bubbleDriftY);
 	}
 
-	// Shoreline waves: the sea's dominant waves as a wave train, its phases carried on from last frame (they keep
-	// running while shore waves are off, so turning them on never starts every beach in step).
+	// Shoreline waves: the sea's dominant waves as a wave train, its clock carried on from last frame (it keeps running
+	// while shore waves are off, so turning them on never starts every beach in step).
 	shoreState = PBRWaterModel::UpdateShoreParams(*spectrum, hasShoreState ? &shoreState : nullptr, dt);
+	shoreState.variation = settings.ShoreVariation;
+	shoreState.variationTime = static_cast<float>(std::fmod(globals::state->timer, 86400.0f));
 	hasShoreState = true;
 	const bool shoreEnabled = exterior && settings.EnableShoreWaves && settings.UseBathymetry;
 
@@ -1575,7 +1631,6 @@ void PBRWater::MainThreadUpdate()
 	next->shoreField = currentShore;
 	next->shorePrevious = previousShore;
 	next->shoreBlend = shoreBlend;
-	next->shoreShift = shoreShift;
 
 	std::shared_ptr<const PBRWaterModel::WaveSnapshot> published = next;
 	snapshot.store(published, std::memory_order_release);
@@ -1604,26 +1659,13 @@ void PBRWater::MainThreadUpdate()
 
 void PBRWater::UpdateShoreField(float dt, bool enabled)
 {
-	// Seconds a new shore field takes to take over: the two trains are cross-faded over it, each with its own arrival
-	// times, so no crest ever jumps or drifts.
+	// Seconds a new coastline map takes to take over: long enough that a map traced for a new period or moving with the
+	// player only makes the crests drift a little for a moment, never jump.
 	constexpr float BlendTime = 4.0f;
 	const auto latest = enabled ? environment.GetShore() : nullptr;
 	if (latest != currentShore) {
-		if (latest && currentShore) {
-			// The clocks follow the new field's reference times, so a crest's phase omega (t - T) runs on unchanged; the
-			// previous field's clocks lag by the shift.
-			for (uint32_t c = 0; c < PBRWaterModel::ShoreComponents; ++c) {
-				const double shift = latest->omega[c] * (currentShore->referenceTime[c] - latest->referenceTime[c]);
-				shoreShift[c] = shift - PBRWaterModel::TwoPi * std::floor(shift / PBRWaterModel::TwoPi);
-				const double phase = shoreState.phase[c] + shoreShift[c];
-				shoreState.phase[c] = phase - PBRWaterModel::TwoPi * std::floor(phase / PBRWaterModel::TwoPi);
-			}
-			previousShore = currentShore;
-			shoreBlend = 0.0f;
-		} else {
-			previousShore = nullptr;
-			shoreBlend = 1.0f;
-		}
+		previousShore = latest && currentShore ? currentShore : nullptr;
+		shoreBlend = previousShore ? 0.0f : 1.0f;
 		currentShore = latest;
 	}
 	shoreBlend = std::min(shoreBlend + dt / BlendTime, 1.0f);

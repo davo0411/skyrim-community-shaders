@@ -1678,14 +1678,19 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
 	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness) * PBRWater::Light0.y;
 
-	// Foam: breaking shore waves and the front of the swash. Nothing is drawn from what the depth buffer shows through
-	// the water: that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from below.
-	float2 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface);
-	// Lagrangian position plus the wind's surface drift, so foam travels instead of sitting in place.
+	// Foam: whitecaps, breaking shore waves and the front of the swash. Nothing is drawn from what the depth buffer shows
+	// through the water: that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from
+	// below.
+	float3 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface);
+	// Drawn with the foam texture (Crest's black-point fade) at the Lagrangian position plus the wind's surface drift, so
+	// foam rides the waves and travels downwind, and churned by Fluid Flux's flow advection.
 	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy - PBRWater::Foam3.xy;
-	float pbrFoam = PBRWater::FoamLace(pbrFoamPosition, pbrFoamCoverage.x, pbrSurface.footprint, PBRWater::Foam1.y);
-	// Bubble specks come from foam and from air churned in by anything moving through the water.
-	float pbrBubbles = PBRWater::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrFoamCoverage.y, pbrSurface.footprint, PBRWater::Foam1.y);
+	float3 pbrFoamFlow = float3(PBRWater::Params1.xy * PBRWater::FoamAdvectionSlide, PBRWater::FoamAdvectionRate);
+	float pbrFoam = PBRWaterFoam::SurfaceFoam(pbrFoamPosition, pbrFoamCoverage.x, PBRWater::FoamTile, pbrFoamFlow, PBRWater::Foam1.y, PBRWater::OceanSampler);
+	// Bubble specks under the surface (Crest's bubble foam) from foam and from air churned in by anything moving through
+	// the water, seen with parallax through the surface.
+	float2 pbrParallax = viewDirection.xy / max(abs(viewDirection.z), 0.2) * PBRWater::BubbleDepth;
+	float pbrBubbles = PBRWaterFoam::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrFoamCoverage.y * PBRWater::Foam0.y, PBRWater::FoamTile, pbrParallax, PBRWater::OceanSampler);
 	float3 pbrFoamDir, pbrFoamAmbient;
 	ShadowSampling::ExtractLighting(PBRWater::Light1.yyy, pbrFoamDir, pbrFoamAmbient);
 #							if defined(SKYLIGHTING)
@@ -1698,6 +1703,8 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 pbrFoamColor = pbrFoamDir * dirShadow * pbrFoamSun + pbrFoamAmbient * (0.55 + 0.45 * saturate(pbrFoamNormal.z));
 	// Drifting bubble specks just under the surface.
 	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor * 0.8, pbrBubbles * 0.6);
+	// Fresh whitecaps are brighter than the settled foam.
+	pbrFoamColor *= lerp(1.0, 1.15, saturate(pbrFoamCoverage.z));
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
@@ -1790,8 +1797,8 @@ PS_OUTPUT main(PS_INPUT input)
 	// The foam the drained swash left on the sand, where the ground shows: it stays put and only slowly churns.
 	[branch] if (pbrSurface.residueFoam > 0.002)
 	{
-		float pbrResidue = PBRWater::FoamLace(input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy, saturate(pbrSurface.residueFoam * PBRWater::Shore1.y * PBRWater::Foam0.z),
-			pbrSurface.footprint, PBRWater::Foam1.y * 0.15);
+		float pbrResidue = PBRWaterFoam::SurfaceFoam(input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy, saturate(pbrSurface.residueFoam * PBRWater::Shore1.y * PBRWater::Foam0.z),
+			PBRWater::FoamTile, float3(0.0, 0.0, 0.15 * PBRWater::FoamAdvectionRate), PBRWater::Foam1.y, PBRWater::OceanSampler);
 		finalColor = lerp(finalColor, pbrFoamColor, pbrResidue * (1.0 - pbrEdge) * 0.9);
 	}
 #							endif

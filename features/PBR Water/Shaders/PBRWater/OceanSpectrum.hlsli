@@ -17,11 +17,13 @@
 
 cbuffer OceanCB : register(b0)
 {
-	float4 Wind;     // xy wind direction, z open-sea peak omega (rad/s), w height scale
-	float4 Spread;   // x Mitsuyasu exponent at the peak, y choppiness (lambda), z swell alpha, w swell peak omega (rad/s)
-	float4 Swell;    // xy swell direction, z gravity (m/s^2), w omega0 = 2 pi / loop period (rad/s)
-	float4 Time;     // x loop fraction (0..1), y fft size, z units per metre, w unused
-	float4 Band[4];  // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
+	float4 Wind;         // xy wind direction, z open-sea peak omega (rad/s), w height scale
+	float4 Spread;       // x Mitsuyasu exponent at the peak, y choppiness (lambda), z swell alpha, w swell peak omega (rad/s)
+	float4 Swell;        // xy swell direction, z gravity (m/s^2), w omega0 = 2 pi / loop period (rad/s)
+	float4 Time;         // x loop fraction (0..1), y fft size, z units per metre, w unused
+	float4 Band[4];      // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
+	float4 Foam0;        // x dt (s), y foam retained this step (decay), z foam grown this step at the full rate, w unused
+	float4 FoamBand[4];  // x Jacobian below which the band's crests whiten, yz foam drift this step (uv), w 1 / how far below it the rate is full
 };
 
 static const float OceanJonswapAlpha = 0.0081;

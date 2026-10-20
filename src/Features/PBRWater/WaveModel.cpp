@@ -57,11 +57,12 @@ namespace PBRWaterModel
 			return a + (b - a) * uy;
 		}
 
-		/// Wave groups: the factor on the shore waves' height. Mirrors PBRWater::ShoreGroup.
-		float ShoreGroup(const ShoreParams& p, float x, float y, float departure)
+		/// Wave groups: the factor on the shore waves' height at the waterline point (x, y) for waves reaching it at
+		/// `arrival` (s, groupTime clock). Mirrors PBRWater::ShoreGroup.
+		float ShoreGroup(const ShoreParams& p, float x, float y, float arrival)
 		{
 			const float qx = x / std::max(3.0f * p.deepLength, 1.0f), qy = y / std::max(3.0f * p.deepLength, 1.0f);
-			const float s = departure / std::max(7.0f * p.period, 1.0f);
+			const float s = arrival / std::max(7.0f * p.period, 1.0f);
 			const float slice = std::floor(s);
 			float t = s - slice;
 			t = t * t * (3.0f - 2.0f * t);
@@ -526,8 +527,27 @@ namespace PBRWaterModel
 		}
 		s.shoreScale = params.shoreScale;
 		s.displacementBound = 5.0f * sigma * std::max(1.0f, s.choppiness) * static_cast<float>(UnitsPerMetre) + 1.0f;
+		s.whitecapCoverage = std::clamp(3.84e-6f * std::pow(U, 3.41f), 0.0f, 1.0f);
 		s.calm = 4.0f * sigma < 0.01f;
 		return s;
+	}
+
+	WhitecapCriterion CascadeWhitecaps(const OceanSpectrum& spectrum, uint32_t cascade, float amount)
+	{
+		WhitecapCriterion out;
+		if (cascade >= NumCascades || spectrum.calm || amount <= 0.0f)
+			return out;
+		// Crests breaking now: half of Monahan's whitecap coverage (the rest is the foam they leave behind).
+		out.share = std::clamp(0.5f * spectrum.whitecapCoverage * amount, 1e-6f, 0.4f);
+		// Upper-tail normal quantile of the share (Abramowitz & Stegun 26.2.23).
+		const float t = std::sqrt(-2.0f * std::log(out.share));
+		const float z = t - (2.515517f + 0.802853f * t + 0.010328f * t * t) / (1.0f + 1.432788f * t + 0.189269f * t * t + 0.001308f * t * t * t);
+		const CascadeBand& band = spectrum.cascades[cascade];
+		const float sigma = std::max(spectrum.choppiness * std::sqrt(std::max(band.meanSquareSlope, 0.0f)), 1e-4f);
+		out.threshold = 1.0f - sigma * z;
+		// Half a spread past the threshold the foam grows at its full rate, so a crest only just over it whitens slowly.
+		out.width = 0.5f * sigma;
+		return out;
 	}
 
 	ShoreParams UpdateShoreParams(const OceanSpectrum& spectrum, const ShoreParams* previous, double dt)
@@ -537,43 +557,25 @@ namespace PBRWaterModel
 		p.swellHeight = spectrum.swellHeight * spectrum.shoreScale;
 		p.windSeaHeight = spectrum.windSeaHeight * spectrum.shoreScale;
 
-		// The dominant sea: the swell where it is higher than the open-sea wind sea, else the wind sea. Its spectral
-		// width delta (the JONSWAP sigma_a = 0.07 for the wind sea, narrower for long-travelled swell) sets how fast the
-		// components drift apart into groups, its directional spread sigma_theta = sqrt(2 / (s + 1)) of a cos^2s(theta / 2)
-		// spreading (Mitsuyasu s at the wind sea's peak) how far apart their directions are, i.e. how short the crests run.
+		// The dominant sea: the swell where it is higher than the open-sea wind sea, else the wind sea.
 		const bool swell = spectrum.swellHeight > spectrum.windSeaHeight;
 		const float peak = swell ? spectrum.swellPeak : spectrum.peakOmega;
 		// Within the periods that make surf.
 		const float targetOmega = std::clamp(peak, static_cast<float>(TwoPi / 14.0), static_cast<float>(TwoPi / 4.0));
-		const float targetDelta = swell ? 0.04f : 0.07f;
-		const float spreadExponent = swell ? 40.0f : spectrum.spreadPeak;
-		const float targetSpread = std::sqrt(2.0f / (spreadExponent + 1.0f));
-		const float targetDirection = swell ? std::atan2(spectrum.swellDirY, spectrum.swellDirX) : std::atan2(spectrum.windDirY, spectrum.windDirX);
 		const float targetSwellDirection = std::atan2(spectrum.swellDirY, spectrum.swellDirX);
 
 		if (previous && previous->omega > 0.0f) {
-			// Ease over 8 s (as the wind): when the swell overtakes the wind sea the period and direction change, which
-			// would otherwise shift every crest at once. The frequency eases in log space, so up and down take as long.
+			// Ease over 8 s (as the wind): when the swell overtakes the wind sea the period changes, which would otherwise
+			// close up or spread every crest at once. The frequency eases in log space, so up and down take as long.
 			const float ease = 1.0f - static_cast<float>(std::exp(-std::max(dt, 0.0) / 8.0));
-			auto easeAngle = [ease](float from, float to) { return from + static_cast<float>(std::remainder(static_cast<double>(to) - from, TwoPi)) * ease; };
 			p.omega = previous->omega * std::exp((std::log(targetOmega) - std::log(previous->omega)) * ease);
-			p.delta = previous->delta + (targetDelta - previous->delta) * ease;
-			p.spread = previous->spread + (targetSpread - previous->spread) * ease;
-			p.direction = easeAngle(previous->direction, targetDirection);
-			p.swellDirection = easeAngle(previous->swellDirection, targetSwellDirection);
+			p.swellDirection = previous->swellDirection + static_cast<float>(std::remainder(static_cast<double>(targetSwellDirection) - previous->swellDirection, TwoPi)) * ease;
 		} else {
 			p.omega = targetOmega;
-			p.delta = targetDelta;
-			p.spread = targetSpread;
-			p.direction = targetDirection;
 			p.swellDirection = targetSwellDirection;
 		}
-		for (uint32_t c = 0; c < ShoreComponents; ++c) {
-			p.componentOmega[c] = p.omega * (1.0f + ShoreComponentFrequency[c] * p.delta);
-			p.componentDirection[c] = p.direction + ShoreComponentDirection[c] * p.spread;
-			// Phases integrate the frequency, so a frequency that changes never moves the waves.
-			p.phase[c] = previous ? Wrap(previous->phase[c] + static_cast<double>(p.componentOmega[c]) * dt) : 0.0;
-		}
+		// The clock integrates the frequency, so a frequency that changes never moves the waves.
+		p.phase = previous ? Wrap(previous->phase + static_cast<double>(p.omega) * dt) : 0.0;
 		p.groupTime = previous ? std::fmod(previous->groupTime + dt, 3600.0) : 0.0;
 
 		const float units = static_cast<float>(UnitsPerMetre);
@@ -582,13 +584,10 @@ namespace PBRWaterModel
 		p.deepLength = L0 * units;
 
 		// Bound of the run-up: Stockdon et al. (2006), 2 % exceedance, R = 1.1 (<eta> + S / 2) with set-up
-		// <eta> = 0.35 b sqrt(H0 L0) and swash S = sqrt(H0 L0 (0.563 b^2 + 0.004)), for the highest crest the components
-		// can build (all in phase) of the full open sea on a steep (b = 0.2) beach, with a margin.
+		// <eta> = 0.35 b sqrt(H0 L0) and swash S = sqrt(H0 L0 (0.563 b^2 + 0.004)), for the highest wave of the biggest set
+		// (ShoreGroup at most 1.55) of the full open sea on a steep (b = 0.2) beach, with a margin.
 		constexpr float Slope = 0.2f;
-		float peakSum = 0.0f;
-		for (const float a : ShoreComponentAmplitude)
-			peakSum += a;
-		const float highest = 2.0f * ShoreAmplitudeScale * peakSum * p.MaxDeepHeight() / units;
+		const float highest = ShoreHeightRatio * 1.55f * p.MaxDeepHeight() / units;
 		const float hl = std::sqrt(highest * L0);
 		const float runup = ShoreRunupScale * 1.1f * (0.35f * Slope * hl + 0.5f * hl * std::sqrt(0.563f * Slope * Slope + 0.004f));
 		p.maxRunup = runup * units + 20.0f;
@@ -1015,11 +1014,11 @@ namespace PBRWaterModel
 			const float b = v[i + width] + (v[i + width + 1] - v[i + width]) * tx;
 			return a + (b - a) * ty;
 		};
-		for (uint32_t c = 0; c < ShoreComponents; ++c) {
-			out.travelTime[c] = lerp2(travelTime[c]);
-			out.slownessX[c] = lerp2(slownessX[c]);
-			out.slownessY[c] = lerp2(slownessY[c]);
-		}
+		out.travelTime = lerp2(travelTime);
+		out.phaseLag = omega * out.travelTime;
+		out.distance = lerp2(distance);
+		out.slownessX = lerp2(slownessX);
+		out.slownessY = lerp2(slownessY);
 		out.slope = lerp2(slope);
 		out.exposure = lerp2(exposure);
 		out.room = lerp2(room);
@@ -1157,7 +1156,7 @@ namespace PBRWaterModel
 		}
 
 		// Distance to the waterline on either side (units), seeded with the zero crossing of the depth between
-		// neighbours: the beach slope and, up the beach, the arrival times are carried along it.
+		// neighbours: the beach slope and, up the beach, the travel times are carried along it.
 		std::vector<float> waterDistance(n, Far), landDistance(n, Far), unit(n, in.step);
 		for (uint32_t y = 0; y < h; ++y) {
 			for (uint32_t x = 0; x < w; ++x) {
@@ -1193,61 +1192,35 @@ namespace PBRWaterModel
 		field->step = in.step;
 		field->swellDirection = in.swellDirection;
 		field->level = in.level;
-		const double centreX = in.minX + 0.5 * static_cast<double>(w - 1) * in.step;
-		const double centreY = in.minY + 0.5 * static_cast<double>(h - 1) * in.step;
 
-		// Arrival time of each component's wavefronts. Over a shoaling bed refraction turns the crests towards the depth
-		// contours, so surf runs into every beach nearly head-on whatever the sea offshore does. Traced from the open sea
-		// in its one direction instead, the fronts ran along the banks of an inlet and lee shores got none. So T is minus
-		// the travel time to the nearest waterline, tau (eikonal from the waterline outwards over the real depths,
-		// |grad tau| = 1 / c(h)): the crests move shorewards and slow down and shorten as the water shoals. A share of the
-		// deep-water plane wave x.d / c0 (Oblique) keeps each component a little oblique, so they cross at small angles
-		// and beat into crest segments that wander along the shore. Relative to that plane wave at the field's centre
-		// (referenceTime), so the values stay small and a new field takes over without its clocks jumping.
-		constexpr double Oblique = 0.2;
+		// The time tau the waves take to the nearest waterline (eikonal from the waterline outwards over the real depths,
+		// |grad tau| = 1 / c(h)): Fluid Flux's coastline distance, as a travel time. Over a shoaling bed refraction turns the
+		// crests towards the depth contours, so surf runs into every beach nearly head-on whatever the sea offshore does;
+		// traced from the open sea in its one direction instead, the fronts ran along the banks of an inlet and lee shores
+		// got none. The crests move shorewards down tau, and slow down and close up as the water shoals.
+		const float omega = std::max(in.omega, 0.05f);
+		field->omega = omega;
+		std::vector<float> tau(n, Far), cost(n, 0.0f);
+		for (size_t i = 0; i < n; ++i) {
+			if (!water[i])
+				continue;
+			cost[i] = stepMetres / PhaseSpeed(omega, std::max(depth[i] * metresPerUnit, MinDepth));
+			// The waterline: the water's edge, at the sub-texel distance the zero crossing of the depth gives.
+			if (waterDistance[i] <= in.step)
+				tau[i] = waterDistance[i] / in.step * cost[i];
+		}
+		FastSweep(tau, cost, water, w, h, 3, cancel);
+		if (cancelled())
+			return nullptr;
 		std::vector<uint8_t> reached(n, 0);
-		std::vector<float> shoreTime;  // tau of component 0: how coherent the fronts are (below)
-		for (uint32_t c = 0; c < ShoreComponents; ++c) {
-			const float omega = std::max(in.omega[c], 0.05f);
-			const double dirX = std::cos(static_cast<double>(in.direction[c]));
-			const double dirY = std::sin(static_cast<double>(in.direction[c]));
-			const float deepSpeed = G / omega;
-			field->omega[c] = omega;
-			field->direction[c] = in.direction[c];
-			field->referenceTime[c] = Oblique * (centreX * dirX + centreY * dirY) * MetresPerUnit / deepSpeed;
+		for (size_t i = 0; i < n; ++i)
+			reached[i] = water[i] && tau[i] < Far;
+		field->travelTime = SmoothReached(tau, reached, w, h);
 
-			std::vector<float> tau(n, Far), cost(n, 0.0f);
-			for (size_t i = 0; i < n; ++i) {
-				if (!water[i])
-					continue;
-				cost[i] = stepMetres / PhaseSpeed(omega, std::max(depth[i] * metresPerUnit, MinDepth));
-				// The waterline: the water's edge, at the sub-texel distance the zero crossing of the depth gives.
-				if (waterDistance[i] <= in.step)
-					tau[i] = waterDistance[i] / in.step * cost[i];
-			}
-			FastSweep(tau, cost, water, w, h, 3, cancel);
-			if (cancelled())
-				return nullptr;
-			std::vector<float> T(n, Far);
-			for (uint32_t y = 0; y < h; ++y) {
-				for (uint32_t x = 0; x < w; ++x) {
-					const size_t i = static_cast<size_t>(y) * w + x;
-					if (!water[i] || tau[i] >= Far)
-						continue;
-					const double rx = in.minX + static_cast<double>(x) * in.step - centreX;
-					const double ry = in.minY + static_cast<double>(y) * in.step - centreY;
-					T[i] = static_cast<float>(Oblique * (rx * dirX + ry * dirY) * MetresPerUnit / deepSpeed) - tau[i];
-				}
-			}
-			for (size_t i = 0; i < n; ++i)
-				reached[i] = water[i] && T[i] < Far;
-			field->travelTime[c] = SmoothReached(T, reached, w, h);
-			if (c == 0)
-				shoreTime = std::move(tau);
-
-			// Slowness grad T (s/m), lightly smoothed: the direction the component travels in and 1 / its phase speed.
-			auto& sx = field->slownessX[c];
-			auto& sy = field->slownessY[c];
+		// Slowness grad tau (s/m), lightly smoothed: the waves travel down it, at 1 / its length.
+		{
+			auto& sx = field->slownessX;
+			auto& sy = field->slownessY;
 			sx.assign(n, 0.0f);
 			sy.assign(n, 0.0f);
 			std::vector<float> gx(n, 0.0f), gy(n, 0.0f);
@@ -1255,7 +1228,7 @@ namespace PBRWaterModel
 				for (uint32_t x = 0; x < w; ++x) {
 					const size_t i = static_cast<size_t>(y) * w + x;
 					float dx = 0.0f, dy = 0.0f;
-					if (reached[i] && Gradient(field->travelTime[c], reached, w, h, static_cast<int>(x), static_cast<int>(y), dx, dy)) {
+					if (reached[i] && Gradient(field->travelTime, reached, w, h, static_cast<int>(x), static_cast<int>(y), dx, dy)) {
 						gx[i] = dx / stepMetres;
 						gy[i] = dy / stepMetres;
 					}
@@ -1285,11 +1258,21 @@ namespace PBRWaterModel
 					sy[i] = ay / count;
 				}
 			}
-			// Water no wave reaches (cut off from every seed) gets no train.
-			for (size_t i = 0; i < n; ++i) {
-				if (!reached[i])
-					field->travelTime[c][i] = 0.0f;
-			}
+		}
+		// Water no wave reaches (cut off from every seed) gets no train.
+		for (size_t i = 0; i < n; ++i) {
+			if (!reached[i])
+				field->travelTime[i] = 0.0f;
+		}
+
+		// Signed distance to the waterline (Fluid Flux's coastline distance): it finds the nearest point of the coast, where
+		// the shaders read the variation along it and the swash its timing.
+		field->distance.assign(n, 0.0f);
+		for (size_t i = 0; i < n; ++i) {
+			if (water[i])
+				field->distance[i] = std::min(waterDistance[i], 1.0e7f);
+			else
+				field->distance[i] = -std::min(landDistance[i], 1.0e7f);
 		}
 		if (cancelled())
 			return nullptr;
@@ -1361,7 +1344,7 @@ namespace PBRWaterModel
 		// wavelength across for them to look like waves at all. Only a ditch narrower than that has none (the FFT sea
 		// carries what waves it has); a stream keeps a train, as small as its fetch-limited sea (no swell reaches it). The width is that of the largest
 		// disc of water around each point (twice the distance to the waterline at its centre: the width of a channel, the
-		// size of a pond), propagated by raster sweeps; the wavelength that of component 0 in the local depth.
+		// size of a pond), propagated by raster sweeps; the wavelength that of the shore waves in the local depth.
 		field->room.assign(n, 0.0f);
 		{
 			std::vector<float> radius(n, 0.0f), reach(n, -1.0f);
@@ -1415,7 +1398,6 @@ namespace PBRWaterModel
 				if (cancelled())
 					return nullptr;
 			}
-			const float omega = std::max(in.omega[0], 0.05f);
 			for (size_t i = 0; i < n; ++i) {
 				if (!water[i])
 					continue;
@@ -1438,7 +1420,7 @@ namespace PBRWaterModel
 				for (uint32_t x = 0; x < w; ++x) {
 					const size_t i = static_cast<size_t>(y) * w + x;
 					float dx = 0.0f, dy = 0.0f;
-					if (reached[i] && Gradient(shoreTime, reached, w, h, static_cast<int>(x), static_cast<int>(y), dx, dy)) {
+					if (reached[i] && Gradient(tau, reached, w, h, static_cast<int>(x), static_cast<int>(y), dx, dy)) {
 						gx[i] = dx / stepMetres;
 						gy[i] = dy / stepMetres;
 						weight[i] = 1.0f;
@@ -1448,7 +1430,6 @@ namespace PBRWaterModel
 			Blur(gx, w, h, 4);
 			Blur(gy, w, h, 4);
 			Blur(weight, w, h, 4);
-			const float omega = std::max(in.omega[0], 0.05f);
 			for (size_t i = 0; i < n; ++i) {
 				if (!water[i])
 					continue;
@@ -1490,16 +1471,11 @@ namespace PBRWaterModel
 		std::sort(seaward.begin(), seaward.end(), [&](uint32_t a, uint32_t b) { return waterDistance[a] < waterDistance[b]; });
 		std::sort(inland.begin(), inland.end(), [&](uint32_t a, uint32_t b) { return landDistance[a] < landDistance[b]; });
 
-		// Up the beach the arrival times, directions and exposure are those of the waterline the inland ray leaves from,
+		// Up the beach the travel times, directions and exposure are those of the waterline the inland ray leaves from,
 		// so the swash on a stretch of beach follows the crests that reach it.
 		{
 			std::vector<uint8_t> done(reached);
-			std::vector<std::vector<float>*> carried;
-			for (uint32_t c = 0; c < ShoreComponents; ++c) {
-				carried.push_back(&field->travelTime[c]);
-				carried.push_back(&field->slownessX[c]);
-				carried.push_back(&field->slownessY[c]);
-			}
+			std::vector<std::vector<float>*> carried = { &field->travelTime, &field->slownessX, &field->slownessY };
 			carried.push_back(&field->exposure);
 			carried.push_back(&field->room);
 			for (const uint32_t i : inland) {
@@ -1517,12 +1493,10 @@ namespace PBRWaterModel
 			}
 			// Neighbouring rays leave from different stretches of the waterline: where they meet, the carried times and
 			// directions jump from texel to texel, which put hard corners in the swash. Smoothed over the carried texels.
-			for (uint32_t c = 0; c < ShoreComponents; ++c) {
-				for (int pass = 0; pass < 2; ++pass) {
-					field->travelTime[c] = SmoothReached(field->travelTime[c], done, w, h);
-					field->slownessX[c] = SmoothReached(field->slownessX[c], done, w, h);
-					field->slownessY[c] = SmoothReached(field->slownessY[c], done, w, h);
-				}
+			for (int pass = 0; pass < 2; ++pass) {
+				field->travelTime = SmoothReached(field->travelTime, done, w, h);
+				field->slownessX = SmoothReached(field->slownessX, done, w, h);
+				field->slownessY = SmoothReached(field->slownessY, done, w, h);
 			}
 		}
 
@@ -1582,110 +1556,124 @@ namespace PBRWaterModel
 
 	namespace
 	{
+		/// Mirrors PBRWater::ValueNoiseGrad: the value noise and its gradient.
+		void ValueNoiseGrad(float x, float y, float& value, float& gx, float& gy)
+		{
+			const float ix = std::floor(x), iy = std::floor(y);
+			const float fx = x - ix, fy = y - iy;
+			const float ux = fx * fx * (3.0f - 2.0f * fx), uy = fy * fy * (3.0f - 2.0f * fy);
+			const float dux = 6.0f * fx * (1.0f - fx), duy = 6.0f * fy * (1.0f - fy);
+			const float a = Hash12(ix, iy), b = Hash12(ix + 1.0f, iy), c = Hash12(ix, iy + 1.0f), d = Hash12(ix + 1.0f, iy + 1.0f);
+			const float k = a - b - c + d;
+			value = a + (b - a) * ux + (c - a) * uy + k * ux * uy;
+			gx = dux * (b - a + k * uy);
+			gy = duy * (c - a + k * ux);
+		}
+
 		/**
-		 * Displacement (units) and velocity (units/s) of the shore wave train at a point of the shore field, times the
-		 * hand-over weight. Mirrors PBRWater::ShoreWaves in PBRWater.hlsli (SumShoreComponents, EvaluateShoreProfile).
-		 *
-		 * Component i has phase theta_i = clock_i - omega_i T_i (omega_i as the field was traced for it; the clock runs at
-		 * this frame's frequency) and deep-water amplitude a_i = ShoreAmplitudeScale
-		 * ShoreComponentAmplitude_i H0. Their sum Z = sum a_i e^(i theta_i) is the local wave: its amplitude |Z| is shoaled
-		 * (Ks) and held to the McCowan limit H = 0.78 h, past 0.75 of which the waves break (on beaches, not rock faces);
-		 * its phase arg Z falls along the direction of travel and rises in time at sum Re(conj(Z) c_i) omega_i / |Z|^2.
-		 *
-		 * Profile: near the shore the waves are long against their height, so their shape is set in phase, as a pure
-		 * height field that cannot fold: the front narrows to pi (1 - 0.8 s) of the cycle while breaking, the back
-		 * widens, and the crest peaks like a cnoidal wave with the Ursell number Ur = H L^2 / h^3:
-		 * z = 2 A (P - mu_p), P = ((1 + cos v') / 2)^p, mu_p its mean, p = 1 + 3 saturate((Ur - 10) / 50).
-		 * Horizontally only the orbital motion D = A f sin(arg Z) along the direction of travel, f = min(1, 0.5 / (A k)).
+		 * Mirrors PBRWater::ShorePhase (Fluid Flux's MF_CoastlineProfileUV with MF_CoastlineOffsets): the phase at (x, y)
+		 * and its gradient (rad/unit) for the waves travelling along (dirX, dirY).
 		 */
-		WaveSnapshot::Displacement ShoreTrain(const ShoreParams& p, const ShoreTrainContext& t, const ShoreField::Sample& ray)
+		double ShorePhase(const ShoreParams& p, float tracedOmega, float x, float y, float coastX, float coastY, const ShoreField::Sample& ray, float dirX, float dirY, float slowness, float& gradX, float& gradY)
+		{
+			const float L0 = std::max(p.deepLength, 1.0f);
+			const float drift = p.variationTime * 0.004f;
+			float coarse, cx, cy, fine, fx, fy, across, ax, ay;
+			ValueNoiseGrad(coastX / (4.0f * L0) + drift, coastY / (4.0f * L0), coarse, cx, cy);
+			ValueNoiseGrad(coastX / (1.7f * L0) + 17.1f, coastY / (1.7f * L0) + 17.1f, fine, fx, fy);
+			ValueNoiseGrad(x / (1.3f * L0) + 5.3f, y / (1.3f * L0) + drift * 1.5f, across, ax, ay);
+			const float along = coarse * 0.67f + fine * 0.33f;
+			const float offshoreRamp = ray.distance / L0 * 0.35f - 0.05f;
+			const float offshore = std::clamp(offshoreRamp, 0.0f, 1.0f);
+			const float alongScale = static_cast<float>(TwoPi) * 1.2f * p.variation;
+			const float acrossScale = static_cast<float>(TwoPi) * 0.35f;
+			float alongX = cx * (0.67f / (4.0f * L0)) + fx * (0.33f / (1.7f * L0));
+			float alongY = cy * (0.67f / (4.0f * L0)) + fy * (0.33f / (1.7f * L0));
+			const float alongDir = alongX * dirX + alongY * dirY;
+			alongX -= dirX * alongDir;
+			alongY -= dirY * alongDir;
+			const float ramp = offshoreRamp > 0.0f && offshoreRamp < 1.0f ? 0.35f / L0 : 0.0f;
+			gradX = -tracedOmega * slowness * dirX + alongScale * alongX + acrossScale * (offshore * ax / (1.3f * L0) - (across - 0.5f) * ramp * dirX);
+			gradY = -tracedOmega * slowness * dirY + alongScale * alongY + acrossScale * (offshore * ay / (1.3f * L0) - (across - 0.5f) * ramp * dirY);
+			return p.phase + static_cast<double>(ray.phaseLag) + alongScale * (along - 0.5f) + acrossScale * offshore * (across - 0.5f);
+		}
+
+		/// Mirrors PBRWater::ShoreShape.
+		struct ShoreShape
+		{
+			float x = 0.0f, z = 0.0f, dx = 0.0f, dz = 0.0f;
+		};
+
+		/// Mirrors PBRWater::ShoreProfile: Airy orbits tilted forward, blending into the bore.
+		ShoreShape ShoreProfile(double theta, float a, float ax, float tilt, float bore, float frontWidth)
+		{
+			const float s = static_cast<float>(std::sin(theta)), c = static_cast<float>(std::cos(theta));
+			const float st = std::sin(tilt), ct = std::cos(tilt);
+			const float X = ax * s, Z = a * c, dX = ax * c, dZ = -a * s;
+			ShoreShape o;
+			o.x = X * ct + Z * st;
+			o.z = Z * ct - X * st;
+			o.dx = dX * ct + dZ * st;
+			o.dz = dZ * ct - dX * st;
+			if (bore > 0.0f) {
+				double v = theta / TwoPi;
+				v -= std::floor(v);
+				const float back = 1.0f - frontWidth;
+				const bool onBack = v < back;
+				const float rate = onBack ? 1.0f / back : 1.0f / frontWidth;
+				const float u = onBack ? static_cast<float>(v) * rate : 1.0f + (static_cast<float>(v) - back) * rate;
+				const float su = std::sin(static_cast<float>(Pi) * u), cu = std::cos(static_cast<float>(Pi) * u);
+				o.x += (0.3f * ax * s - o.x) * bore;
+				o.z += (a * cu - o.z) * bore;
+				o.dx += (0.3f * ax * c - o.dx) * bore;
+				o.dz += (-a * static_cast<float>(Pi) * su * rate / static_cast<float>(TwoPi) - o.dz) * bore;
+			}
+			return o;
+		}
+
+		/**
+		 * Displacement (units) and velocity (units/s) of the shore wave train at (x, y), times the hand-over weight.
+		 * Mirrors PBRWater::ShoreWaves in PBRWater.hlsli at full resolution (scale 0): the phase from the coastline map's
+		 * travel time with Fluid Flux's offsets, the wave set's height shoaled up to the breaking limit, Airy orbits
+		 * pitching forward as the wave nears breaking, then the bore. The velocity is the displacement's rate of change at
+		 * the clock's frequency.
+		 */
+		WaveSnapshot::Displacement ShoreTrain(const ShoreParams& p, float tracedOmega, const ShoreTrainContext& t, const ShoreField::Sample& ray, float x, float y)
 		{
 			WaveSnapshot::Displacement out;
-
-			// The current field's components and, while it takes over, its predecessor's (cross-faded, as SumShoreComponents).
-			constexpr uint32_t Count = 2 * ShoreComponents;
-			std::array<double, Count> re{}, im{}, omega{};
-			std::array<uint32_t, Count> component{};
-			double zr = 0.0, zi = 0.0, total = 0.0;
-			for (uint32_t c = 0; c < ShoreComponents; ++c) {
-				const double a = static_cast<double>(ShoreAmplitudeScale) * ShoreComponentAmplitude[c] * t.deepHeight;
-				const double theta = p.phase[c] - static_cast<double>(ray.omega[c]) * ray.travelTime[c];
-				const double thetaPrevious = p.phase[c] - ray.previousShift[c] - static_cast<double>(ray.previousOmega[c]) * ray.previousTravelTime[c];
-				const double current = a * ray.blend;
-				const double previous = a * (1.0 - ray.blend);
-				re[c] = current * std::cos(theta);
-				im[c] = current * std::sin(theta);
-				re[c + ShoreComponents] = previous * std::cos(thetaPrevious);
-				im[c + ShoreComponents] = previous * std::sin(thetaPrevious);
-				omega[c] = ray.omega[c];
-				omega[c + ShoreComponents] = ray.previousOmega[c];
-				component[c] = component[c + ShoreComponents] = c;
-				total += a;
-			}
-			for (uint32_t i = 0; i < Count; ++i) {
-				zr += re[i];
-				zi += im[i];
-			}
-			const double zz = zr * zr + zi * zi;
-			const double norm = std::max(zz, 1e-4 * total * total + 1e-12);
-			double gradX = 0.0, gradY = 0.0, rate = 0.0;
-			for (uint32_t i = 0; i < Count; ++i) {
-				const uint32_t c = component[i];
-				const double along = zr * re[i] + zi * im[i];
-				gradX -= along * omega[i] * ray.slownessX[c];
-				gradY -= along * omega[i] * ray.slownessY[c];
-				rate += along * p.componentOmega[c];
-			}
-			gradX /= norm;
-			gradY /= norm;
-			rate /= norm;
-			const double phase = std::atan2(zi, zr);
-
-			const float shoaled = static_cast<float>(std::sqrt(zz)) * t.shoaling;
-			const float limit = 0.5f * 0.78f * t.depth;
-			const float ratio = shoaled / std::max(limit, 1e-4f);
-			const float A = std::min(shoaled, limit);
-			if (!(A > 1e-5f) || t.wavenumber <= 0.0f)
+			const float slowness = std::sqrt(ray.slownessX * ray.slownessX + ray.slownessY * ray.slownessY);
+			if (slowness <= 1e-9f || t.deepHeight <= 0.0f)
 				return out;
-			const float breaking = Smoothstep(0.75f, 1.0f, ratio) * t.beach;
+			const float dirX = -ray.slownessX / slowness;
+			const float dirY = -ray.slownessY / slowness;
+			const float coastX = x + dirX * ray.distance;
+			const float coastY = y + dirY * ray.distance;
+			const float omega = std::max(tracedOmega, 1e-3f);
+			const float depth = std::max(t.depth, 0.05f);
+			// Slowness in s/unit, as the shaders read it.
+			float gradX = 0.0f, gradY = 0.0f;
+			const double theta = ShorePhase(p, omega, x, y, coastX, coastY, ray, dirX, dirY, slowness * static_cast<float>(MetresPerUnit), gradX, gradY);
 
-			// Skewed phase: crest (v = 0) to trough over the long back, trough to crest over the short front.
-			const double v = Wrap(phase);
-			const double front = Pi * (1.0 - 0.8 * breaking);
-			const double back = TwoPi - front;
-			const bool onBack = v < back;
-			const double remapped = onBack ? v * Pi / back : Pi + (v - back) * Pi / front;
-			const double remapSlope = onBack ? Pi / back : Pi / front;
+			const float shoaled = ShoreHeightRatio * t.deepHeight * ShoreGroup(p, coastX, coastY, static_cast<float>(p.groupTime) + ray.travelTime) * t.shoaling;
+			const float limit = BreakerIndex * depth;
+			const float stage = shoaled / std::max(limit, 1e-4f);
+			const float a = 0.5f * std::min(shoaled, limit);
+			const float k = std::max(std::sqrt(gradX * gradX + gradY * gradY) * static_cast<float>(UnitsPerMetre), omega * omega / G);
+			const float breaking = Smoothstep(0.75f, 1.0f, stage) * t.beach;
+			const float bore = Smoothstep(1.0f, 1.4f, stage) * t.beach;
+			const float lean = breaking * (1.0f - bore);
+			const float ax = std::min(a / std::max(std::tanh(std::min(k * depth, 20.0f)), 1e-3f), ShoreOrbitLimit / k);
+			const float tilt = 0.5f * std::atan(ray.slope) + 0.6f * lean;
+			const ShoreShape shape = ShoreProfile(theta, a, ax, tilt, bore, 0.2f);
 
-			// Cnoidal peakedness from the Ursell number (metres).
-			const float k = t.wavenumber;
-			const float L = static_cast<float>(TwoPi) / k;
-			const float h = std::max(t.depth, 0.15f);
-			const float ursell = 2.0f * A * L * L / (h * h * h);
-			const float peakedness = 1.0f + 3.0f * std::clamp((ursell - 10.0f) / 50.0f, 0.0f, 1.0f);
-			// Mean of P over a cycle, Gamma(p + 1/2) / (sqrt(pi) Gamma(p + 1)), within 1 %.
-			const float mean = 1.0f / std::sqrt(static_cast<float>(Pi) * (peakedness + 0.25f));
-			const float cosine = std::max(0.5f * (1.0f + static_cast<float>(std::cos(remapped))), 0.0f);
-			const float P = std::pow(cosine, peakedness);
-			const float dPdv = -peakedness * std::pow(cosine, peakedness - 1.0f) * static_cast<float>(std::sin(remapped)) * 0.5f;
-			const float z = 2.0f * A * (P - mean);
-			const float dzdt = 2.0f * A * dPdv * static_cast<float>(remapSlope * rate);
-
-			const float f = std::min(1.0f, 0.5f / std::max(A * k, 1e-6f));
-			const float D = A * f * static_cast<float>(std::sin(phase));
-			const float dDdt = A * f * static_cast<float>(std::cos(phase) * rate);
-			// The direction of travel: down the phase.
-			const double gradLength = std::sqrt(gradX * gradX + gradY * gradY);
-			const float dirX = gradLength > 1e-12 ? static_cast<float>(-gradX / gradLength) : 0.0f;
-			const float dirY = gradLength > 1e-12 ? static_cast<float>(-gradY / gradLength) : 0.0f;
-
+			const float rate = std::max(p.omega, 1e-3f);
 			const float units = static_cast<float>(UnitsPerMetre) * t.weight;
-			out.dx = dirX * D * units;
-			out.dy = dirY * D * units;
-			out.dz = z * units;
-			out.vx = dirX * dDdt * units;
-			out.vy = dirY * dDdt * units;
-			out.vz = dzdt * units;
+			out.dx = dirX * shape.x * units;
+			out.dy = dirY * shape.x * units;
+			out.dz = shape.z * units;
+			out.vx = dirX * shape.dx * rate * units;
+			out.vy = dirY * shape.dx * rate * units;
+			out.vz = shape.dz * rate * units;
 			return out;
 		}
 	}
@@ -1693,18 +1681,14 @@ namespace PBRWaterModel
 	ShoreField::Sample WaveSnapshot::ShoreAt(float x, float y) const
 	{
 		ShoreField::Sample sample = shoreField ? shoreField->At(x, y) : ShoreField::Sample{};
-		if (shoreField)
-			sample.omega = shoreField->omega;
-		// As PBRWater::SampleShore: a new field takes over from its predecessor by cross-fading the two trains.
+		// As PBRWater::SampleShore: a new map takes over from its predecessor's travel times, each field's lag at the
+		// frequency it was traced for.
 		if (shoreField && shorePrevious && shoreBlend < 1.0f) {
 			const auto previous = shorePrevious->At(x, y);
 			if (previous.weight > 0.0f) {
-				for (uint32_t c = 0; c < ShoreComponents; ++c) {
-					sample.previousTravelTime[c] = previous.travelTime[c];
-					sample.previousOmega[c] = shorePrevious->omega[c];
-					sample.previousShift[c] = static_cast<float>(shoreShift[c]);
-				}
-				sample.blend = shoreBlend;
+				sample.travelTime = previous.travelTime + (sample.travelTime - previous.travelTime) * shoreBlend;
+				sample.phaseLag = previous.phaseLag + (sample.phaseLag - previous.phaseLag) * shoreBlend;
+				sample.distance = previous.distance + (sample.distance - previous.distance) * shoreBlend;
 				sample.weight = previous.weight + (sample.weight - previous.weight) * shoreBlend;
 			}
 		}
@@ -1797,10 +1781,8 @@ namespace PBRWaterModel
 				// grow (as PBRWater::BuildWaveContext).
 				const float swell = shore.swellHeight * ray.exposure;
 				const float wind = shore.windSeaHeight * ctx.fetchRatio;
-				t.deepHeight = std::sqrt(swell * swell + wind * wind) * static_cast<float>(MetresPerUnit) *
-				               ShoreGroup(shore, fx, fy, static_cast<float>(shore.groupTime) - ray.travelTime[0]);
-				t.wavenumber = Wavenumber(shore.omega, std::max(depthMetres, 0.15f));
-				t.shoaling = ShoalingCoefficient(shore.omega, depthMetres);
+				t.deepHeight = std::sqrt(swell * swell + wind * wind) * static_cast<float>(MetresPerUnit);
+				t.shoaling = ShoalingCoefficient(shoreField->omega, depthMetres);
 				// Breaking or surging: the Iribarren number tan(beta) / sqrt(H0 / L0) of the local sea (Battjes 1974),
 				// as ctx.beach in the shader.
 				const float deepHeight = 4.0f * std::sqrt(deepVariance) * static_cast<float>(UnitsPerMetre);
@@ -1808,7 +1790,7 @@ namespace PBRWaterModel
 				const float iribarren = ray.slope / std::sqrt(std::max(steepness, 1e-4f));
 				t.beach = Smoothstep(3.3f, 2.0f, iribarren) * ray.weight * ray.room * std::clamp(deepHeight - 1.0f, 0.0f, 1.0f);
 				for (uint32_t c = 0; c < NumCascades; ++c) {
-					const float overlap = std::clamp(1.0f - std::abs(std::log2(ocean->cascades[c].meanOmega / shore.omega)), 0.0f, 1.0f);
+					const float overlap = std::clamp(1.0f - std::abs(std::log2(ocean->cascades[c].meanOmega / shoreField->omega)), 0.0f, 1.0f);
 					ctx.weight[c] *= 1.0f - weight * overlap;
 				}
 			}
@@ -1838,8 +1820,8 @@ namespace PBRWaterModel
 			out.vz = a.vz + (b.vz - a.vz) * t;
 		}
 		if (ctx.train.weight > 0.0f && shoreField) {
-			// The phase varies over a hull: arrival times and directions are read at each point, the amplitude is the context's.
-			const Displacement train = ShoreTrain(shore, ctx.train, ShoreAt(static_cast<float>(x), static_cast<float>(y)));
+			// The phase varies over a hull: travel times and directions are read at each point, the amplitude is the context's.
+			const Displacement train = ShoreTrain(shore, shoreField->omega, ctx.train, ShoreAt(static_cast<float>(x), static_cast<float>(y)), static_cast<float>(x), static_cast<float>(y));
 			out.dx += train.dx;
 			out.dy += train.dy;
 			out.dz += train.dz;

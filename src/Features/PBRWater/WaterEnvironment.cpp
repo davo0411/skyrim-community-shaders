@@ -543,11 +543,10 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 	const auto now = std::chrono::steady_clock::now();
 	const bool newLand = landVersion != shoreLandVersion && now - shoreBuiltAt > std::chrono::seconds(10);
 	const bool newData = newLand || coarse != shoreCoarse || levels != shoreLevels;
-	// The arrival times hold for the period and directions they were traced for; a new field takes over smoothly.
+	// The travel times hold for the period they were traced for, the exposure for the swell's direction; a new field
+	// takes over smoothly.
 	auto turned = [](float a, float b, float degrees) { return std::abs(std::remainder(a - b, static_cast<float>(PBRWaterModel::TwoPi))) > degrees * std::numbers::pi_v<float> / 180.0f; };
-	bool newWaves = shoreTraced.omega <= 0.0f || std::abs(waves.omega / shoreTraced.omega - 1.0f) > 0.08f || turned(waves.swellDirection, shoreTraced.swellDirection, 8.0f);
-	for (uint32_t c = 0; c < PBRWaterModel::ShoreComponents; ++c)
-		newWaves = newWaves || turned(waves.componentDirection[c], shoreTraced.componentDirection[c], 4.0f);
+	const bool newWaves = shoreTraced.omega <= 0.0f || std::abs(waves.omega / shoreTraced.omega - 1.0f) > 0.08f || turned(waves.swellDirection, shoreTraced.swellDirection, 8.0f);
 	if (shore.load(std::memory_order_acquire) && !moved && !newData && !newWaves)
 		return;
 
@@ -575,8 +574,7 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 		inputs.minX = minX;
 		inputs.minY = minY;
 		inputs.step = ShoreStep;
-		inputs.omega = waves.componentOmega;
-		inputs.direction = waves.componentDirection;
+		inputs.omega = waves.omega;
 		inputs.swellDirection = waves.swellDirection;
 		inputs.fetch = fetchField;
 		inputs.fetchScale = fetchScale;

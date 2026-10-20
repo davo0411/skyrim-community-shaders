@@ -42,8 +42,20 @@ wave train.
     transform. The FFT is a radix-2 Stockham kernel in group shared memory (one group per line; 128, 256 or
     512 per the Wave Detail setting).
 -   **Outputs** (texture arrays, one slice per cascade, full mip chains): displacement + shear, slopes +
-    compression, and `(slope^2, unused, |laplacian|)`. Last frame's displacement is kept for
+    compression, and `(slope^2, whitecap foam, |laplacian|)`. Last frame's displacement is kept for
     motion vectors.
+-   **Whitecaps** (Jacobian foam, `OceanAssembleCS`; GodotOceanWaves, 2Retr0, MIT): each cascade keeps its own foam
+    in its own tile (so it rides the waves that made it, and drifts downwind with the surface current), growing where
+    the band's Jacobian `J = (1 + Dxx)(1 + Dyy) - Dxy^2` falls below a threshold and decaying exponentially over
+    Whitecap Lifetime, so a breaking crest leaves a trail that thins out behind it. The growth saturates a little past
+    the threshold (Crest's `UpdateFoam`) instead of growing without bound on folds. Godot, Crest and Ocean-URP all
+    tune the threshold by hand per sea state; here the wind sets it (`CascadeWhitecaps`): Monahan &
+    O'Muircheartaigh (1980) measured the share of the sea covered by whitecaps, `W = 3.84e-6 U^3.41`, half of it
+    taken as crests breaking now; a band's compression is near Gaussian with standard deviation `lambda sqrt(mss)`,
+    so the threshold its most compressed `W / 2` falls below is `1 - z lambda sqrt(mss)` (`z` the normal quantile).
+    The shaders sum the bands as Godot does, weighted by how much each carries the dominant waves at the location
+    (Ocean-URP's per-cascade foam weights ~1 : 1/3 : 1/10, placed by the local spectral peak; the smallest band never
+    counts), and by the band's local presence (fetch, depth, the shore train taking over).
 -   **Time**: frequencies are quantised to multiples of `2 pi / 1024 s`, so the sea repeats exactly every
     1024 s and the GPU only ever sees time as a fraction of that loop. Wind changes rescale amplitudes on
     fixed random coefficients, so the sea changes continuously; pausing freezes it.
@@ -79,7 +91,7 @@ static destructors without risking a hang at game exit.
 | ---------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Wind speed / direction | `RE::Sky::windSpeed/windAngle` (blended across weather transitions)          | spectrum energy, peak period, direction                                                                                     |
 | Fetch                  | baked from Unified Water's cell coverage, 16 directions (`WaterEnvironment`) | JONSWAP fetch-limited peak, energy and height per cascade: ponds and rivers keep only short chop, the open sea builds swell |
-| Depth                  | Terrain Shadows heightmap and the loaded cells' terrain                      | shore field: refraction, shoaling (Green's law), depth-limited breaking (Hs <= 0.6 h), swash up the beach                  |
+| Depth                  | Terrain Shadows heightmap and the loaded cells' terrain                      | shore field: refraction, shoaling (Green's law), depth-limited breaking (Hs <= 0.6 h), swash up the beach                   |
 | Flow                   | Unified Water flowmap                                                        | calms waves on rivers                                                                                                       |
 | Absorption             | the water form's vanilla shallow colour and visibility distance              | Beer-Lambert extinction per channel                                                                                         |
 
@@ -100,29 +112,29 @@ visibility, subsurface, roughness.
 
 ## Shoreline
 
-Near the shore the long FFT cascades hand over (`h < L0 / 2`) to an analytic wave train that is refracted
-from the open sea over the real depths: no per-shore setup, everything follows from the sea state and the
-terrain. Four parts: a shore field (CPU, when the waves arrive where), the train (GPU, what they look like),
-the swash (GPU, what they do on the beach) and a per-pixel waterline (where the water ends).
+Near the shore the long FFT cascades hand over (`h < L0 / 2`) to Fluid Flux 2-style coastline waves (Imaginary Blend;
+DaiZiLing's HLSL port of its `MF_SurfaceFlux_Coastline`, the Flux2-Shoreline-Wave-HLSL repository): one train of the
+sea's dominant waves running up a coastline map that is traced over the real depths instead of baked. No per-shore
+setup: everything follows from the sea state and the terrain. Four parts: a coastline map (CPU, how long the waves take
+to reach the waterline from where), the train (GPU, what they look like), the swash (GPU, what they do on the beach)
+and a per-pixel waterline (where the water ends).
 
--   **Shore field** (`WaveModel::BuildShoreField`, rebuilt on a `WaterEnvironment` worker around the player:
-    768^2 texels of 128 units, ~1.4 km across, from the loaded cells' exact terrain, else the Terrain
-    Shadows heightmap, and each cell's water level from Unified Water's cache). For each of the train's three
-    components the arrival time `T` of its wavefronts solves the eikonal `|grad T| = 1 / c(h)` by fast
-    sweeping (Zhao 2005), seeded with the deep-water plane wave `T = x.d / c0` in water deep enough not to
-    feel the bottom (`h > 0.3 L0`) and where the waves enter the field or leave a lee shore. So the fronts
-    refract round headlands, wrap into bays, slow and shorten over the shoals, and reach every stretch of a
-    beach at its own time. Up the beach `T` is carried from the waterline the inland ray leaves from. The field
-    also holds `grad T` (direction of travel, `1 / c`), the beach slope at the waterline and the exposure to
-    the swell (open water upwind along its direction: lee shores see little of it). `T` is stored relative to
-    the plane wave at the field's centre. Each component's phase is `clock - omega_f T`: the clock integrates this
-    frame's (eased) frequency, but the spatial term uses the frequency `omega_f` the field was traced for
-    (`Shore4`). With the eased one, `T` (up to a minute across the field) turned every change of the sea into
-    `T d(omega)/dt` of extra phase speed: the crests raced, stalled or ran backwards until the frequency settled.
-    A new field (the player moved ~175 m, the sea turned or changed period) takes over by cross-fading the two
-    trains as complex amplitudes over 4 s (`SumShoreComponents`, `SwashTip`, the CPU's `ShoreTrain`), each with
-    its own arrival times and frequencies (`Shore7`) and the predecessor's clocks lagging by the hand-over shift
-    (`Shore5`). Blending the arrival times instead moved every crest by `omega dT` during the blend.
+-   **Coastline map** (`WaveModel::BuildShoreField`, rebuilt on a `WaterEnvironment` worker around the player:
+    768^2 texels of 128 units, ~1.4 km across, from the loaded cells' exact terrain, else the Terrain Shadows
+    heightmap, and each cell's water level from Unified Water's cache). Fluid Flux's coastline distance, as a travel
+    time: `tau`, the time the waves take from a point to the nearest waterline, solves the eikonal `|grad tau| = 1 / c(h)`
+    by fast sweeping (Zhao 2005) from the waterline outwards. So the crests run parallel to the shore, slow down and
+    close up over the shoals, turn towards the depth contours and wrap into bays, and surf runs into every beach nearly
+    head-on whatever the sea offshore does (traced from the open sea in its one direction instead, the fronts ran along
+    the banks of an inlet and lee shores got none). The map also holds `grad tau` (the waves travel down it, at
+    `1 / |grad tau|`), the signed distance to the waterline (to find the nearest point of the coast), the beach slope at
+    the waterline, the exposure to the swell (open water upwind along its direction: lee shores see little of it) and
+    the room for the train. Up the beach the direction, exposure and room of the waterline the inland ray leaves from
+    are carried. The phase lag `omega tau` uses the frequency the map was traced for (`Shore4`): with the eased one,
+    `tau` turned every change of the sea into `tau d(omega)/dt` of extra phase speed. A new map (the player moved ~175 m,
+    the sea changed period, the swell turned) takes over by blending the two maps' lags over 4 s: both are traced
+    from the waterline on the same texel grid, so for the same waves they agree and nothing moves; traced for a new
+    period, the crests slide onto their new spacing over the blend.
 -   **Exact terrain everywhere it was loaded** (`LandCache`, `WaterEnvironment::UpdateLoadedLand`): Skyrim
     streams only the 5 x 5 cells around the player, and beyond them the coarse Terrain Shadows heightmap is
     metres off. With only the loaded block exact, the depth had a straight cliff along its border (the waves'
@@ -131,42 +143,50 @@ the swash (GPU, what they do on the beach) and a per-pixel waterline (where the 
     read an 11 x 11-cell window of them, the shore field reads all of them, and where exact data ends it is
     carried half a cell further and faded into the coarse heights (`FeatherBed`; `ExactTerrainShare` at the
     window's border). New cells refine the shore field at most every 10 s.
--   **Coherent fronts only**: where fronts from different seeds meet (behind headlands and islands, bays reached
-    from both sides, off a lee shore) the first-arrival times kink, so crests bent at sharp angles and the
-    direction of travel flipped across a line. Across a kink the averaged slowness is shorter than `1 / c`, so
-    `|<grad T>| c` (averaged over ~7 m) measures how coherent the fronts are; the room fades the train where it
-    drops below ~0.9, and where no front arrived at all (`T = 0` would rise and fall in step everywhere).
--   **Train** (`PBRWater::ShoreWaves`, mirrored by `WaveModel.cpp`'s `ShoreTrain` for gameplay): three
-    components of the dominant sea (swell or wind sea) at slightly different frequencies and directions
-    (`ShoreComponent*`: offsets in units of the spectrum's relative width and directional spread). Summed as
-    one complex amplitude `Z = sum a_i e^(i (clock_i - omega_i T_i))` they beat into wave groups in time and,
-    crossing at small angles, into crest segments that wander along the shore. The local wave (`|Z|`,
-    `arg Z`) shoals with Green's law and breaks at `H = 0.78 h` (McCowan 1894); its profile is shaped in
-    phase, so it is a pure height field that cannot fold: cnoidal peaking with the Ursell number, and once
-    breaking a narrow front and long back (the saw-tooth bore). The Iribarren number of the beach
-    (Battjes 1974) gates breaking, surf and swash: waves spill and plunge on gentle beaches (`xi < 2`) and
-    surge against rock faces and cliffs (`xi > 3.3`).
+-   **Coherent fronts only**: where fronts from different stretches of shore meet (mid-channel, behind headlands and
+    islands, bays reached from both sides) `tau` kinks, so crests met at sharp angles and the direction of travel
+    flipped across a line. Across a kink the averaged slowness is shorter than `1 / c`, so `|<grad tau>| c` (averaged
+    over ~3.5 m) measures how coherent the fronts are; the room fades the train where it drops below ~0.9 (Fluid Flux's
+    coastline mask), and where no front arrived at all.
+-   **Train** (`PBRWater::ShoreWaves`, mirrored by `WaveModel.cpp`'s `ShoreTrain` for gameplay), as Fluid Flux:
+    -   the phase runs with time and the travel time to the shore, `theta = clock + omega tau`, offset along the coast
+        (value noise at the nearest point of the waterline over ~4 and ~1.7 deep-water wavelengths, drifting slowly:
+        Variation Along the Coast) and, from a few wavelengths offshore, across it (`MF_CoastlineOffsets`): each
+        stretch of shore sees its crests at its own time, and the crests bend offshore;
+    -   the wave's shape follows its phase and its life stage, the stage being the shoaled height against the
+        breaking limit. Fluid Flux's canned profile animation is analytic here: linear (Airy) particle orbits in
+        finite depth, horizontal semi-axis `a coth(kh)` (Dean & Dalrymple 1991), so the crests sharpen and the troughs
+        flatten as the wave feels the bottom; the orbits tilt with the bed slope (Biesel 1952) and, nearing breaking,
+        pitch forward, so the front steepens and the crest leans over it. The orbits are held to `k ax <= 0.7`, so
+        the surface compresses on the crests but never folds over itself (Jacobian >= 0.3). Shoaling follows
+        Green's law up to depth-limited breaking at `H = 0.78 h` (McCowan 1894); broken waves become the bore, a
+        saw-tooth with a steep front (a fifth of the cycle) and a long back, held to the depth (Svendsen 2006);
+    -   the horizontal motion follows the direction of travel, and offshore the waves hand over to the open sea.
+    -   A random sea's energy is carried by regular waves of `Hrms = Hs / sqrt(2)`. The Iribarren number of the beach
+        (Battjes 1974) gates breaking, surf and swash: waves spill and plunge on gentle beaches (`xi < 2`) and surge
+        against rock faces and cliffs (`xi > 3.3`).
 -   **Room for the train** (`ShoreField::room`, `t124`): a train of shoaling, breaking waves needs open water
     a few wavelengths across. Each water texel gets the width of the largest disc of water around it (twice
-    the distance to the waterline at that disc's centre, propagated by raster sweeps) against the wavelength of
-    component 0 in the local depth: `room = smoothstep(0.1, 0.6, width / L)`. It scales the train's share
+    the distance to the waterline at that disc's centre, propagated by raster sweeps) against the shore waves'
+    wavelength in the local depth: `room = smoothstep(0.1, 0.6, width / L)`. It scales the train's share
     (`ctx.train`) and the beach factor (surf, swash, breaking foam), so streams, ditches and ponds narrower than
     a few waves get none: before, the train entered a stream from both banks (every up-wave bank is an entry
-    seed), its components crossed at odd angles and the whole stream "broke". There the FFT sea, fetch- and
+    seed), its fronts met at odd angles and the whole stream "broke". There the FFT sea, fetch- and
     depth-limited, carries what waves there are. Mirrored on the CPU (`WaveSnapshot` train weight and beach).
 -   **Smooth fields**: the beach slope, the exposure and the room are copied along rays from the waterline and
     propagated texel by texel, so they jumped where rays from different stretches of shore met (and the room's
-    disc sweep drew octagons); the arrival times and directions carried up the beach jumped the same way. They
+    disc sweep drew octagons); the travel times and directions carried up the beach jumped the same way. They
     gate the surf, swash and foam, which showed the seams as hard corners. All are smoothed after the build
     (`Blur` over ~4 m; `SmoothReached` on the carried times and directions).
 -   **Wave groups** (`ShoreGroup`, mirrored on the CPU): the shore waves come in sets. Their height is
-    scaled by 0.45-1.55 from a value noise over about three deep-water wavelengths of coast and over the time
-    the waves left deep water (now minus their travel time, so a set travels in with them), re-drawn every
-    ~7 periods and cross-faded (groupiness: Longuet-Higgins 1984). Bigger waves shoal and break further out,
+    scaled by 0.45-1.55 from a value noise over about three deep-water wavelengths of coast (at the waterline the
+    waves run to) and over the time they reach it (now plus their travel time, so a set travels in with them),
+    re-drawn every ~7 periods and cross-faded (groupiness: Longuet-Higgins 1984). Bigger waves shoal and break further out,
     run up further and leave their foam higher on their own, so no two stretches of beach keep the same
     rhythm. Shore Wave Height scales the sea arriving at the shore (the swell and the wind sea).
 -   **Swash** (`PBRWater::SwashCrests`): from the crests that reached the waterline of the ray through a point
-    over the last six periods (each with its own height `2 |Z|` and wave group), the tip runs up 1.6 times as
+    over the last six periods (a crest at every whole cycle of the train's phase there, each with its wave set's
+    height), the tip runs up 1.6 times as
     far as Stockdon et al. (2006) give (`ShoreRunupScale`: their 2 % value is fitted to the mean water line,
     the visible sheet runs on past it) and moves ballistically, decelerating at `g sin^2 beta` (Shen & Meyer 1963; Peregrine &
     Williams 2001). The water over the beach is a thin sheet (`SwashTop`: 15 % of the height below the tip,
@@ -261,24 +281,29 @@ crack), so waves the mesh cannot carry are averaged out instead of aliasing.
 -   Wave subsurface scattering (Atlas, GDC 2019).
 -   Drifting sediment patches and wind gusts are tens of metres across, so the vertices evaluate their noise
     (`TurbidityPatches`, `WindGust`) and the pixels interpolate it (`SurfaceNoise`).
--   Foam is a _coverage_ field turned into a pattern by a soft threshold (the approach used by Crest and
-    Sea of Thieves): as coverage drops, the bubbles in the foam grow and merge, so dense foam thins into
-    lace and then specks instead of fading uniformly (`FoamLacePattern`: round bubbles of random size on a
-    jittered grid, walls bent by an fBm domain warp; in Lagrangian coordinates so it rides the wave orbits,
-    fading to its average when sub-pixel). Patches of four cell sizes, 0.2 m down to 0.02 m, drift into
-    each other (two neighbouring sizes per pixel), so breakers do not repeat one stamp. Coverage comes only from shore waves breaking now and the front of the swash; the surf zone between
-    breakers is not blanketed. Breaking foam is read off the surface itself: the slope of the whole surface
-    along the direction of travel (on from 0.15, full at 0.45; the limiting Stokes crest has slope 0.58) in
-    the upper part of the wave, falling back to the crest phase where the pixel cannot carry the train's
-    slopes, plus a short trail behind the crest. All foam edges are feathered (waterline 4 cm, swash front
-    about a metre). A thin band lingers along the water's edge (`edgeFoam`, Edge
-    Foam): the last centimetres of water over the bed, from the terrain heights (never the depth buffer), about
-    0.4 m wide - its depth follows the bed's slope - always faintly there and wider and denser where a wave has
-    just broken or run up. The sources combine by maximum, never by sum (a crest running into the edge band
-    doubled the foam where they met). Whitecaps (and the FFT's crest foam trails), windrow foam
-    lines and the contact band along rocks, piers and legs (read from the depth buffer, it took the shape of
-    whatever stood in the water) were removed. Wakes show as bubble specks, no milky tint;
-    bubbles come from breakers, swash and churn only (not the calm edge rim), thinning at a patch's edge.
+-   Foam is a _coverage_ field turned into a pattern by the "black point fade" of Crest (wave-harmonic/crest, MIT;
+    also Sea of Thieves): the foam texture is thresholded at `1 - coverage`, so as coverage drops the bubbles in the
+    foam grow and merge, and dense foam thins into lace and then specks instead of fading uniformly
+    (`PBRWater/Foam.hlsli`). The texture is baked at start-up on a worker (`FoamPattern.cpp`, t125, 512^2 RG8 with
+    mips): round bubbles of random size on a jittered grid (20 cm, with 2.7 times smaller ones in the walls), merged
+    with a smooth minimum, walls bent by a domain warp, density varied by clumps, every value histogram-equalised so a
+    coverage `C` whitens exactly a share `C` and the mips converge to it far away. It is sampled in Lagrangian
+    coordinates (it rides the wave orbits) plus the wind's surface drift, and moved by Fluid Flux's three-phase flow
+    advection (`MF_AdvectionData`: three copies slide 30 cm downwind and back every five seconds, each fading out
+    before it wraps), so the foam churns without stretching. Its G channel holds the bubble specks under the surface
+    (Crest's bubble layer), seen with parallax 30 cm down. This replaced a procedural pattern that evaluated
+    Voronoi bubbles and fBm warps per pixel. Coverage comes from the whitecaps (above), the shore waves breaking now
+    and the front of the swash; the surf zone between breakers is not blanketed. Breaking foam is read off the
+    surface itself: the slope of the whole surface along the direction of travel (on from 0.15, full at 0.45; the
+    limiting Stokes crest has slope 0.58) in the upper part of the wave, falling back to the crest phase where the
+    pixel cannot carry the train's slopes, plus a short trail behind the crest. All foam edges are feathered
+    (waterline 4 cm, swash front about a metre). A thin band lingers along the water's edge (`edgeFoam`, Edge Foam):
+    the last centimetres of water over the bed, from the terrain heights (never the depth buffer), about 0.4 m wide -
+    its depth follows the bed's slope - always faintly there and wider and denser where a wave has just broken or run
+    up. The sources combine by maximum, never by sum (a crest running into the edge band doubled the foam where they
+    met). Windrow foam lines and the contact band along rocks, piers and legs (read from the depth buffer, it took the
+    shape of whatever stood in the water) were removed. Wakes show as bubble specks, no milky tint; bubbles come from
+    whitecaps, breakers, swash and churn only (not the calm edge rim).
 -   The vanilla normal maps keep most of their strength over the FFT waves (0.75-1.3 by local wind), so
     the flowmap to open-water transition and the capillary texture stay visible.
 -   **Wave shadows through Skylighting**: the displaced water surface is drawn into Skylighting's sky
@@ -426,6 +451,8 @@ against the CPU mirror, including slopes and compression against finite differen
 -   [ ] Swell Height 2 m in calm weather: long, regular swell crossing at the Swell Direction; none in ponds.
 -   [ ] Swim in a choppy sea: rings and bubbles stay on the swimmer, no ripples while floating still.
 -   [ ] Jump off a dock: crater, ring and a burst of whitewater that drifts and fades over Wake Foam Lifetime.
+-   [ ] Open sea in a storm vs a fresh breeze: whitecaps on the big crests, thinning into trails behind them, more of
+        them the stronger the wind; none in calm weather or on ponds; Debug shows the whitecap share and thresholds.
 -   [ ] Beach near Dawnstar / the Solitude coast in a fresh breeze: waves shorten, turn to the shore and
         break with foam on the breaking crests and the swash front, none blanketing the surf zone and none on
         the sand; underwater, no white line along the shore; the sand is wet up to where the water reached and dries slowly. Rock outcrops and cliffs get
@@ -439,9 +466,10 @@ against the CPU mirror, including slopes and compression against finite differen
 ## Known limitations
 
 -   Shoreline waves and depth attenuation need the bathymetry (loaded cells or a Terrain Shadows heightmap).
--   Only the dominant sea is refracted: the train's three components are traced for its period and direction,
-    the shorter FFT bands near the shore are only shoaled and depth-limited. The field follows the player every
-    ~175 m or a change of the dominant period or direction (cross-faded over 4 s). The wet level is resolved
+-   Only the dominant sea is refracted: the train is traced for its period, the shorter FFT bands near the shore are
+    only shoaled and depth-limited. The map follows the player every ~175 m or a change of the dominant period or the
+    swell's direction (blended over 4 s). The shore waves are one regular train in sets, not a random sea: Fluid
+    Flux's offsets vary their timing along the coast, but every crest of a set has the same height. The wet level is resolved
     at the swash grid's ~0.9 m; the swash itself is evaluated per vertex and per pixel.
 -   Gameplay water heights include the shore wave train but not the swash: swimming and buoyancy see the
     shoaled waves, not the run-up's thin sheet.
@@ -473,17 +501,23 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Bruneton, Neyret & Holzschuch, _Real-time Realistic Ocean Lighting using Seamless Transitions from
     Geometry to BRDF_ (2010) - filtered slope variance
 -   Mihelich & Tcheblokov, _Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas_ (GDC 2019) - FFT cascades, foam accumulation
+-   GodotOceanWaves (2Retr0, MIT) - Jacobian whitecap foam: growth below a threshold, exponential decay, summed over cascades
+-   Ocean-URP (gasgiant, MIT) - per-cascade foam weights
+-   Fluid Flux 2 (Imaginary Blend) and DaiZiLing's Flux2-Shoreline-Wave-HLSL port of its coastline waves - coastline
+    map, coastline offsets, wave profile by phase and life stage, three-phase foam advection
 -   Unity HDRP water system - CPU re-simulation of the FFT for script queries instead of readback
 -   Hasselmann et al. (1973) JONSWAP; Pierson & Moskowitz (1964); Monahan & O'Muircheartaigh (1980) whitecaps
 -   Olano & Baker, _LEAN Mapping_ (2010)
 -   Ang, _The Technical Art of Sea of Thieves_ (SIGGRAPH 2018 Talks) - foam and scattering breakdown
--   Crest Ocean System (wave-harmonic/crest, MIT) - coverage-threshold foam with feathering and a bubble layer
+-   Crest Ocean System (wave-harmonic/crest, MIT) - foam texture black-point fade, saturated foam growth, bubble layer
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Atlas (GDC 2019, above) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement
--   Banner, Babanin & Young, _Breaking Probability for Dominant Waves on the Sea Surface_ (JPO 2000) - crest foam
 -   Zhao, _A Fast Sweeping Method for Eikonal Equations_ (Math. Comp. 2005) - shore wave rays
 -   Eckart (1952) - shallow-water dispersion approximation; Green's law shoaling
+-   Dean & Dalrymple, _Water Wave Mechanics for Engineers and Scientists_ (1991) - finite-depth particle orbits
+-   Biesel (1952) - wave orbits over a sloping bed; McCowan (1894) - breaking index; Svendsen, _Introduction to
+    Nearshore Hydrodynamics_ (2006) - surf-zone bores
 -   Thornton & Guza, _Transformation of Wave Height Distribution_ (JGR 1983) - depth-limited breaking
 -   Battjes, _Surf Similarity_ (ICCE 1974) - Iribarren number, breaking vs surging shores
 -   Stockdon, Holman, Howd & Sallenger, _Empirical Parameterization of Setup, Swash, and Runup_ (Coastal

@@ -23,9 +23,10 @@
 // each cascade as a whole: the fetch-limited spectral peak removes long-wave cascades from sheltered water,
 // young seas get the JONSWAP energy gain, and tanh(kh) calms waves in the shallows.
 //
-// Near the shore the long waves hand over to an analytic wave train refracted from the open sea over the real depths
-// (ShoreWaves): it shoals, peaks, breaks and runs up the beach as the swash (SwashTip), and the water ends per pixel
-// against the ground behind it (Water.hlsl), never where the mesh's triangles cut the terrain.
+// Near the shore the long waves hand over to Fluid Flux-style coastline waves (ShoreWaves): a wave train running up a
+// coastline map traced over the real depths, which shoals, steepens, breaks and runs up the beach as the swash
+// (SwashTip); the water ends per pixel against the ground behind it (Water.hlsl), never where the mesh's triangles cut
+// the terrain.
 //
 // References:
 //   Tessendorf, "Simulating Ocean Water" (2001)
@@ -77,12 +78,10 @@ namespace PBRWater
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), y deep-water phase speed g / omega of its mean frequency (units/s), zw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Swash0;                   // xy swash grid corner (absolute units), z 1 / its extent (units), w enabled
-		float4 Shore2;                   // xyz wave clock of each shore wave component (rad, wrapped), w peak period Tp (s)
-		float4 Shore3;                   // xyz the clocks last frame, w deep-water wavelength L0 (units)
-		float4 Shore4;                   // xyz angular frequency each component was traced for in the current shore field (rad/s), w unused
-		float4 Shore5;                   // xyz clock shift applied when the current field took over (rad): the previous field's clocks are Shore2 - Shore5
+		float4 Shore2;                   // x wave clock (rad, wrapped), y the clock last frame, z its rate: this frame's (eased) angular frequency (rad/s), w peak period Tp (s)
+		float4 Shore3;                   // x variation along the coast (0..1), y its drift clock (s, wrapped daily), z unused, w deep-water wavelength L0 (units)
+		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, zw unused
 		float4 Shore6;                   // xy previous shore field corner (absolute units), zw 1 / its extent (units)
-		float4 Shore7;                   // xyz angular frequency each component was traced for in the previous shore field (rad/s), w unused
 		float4 Grid0;                    // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 	}
 
@@ -93,11 +92,10 @@ namespace PBRWater
 	Texture2D<float> LoadedTerrainTexture : register(t114);             // exact terrain z of the loaded cells (LAND vertex heights)
 	Texture2DArray<float4> OceanDisplacement : register(t115);          // xyz displacement (units), w dDx/dy, one slice per cascade
 	Texture2DArray<float4> OceanDerivatives : register(t116);           // xy height slopes, zw compression dDx/dx, dDy/dy
-	Texture2DArray<float4> OceanSurface : register(t117);               // xy squared slopes, z unused, w |laplacian| (1/unit)
+	Texture2DArray<float4> OceanSurface : register(t117);               // xy squared slopes, z whitecap foam, w |laplacian| (1/unit)
 	Texture2DArray<float4> OceanPreviousDisplacement : register(t118);  // last frame's displacement (motion vectors)
-	Texture2D<float4> ShoreField0 : register(t119);                     // xyz arrival time T of each shore wave component (s, field-relative; up the beach: at the waterline), w still water level (absolute z, < -1e6: none)
-	Texture2D<float4> ShoreField1 : register(t120);                     // xy grad T of component 0, zw of component 1 (s/m)
-	Texture2D<float4> ShoreField2 : register(t121);                     // xy grad T of component 2 (s/m), z beach slope (tan) at the waterline, w exposure to the swell
+	Texture2D<float4> ShoreField0 : register(t119);                     // x travel time to the waterline tau (s; up the beach: the waterline's), y signed distance to it (units), z unused, w still water level (absolute z, < -1e6: none)
+	Texture2D<float4> ShoreField1 : register(t120);                     // xy grad tau (s/m, seaward; up the beach: the waterline's), z beach slope (tan) at the waterline, w exposure to the swell
 	Texture2D<float4> ShoreFieldPrevious : register(t122);              // ShoreField0 of the field being replaced (Shore0.y < 1)
 	Texture2D<float4> SwashWetTexture : register(t123);                 // x wet level, yz unused, w water surface height (units above the still water)
 	Texture2D<float> ShoreRoomTexture : register(t124);                 // 0..1 room for the shore wave train: the width of the water against the wavelength
@@ -121,18 +119,18 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 	// Spatial context: everything that makes the spectrum vary over the map.
 	// ------------------------------------------------------------------------
-	/// How the shore waves reach this point (shore field, ShoreField in WaveModel.h).
+	/// How the shore waves reach this point: the coastline map (ShoreField in WaveModel.h).
 	struct ShoreRay
 	{
-		float3 travelTime;    // arrival time T of each component's wavefronts (s, field-relative; up the beach: at the waterline)
-		float3 slownessX;     // grad T of each component (s/unit), x: it travels along grad T, |grad T| = 1 / c
-		float3 slownessY;     // the same, y
-		float slope;          // beach slope (tan) at the waterline
-		float exposure;       // 0..1 how open this water is to the swell
-		float room;           // 0..1 room for the wave train: none in a stream or pond narrower than the waves
-		float weight;         // 0 outside the field, fading in from its border
-		float3 previousTime;  // while a new field takes over: its predecessor's arrival times (s, the predecessor's reference)
-		float blend;          // 0..1 share of the current field's train; the rest is the predecessor's
+		float travelTime;  // time tau the waves take from here to the waterline (s; up the beach: the waterline's, ~0)
+		float phaseLag;    // omega tau (rad): the phase the waves here lag behind the waterline's, at the frequency the field was traced for
+		float distance;    // signed distance to the waterline (units): > 0 in the water, < 0 up the beach
+		float2 direction;  // unit direction the waves travel in: towards the shore (up the beach: inland); the wind's outside the field
+		float slowness;    // |grad tau| (s/unit): 1 / the waves' phase speed
+		float slope;       // beach slope (tan) at the waterline
+		float exposure;    // 0..1 how open this water is to the swell
+		float room;        // 0..1 room for the wave train: none in a stream or pond narrower than the waves, nor where fronts meet
+		float weight;      // 0 outside the field, fading in from its border
 	};
 
 	struct WaveContext
@@ -310,31 +308,39 @@ namespace PBRWater
 	{
 		ShoreRay r = (ShoreRay)0;
 		r.slope = 1.0;
+		r.direction = Params1.xy;
 		float2 uv;
 		[branch] if (ShoreFieldUV(absXY, uv))
 		{
 			float4 f0 = ShoreField0.SampleLevel(LinearClampSampler, uv, 0);
 			float4 f1 = ShoreField1.SampleLevel(LinearClampSampler, uv, 0);
-			float4 f2 = ShoreField2.SampleLevel(LinearClampSampler, uv, 0);
 			r.weight = BorderFade(uv);
-			r.travelTime = f0.xyz;
-			r.blend = 1.0;
-			// A new field (the player moved on, the sea turned) takes over from its predecessor over a few seconds: the two
-			// trains are cross-faded (SumShoreComponents), each with its own arrival times and frequencies. Blending the
-			// times instead moved every crest by omega dT over the blend, so the waves raced, stalled or ran backwards.
+			r.travelTime = f0.x;
+			r.distance = f0.y;
+			// Each field's lag uses the frequency it was traced for (Shore4), never this frame's: those ease with the sea, and
+			// omega(t) tau would sweep the crests by tau d(omega)/dt until the frequency settled.
+			r.phaseLag = Shore4.x * f0.x;
+			// A new field (the player moved on, the waves changed period) takes over from its predecessor over a few seconds.
+			// Both are traced from the waterline, so for the same waves their travel times agree and the blend moves no crest;
+			// traced for a new period, the crests slide onto their new spacing over the blend.
 			[branch] if (Shore0.y < 1.0)
 			{
 				float2 previousUV = (absXY - Shore6.xy) * Shore6.zw;
 				if (all(previousUV > 0.0) && all(previousUV < 1.0)) {
-					r.previousTime = ShoreFieldPrevious.SampleLevel(LinearClampSampler, previousUV, 0).xyz;
-					r.blend = Shore0.y;
+					float2 previous = ShoreFieldPrevious.SampleLevel(LinearClampSampler, previousUV, 0).xy;
+					r.travelTime = lerp(previous.x, r.travelTime, Shore0.y);
+					r.distance = lerp(previous.y, r.distance, Shore0.y);
+					r.phaseLag = lerp(Shore4.y * previous.x, r.phaseLag, Shore0.y);
 					r.weight = lerp(BorderFade(previousUV), r.weight, Shore0.y);
 				}
 			}
-			r.slownessX = float3(f1.x, f1.z, f2.x) * MetresPerUnit;
-			r.slownessY = float3(f1.y, f1.w, f2.y) * MetresPerUnit;
-			r.slope = f2.z;
-			r.exposure = f2.w;
+			// The waves travel down the travel time, at the phase speed 1 / |grad tau|.
+			float2 grad = f1.xy * MetresPerUnit;
+			r.slowness = length(grad);
+			if (r.slowness > 1e-9)
+				r.direction = -grad / r.slowness;
+			r.slope = f1.z;
+			r.exposure = f1.w;
 			r.room = ShoreRoomTexture.SampleLevel(LinearClampSampler, uv, 0);
 		}
 		return r;
@@ -494,6 +500,21 @@ namespace PBRWater
 		return DisplacementDistanceFade(length(positionWS)) * LoadedGridFade(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
 	}
 
+	/**
+	 * How much cascade `c` carries the dominant waves here, for its whitecaps: Ocean-URP's per-cascade foam weights
+	 * (gasgiant/Ocean-URP, MIT, ~1 : 1/3 : 1/10 from the longest band), placed by the local spectral peak instead of
+	 * fixed per cascade. The band holding the peak (and any longer one) counts fully, each band shorter a third as much
+	 * as the one before: short waves break too, but their small crests only sprinkle the sea with flecks. The smallest
+	 * band never counts (Crest's minimum waves LOD for foam).
+	 */
+	float DominanceWeight(uint c, float peakOmega)
+	{
+		if (c + 1 >= PBRW_CASCADES)
+			return 0.0;
+		float r = Cascade1[c].x / max(peakOmega, 1e-3);
+		return pow(max(r, 1.0), -1.2);
+	}
+
 	/// Tile coordinate of camera-relative position `p` in cascade `c` (world-anchored, re-based on the
 	/// reference camera so other cameras still sample the same water).
 	float2 CascadeUV(float2 p, uint c)
@@ -505,50 +526,60 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 	// Shore wave train
 	//
-	// Near the shore the waves stop being a random field: refraction turns their crests towards the depth contours,
-	// shoaling raises them and the depth makes them break. The train is the sea's dominant waves as three components
-	// at slightly different frequencies and directions (ShoreComponentAmplitude; WaveModel.h): they beat into wave
-	// groups (sets) in time and, crossing at small angles, into crest segments that wander along the shore. Component i
-	// has phase theta_i = clock_i - omega_i T_i, with T_i the arrival time of its wavefronts, which the shore field
-	// solves over the real depths from the open sea (eikonal |grad T| = 1 / c(h)): the crests refract round headlands,
-	// wrap into bays and reach every stretch of a beach at its own time.
-	//
-	// The components are summed as one complex amplitude Z = sum a_i e^(i theta_i): the local wave has height |Z| and
-	// phase arg Z, and is then shaped as a whole (its own sinusoids could not steepen or break):
+	// After Fluid Flux 2's coastline waves (Imaginary Blend; DaiZiLing's HLSL port of its MF_SurfaceFlux_Coastline, the
+	// Flux2-Shoreline-Wave-HLSL repository): near the shore the sea is one train of its dominant waves running up a
+	// coastline map instead of a random field. The map (ShoreField, WaveModel.cpp), built around the player from the real
+	// depths, holds the time tau the waves take from each point to the waterline (eikonal |grad tau| = 1 / c(h) from the
+	// waterline outwards: Fluid Flux's coastline distance, as a travel time, so the crests slow down and close up over the
+	// shoals, turn towards the depth contours and wrap into bays), its gradient (where they travel, and their wavenumber
+	// omega |grad tau|), the signed distance to the waterline, the beach slope, the exposure to the swell and the room for
+	// the train. As in Fluid Flux:
+	//   - the phase runs with time and the travel time to the shore, theta = clock + omega tau, offset along the coast and,
+	//     offshore, across it by smooth noise (MF_CoastlineOffsets): each stretch of shore sees the crests at its own time
+	//     and the crests bend offshore. The waves come in sets (ShoreGroup);
+	//   - the wave's shape follows its phase and its life stage (Fluid Flux's wave profile animation), the stage being how
+	//     close the shoaled wave is to breaking;
+	//   - the horizontal motion follows the direction of travel, and offshore the waves hand over to the open sea.
+	// The profile, a canned animation texture in Fluid Flux, is analytic here:
+	//   - unbroken: linear (Airy) particle orbits in finite depth, horizontal semi-axis a coth(kh) (Dean & Dalrymple 1991),
+	//     so the crests sharpen and the troughs flatten as the wave feels the bottom; the orbits tilt with the bed slope
+	//     (Biesel 1952: the major axis along the slope) and, nearing breaking, pitch forward, so the front face steepens
+	//     and the crest leans over it. The orbits are held short of looping, so the surface never folds over itself;
 	//   - Green's-law shoaling (ShoalingCoefficient) up to depth-limited breaking at H = 0.78 h (McCowan 1894);
-	//   - the profile is shaped in phase, so it is a pure height field and can never fold: crests peak and troughs
-	//     flatten as the Ursell number grows (cnoidal waves, Korteweg & de Vries 1895; Wiegel 1960), and once the wave
-	//     breaks its front steepens and its back lengthens (the saw-tooth bore, Svendsen 2006).
-	// The CPU mirrors it for swimming, buoyancy and floating objects (WaveModel.cpp).
+	//   - broken: the bore, a saw-tooth with a steep front and a long back, held to the depth (Svendsen 2006).
+	// The CPU mirrors it for swimming, buoyancy and floating objects (WaveModel.cpp ShoreTrain).
 	// ------------------------------------------------------------------------
 
-	/// Relative amplitude of each shore wave component. Mirrors PBRWaterModel::ShoreComponentAmplitude.
-	static const float3 ShoreComponentAmplitude = float3(1.0, 0.75, 0.6);
-	/// Amplitude per unit significant height: sum a_i^2 / 2 = (Hs / 4)^2. Mirrors PBRWaterModel::ShoreAmplitudeScale.
-	static const float ShoreAmplitudeScale = 0.255;
-
+	/// Waves break at H = 0.78 h (McCowan 1894). Mirrors PBRWaterModel::BreakerIndex.
+	static const float BreakerIndex = 0.78;
+	/// Height of the regular waves that carry a random sea's energy: Hrms = Hs / sqrt(2). Mirrors PBRWaterModel::ShoreHeightRatio.
+	static const float ShoreHeightRatio = 0.7071;
 	/// Run-up over Stockdon et al.'s (2006) 2 % value. Mirrors PBRWaterModel::ShoreRunupScale.
 	static const float ShoreRunupScale = 1.6;
+	/// The horizontal orbits are held to k ax <= this: the crests compress, but the surface never folds over itself (its
+	/// Jacobian stays >= 0.3). Mirrors PBRWaterModel::ShoreOrbitLimit.
+	static const float ShoreOrbitLimit = 0.7;
 
-	/// Deep-water amplitude (m) of each shore wave component here.
-	float3 ShoreDeepAmplitudes(WaveContext ctx)
+	/// The nearest point of the waterline (absolute units): along the direction of travel, by the signed distance.
+	float2 CoastPoint(float2 absXY, ShoreRay ray)
 	{
-		return ShoreComponentAmplitude * (ShoreAmplitudeScale * ctx.shoreHeight * MetresPerUnit * ctx.damping);
+		return absXY + ray.direction * ray.distance;
 	}
 
 	/**
 	 * Wave groups, as a factor on the height (mean ~1). A sea's narrow spectrum brings its waves in sets, a few big ones
 	 * between smaller ones (groupiness: Longuet-Higgins 1984), and out of a short-crested sea the sets differ along the
-	 * coast. A value noise over a few deep-water wavelengths of coast and over the time the waves left deep water (they
-	 * carry their height in with them: now minus their travel time), re-drawn every ~7 periods and cross-faded. Bigger
-	 * waves then shoal and break further out, run up further and leave their foam higher, each on its own.
+	 * coast. A value noise over a few deep-water wavelengths of coast and over the time the waves reach the waterline
+	 * (they carry their height in with them: now plus their travel time), re-drawn every ~7 periods and cross-faded.
+	 * Bigger waves then shoal and break further out, run up further and leave their foam higher, each on its own.
 	 * Mirrors PBRWaterModel::ShoreGroup.
-	 * @param departure when the waves here left deep water (s, on the Shore0.z clock)
+	 * @param coast   the waterline the waves run to (CoastPoint), so a crest keeps its height all the way in
+	 * @param arrival when they reach it (s, on the Shore0.z clock)
 	 */
-	float ShoreGroup(float2 absXY, float departure)
+	float ShoreGroup(float2 coast, float arrival)
 	{
-		float2 q = absXY / max(3.0 * Shore3.w, 1.0);
-		float s = departure / max(7.0 * Shore2.w, 1.0);
+		float2 q = coast / max(3.0 * Shore3.w, 1.0);
+		float s = arrival / max(7.0 * Shore2.w, 1.0);
 		float slice = floor(s);
 		float t = frac(s);
 		t = t * t * (3.0 - 2.0 * t);
@@ -556,125 +587,89 @@ namespace PBRWater
 		return lerp(0.45, 1.55, n);
 	}
 
-	/// The shore wave components summed at one point and instant (metres, radians, units).
-	struct ShoreSum
-	{
-		float amplitude;       // |Z| (m)
-		float phase;           // arg Z: 0 at a crest, falling along the direction of travel
-		float2 phaseGrad;      // grad arg Z (rad/unit): minus the local wave vector
-		float2 amplitudeGrad;  // grad |Z| (m/unit)
-	};
-
 	/**
-	 * Sums the components with deep-water amplitudes `amplitude` at the clocks `clock` (Shore2.xyz, or Shore3.xyz for
-	 * last frame). d(arg Z) = sum Re(conj(Z) c_i) d(theta_i) / |Z|^2 and d|Z| = -sum Im(conj(Z) c_i) d(theta_i) / |Z|,
-	 * with grad theta_i = -omega_i grad T_i. Each field's spatial phase uses the frequencies it was traced for (Shore4,
-	 * Shore7), never this frame's: those ease with the sea, and omega(t) T would sweep the crests by T d(omega)/dt. While
-	 * a new field takes over, the predecessor's components are added with the remaining share (its clocks are Shore5
-	 * behind; its directions are taken from the current field's).
+	 * The shore waves' phase (rad): 0 at a crest, falling along the direction of travel. Fluid Flux's
+	 * MF_CoastlineProfileUV with its MF_CoastlineOffsets: the clock plus the lag omega tau behind the waterline, offset
+	 * along the coast (noise at the nearest point of the waterline, drifting slowly) and, from a few wavelengths offshore,
+	 * across it. Mirrors PBRWaterModel::ShorePhase.
+	 * @param coast nearest point of the waterline (CoastPoint)
+	 * @param clock Shore2.x now, Shore2.y last frame
+	 * @param grad  its gradient (rad/unit): minus the local wave vector, offsets included, so the slopes match the mesh
 	 */
-	ShoreSum SumShoreComponents(ShoreRay ray, float3 clock, float3 amplitude)
+	float ShorePhase(float2 absXY, float2 coast, ShoreRay ray, float clock, out float2 grad)
 	{
-		ShoreSum o;
-		float3 s, c;
-		sincos(clock - Shore4.xyz * ray.travelTime, s, c);
-		float3 a = amplitude * ray.blend;
-		float3 re = a * c;
-		float3 im = a * s;
-		float3 rePrevious = 0.0;
-		float3 imPrevious = 0.0;
-		[branch] if (ray.blend < 1.0)
-		{
-			sincos(clock - Shore5.xyz - Shore7.xyz * ray.previousTime, s, c);
-			float3 aPrevious = amplitude * (1.0 - ray.blend);
-			rePrevious = aPrevious * c;
-			imPrevious = aPrevious * s;
-		}
-		float2 z = float2(dot(re + rePrevious, 1.0.xxx), dot(im + imPrevious, 1.0.xxx));
-		float zz = dot(z, z);
-		o.amplitude = sqrt(zz);
-		o.phase = atan2(z.y, z.x);
-		float3 along = z.x * re + z.y * im;
-		float3 across = z.x * im - z.y * re;
-		float3 alongPrevious = z.x * rePrevious + z.y * imPrevious;
-		float3 acrossPrevious = z.x * imPrevious - z.y * rePrevious;
-		// Where the components cancel the phase turns fast; the floor keeps it bounded where the height is gone anyway.
-		float total = amplitude.x + amplitude.y + amplitude.z;
-		float norm = max(zz, 1e-4 * total * total + 1e-12);
-		float3 gx = -Shore4.xyz * ray.slownessX;
-		float3 gy = -Shore4.xyz * ray.slownessY;
-		float3 gxPrevious = -Shore7.xyz * ray.slownessX;
-		float3 gyPrevious = -Shore7.xyz * ray.slownessY;
-		o.phaseGrad = float2(dot(along, gx) + dot(alongPrevious, gxPrevious), dot(along, gy) + dot(alongPrevious, gyPrevious)) / norm;
-		o.amplitudeGrad = -float2(dot(across, gx) + dot(acrossPrevious, gxPrevious), dot(across, gy) + dot(acrossPrevious, gyPrevious)) * rsqrt(norm);
-		return o;
+		float L0 = max(Shore3.w, 1.0);
+		float drift = Shore3.y * 0.004;
+		float3 coarse = ValueNoiseGrad(coast / (4.0 * L0) + float2(drift, 0.0));
+		float3 fine = ValueNoiseGrad(coast / (1.7 * L0) + 17.1);
+		float3 across = ValueNoiseGrad(absXY / (1.3 * L0) + float2(5.3, drift * 1.5));
+		float along = coarse.x * 0.67 + fine.x * 0.33;
+		float offshoreRamp = ray.distance / L0 * 0.35 - 0.05;
+		float offshore = saturate(offshoreRamp);
+		float alongScale = Math::TAU * 1.2 * Shore3.x;
+		float acrossScale = Math::TAU * 0.35;
+		// The nearest point of the coast moves along the coast with the point, not across it.
+		float2 alongGrad = coarse.yz * (0.67 / (4.0 * L0)) + fine.yz * (0.33 / (1.7 * L0));
+		alongGrad -= ray.direction * dot(alongGrad, ray.direction);
+		// The signed distance falls along the direction of travel.
+		float2 offshoreGrad = offshoreRamp > 0.0 && offshoreRamp < 1.0 ? -ray.direction * (0.35 / L0) : 0.0;
+		grad = -Shore4.x * ray.slowness * ray.direction + alongScale * alongGrad + acrossScale * (offshore * across.yz / (1.3 * L0) + (across.x - 0.5) * offshoreGrad);
+		return clock + ray.phaseLag + alongScale * (along - 0.5) + acrossScale * offshore * (across.x - 0.5);
 	}
 
-	/// The shaped shore wave at one point and one instant (metres and radians).
-	struct ShoreProfile
+	/// ShorePhase without the gradient.
+	float ShorePhase(float2 absXY, float2 coast, ShoreRay ray, float clock)
 	{
-		float height;      // surface height (m)
-		float dHeight;     // dz / d(arg Z) (m/rad)
-		float shape;       // dz / dA at a fixed phase
-		float cap;         // A per unit |Z|: shoaling, held to the breaking limit
-		float orbital;     // horizontal orbital displacement along the direction of travel (m)
-		float stretch;     // d orbital / d(arg Z) (m/rad)
-		float amplitude;   // A (m): half the crest-to-trough height
-		float k;           // wavenumber (rad/m)
-		float breakStage;  // 0..1 s: the wave is breaking (and on this shore breaks rather than surges)
-		float saturation;  // beta: the shoaled amplitude against the breaking limit (>= 1 in the surf zone)
-		float phase;       // remapped phase v': 0 at the crest, pi in the trough, the front just below 2 pi
-		float frontWidth;  // wf: phase the front spans (rad)
-		float peakedness;  // p: cnoidal peakedness of the crests
+		float2 grad;
+		return ShorePhase(absXY, coast, ray, clock, grad);
+	}
+
+	/// The shape of the wave at one phase (metres): Lagrangian displacement along the direction of travel (x) and up (z),
+	/// and their derivatives with respect to the phase.
+	struct ShoreShape
+	{
+		float x, z;    // displacement (m)
+		float dx, dz;  // d/d(phase) (m/rad)
 	};
 
 	/**
-	 * Shapes the summed wave.
-	 * @param scale size (units) of what has to carry the front (vertex spacing, pixel footprint); 0: exact
+	 * Fluid Flux's wave profile: the shape at phase `theta` for amplitude `a` (m). Mirrors PBRWaterModel::ShoreProfile.
+	 * @param ax         horizontal semi-axis of the orbits (m)
+	 * @param tilt       forward tilt of the orbits (rad): the bed slope, and the crest pitching forward to break
+	 * @param bore       0..1 broken
+	 * @param frontWidth share of the cycle the bore's front takes
 	 */
-	ShoreProfile EvaluateShoreProfile(WaveContext ctx, ShoreSum sum, float scale)
+	ShoreShape ShoreProfile(float theta, float a, float ax, float tilt, float bore, float frontWidth)
 	{
-		ShoreProfile o;
-		float omega = max(Shore4.x, 1e-3);
-		// Shoaling (Green's law) up to the depth-limited height: a wave breaks at H = 0.78 h (McCowan 1894); in the surf
-		// zone the broken bores keep that height against the depth.
-		float depth = ctx.depth * MetresPerUnit;
-		float h = max(depth, 0.15);
-		float shoaled = sum.amplitude * ShoalingCoefficient(omega, depth);
-		float breakingAmplitude = 0.5 * 0.78 * depth;
-		o.saturation = shoaled / max(breakingAmplitude, 1e-4);
-		o.amplitude = min(shoaled, breakingAmplitude);
-		o.cap = o.amplitude / max(sum.amplitude, 1e-6);
-		o.breakStage = smoothstep(0.75, 1.0, o.saturation) * ctx.beach;
-		o.k = Wavenumber(omega, h);
-
-		// The wave travels down the phase: v = 0 is the crest, the front (ahead of the crest) lies just below 2 pi, the
-		// back just above 0. Breaking narrows the front to a fifth of the cycle; the phase is remapped so the front takes
-		// wf and the back the rest. The front never gets narrower than two samples of what has to carry it, so a coarse
-		// mesh gets a softer front instead of aliasing.
-		float v = sum.phase - Math::TAU * floor(sum.phase / Math::TAU);
-		o.frontWidth = clamp(Math::PI * (1.0 - 0.8 * o.breakStage), 2.0 * o.k * scale * MetresPerUnit, Math::PI);
-		float backWidth = Math::TAU - o.frontWidth;
-		bool back = v < backWidth;
-		float rate = Math::PI / (back ? backWidth : o.frontWidth);  // dv'/dv
-		o.phase = back ? v * rate : Math::PI + (v - backWidth) * rate;
-
-		// Cnoidal peakedness from the Ursell number Ur = H L^2 / h^3: sinusoidal below ~10, then the crests peak and the
-		// troughs flatten. P = ((1 + cos v') / 2)^p keeps the crest-to-trough height at 2A; its mean
-		// Gamma(p + 1/2) / (sqrt(pi) Gamma(p + 1)) ~ 1 / sqrt(pi (p + 1/4)) is removed to keep the mean level.
-		float wavelength = Math::TAU / o.k;
-		float ursell = 2.0 * o.amplitude * wavelength * wavelength / (h * h * h);
-		o.peakedness = 1.0 + 3.0 * saturate((ursell - 10.0) / 50.0);
-		float c = max(0.5 + 0.5 * cos(o.phase), 1e-6);
-		float P = pow(c, o.peakedness);
-		o.shape = 2.0 * (P - rsqrt(Math::PI * (o.peakedness + 0.25)));
-		o.height = o.amplitude * o.shape;
-		o.dHeight = -o.amplitude * o.peakedness * pow(c, o.peakedness - 1.0) * sin(o.phase) * rate;
-
-		// A small orbital motion along the direction of travel (Q = 1), held to A k <= 0.5 so the Jacobian stays >= 0.5.
-		float f = min(1.0, 0.5 / max(o.amplitude * o.k, 1e-6));
-		o.orbital = o.amplitude * f * sin(sum.phase);
-		o.stretch = o.amplitude * f * cos(sum.phase);
+		ShoreShape o;
+		float s, c, st, ct;
+		sincos(theta, s, c);
+		sincos(tilt, st, ct);
+		// Airy orbits, an ellipse rotated forward by the tilt: at the crest the water leans towards the shore.
+		float X = ax * s, Z = a * c;
+		float dX = ax * c, dZ = -a * s;
+		o.x = X * ct + Z * st;
+		o.z = Z * ct - X * st;
+		o.dx = dX * ct + dZ * st;
+		o.dz = dZ * ct - dX * st;
+		[branch] if (bore > 0.0)
+		{
+			// The phase runs up from a crest (v = 0) along its back to the trough, then up the next crest's front.
+			float v = theta / Math::TAU;
+			v -= floor(v);
+			float back = 1.0 - frontWidth;
+			bool onBack = v < back;
+			float rate = onBack ? 1.0 / back : 1.0 / frontWidth;  // du / dv
+			float u = onBack ? v * rate : 1.0 + (v - back) * rate;
+			float su, cu;
+			sincos(Math::PI * u, su, cu);
+			// Saw-tooth with rounded corners and zero mean: cos(pi u) over the long back and the short front; the broken
+			// water keeps a little of its forward surge.
+			o.x = lerp(o.x, 0.3 * ax * s, bore);
+			o.z = lerp(o.z, a * cu, bore);
+			o.dx = lerp(o.dx, 0.3 * ax * c, bore);
+			o.dz = lerp(o.dz, -a * Math::PI * su * rate / Math::TAU, bore);
+		}
 		return o;
 	}
 
@@ -685,14 +680,14 @@ namespace PBRWater
 		float2 slope;                 // height gradient (units/unit)
 		float3 compression;           // horizontal displacement gradient: x dDx/dx, y dDy/dy, z dDx/dy
 		float2 direction;             // the direction the waves travel in here (unit)
-		float breakStage;             // 0..1 the wave breaking here (s), weighted by the train's share
+		float breakStage;             // 0..1 the wave breaking here (pitching forward or broken), weighted by the train's share
 		float saturation;             // beta: shoaled height against the breaking limit
 		float crestFront;             // 0..1 the crest and the front face
 		float foamTrail;              // 0..1 just behind a crest that passed: the foam a breaking crest leaves
 		float resolved;               // 0..1 how much of the train the mesh or pixel carries (its slopes are only there)
 		float slopeVariance;          // slope variance the scale filters out (for roughness)
 		float curvature;              // largest curvature of the profile (1/unit), on its front (tessellation)
-		float amplitude;              // A (units), weighted
+		float amplitude;              // a (units), weighted
 		float k;                      // wavenumber (rad/unit)
 	};
 
@@ -701,7 +696,7 @@ namespace PBRWater
 	 * implementation for geometry (VS/DS, the occluder grid, ShoreSimCS), shading and tessellation; mirrored on the
 	 * CPU (WaveModel.cpp) for swimming, buoyancy and floating objects.
 	 * @param scale    vertex spacing or pixel footprint (units): waves shorter than it carries fade out (their slope
-	 *                 variance goes to the roughness) and the front is softened to what it resolves; 0: exact
+	 *                 variance goes to the roughness) and the bore's front is softened to what it resolves; 0: exact
 	 * @param previous also evaluate last frame's displacement (motion vectors)
 	 */
 	ShoreTrain ShoreWaves(float3 positionWS, WaveContext ctx, float scale, bool previous)
@@ -709,43 +704,64 @@ namespace PBRWater
 		ShoreTrain o = (ShoreTrain)0;
 		[branch] if (ctx.train > 0.0)
 		{
-			float3 amplitude = ShoreDeepAmplitudes(ctx) * ShoreGroup(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, Shore0.z - ctx.shore.travelTime.x);
-			ShoreSum sum = SumShoreComponents(ctx.shore, Shore2.xyz, amplitude);
-			ShoreProfile p = EvaluateShoreProfile(ctx, sum, scale);
-			float k = p.k * MetresPerUnit;
-			float amplitudeUnits = p.amplitude * UnitsPerMetre;
+			ShoreRay ray = ctx.shore;
+			float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+			float2 coast = CoastPoint(absXY, ray);
+			float omega = max(Shore4.x, 1e-3);
+			float depth = max(ctx.depth * MetresPerUnit, 0.05);
+			float2 gradTheta;  // rad/unit
+			float theta = ShorePhase(absXY, coast, ray, Shore2.x, gradTheta);
+
+			// Shoaling up to the breaking limit; the stage is the shoaled height against it (> 1: broken).
+			float deepHeight = ShoreHeightRatio * ctx.shoreHeight * MetresPerUnit * ShoreGroup(coast, Shore0.z + ray.travelTime) * ctx.damping;
+			float shoaled = deepHeight * ShoalingCoefficient(omega, depth);
+			float limit = BreakerIndex * depth;
+			o.saturation = shoaled / max(limit, 1e-4);
+			float a = 0.5 * min(shoaled, limit);
+			// The local wavenumber: the travel time's omega / c with the offsets' compression, so the orbits match the phase.
+			float k = max(length(gradTheta) * UnitsPerMetre, omega * omega / GravityMetres);
+			float breaking = smoothstep(0.75, 1.0, o.saturation) * ctx.beach;
+			float bore = smoothstep(1.0, 1.4, o.saturation) * ctx.beach;
+			float lean = breaking * (1.0 - bore);
+			float ax = min(a / max(SafeTanh(k * depth), 1e-3), ShoreOrbitLimit / k);
+			float tilt = 0.5 * atan(ray.slope) + 0.6 * lean;
+			// The bore's front takes a fifth of the cycle, never less than two samples of what has to carry it.
+			float frontWidth = clamp(2.0 * k * scale * MetresPerUnit / Math::TAU, 0.2, 0.5);
+			ShoreShape shape = ShoreProfile(theta, a, ax, tilt, bore, frontWidth);
+
 			// As the cascades' mip selection: what the mesh or the pixel cannot carry (k scale -> pi) fades out.
-			float fade = smoothstep(Math::PI, 0.5 * Math::PI, k * scale);
+			float kUnits = k * MetresPerUnit;
+			float fade = smoothstep(Math::PI, 0.5 * Math::PI, kUnits * scale);
 			float w = ctx.train * fade;
-			float waveNumber = length(sum.phaseGrad);
-			float2 dir = waveNumber > 1e-8 ? -sum.phaseGrad / waveNumber : 0.0;
-			o.displacement = float3(dir * p.orbital, p.height) * (UnitsPerMetre * w);
-			o.slope = (p.dHeight * sum.phaseGrad + p.shape * p.cap * sum.amplitudeGrad) * (UnitsPerMetre * w);
-			o.compression = float3(dir.x * dir.x, dir.y * dir.y, dir.x * dir.y) * (-p.stretch * waveNumber * UnitsPerMetre * w);
+			float units = UnitsPerMetre * w;
+			float2 dir = ray.direction;
+			o.displacement = float3(dir * shape.x, shape.z) * units;
+			o.slope = shape.dz * units * gradTheta;
+			o.compression = float3(dir.x * gradTheta.x, dir.y * gradTheta.y, dir.x * gradTheta.y) * (shape.dx * units);
 			o.direction = dir;
-			o.breakStage = p.breakStage * ctx.train;
-			o.saturation = p.saturation;
+			o.breakStage = breaking * ctx.train;
+			// Where on the cycle the crest and its foam are: the front (ahead of the crest, just below 2 pi) narrows from
+			// half the cycle to the bore's as the wave breaks; v' is 0 at the crest, pi in the trough.
+			float v = theta / Math::TAU;
+			v -= floor(v);
+			float frontShare = lerp(0.5, frontWidth, breaking);
+			float remapped = v < 1.0 - frontShare ? v * Math::PI / (1.0 - frontShare) : Math::PI + (v - 1.0 + frontShare) * Math::PI / frontShare;
 			// The front just ahead of the crest, and the crest itself (about a fifth of the cycle); behind it the foam it
 			// leaves, thinning over a third of a cycle.
-			o.crestFront = smoothstep(0.55, 0.95, cos(p.phase + 0.4));
-			o.foamTrail = p.phase < Math::PI ? exp(-5.0 * p.phase / Math::PI) : 0.0;
+			o.crestFront = smoothstep(0.55, 0.95, cos(remapped + 0.4));
+			o.foamTrail = remapped < Math::PI ? exp(-5.0 * remapped / Math::PI) : 0.0;
 			o.resolved = fade;
-			// Mean square slope: (A k)^2 / 2 for a sinusoid; the remap steepens the front by pi / wf over its share
-			// wf / 2pi of the cycle, and flattens the back alike.
-			float backWidth = Math::TAU - p.frontWidth;
-			float meanSquareSlope = 0.25 * amplitudeUnits * amplitudeUnits * k * k * (Math::PI / p.frontWidth + Math::PI / backWidth);
-			o.slopeVariance = (1.0 - fade * fade) * ctx.train * ctx.train * meanSquareSlope;
-			// Peaked crest: z ~ 2A (1 - p v'^2 / 4), with v' = k s pi / wf on the front.
-			float frontRate = Math::PI / p.frontWidth;
-			o.curvature = w * k * k * amplitudeUnits * p.peakedness * frontRate * frontRate;
+			// Mean square slope (a k)^2 / 2 of a sinusoid, steepened by the bore's front over its share of the cycle.
+			float steepening = lerp(1.0, 0.5 / frontWidth + 0.5 / (1.0 - frontWidth), bore);
+			float amplitudeUnits = a * UnitsPerMetre;
+			o.slopeVariance = (1.0 - fade * fade) * ctx.train * ctx.train * 0.5 * amplitudeUnits * amplitudeUnits * kUnits * kUnits * steepening;
+			// The sharpened crest (k ax), the pitching front and the bore's front.
+			o.curvature = w * kUnits * kUnits * amplitudeUnits * (1.0 + k * ax) * (1.0 + 2.0 * lean + bore / frontWidth);
 			o.amplitude = amplitudeUnits * w;
-			o.k = k;
+			o.k = kUnits;
 			if (previous) {
-				ShoreSum lastSum = SumShoreComponents(ctx.shore, Shore3.xyz, amplitude);
-				ShoreProfile last = EvaluateShoreProfile(ctx, lastSum, scale);
-				float lastNumber = length(lastSum.phaseGrad);
-				float2 lastDir = lastNumber > 1e-8 ? -lastSum.phaseGrad / lastNumber : 0.0;
-				o.previousDisplacement = float3(lastDir * last.orbital, last.height) * (UnitsPerMetre * w);
+				ShoreShape last = ShoreProfile(ShorePhase(absXY, coast, ray, Shore2.y), a, ax, tilt, bore, frontWidth);
+				o.previousDisplacement = float3(dir * last.x, last.z) * units;
 			}
 		}
 		return o;
@@ -758,6 +774,7 @@ namespace PBRWater
 		float3 normal;                // surface normal
 		float jacobian;               // < 1 where the surface compresses, < 0 where it folds (breaking)
 		float slopeVariance;          // slope variance filtered out of the pixel (for roughness)
+		float crestTrail;             // whitecap foam coverage: crests whitening now and the foam they left (EvaluateWavesFiltered only)
 		float shoreBreak;             // 0..1 a shore wave breaking here now: its crest and front face
 		float breakStage;             // 0..1 how far the shore waves here have got with breaking (s)
 	};
@@ -769,6 +786,7 @@ namespace PBRWater
 		float3 previous;
 		float dzdx, dzdy, dxdx, dydy, dxdy;
 		float slopeVariance;
+		float crestTrail;
 	};
 
 	WaveSums EmptySums()
@@ -778,6 +796,7 @@ namespace PBRWater
 		sums.previous = 0.0;
 		sums.dzdx = sums.dzdy = sums.dxdx = sums.dydy = sums.dxdy = 0.0;
 		sums.slopeVariance = 0.0;
+		sums.crestTrail = 0.0;
 		return sums;
 	}
 
@@ -839,6 +858,7 @@ namespace PBRWater
 		o.displacement = sums.displacement;
 		o.previousDisplacement = sums.previous;
 		o.slopeVariance = sums.slopeVariance;
+		o.crestTrail = sums.crestTrail;
 		return o;
 	}
 
@@ -894,7 +914,7 @@ namespace PBRWater
 	 * Waves for shading at undisplaced camera-relative `positionWS`, filtered over the pixel footprint
 	 * (trilinear / anisotropic). The slope variance the filter removes is recovered from the mip-filtered
 	 * second moments (LEAN mapping) and returned for the roughness, as is the variance of the shore wave
-	 * train where the pixel cannot carry it.
+	 * train where the pixel cannot carry it; whitecaps come from the cascades that carry the waves here.
 	 */
 	WaveResult EvaluateWavesFiltered(float3 positionWS, WaveContext ctx)
 	{
@@ -918,6 +938,11 @@ namespace PBRWater
 				float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
 				float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
 				sums.slopeVariance += variance * vertical * vertical * MinifiedShare(gx * texelsPerUV, gy * texelsPerUV);
+				// Jacobian foam (OceanAssembleCS), summed over the bands as in GodotOceanWaves. It was laid down by the
+				// open-sea band; where fetch or depth calm the band its crests compress less and whiten less, and near the
+				// shore the train takes the band's waves (and their foam) over.
+				float presence = saturate(horizontal);
+				sums.crestTrail += m.z * presence * presence * DominanceWeight(c, ctx.peakOmega);
 			}
 		}
 		AddShoreTrain(sums, o, ShoreWaves(positionWS, ctx, footprint, false), ctx);
@@ -1056,10 +1081,11 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 	// Swash: the water a breaking wave throws up the beach
 	//
-	// Up the beach the shore field carries the arrival times of the waterline the ray leaves from, so the swash is
-	// worked out analytically from the crests that reached that stretch of waterline, and stretches of beach the crests
-	// reach at different times run up at different times. Each crest runs up as far as Stockdon et al. (2006) give for
-	// its height H (2 |Z| when it arrived), the deep-water wavelength L0 and the beach slope b:
+	// Up the beach the shore field carries the direction of the waterline the ray leaves from, so the swash is worked out
+	// analytically from the crests that reached that point of the waterline: they arrive there at every whole cycle of the
+	// waves' phase (ShorePhase at the waterline), so stretches of beach the crests reach at different times run up at
+	// different times. Each crest runs up as far as Stockdon et al. (2006) give for its height H (its wave set's), the
+	// deep-water wavelength L0 and the beach slope b:
 	//     R = 1.1 (0.35 b sqrt(H L0) + 0.5 sqrt(H L0 (0.563 b^2 + 0.004)))
 	// and its tip moves ballistically up the slope and back down (Shen & Meyer 1963; Peregrine & Williams 2001),
 	// rising at w0 = sqrt(2 g sin^2(b) R) and decelerating vertically at g sin^2(b). On a gentle beach the next uprush
@@ -1074,7 +1100,7 @@ namespace PBRWater
 	 * a crest has drained the tip keeps falling below the still water instead of resting at it: the vertices
 	 * interpolate the tip linearly, and a tip held at 0 next to a running one put the swash front on the triangle edges.
 	 * Each crest's height carries its wave group (ShoreGroup), so every uprush reaches its own height.
-	 * @param previous  at last frame's clocks (motion vectors)
+	 * @param previous  at last frame's clock (motion vectors)
 	 * @param elevation bed above the still water (units) for the foam left behind; -1e9: not needed
 	 */
 	float3 SwashCrests(float3 positionWS, WaveContext ctx, bool previous, float elevation)
@@ -1084,38 +1110,24 @@ namespace PBRWater
 		// swash, so most of the sea skips it.
 		[branch] if (ctx.beach > 0.0 && ctx.elevation > -1.5 * max(Shore0.w, 1.0))
 		{
-			float omega = max(Shore4.x, 1e-3);
+			// Crests reach the waterline once per cycle of the clock, which runs at this frame's frequency.
+			float omega = max(Shore2.z, 1e-3);
 			float period = Math::TAU / omega;
 			float b = clamp(ctx.shore.slope, 0.02, 0.3);
 			float decel = GravityMetres * b * b / (1.0 + b * b);  // g sin^2(b), m/s^2
 			float deepLength = Shore3.w * MetresPerUnit;
 			float runupPerHeight = ShoreRunupScale * 1.1 * (0.35 * b + 0.5 * sqrt(0.563 * b * b + 0.004));  // R / sqrt(H L0)
-			float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
-			float departure = Shore0.z - ctx.shore.travelTime.x;
 			float bed = elevation * MetresPerUnit;
 
-			// The components at the waterline now (the current field's and, while it takes over, its predecessor's, as in
-			// SumShoreComponents), and the time since the last crest reached it (arg Z rises at about omega).
-			float3 amplitude = ShoreDeepAmplitudes(ctx);
-			float3 a = amplitude * ctx.shore.blend;
-			float3 aPrevious = amplitude * (1.0 - ctx.shore.blend);
-			float3 clock = previous ? Shore3.xyz : Shore2.xyz;
-			float3 s, c, sPrevious, cPrevious;
-			sincos(clock - Shore4.xyz * ctx.shore.travelTime, s, c);
-			sincos(clock - Shore5.xyz - Shore7.xyz * ctx.shore.previousTime, sPrevious, cPrevious);
-			float phase = atan2(dot(a, s) + dot(aPrevious, sPrevious), dot(a, c) + dot(aPrevious, cPrevious));
-			float sinceLast = (phase - Math::TAU * floor(phase / Math::TAU)) / omega;
-			// Each component turned back to that crest, then one period further for each older crest: complex rotations,
-			// so the candidates need no more trigonometry.
-			float3 bs, bc, ps, pc, bsPrevious, bcPrevious, psPrevious, pcPrevious;
-			sincos(-Shore4.xyz * sinceLast, bs, bc);
-			sincos(-Shore4.xyz * period, ps, pc);
-			sincos(-Shore7.xyz * sinceLast, bsPrevious, bcPrevious);
-			sincos(-Shore7.xyz * period, psPrevious, pcPrevious);
-			float3 re = a * (c * bc - s * bs);
-			float3 im = a * (s * bc + c * bs);
-			float3 rePrevious = aPrevious * (cPrevious * bcPrevious - sPrevious * bsPrevious);
-			float3 imPrevious = aPrevious * (sPrevious * bcPrevious + cPrevious * bsPrevious);
+			// The train's phase here (up the beach the waterline's, carried up the ray), and the time since the last crest
+			// reached it: each uprush starts as its crest arrives.
+			float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+			float2 coast = CoastPoint(absXY, ctx.shore);
+			float theta = ShorePhase(absXY, coast, ctx.shore, previous ? Shore2.y : Shore2.x);
+			float sinceLast = (theta - Math::TAU * floor(theta / Math::TAU)) / omega;
+			float deepHeight = ShoreHeightRatio * ctx.shoreHeight * MetresPerUnit * ctx.damping;
+			// The crest that arrived tau ago reached the waterline (its wave set's clock) a travel time later.
+			float arrival = Shore0.z + ctx.shore.travelTime;
 
 			// The crests of the last periods; the oldest fade out before they leave the window, so the tip never pops. The
 			// newest crest's own path continues below the still water after it drained.
@@ -1127,7 +1139,7 @@ namespace PBRWater
 			[unroll] for (uint j = 0; j < candidates; j++)
 			{
 				float tau = sinceLast + j * period;
-				float H = 2.0 * length(float2(dot(re + rePrevious, 1.0.xxx), dot(im + imPrevious, 1.0.xxx))) * ShoreGroup(absXY, departure - tau);
+				float H = deepHeight * ShoreGroup(coast, arrival - tau);
 				float runup = runupPerHeight * sqrt(H * deepLength);
 				float w0 = sqrt(2.0 * decel * runup);
 				float fade = saturate((window - tau) / period);
@@ -1146,12 +1158,6 @@ namespace PBRWater
 						residue = max(residue, max(markLine, 0.3) * exp(-(tau - peakTime) / (3.0 * period)) * fade);
 					}
 				}
-				float3 nextRe = re * pc - im * ps;
-				im = re * ps + im * pc;
-				re = nextRe;
-				nextRe = rePrevious * pcPrevious - imPrevious * psPrevious;
-				imPrevious = rePrevious * psPrevious + imPrevious * pcPrevious;
-				rePrevious = nextRe;
 			}
 			result = float3(float2(tip, mark) * (UnitsPerMetre * ctx.beach), residue * ctx.beach);
 		}
