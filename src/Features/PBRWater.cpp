@@ -1208,9 +1208,9 @@ void PBRWater::UpdateFrameConstants()
 		d.Shore0 = { shoreReady ? 1.0f : 0.0f, blending ? snap->shoreBlend : 1.0f, static_cast<float>(shore.groupTime), shore.enabled ? shore.maxRunup : 0.0f };
 		d.Shore1 = { settings.BreakingFoam, settings.SwashFoam, shore.swellHeight, shore.windSeaHeight };
 		// The clock now and as last frame drew it (motion vectors); the first frame has no motion.
-		const float clock = static_cast<float>(shore.phase);
+		const float shoreClock = static_cast<float>(shore.phase);
 		const bool consecutive = lastFrame != UINT32_MAX && frame == lastFrame + 1 && frameData.Shore2.w > 0.0f;
-		d.Shore2 = { clock, consecutive ? frameData.Shore2.x : clock, shore.omega, shore.period };
+		d.Shore2 = { shoreClock, consecutive ? frameData.Shore2.x : shoreClock, shore.omega, shore.period };
 		d.Shore3 = { shore.variation, shore.variationTime, 0.0f, shore.deepLength };
 		d.Shore4 = { shoreReady ? snap->shoreField->omega : shore.omega, blending ? snap->shorePrevious->omega : shore.omega, 0.0f, 0.0f };
 		auto fieldMap = [](const PBRWaterModel::ShoreField& f) {

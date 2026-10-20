@@ -126,14 +126,14 @@ namespace PBRWaterFoam
 				const float warpX = (Fbm(tx, ty, 6, 11u) - 0.5f) * 1.6f;
 				const float warpY = (Fbm(tx, ty, 6, 23u) - 0.5f) * 1.6f;
 				const float large = BubbleField(tx * Large + warpX, ty * Large + warpY, Large, 37u);
-				const float small = BubbleField(tx * Small + warpX * (static_cast<float>(Small) / Large) + 9.3f,
+				const float fineField = BubbleField(tx * Small + warpX * (static_cast<float>(Small) / Large) + 9.3f,
 					ty * Small + warpY * (static_cast<float>(Small) / Large) + 9.3f, Small, 59u);
 				// Foam gathers in clumps and streaks: denser foam survives to lower coverage there.
 				const float clumps = Fbm(tx, ty, 3, 71u);
 				// The coverage at which this texel turns white: the bubbles shrink from radius 1.45 (nothing but the
-				// densest walls) to 0.05 (everything but the bubble centres) as the coverage rises, the small bubbles a
+				// densest walls) to 0.05 (everything but the bubble centres) as the coverage rises, the fineField bubbles a
 				// little inside the large ones.
-				const float wall = std::min(large, small / 0.85f);
+				const float wall = std::min(large, fineField / 0.85f);
 				const float r = std::clamp((1.45f - wall) / 1.4f, 0.0f, 1.0f);
 				const float onset = r * r / (0.45f + 1.1f * clumps);
 				foam[static_cast<size_t>(y) * size + x] = 1.0f - onset;
