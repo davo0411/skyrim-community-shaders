@@ -43,8 +43,11 @@ namespace
 			return;
 
 		const auto message = std::format(
-			"{} file(s) in CommunityShaders/Overrides are no longer read. Move them into the Baseline folder of a "
-			"preset pack (Presets/<Name>/Baseline/) and enable that pack on the Presets page.",
+			"{} old-format override file(s) in CommunityShaders/Overrides are not compatible anymore and are no longer read. "
+			"Update them to the new Baseline format: move feature files into the Baseline folder of a preset pack "
+			"(Presets/<Name>/Baseline/) and enable that pack on the Presets page. "
+			"Global files (*_Global.json) cannot be moved, as Baseline packs only hold feature settings; "
+			"set those values again in the menu.",
 			count);
 		logger::warn("{}", message);
 		FeatureIssues::FeatureFileInfo fileInfo;
@@ -111,12 +114,19 @@ size_t BaselineManager::DiscoverDirectory(const std::filesystem::path& directory
 	size_t maxFilesToProcess = 1000;  // Prevent processing too many files
 
 	try {
+		// Sorted by name so a pack's files layer in the same order on every machine; a later file wins conflicts.
+		std::vector<std::filesystem::directory_entry> entries;
 		for (const auto& entry : std::filesystem::directory_iterator(directory)) {
 			// Safety check to prevent infinite loops or DoS
-			if (filesProcessed >= maxFilesToProcess) {
+			if (entries.size() >= maxFilesToProcess) {
 				logger::info("Reached maximum file processing limit ({}), stopping discovery", maxFilesToProcess);
 				break;
 			}
+			entries.push_back(entry);
+		}
+		std::ranges::sort(entries, {}, [](const auto& entry) { return entry.path().filename(); });
+
+		for (const auto& entry : entries) {
 			filesProcessed++;
 
 			// Skip if not a regular file or not a JSON file

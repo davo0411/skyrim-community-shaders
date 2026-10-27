@@ -1,5 +1,6 @@
 #include "LinearLighting.h"
 
+#include <DirectXTex.h>
 #include <cmath>
 
 #include "../I18n/I18n.h"
@@ -133,8 +134,7 @@ bool LinearLighting::IsLinearLightingActive() const
 
 void LinearLighting::PostSetupResources()
 {
-	if (configuredLinearLighting && !globals::features::effects11.IsPresetEnabled() && !globals::features::postProcessing.loaded)
-		stl::report_and_fail("Linear Lighting requires Post Processing for its display transform."sv);
+	assert(!configuredLinearLighting || globals::features::postProcessing.loaded);
 	resourcesReady = true;
 }
 
@@ -169,8 +169,6 @@ void LinearLighting::ClearShaderCache()
 {
 	if (!globals::d3d::context || !globals::game::renderer)
 		return;
-	if (IsLinearLightingActive() && !globals::features::postProcessing.loaded)
-		stl::report_and_fail("Linear Lighting requires Post Processing for its display transform."sv);
 	globals::state->RequestHistoryReset();
 	workingSunlight = nullptr;
 	const float clear[4]{};
@@ -354,6 +352,19 @@ namespace
 			auto* previous = std::exchange(geometryPass, pass);
 			const SKSE::stl::scope_exit restore([previous]() noexcept { geometryPass = previous; });
 			func(shader, pass, renderFlags);
+			if constexpr (Type == RE::BSShader::Type::Lighting) {
+				constexpr auto projectedTextureIsSRGB = static_cast<uint>(State::ExtraShaderDescriptors::ProjectedTextureIsSRGB);
+				auto& descriptor = globals::state->permutationData.ExtraShaderDescriptor;
+				descriptor &= ~projectedTextureIsSRGB;
+				if (globals::state->currentPixelDescriptor & static_cast<uint>(SIE::ShaderCache::LightingShaderFlags::ProjectedUV)) {
+					if (auto* srv = globals::game::shadowState->GetRuntimeData().PSTexture[3]) {
+						D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+						srv->GetDesc(&desc);
+						if (DirectX::IsSRGB(desc.Format))
+							descriptor |= projectedTextureIsSRGB;
+					}
+				}
+			}
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -630,7 +641,9 @@ namespace ImageSpaceColorManagement
 void LinearLighting::Load()
 {
 	ApplyGameGamma();
-	configuredLinearLighting = loaded && settings.enableLinearLighting;
+	// Matches Reset() so a saved Vanilla mode does not cost a shader reload on the first frame.
+	configuredLinearLighting = loaded && settings.enableLinearLighting && globals::features::postProcessing.loaded &&
+	                           !PostProcessingMode::IsVanillaPending();
 	configuredACEScg = configuredLinearLighting && settings.enableACEScg;
 
 	// Installed regardless of the toggle so Reset() can enable Linear Lighting without a restart.

@@ -9,7 +9,7 @@
 #include "Fonts.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
-#include "IconsFontAwesome5.h"
+#include "IconsTabler.h"
 #include "Menu.h"
 #include "Menu/Icons/helpers/IconFonts.h"
 #include "Presets/PresetCompatibility.h"
@@ -224,7 +224,7 @@ namespace
 		ImGui::PopStyleVar();
 		ImGui::EndDisabled();
 
-		const Icons::GlyphRef folderIcon = Icons::FA(ICON_FA_FOLDER_OPEN);
+		const Icons::GlyphRef folderIcon = Icons::TI(ICON_TI_FOLDER_OPEN);
 		BrowserUI::SameLineIfFits(Icons::CalcGlyphSize(folderIcon).x + ImGui::GetStyle().FramePadding.x * 2.0f);
 		{
 			auto _style = Util::TransparentIconButtonStyle();
@@ -326,7 +326,7 @@ void PresetsPageRenderer::RenderToolbar()
 
 	{
 		auto _style = Util::TransparentIconButtonStyle();
-		if (Icons::Button("##PresetsRefresh", Icons::FA(ICON_FA_SYNC_ALT))) {
+		if (Icons::Button("##PresetsRefresh", Icons::TI(ICON_TI_REFRESH))) {
 			catalog.Discover();
 			discovered = true;
 		}
@@ -334,7 +334,7 @@ void PresetsPageRenderer::RenderToolbar()
 			ImGui::SetTooltip("%s", T("menu.presets.refresh_tooltip", "Rescan unified packs and Effects 11 library presets."));
 
 		ImGui::SameLine();
-		if (Icons::Button("##PresetsOpenFolder", Icons::FA(ICON_FA_FOLDER_OPEN)))
+		if (Icons::Button("##PresetsOpenFolder", Icons::TI(ICON_TI_FOLDER_OPEN)))
 			catalog.OpenPresetsFolder();
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("%s", T("menu.presets.open_folder_tooltip", "Open the unified Presets library folder in Explorer."));
@@ -346,11 +346,64 @@ void PresetsPageRenderer::RenderToolbar()
 void PresetsPageRenderer::DrawOpenCSEditorButton(const char* id)
 {
 	const char* title = T("menu.presets.open_cs_editor", "CS Editor");
-	const Icons::GlyphRef brush = Icons::FA(ICON_FA_PAINT_BRUSH);
+	const Icons::GlyphRef brush = Icons::TI(ICON_TI_BRUSH);
 	BrowserUI::RightAlign(Icons::MeasureLabeledButton(brush, title));
 	if (Icons::LabeledButton(id, brush, title))
 		CSEditor::OpenEditorWindow();
 	Util::AddTooltip(T("menu.presets.open_cs_editor_tooltip", "Open the CS Editor for weather, lighting, and scene editing."));
+}
+
+void PresetsPageRenderer::RenderBaselineOrder()
+{
+	auto& catalog = UnifiedPresetCatalog::GetSingleton();
+	const auto& ids = catalog.GetBaselinePackIds();
+	if (ids.size() < 2)
+		return;
+
+	const bool open = ImGui::CollapsingHeader(T("menu.presets.baseline_order", "Baseline Load Order"), ImGuiTreeNodeFlags_DefaultOpen);
+	Util::AddTooltip(T("menu.presets.baseline_order_tooltip",
+		"Enabled Baseline packs, highest priority first. A pack wins any setting it shares with the packs below it; your own edits still win over all of them."));
+	if (!open)
+		return;
+
+	// Highest priority first, like a datapack list. Moves apply after the loop so the list is not edited mid-draw.
+	std::string moveId;
+	bool moveRaise = false;
+	for (size_t row = 0; row < ids.size(); ++row) {
+		const auto& id = ids[ids.size() - 1 - row];
+		ImGui::PushID(id.c_str());
+
+		ImGui::BeginDisabled(row == 0);
+		if (ImGui::ArrowButton("##up", ImGuiDir_Up)) {
+			moveId = id;
+			moveRaise = true;
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+		ImGui::BeginDisabled(row + 1 == ids.size());
+		if (ImGui::ArrowButton("##down", ImGuiDir_Down)) {
+			moveId = id;
+			moveRaise = false;
+		}
+		ImGui::EndDisabled();
+
+		ImGui::SameLine();
+		const auto* pack = catalog.FindPack(id);
+		const std::string label = std::format("{}. {}", row + 1, pack && !pack->name.empty() ? pack->name : id);
+		if (ImGui::Selectable(label.c_str(), selectedPackId == id)) {
+			selectedPackId = id;
+			lightboxPackId.clear();
+			lightboxImageIndex = -1;
+			lightboxSuppressClose = false;
+		}
+
+		ImGui::PopID();
+	}
+	if (!moveId.empty())
+		catalog.MoveBaseline(moveId, moveRaise);
+
+	ImGui::Spacing();
+	ImGui::Separator();
 }
 
 void PresetsPageRenderer::RenderList(float width)
@@ -362,6 +415,7 @@ void PresetsPageRenderer::RenderList(float width)
 	const auto indices = catalog.Query(typeFilter, searchBuffer);
 
 	ImGui::BeginChild("##PresetList", ImVec2(width, 0), true);
+	RenderBaselineOrder();
 	{
 		MenuFonts::FontRoleGuard heading(Menu::FontRole::Subheading);
 		ImGui::TextUnformatted(T("menu.presets.installed", "Installed"));
@@ -581,7 +635,7 @@ void PresetsPageRenderer::RenderDetail()
 					Util::Text::Secondary("%s", metaLine.c_str());
 				if (!pack->nexusUrl.empty()) {
 					ImGui::SameLine(0.0f, style.ItemSpacing.x);
-					if (Icons::Button("##NexusLink", Icons::FA(ICON_FA_EXTERNAL_LINK_ALT)))
+					if (Icons::Button("##NexusLink", Icons::TI(ICON_TI_EXTERNAL_LINK)))
 						Util::FileHelpers::OpenWithShell(pack->nexusUrl);
 					Util::AddTooltip(T("menu.presets.nexus_link_tooltip", "Open this preset's Nexus Mods page."));
 				}
@@ -686,12 +740,12 @@ void PresetsPageRenderer::Open()
 
 float PresetsPageRenderer::MeasureOpenButton()
 {
-	return Icons::MeasureLabeledButton(Icons::FA(ICON_FA_LAYER_GROUP), T("menu.presets.open_presets", "Presets"));
+	return Icons::MeasureLabeledButton(Icons::TI(ICON_TI_STACK_2), T("menu.presets.open_presets", "Presets"));
 }
 
 void PresetsPageRenderer::DrawOpenButton(const char* id, const char* tooltip)
 {
-	if (Icons::LabeledButton(id, Icons::FA(ICON_FA_LAYER_GROUP), T("menu.presets.open_presets", "Presets")))
+	if (Icons::LabeledButton(id, Icons::TI(ICON_TI_STACK_2), T("menu.presets.open_presets", "Presets")))
 		Open();
 	Util::AddTooltip(tooltip);
 }
@@ -778,12 +832,12 @@ void PresetsPageRenderer::RenderScreenshotLightbox()
 		const float arrowBtn = ImGui::GetFrameHeight() * 1.35f;
 		const float midY = imgOrigin.y + imgH * 0.5f;
 		const float inset = style.ItemSpacing.x * 2.0f;
-		if (DrawCarouselArrow("##LightboxPrev", Icons::FA(ICON_FA_ANGLE_LEFT),
+		if (DrawCarouselArrow("##LightboxPrev", Icons::TI(ICON_TI_CHEVRON_LEFT),
 				ImVec2(imgOrigin.x + inset + arrowBtn * 0.5f, midY), arrowBtn)) {
 			lightboxImageIndex = (lightboxImageIndex - 1 + shotCount) % shotCount;
 			navigated = true;
 		}
-		if (DrawCarouselArrow("##LightboxNext", Icons::FA(ICON_FA_ANGLE_RIGHT),
+		if (DrawCarouselArrow("##LightboxNext", Icons::TI(ICON_TI_CHEVRON_RIGHT),
 				ImVec2(imgEnd.x - inset - arrowBtn * 0.5f, midY), arrowBtn)) {
 			lightboxImageIndex = (lightboxImageIndex + 1) % shotCount;
 			navigated = true;

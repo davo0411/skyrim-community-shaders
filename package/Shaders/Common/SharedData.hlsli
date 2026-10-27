@@ -53,6 +53,10 @@ namespace SharedData
 		// Only read by the GRASS_OPTIMIZATIONS permutation, for grass drawn with an LOD mesh.
 		float MidLODBrightness;
 		float FarLODBrightness;
+		float PBRWrappedLightingAmount;
+		float SubsurfaceBalance;
+		float CanopyOcclusion;
+		float ClumpShading;
 	};
 
 	struct CPMSettings
@@ -335,7 +339,8 @@ namespace SharedData
 
 		float MasserBillboardTan;
 		float SecundaBillboardTan;
-		float2 SkyScatteringPad0;
+		float SkyScaleMultiplier;
+		float SkyScatteringPad0;
 
 		uint EnableWater;
 		float WaterWavesAmplitude;
@@ -481,6 +486,9 @@ namespace SharedData
 		float MotionStretch;
 		float MotionTransparency;
 		float pad0;
+		float4 TextureBounds;
+		float2 TextureRadiusScale;
+		float2 pad1;
 	};
 
 	cbuffer FeatureData : register(b6)

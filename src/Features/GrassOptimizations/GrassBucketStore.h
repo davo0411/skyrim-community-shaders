@@ -28,23 +28,27 @@ public:
 		float fadeStart = 0.0f;  // New slices begin fading at this time.
 	};
 
-	/** @brief Retains every admitted bucket's draw proxy through visibility submission. */
+	/** @brief The native shapes and draw proxies one frame renders, published once per frame by the render thread. */
 	struct CullSnapshot
 	{
 		struct NativeShape
 		{
 			std::shared_ptr<GrassShape> registration;
 			bool direct = false;
+			// Render thread only. Setup and draw both ask per pass, and a group the engine adds mid-frame invalidates the answer.
+			mutable uint32_t optimizedFrame = UINT32_MAX;
+			mutable uint32_t optimizedGroups = 0;
+			mutable bool optimized = false;
 		};
 
-		/** @brief Returns the submission mode captured for this native shape. */
-		bool IsDirect(const RE::NiAVObject* shape) const
+		/** @brief Returns the published state of a native shape, or null when it has none. */
+		const NativeShape* Find(const RE::NiAVObject* shape) const
 		{
 			const auto it = nativeShapes.find(shape);
-			return it != nativeShapes.end() && it->second.direct;
+			return it != nativeShapes.end() ? &it->second : nullptr;
 		}
 
-		std::unordered_map<const RE::NiAVObject*, NativeShape> nativeShapes;
+		ankerl::unordered_dense::map<const RE::NiAVObject*, NativeShape> nativeShapes;
 		std::vector<RE::NiPointer<RE::BSMultiStreamInstanceTriShape>> proxies;
 	};
 
@@ -69,6 +73,9 @@ public:
 	/** @brief Copies a registered engine group into the ordered preparation queue. */
 	void CaptureEngineGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t engineGroup);
 
+	/** @brief Captures newly attached cache groups without duplicating groups already in preparation. */
+	void CaptureQueuedGroups();
+
 	/** @brief Retires an engine group's coverage and stages removal at the next frame boundary. */
 	void RemoveEngineGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t engineGroup,
 		void (*remove)(RE::BSMultiStreamInstanceTriShape*, uint32_t));
@@ -76,8 +83,8 @@ public:
 	/** @brief Stages a shape's destruction for the render thread. */
 	void StageRemoval(RE::BSMultiStreamInstanceTriShape* shape);
 
-	/** @brief Returns the latest published snapshot for culling threads. */
-	std::shared_ptr<const CullSnapshot> AcquireCullSnapshot() const { return cullSnapshot.load(std::memory_order_acquire); }
+	/** @brief Returns the latest published snapshot, valid on any thread until the frame after the next publish. */
+	const CullSnapshot* GetCullSnapshot() const { return publishedSnapshot.load(std::memory_order_acquire); }
 
 	/** @brief Publishes the proxy set after frame-end lifecycle changes. */
 	void PublishCullSnapshot();
@@ -91,11 +98,11 @@ public:
 	/** @brief Retains the current registration while holding the lifecycle lock. */
 	std::shared_ptr<GrassShape> FindShape(RE::BSMultiStreamInstanceTriShape* shape);
 
-	/** @brief Reads published native coverage without waiting for capture copies. */
-	std::shared_ptr<GrassShape> FindRenderedShape(RE::BSMultiStreamInstanceTriShape* shape) const;
-
 	/** @brief Returns whether this frame's optimized draw covers every native instance. */
 	static bool IsShapeOptimized(const GrassShape& shape);
+
+	/** @brief IsShapeOptimized for a published shape, cached per frame and per engine group count. */
+	static bool IsShapeOptimized(const CullSnapshot::NativeShape& native, uint32_t frame);
 
 	/** @brief Returns whether this native group has resident records in a ready bucket. */
 	static bool IsGroupOptimized(const GrassShape& shape, uint32_t group);
@@ -122,7 +129,10 @@ public:
 	GrassMeshLibrary meshLibrary;
 
 private:
-	std::unordered_map<const RE::BSGeometry*, GrassBucket*> proxyBuckets;
+	/** @brief Interleaves a packed cell's coordinates so nearby cells sort together. */
+	static uint64_t MortonCode(uint64_t cell);
+
+	ankerl::unordered_dense::map<const RE::BSGeometry*, GrassBucket*> proxyBuckets;
 
 	struct Removal
 	{
@@ -147,6 +157,9 @@ private:
 	static void PackInstances(GrassChunk& slice, const void* sourceData);
 
 	static std::optional<PendingCapture> CaptureMetadata(RE::BSMultiStreamInstanceTriShape* shape, uint32_t count, uint32_t stride);
+
+	// The caller holds pendingMutex and EngineGroupLock while copying native group data.
+	void CaptureEngineGroup(const std::shared_ptr<GrassShape>& registration, uint32_t engineGroup);
 
 	// The caller holds pendingMutex while updating native group lifetimes.
 	void QueueEvent(PendingEvent event);
@@ -220,7 +233,10 @@ private:
 	bool snapshotDirty = true;
 
 	std::vector<RE::NiPointer<RE::BSMultiStreamInstanceTriShape>> retiredProxies;
-	std::atomic<std::shared_ptr<const CullSnapshot>> cullSnapshot;
+	// Like retiredProxies, the previous snapshot outlives one publish for readers still finishing the last frame.
+	std::unique_ptr<const CullSnapshot> cullSnapshot;
+	std::unique_ptr<const CullSnapshot> retiredSnapshot;
+	std::atomic<const CullSnapshot*> publishedSnapshot{ nullptr };
 
 	std::unique_ptr<Buffer> compactionScratch;
 	std::unique_ptr<BS::thread_pool<>> preparation;

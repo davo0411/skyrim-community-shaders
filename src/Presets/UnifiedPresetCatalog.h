@@ -176,6 +176,11 @@ public:
 	 *  @return False when the pack was not enabled. */
 	bool RemoveBaseline(const std::string& id);
 
+	/** @brief Moves an enabled Baseline pack one step in the layering order and reapplies the layers.
+	 *  @param raise True moves it later, so it wins conflicts against the pack it passes; false moves it earlier.
+	 *  @return False when the pack is not enabled, is already at that end, or the new order could not be saved. */
+	bool MoveBaseline(const std::string& id, bool raise);
+
 	/** @brief Sets the Effects 11 handoff flags from the active pack's manifest sceneControl, overlaid with the
 	 *  user's choices for that pack; no active pack hands nothing off. */
 	void LoadSceneControl() const;
@@ -214,8 +219,9 @@ private:
 
 	/** @brief Reads the persisted active pack state from SettingsUser.json, clearing it when missing or bad. */
 	void LoadActiveState();
-	/** @brief Writes the active pack state into its SettingsUser.json section, leaving the rest of the file alone. */
-	void SaveActiveState() const;
+	/** @brief Writes the active pack state into its SettingsUser.json section, leaving the rest of the file alone.
+	 *  @return False when the user config could not be read or written. */
+	bool SaveActiveState() const;
 
 	/** @brief Enables a pack's Baseline overwrites as the last layer and reapplies them to the loaded features. */
 	void EnableBaseline(const PackInfo& pack);
@@ -227,8 +233,9 @@ private:
 	/** @brief Adds the Effects 11 install at the game root or Data folder, when present, and the library presets
 	 *  no unified pack of the same name already covers. */
 	void DiscoverEffects11Presets();
-	/** @brief Switches to the pipeline a pack chose, recording it as the pack layer's choice; the caller persists. */
-	void UsePackPipeline(PostProcessingMode::Mode mode);
+	/** @brief Switches to the pipeline a pack chose, recording it as the pack layer's choice; the caller persists.
+	 *  @return False, recording nothing, when the pipeline cannot run. */
+	bool UsePackPipeline(PostProcessingMode::Mode mode);
 
 	/** @brief Decodes an image file into an SRV; false when missing or undecodable. */
 	static bool LoadTextureSRV(const std::filesystem::path& path, winrt::com_ptr<ID3D11ShaderResourceView>& outSRV);

@@ -373,7 +373,7 @@ json UnifiedPresetCatalog::SerializeActiveState() const
 	return state;
 }
 
-void UnifiedPresetCatalog::SaveActiveState() const
+bool UnifiedPresetCatalog::SaveActiveState() const
 {
 	// Only this section is written now; the rest of the user config waits for Save Settings.
 	const auto path = Util::PathHelpers::GetSettingsUserPath();
@@ -382,20 +382,21 @@ void UnifiedPresetCatalog::SaveActiveState() const
 	                                                    std::optional<json>(json::object());
 	if (!document) {
 		logger::warn("[Presets] Active pack state not saved: {} could not be read", Util::PathHelpers::ToUtf8(path));
-		return;
+		return false;
 	}
 	try {
 		(*document)[kUserSettingsKey] = SerializeActiveState();
 		if (!Util::FileHelpers::WriteJsonAtomically(path, *document, kUserSettingsIndent, "user config")) {
 			logger::warn("[Presets] Failed to save active pack state to {}", Util::PathHelpers::ToUtf8(path));
-			return;
+			return false;
 		}
 	} catch (const std::exception& e) {
 		logger::warn("[Presets] Failed to save active pack state: {}", e.what());
-		return;
+		return false;
 	}
 	// Left behind, the old file would come back as the state the next time the user config goes missing.
 	std::filesystem::remove(Util::PathHelpers::GetUnifiedPresetsRealPath() / kLegacyActiveStateFileName, ec);
+	return true;
 }
 
 void UnifiedPresetCatalog::SetActivePackId(const std::string& id)
@@ -409,11 +410,14 @@ std::string UnifiedPresetCatalog::GetActiveEffects11PresetId() const
 	return activePackId.empty() ? std::string() : GetEffects11PresetId(activePackId);
 }
 
-void UnifiedPresetCatalog::UsePackPipeline(PostProcessingMode::Mode mode)
+bool UnifiedPresetCatalog::UsePackPipeline(PostProcessingMode::Mode mode)
 {
-	PostProcessingMode::Set(mode);
+	// Only a pipeline that took effect is recorded, so the next boot runs what this session does.
+	if (!PostProcessingMode::Set(mode))
+		return false;
 	activePipeline = mode;
 	++pipelineRevision;
+	return true;
 }
 
 UnifiedPresetCatalog::PackInfo* UnifiedPresetCatalog::FindPack(const std::string& id)
@@ -699,9 +703,11 @@ bool UnifiedPresetCatalog::ApplyPack(const std::string& id, bool saveEffects11Cu
 		activePackId = id;
 		globals::features::sceneManager.ReloadOverwrites();
 		CSEditor::ReloadFormEdits();
-		// Applying a pack, even again, re-selects the pipeline it was authored for.
+		// Applying a pack, even again, re-selects the pipeline it was authored for. An Effects 11 pack that cannot
+		// run falls back to Post Processing; without that either, the current pipeline stays.
 		using PostProcessingMode::Mode;
-		UsePackPipeline(pack->IsE11() && effects11Applied ? Mode::Effects11 : Mode::PostProcessing);
+		if (!(pack->IsE11() && effects11Applied && UsePackPipeline(Mode::Effects11)))
+			UsePackPipeline(Mode::PostProcessing);
 		SaveActiveState();
 	}
 
@@ -846,6 +852,28 @@ bool UnifiedPresetCatalog::RemoveBaseline(const std::string& id)
 	BaselineManager::GetSingleton()->Refresh();
 	globals::state->ReapplySettingsLayers();
 	logger::info("[Presets] Removed Baseline pack '{}'", id);
+	return true;
+}
+
+bool UnifiedPresetCatalog::MoveBaseline(const std::string& id, bool raise)
+{
+	const auto found = std::ranges::find(baselinePackIds, id);
+	if (found == baselinePackIds.end())
+		return false;
+	const auto index = static_cast<size_t>(found - baselinePackIds.begin());
+	if (raise ? index + 1 >= baselinePackIds.size() : index == 0)
+		return false;
+	const size_t target = raise ? index + 1 : index - 1;
+	std::swap(baselinePackIds[index], baselinePackIds[target]);
+	// An order that is not saved would revert at the next start, so keep showing the one on disk.
+	if (!SaveActiveState()) {
+		std::swap(baselinePackIds[index], baselinePackIds[target]);
+		return false;
+	}
+
+	BaselineManager::GetSingleton()->Refresh();
+	globals::state->ReapplySettingsLayers();
+	logger::info("[Presets] Moved Baseline pack '{}' {}", id, raise ? "up" : "down");
 	return true;
 }
 

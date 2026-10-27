@@ -15,6 +15,7 @@
 #include "TruePBR.h"
 #include "Util.h"
 #include "Utils/ShaderDescriptor.h"
+#include "VanillaBinding.h"
 
 #include "CSEditor/SceneManager/WeatherTransition.h"
 #include "Features/Effects11.h"
@@ -272,6 +273,7 @@ namespace SkyExtensions
 		static void thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 		{
 			globals::state->UpdateSkyShaderPermutation(pass);
+			VanillaBinding::BindSkyResources(pass);
 			if (globals::features::effects11.loaded)
 				globals::features::effects11.ModifySky(pass);
 			func(shader, pass, renderFlags);
@@ -306,21 +308,20 @@ namespace GrassExtensions
 	{
 		static void thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 		{
-			// Replace vanilla setup and pixel constants for passes handled by Grass Optimizations.
-			if (!globals::features::grassOptimizations.SetupGrassPass(shader, pass)) {
-				func(shader, pass, renderFlags);
-				LegacyGraphicsCompatibility::BindLegacyGrassPerGeometryToPixelShader();
-			}
+			// Grass Optimizations' setup replaces this for its buckets, and covered shapes draw nothing.
+			if (globals::features::grassOptimizations.SetupGrassPass(shader, pass) != GrassOptimizations::GrassPassSetup::kNative)
+				return;
+
+			func(shader, pass, renderFlags);
+			LegacyGraphicsCompatibility::BindLegacyGrassPerGeometryToPixelShader();
 
 			auto state = globals::state;
+			const auto* shaderProperty = static_cast<RE::BSShaderProperty*>(pass->geometry->GetGeometryRuntimeData().shaderProperty.get());
+			state->SetGrassSphereNormal(shaderProperty && shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kEffectLighting));
 
-			state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::GrassSphereNormal);
-
-			if (auto* shaderProperty = static_cast<RE::BSShaderProperty*>(pass->geometry->GetGeometryRuntimeData().shaderProperty.get())) {
-				if (shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kEffectLighting)) {
-					state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::GrassSphereNormal);
-				}
-			}
+			// Grass meshes are rooted at the model origin, so the model bound's center sits about halfway up the mesh.
+			const auto& bound = pass->geometry->GetModelData().modelBound;
+			state->permutationData.GrassCanopyHeight = bound.center.z > 1.0f ? 2.0f * bound.center.z : std::max(bound.center.z + bound.radius, 1.0f);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -569,6 +570,8 @@ void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
 	globals::state->Draw();
+	if (!isCompute)
+		VanillaBinding::BindDrawResources();
 }
 
 struct ID3D11Device_CreateVertexShader
@@ -694,6 +697,10 @@ namespace Hooks
 	{
 		static void thunk()
 		{
+			// Detour the pre-call Present so plugins hooking it during this call run before our HDR composite.
+			const auto swapChain = RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().renderWindows->swapChain;
+			const auto originalPresent = (*reinterpret_cast<std::uintptr_t**>(swapChain))[8];
+
 			logger::info("Calling original Init3D");
 
 			func();
@@ -704,9 +711,9 @@ namespace Hooks
 			logger::info("Detouring virtual function tables");
 			stl::detour_vfunc<13, IDXGISwapChain_ResizeBuffers>(globals::d3d::swapChain);
 			// InstallSwapChainPresentHooks installs SwapChainPresentBottom (suppression) and OMSetBlendState first.
-			// IDXGISwapChain_Present is installed last so it sits at the top of the Detours chain and fires first.
-			HDRDisplay::InstallSwapChainPresentHooks(globals::d3d::swapChain);
-			stl::detour_vfunc<8, IDXGISwapChain_Present>(globals::d3d::swapChain);
+			// IDXGISwapChain_Present is installed last so it sits above SwapChainPresentBottom and fires first of the two.
+			HDRDisplay::InstallSwapChainPresentHooks(globals::d3d::swapChain, originalPresent);
+			stl::detour_vfunc<8, IDXGISwapChain_Present>(globals::d3d::swapChain, originalPresent);
 
 			auto shaderCache = globals::shaderCache;
 			if (shaderCache->IsDump()) {

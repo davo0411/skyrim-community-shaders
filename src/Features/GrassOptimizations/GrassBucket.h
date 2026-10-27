@@ -71,6 +71,7 @@ struct GrassShape
 	GrassBucket* current = nullptr;
 	std::unordered_map<uint32_t, std::unique_ptr<GrassChunk>> chunks;
 	uint32_t residentInstances = 0;
+	uint32_t residentGroups = 0;
 	bool admitted = false;
 };
 
@@ -197,7 +198,10 @@ struct GrassBucket
 	std::vector<SliceRunBatch> sliceBlockBatches;
 	uint32_t clusteredSlices = 0;  // Cached runs cover this slice prefix, and additions extend its tail.
 	bool clustersValid = false;
-	bool sliceBlocksUseful = false;  // Scattered run order can make parent bounds too broad.
+	bool sliceBlocksUseful = false;      // Scattered run order can make parent bounds too broad.
+	uint64_t lastRunCell = 0;            // The cell of the newest run, which appended slices may extend.
+	uint32_t appendedRuns = 0;           // Runs added in arrival order since the last spatially ordered rebuild.
+	bool spatialRebuildPending = false;  // Appended runs are valid but scattered, and the cull reorders one bucket per frame.
 
 	// Keep the resolved LOD selection for all draws in this frame.
 	std::array<const GrassMeshLibrary::LODMesh*, kTierCount - 1> lodMeshes{};
