@@ -4,13 +4,21 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <format>
 #include <imgui.h>
 #include <unordered_map>
+#include <utility>
 
+#include "Features/PerformanceOverlay.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "IconsTabler.h"
 #include "Menu.h"
+#include "Menu/FeatureListRenderer.h"
+#include "Menu/Fonts.h"
+#include "Menu/Icons/helpers/IconFonts.h"
 #include "State.h"
+#include "Utils/UI.h"
 
 static ImU32 HslToImU32(float h, float s, float l)
 {
@@ -232,6 +240,112 @@ void ProfilingRenderer::GraphState::Render(const std::vector<legit::ProfilerTask
 	graph.RenderTimings(layout.graphWidth, layout.legendWidth, layout.height, 0, maxFrameTimeSec, layout.uiScale);
 
 	ImGui::Spacing();
+}
+
+void ProfilingRenderer::SelectTab(Tab tab)
+{
+	pendingTab = static_cast<int>(tab);
+}
+
+void ProfilingRenderer::DrawTabCard(Tab tab, const char* icon, const char* title, const char* status, const ImVec4& statusColor, const char* blurb)
+{
+	ImGui::PushID(static_cast<int>(tab));
+	if (ImGui::BeginChild("##TabCard", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY)) {
+		{
+			MenuFonts::FontRoleGuard heading(Menu::FontRole::Subheading);
+			Icons::Text(Icons::TI(icon));
+			ImGui::SameLine();
+			ImGui::TextUnformatted(title);
+		}
+		ImGui::TextColored(statusColor, "%s", status);
+		{
+			MenuFonts::FontRoleGuard subtext(Menu::FontRole::Subtext);
+			ImGui::TextWrapped("%s", blurb);
+		}
+		ImGui::Spacing();
+		if (Icons::LabeledButton("##OpenTab", Icons::TI(ICON_TI_CHEVRON_RIGHT), T("menu.profiling.open_tab", "Open"), ImVec2(-FLT_MIN, 0.0f)))
+			SelectTab(tab);
+	}
+	ImGui::EndChild();
+	ImGui::PopID();
+}
+
+void ProfilingRenderer::RenderPage()
+{
+	auto* menu = globals::menu;
+	const auto& palette = menu->GetTheme().StatusPalette;
+	auto& overlay = globals::features::performanceOverlay;
+
+	ImGui::TextWrapped("%s", T("menu.profiling.intro", "See where frame time goes: the Performance Overlay shows FPS, draw calls and VRAM while you play, and Pass Timings breaks each frame down by render pass."));
+	ImGui::Spacing();
+
+	// Performance Overlay status
+	std::string overlayStatus;
+	ImVec4 overlayColor;
+	if (!overlay.loaded) {
+		if (globals::state->IsFeatureDisabled(overlay.GetShortName())) {
+			overlayStatus = T("menu.profiling.overlay_disabled_at_boot", "Disabled at boot");
+			overlayColor = palette.Disable;
+		} else if (overlay.installed) {
+			overlayStatus = T("menu.profiling.overlay_restart", "Restart to enable");
+			overlayColor = palette.RestartNeeded;
+		} else {
+			overlayStatus = T("menu.profiling.overlay_not_installed", "Not installed");
+			overlayColor = palette.Disable;
+		}
+	} else if (!overlay.settings.ShowInOverlay) {
+		overlayStatus = T("menu.profiling.overlay_off", "Off");
+		overlayColor = palette.Disable;
+	} else if (menu->overlayVisible) {
+		overlayStatus = T("menu.profiling.overlay_showing", "Showing");
+		overlayColor = palette.SuccessColor;
+	} else {
+		const auto hotkey = Util::Input::KeyIdToString(menu->GetSettings().OverlayToggleKey);
+		overlayStatus = std::vformat(T("menu.profiling.overlay_hidden", "Hidden: press {} to show"), std::make_format_args(hotkey));
+		overlayColor = palette.Warning;
+	}
+
+	// Pass Timings status, from the last collected frame
+	std::string timingsStatus;
+	ImVec4 timingsColor;
+	const auto& profiler = *globals::profiler;
+	if (profiler.GetResults().empty()) {
+		timingsStatus = T("menu.profiling.timings_no_data", "No data yet (enter the game world)");
+		timingsColor = palette.Disable;
+	} else {
+		const auto gpuMs = std::format("{:.2f}", profiler.GetTotalTimeMs());
+		timingsStatus = std::vformat(T("menu.profiling.timings_gpu_total", "{} ms GPU per frame"), std::make_format_args(gpuMs));
+		timingsColor = palette.SuccessColor;
+	}
+
+	if (ImGui::BeginTable("##ProfilingTabCards", static_cast<int>(Tab::Count), ImGuiTableFlags_SizingStretchSame)) {
+		ImGui::TableNextColumn();
+		DrawTabCard(Tab::PerformanceOverlay, ICON_TI_EYE, T("menu.profiling.overlay_tab", "Performance Overlay"), overlayStatus.c_str(), overlayColor,
+			T("menu.profiling.overlay_blurb", "FPS, frame time graphs, draw calls, VRAM and A/B testing in an in-game window."));
+		ImGui::TableNextColumn();
+		DrawTabCard(Tab::PassTimings, ICON_TI_CLOCK, T("menu.profiling.timings_tab", "Pass Timings"), timingsStatus.c_str(), timingsColor,
+			T("menu.profiling.timings_blurb", "GPU and CPU time of every Community Shaders render pass."));
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+
+	const int selectTab = std::exchange(pendingTab, -1);
+	auto tabFlags = [selectTab](Tab tab) {
+		return selectTab == static_cast<int>(tab) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+	};
+
+	if (Util::BeginPillTabBar("##ProfilingTabs")) {
+		if (Util::BeginPillTabItem(T("menu.profiling.overlay_tab", "Performance Overlay"), nullptr, tabFlags(Tab::PerformanceOverlay))) {
+			FeatureListRenderer::DrawEmbeddedFeaturePage(&overlay);
+			Util::EndPillTabItem();
+		}
+		if (Util::BeginPillTabItem(T("menu.profiling.timings_tab", "Pass Timings"), nullptr, tabFlags(Tab::PassTimings))) {
+			RenderStatistics();
+			Util::EndPillTabItem();
+		}
+		Util::EndPillTabBar();
+	}
 }
 
 void ProfilingRenderer::RenderStatistics(bool showTable, bool showModeToggle)
@@ -458,12 +572,10 @@ void ProfilingRenderer::RenderFeatureTimers(const std::string& featurePrefix)
 		maxP99 = std::max(maxP99, p99);
 	}
 
-
 	if (entries.empty()) {
 		ImGui::TextDisabled("%s", T("menu.profiling.no_timing_data", "No timing data"));
 		return;
 	}
-
 
 	std::vector<legit::ProfilerTask> tasks;
 	double accumulated = 0.0;
