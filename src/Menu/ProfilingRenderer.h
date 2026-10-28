@@ -12,15 +12,34 @@
 #include "Utils/LegitProfiler.h"
 
 /**
- * @brief Renders GPU and CPU profiling statistics, timing graphs, and per-feature timer breakdowns.
+ * @brief Renders the Profiling page: the Performance Overlay feature, GPU and CPU timing graphs, and per-feature timer breakdowns.
  *
- * Provides the Profiling page in the menu with frame time graphs, sortable
- * timing tables grouped by rendering pass, and per-feature timer views that
- * can be embedded in individual feature settings panels.
+ * The page shows two status cards over one tab per tool: the Performance Overlay feature's
+ * settings, and frame time graphs with sortable timing tables grouped by rendering pass.
+ * Per-feature timer views can be embedded in individual feature settings panels.
  */
 class ProfilingRenderer
 {
 public:
+	/** @brief The Profiling page's tabs. */
+	enum class Tab : int
+	{
+		PerformanceOverlay,
+		PassTimings,
+		Count
+	};
+
+	/**
+	 * @brief Renders the Profiling page: a status card per tab, then the Performance Overlay and Pass Timings tabs.
+	 */
+	static void RenderPage();
+
+	/**
+	 * @brief Selects a tab the next time the Profiling page is drawn.
+	 * @param tab The tab to open.
+	 */
+	static void SelectTab(Tab tab);
+
 	/** @brief Selects whether profiling displays GPU or CPU timing data. */
 	enum class TimingMode
 	{
@@ -60,6 +79,11 @@ public:
 
 private:
 	static inline TimingMode timingMode = TimingMode::GPU;
+	// UI state only: the tab to select on the next RenderPage, or -1.
+	static inline int pendingTab = -1;
+
+	/** @brief Draws one status card: icon, title, status line, blurb and an Open button that selects the tab. */
+	static void DrawTabCard(Tab tab, const char* icon, const char* title, const char* status, const ImVec4& statusColor, const char* blurb);
 	static inline float timeSinceLastUpdate = 0.0f;
 	static inline float lastFrameTime = 0.0f;
 

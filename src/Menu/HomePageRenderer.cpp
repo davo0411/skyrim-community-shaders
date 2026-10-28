@@ -217,7 +217,7 @@ void HomePageRenderer::RenderFAQSection()
 
 	if (ImGui::CollapsingHeader(T("menu.faq.q5", "How do I improve performance?"))) {
 		ImGui::TextWrapped("%s", T("menu.faq.a5",
-									 "Start by enabling the Performance Overlay to monitor your FPS. Consider disabling "
+									 "Start by enabling the Performance Overlay on the Profiling page to monitor your FPS. Consider disabling "
 									 "expensive features like Screen Space GI or reducing quality settings. The 'Display' "
 									 "tab also includes upscaling options that can improve performance."));
 	}

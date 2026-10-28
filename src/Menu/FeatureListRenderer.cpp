@@ -17,6 +17,7 @@
 #include "FeatureConstraints.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
+#include "Features/PerformanceOverlay.h"
 #include "Fonts.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
@@ -461,20 +462,20 @@ std::vector<FeatureListRenderer::MenuFuncInfo> FeatureListRenderer::BuildMenuLis
 		BuiltInMenu{ T("menu.features.presets", "Presets"), []() { PresetsPageRenderer::Render(); } },
 		BuiltInMenu{ T("menu.features.general", "General"), drawGeneralSettings },
 		BuiltInMenu{ T("menu.features.advanced", "Advanced"), drawAdvancedSettings },
-		BuiltInMenu{ T("menu.features.profiling", "Profiling"), []() { ProfilingRenderer::RenderStatistics(); } },
+		BuiltInMenu{ T("menu.features.profiling", "Profiling"), []() { ProfilingRenderer::RenderPage(); } },
 		BuiltInMenu{ T("menu.features.cs_editor", "CS Editor"), []() { globals::features::csEditor.DrawSettings(); } }
 	};  // NOTE: The menu list is rebuilt every frame, so category expansion states
 	// persist correctly. This is acceptable since the list is small and built
 	// infrequently, but could be optimized if performance becomes an issue.
 
 	const auto isFavorite = [](Feature* feat) {
-		return feat->IsInMenu() && feat->loaded && globals::state->IsFeatureFavorite(feat->GetShortName());
+		return feat->IsInFeatureList() && feat->loaded && globals::state->IsFeatureFavorite(feat->GetShortName());
 	};
 
 	// Favorites leave their category's count; recounted here since they change at runtime
 	Menu::categoryCounts.clear();
 	for (Feature* feat : featureList) {
-		if (feat->IsInMenu() && feat->loaded && !isFavorite(feat))
+		if (feat->IsInFeatureList() && feat->loaded && !isFavorite(feat))
 			Menu::categoryCounts[std::string(feat->GetCategory())]++;
 	}
 
@@ -485,7 +486,7 @@ std::vector<FeatureListRenderer::MenuFuncInfo> FeatureListRenderer::BuildMenuLis
 	const auto sortMode = globals::menu->GetSettings().FeatureListSort;
 	std::map<std::string, std::vector<Feature*>> categorizedFeatures;
 	for (Feature* feat : sortedFeatureList) {
-		if (feat->IsInMenu() && feat->loaded && !isFavorite(feat)) {
+		if (feat->IsInFeatureList() && feat->loaded && !isFavorite(feat)) {
 			switch (sortMode) {
 			case Menu::FeatureSortMode::Alphabetical:
 				menuList.push_back(feat);  // already in display-name order
@@ -543,7 +544,7 @@ std::vector<FeatureListRenderer::MenuFuncInfo> FeatureListRenderer::BuildMenuLis
 	}
 
 	auto unloadedFeatures = sortedFeatureList | std::ranges::views::filter([](Feature* feat) {
-		return !feat->loaded && feat->IsInMenu() && !feat->IsHiddenUnreleased() && (!FeatureIssues::IsObsoleteFeature(feat->GetShortName()) || globals::state->IsDeveloperMode());
+		return !feat->loaded && feat->IsInFeatureList() && !feat->IsHiddenUnreleased() && (!FeatureIssues::IsObsoleteFeature(feat->GetShortName()) || globals::state->IsDeveloperMode());
 	});
 	if (std::ranges::distance(unloadedFeatures) != 0) {
 		menuList.push_back(T("menu.features.unloaded_features", "Unloaded Features"));
@@ -565,6 +566,11 @@ void FeatureListRenderer::HandlePendingFeatureSelection(
 	size_t& selectedMenu)
 {
 	if (!pendingFeatureSelection.empty()) {
+		// The Performance Overlay has no list entry of its own: open its tab on the Profiling page.
+		if (pendingFeatureSelection == globals::features::performanceOverlay.GetShortName()) {
+			ProfilingRenderer::SelectTab(ProfilingRenderer::Tab::PerformanceOverlay);
+			pendingFeatureSelection = T("menu.features.profiling", "Profiling");
+		}
 		for (size_t i = 0; i < menuList.size(); ++i) {
 			if (std::holds_alternative<Feature*>(menuList[i])) {
 				Feature* feature = std::get<Feature*>(menuList[i]);
@@ -841,21 +847,33 @@ void FeatureListRenderer::DrawMenuVisitor::operator()(const CategoryHeader&)
 
 void FeatureListRenderer::DrawMenuVisitor::operator()(Feature* feat)
 {
-	const auto featureName = feat->GetShortName();
-	bool isDisabled = globals::state->IsFeatureDisabled(featureName);
-	bool isLoaded = feat->loaded;
-	bool hasFailedMessage = !feat->failedLoadedMessage.empty();
-
-	if (ImGui::BeginChild("##FeatureConfigFrame", { 0, 0 }, true)) {
-		// Render feature header with integrated action buttons
-		RenderFeatureHeader(feat, isDisabled, isLoaded);
-
-		// Render feature settings content
-		RenderFeatureSettings(feat, isDisabled, isLoaded, hasFailedMessage);
-	}
+	if (ImGui::BeginChild("##FeatureConfigFrame", { 0, 0 }, true))
+		DrawFeatureContent(feat);
 	ImGui::EndChild();
 	// Render reactive constraint warning outside the child window so it can appear as a top-level popup
 	DrawConstraintWarningDialog(pendingFeatureSelection);
+}
+
+void FeatureListRenderer::DrawMenuVisitor::DrawFeatureContent(Feature* feat)
+{
+	const bool isDisabled = globals::state->IsFeatureDisabled(feat->GetShortName());
+	const bool isLoaded = feat->loaded;
+	const bool hasFailedMessage = !feat->failedLoadedMessage.empty();
+
+	// Render feature header with integrated action buttons
+	RenderFeatureHeader(feat, isDisabled, isLoaded);
+
+	// Render feature settings content
+	RenderFeatureSettings(feat, isDisabled, isLoaded, hasFailedMessage);
+}
+
+void FeatureListRenderer::DrawEmbeddedFeaturePage(Feature* feat)
+{
+	std::string pendingFeatureSelection;
+	DrawMenuVisitor{ pendingFeatureSelection }.DrawFeatureContent(feat);
+	DrawConstraintWarningDialog(pendingFeatureSelection);
+	if (!pendingFeatureSelection.empty())
+		globals::menu->SelectFeatureMenu(pendingFeatureSelection);
 }
 
 void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bool isDisabled, bool isLoaded)
@@ -879,7 +897,9 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bo
 	const bool canUseBaselines = canRestore && globals::state->HasEditsUnderBaselines(feat);
 
 	float totalButtonWidth = bootToggleWidth;
-	if (isLoaded) {
+	// Favorites pin list entries, so a feature without one has nothing to pin.
+	const bool canFavorite = isLoaded && feat->IsInFeatureList();
+	if (canFavorite) {
 		totalButtonWidth += exportIconSize + buttonSpacing;
 	}
 	if (canRestore) {
@@ -935,7 +955,7 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bo
 		ImGui::SameLine();
 	}
 
-	if (isLoaded) {
+	if (canFavorite) {
 		RenderFavoriteButton(feat);
 		ImGui::SameLine();
 	}
