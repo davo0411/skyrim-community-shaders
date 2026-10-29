@@ -129,6 +129,43 @@ namespace PBRWaterModel
 
 		// ---- end of shared code ----
 
+		/// <cos(2 psi)> over the cos^2s(psi / 2) spreading about its mean direction: Gamma(s+1)^2 / (Gamma(s+3) Gamma(s-1)).
+		double SpreadingCos2(double s) { return s * (s - 1.0) / ((s + 1.0) * (s + 2.0)); }
+		/// <cos(4 psi)> over the same spreading: Gamma(s+1)^2 / (Gamma(s+5) Gamma(s-3)).
+		double SpreadingCos4(double s) { return SpreadingCos2(s) * (s - 2.0) * (s - 3.0) / ((s + 3.0) * (s + 4.0)); }
+
+		/**
+		 * Adds waves of mean square slope `mss` and first moment `m1` (the integral of k E(k)), travelling on average at
+		 * `angle` from the wind with the spreading moments c2 = <cos 2psi>, c4 = <cos 4psi>, to the joint covariance of
+		 * the foam Jacobian entries and the height (OceanSpectrum::foamDeformation; per unit choppiness^2 for the entries,
+		 * per unit choppiness for the cross terms). A wave of height a cos(psi) and wavenumber k along phi deforms the
+		 * surface by -k (cos^2 phi, sin^2 phi, cos phi sin phi) a cos(psi) (Tessendorf 2001, eq. 44: the crest compresses),
+		 * so the entries' covariances are mss times fourth moments of the direction, and their covariances with the height
+		 * -m1 times second moments.
+		 */
+		void AddDeformation(std::array<double, 9>& cov, double mss, double m1, double angle, double c2, double c4)
+		{
+			const double cos2 = c2 * std::cos(2.0 * angle), sin2 = c2 * std::sin(2.0 * angle);
+			const double cos4 = c4 * std::cos(4.0 * angle), sin4 = c4 * std::sin(4.0 * angle);
+			cov[0] += mss * (3.0 + 4.0 * cos2 + cos4) / 8.0;  // <cos^4>
+			cov[1] += mss * (3.0 - 4.0 * cos2 + cos4) / 8.0;  // <sin^4>
+			cov[2] += mss * (1.0 - cos4) / 8.0;               // <cos^2 sin^2>
+			cov[3] += mss * (2.0 * sin2 + sin4) / 8.0;        // <cos^3 sin>
+			cov[4] += mss * (2.0 * sin2 - sin4) / 8.0;        // <cos sin^3>
+			cov[6] -= m1 * (1.0 + cos2) / 2.0;                // <cos^2>
+			cov[7] -= m1 * (1.0 - cos2) / 2.0;                // <sin^2>
+			cov[8] -= m1 * sin2 / 2.0;                        // <cos sin>
+		}
+
+		/// Standard normal quantile Phi^-1(p) (Abramowitz & Stegun 26.2.23, |error| < 4.5e-4).
+		double NormalQuantile(double p)
+		{
+			const double q = std::clamp(p < 0.5 ? p : 1.0 - p, 1e-12, 0.5);
+			const double t = std::sqrt(-2.0 * std::log(q));
+			const double z = t - (2.515517 + 0.802853 * t + 0.010328 * t * t) / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
+			return p < 0.5 ? -z : z;
+		}
+
 		/// Height spectrum along wavenumber magnitude k (rad/m), directions integrated: S(omega) d(omega)/dk.
 		float BandDensity(const OceanSpectrum& s, float k)
 		{
@@ -465,8 +502,13 @@ namespace PBRWaterModel
 			}
 		}
 
-		// Statistics per band (directions integrate to one).
+		// Statistics per band (directions integrate to one). The bands that whiten also give the covariance of the foam
+		// Jacobian's entries: the wind sea spreads about the wind (Mitsuyasu's exponent at each frequency), the swell
+		// about its own direction.
 		double totalVariance = 0.0, totalSlope = 0.0;
+		std::array<double, 9> deformation{};
+		const double swellAngle = std::atan2(s.swellDirY, s.swellDirX) - std::atan2(s.windDirY, s.windDirX);
+		const double swellCos2 = SpreadingCos2(SwellSpread), swellCos4 = SpreadingCos4(SwellSpread);
 		for (uint32_t c = 0; c < NumCascades; ++c) {
 			CascadeBand& band = s.cascades[c];
 			const double dk = TwoPi / CascadeLength[c];
@@ -487,6 +529,17 @@ namespace PBRWaterModel
 				slope += e * k * k;
 				omegaSum += e * std::sqrt(G * k);
 				kSum += e * k;
+				if (c < FoamCascades) {
+					const float omega = std::sqrt(G * k);
+					const double perDensity = static_cast<double>(G) / (2.0 * omega) * (k1 - k0);  // E per unit S(omega)
+					const double spread = MitsuyasuExponent(omega, s.peakOmega, s.spreadPeak);
+					const double wind = Jonswap(omega, s.peakOmega, JonswapAlpha, JonswapGamma) * s.heightScale * s.heightScale * perDensity;
+					AddDeformation(deformation, wind * k * k, wind * k, 0.0, SpreadingCos2(spread), SpreadingCos4(spread));
+					if (s.swellAlpha > 0.0f) {
+						const double swell = Jonswap(omega, s.swellPeak, s.swellAlpha, SwellGamma) * perDensity;
+						AddDeformation(deformation, swell * k * k, swell * k, swellAngle, swellCos2, swellCos4);
+					}
+				}
 			}
 			band.variance = static_cast<float>(variance);
 			band.meanSquareSlope = static_cast<float>(slope);
@@ -527,26 +580,137 @@ namespace PBRWaterModel
 		}
 		s.shoreScale = params.shoreScale;
 		s.displacementBound = 5.0f * sigma * std::max(1.0f, s.choppiness) * static_cast<float>(UnitsPerMetre) + 1.0f;
-		s.whitecapCoverage = std::clamp(3.84e-6f * std::pow(U, 3.41f), 0.0f, 1.0f);
+		s.whitecapCoverage = std::clamp(3.84e-6f * std::pow(U, 3.41f) * std::max(params.foamAmount, 0.0f), 0.0f, 1.0f);
+		const double lambda = s.choppiness;
+		deformation[5] = totalVariance;
+		for (size_t i = 0; i < deformation.size(); ++i)
+			s.foamDeformation[i] = static_cast<float>(deformation[i] * (i < 5 ? lambda * lambda : (i == 5 ? 1.0 : lambda)));
 		s.calm = 4.0f * sigma < 0.01f;
+		if (!s.calm)
+			s.whitecaps = ComputeWhitecaps(s.foamDeformation, s.whitecapCoverage);
 		return s;
 	}
 
-	WhitecapCriterion CascadeWhitecaps(const OceanSpectrum& spectrum, uint32_t cascade, float amount)
+	Whitecaps ComputeWhitecaps(const std::array<float, 9>& deformation, float coverage)
 	{
-		WhitecapCriterion out;
-		if (cascade >= NumCascades || spectrum.calm || amount <= 0.0f)
+		Whitecaps out;
+		if (!(coverage > 0.0f))
 			return out;
-		// Crests breaking now: half of Monahan's whitecap coverage (the rest is the foam they leave behind).
-		out.share = std::clamp(0.5f * spectrum.whitecapCoverage * amount, 1e-6f, 0.4f);
-		// Upper-tail normal quantile of the share (Abramowitz & Stegun 26.2.23).
-		const float t = std::sqrt(-2.0f * std::log(out.share));
-		const float z = t - (2.515517f + 0.802853f * t + 0.010328f * t * t) / (1.0f + 1.432788f * t + 0.189269f * t * t + 0.001308f * t * t * t);
-		const CascadeBand& band = spectrum.cascades[cascade];
-		const float sigma = std::max(spectrum.choppiness * std::sqrt(std::max(band.meanSquareSlope, 0.0f)), 1e-4f);
-		out.threshold = 1.0f - sigma * z;
-		// Half a spread past the threshold the foam grows at its full rate, so a crest only just over it whitens slowly.
-		out.width = 0.5f * sigma;
+		// The same sea and coverage give the same threshold: only recomputed once they have moved.
+		thread_local std::array<float, 9> lastDeformation{};
+		thread_local float lastCoverage = -1.0f;
+		thread_local Whitecaps last;
+		bool same = std::abs(coverage - lastCoverage) <= 2e-3f * lastCoverage;
+		for (size_t i = 0; i < deformation.size() && same; ++i)
+			same = std::abs(deformation[i] - lastDeformation[i]) <= 2e-3f * std::abs(lastDeformation[i]) + 1e-9f;
+		if (same)
+			return last;
+
+		// Breaking now (Tessendorf, Reinhard & Gao 2023, eq. 13 with their g = e^-0.15): the rest of the coverage is foam
+		// left behind, which FoamSimCS keeps.
+		constexpr double Retained = 0.8607080;
+		const double W = std::min(static_cast<double>(coverage), 0.99);
+		const double share = W * (1.0 - Retained) / (1.0 - Retained * W);
+		out.activeShare = static_cast<float>(share);
+
+		// Fixed standard normal quadruples (Box-Muller on a hash), so the threshold is deterministic.
+		constexpr size_t Samples = 8192;
+		constexpr uint32_t Dims = 4;
+		static const std::vector<std::array<float, Dims>> normals = [] {
+			std::vector<std::array<float, Dims>> n(Samples);
+			for (size_t i = 0; i < Samples; ++i) {
+				for (uint32_t j = 0; j < Dims; ++j) {
+					const uint32_t h1 = HashU(static_cast<uint32_t>(i * Dims + j) * 2654435761u + 0x51ED27u);
+					const uint32_t h2 = HashU(h1 ^ 0x9E3779B9u);
+					const double u1 = (static_cast<double>(h1 >> 8) + 0.5) / 16777216.0;
+					const double u2 = static_cast<double>(h2 >> 8) / 16777216.0;
+					n[i][j] = static_cast<float>(std::sqrt(-2.0 * std::log(u1)) * std::cos(TwoPi * u2));
+				}
+			}
+			return n;
+		}();
+
+		// Cholesky factor of the joint covariance of (dDx/dx, dDy/dy, dDx/dy, height).
+		const double C[Dims][Dims] = {
+			{ deformation[0], deformation[2], deformation[3], deformation[6] },
+			{ deformation[2], deformation[1], deformation[4], deformation[7] },
+			{ deformation[3], deformation[4], deformation[2], deformation[8] },
+			{ deformation[6], deformation[7], deformation[8], deformation[5] },
+		};
+		double L[Dims][Dims] = {};
+		for (uint32_t i = 0; i < Dims; ++i) {
+			for (uint32_t j = 0; j <= i; ++j) {
+				double v = C[i][j];
+				for (uint32_t k = 0; k < j; ++k)
+					v -= L[i][k] * L[j][k];
+				L[i][j] = i == j ? std::sqrt(std::max(v, 1e-12 * std::max(C[i][i], 1e-12))) : v / L[j][j];
+			}
+		}
+		const double heightSpread = std::sqrt(std::max<double>(deformation[5], 1e-12));
+
+		// Each draw: its smallest eigenvalue, and how far up a crest it is (the shaders' crest weight).
+		struct Draw
+		{
+			float eigen, crest;
+		};
+		thread_local std::vector<Draw> draws;
+		draws.resize(Samples);
+		double sum = 0.0, sumSq = 0.0, crestSum = 0.0;
+		for (size_t i = 0; i < Samples; ++i) {
+			const auto& z = normals[i];
+			double v[Dims];
+			for (uint32_t r = 0; r < Dims; ++r) {
+				v[r] = 0.0;
+				for (uint32_t k = 0; k <= r; ++k)
+					v[r] += L[r][k] * z[k];
+			}
+			const double half = 0.5 * (v[0] - v[1]);
+			const double e = 1.0 + 0.5 * (v[0] + v[1]) - std::sqrt(half * half + v[2] * v[2]);
+			const float crest = Smoothstep(WhitecapCrestLow, WhitecapCrestHigh, static_cast<float>(v[3] / heightSpread));
+			draws[i] = { static_cast<float>(e), crest };
+			sum += e;
+			sumSq += e * e;
+			crestSum += crest;
+		}
+		const double mean = sum / Samples;
+		const double spread = std::sqrt(std::max(sumSq / Samples - mean * mean, 0.0));
+		const double crestShare = crestSum / Samples;
+
+		// The threshold: the eigenvalue below which the draws, weighted by their crest weight, add up to the share.
+		std::sort(draws.begin(), draws.end(), [](const Draw& a, const Draw& b) { return a.eigen < b.eigen; });
+		auto eigenAtWeight = [&](double weight) {
+			double cumulative = 0.0;
+			for (const Draw& d : draws) {
+				cumulative += d.crest;
+				if (cumulative >= weight)
+					return static_cast<double>(d.eigen);
+			}
+			return static_cast<double>(draws.back().eigen);
+		};
+		// Beyond the samples' reach (light winds: a share of 1e-4 or less) the tail is carried on from two weighted
+		// quantiles in normal scores, where a Gaussian-like tail is a straight line.
+		constexpr double Near = 8.0, Far = 64.0;
+		const double target = share * Samples;
+		if (target >= Near) {
+			out.threshold = static_cast<float>(eigenAtWeight(target));
+		} else {
+			const double qNear = eigenAtWeight(Near), qFar = eigenAtWeight(Far);
+			const double zNear = NormalQuantile(Near / Samples), zFar = NormalQuantile(Far / Samples);
+			out.threshold = static_cast<float>(qNear + (qNear - qFar) * (NormalQuantile(share) - zNear) / (zNear - zFar));
+		}
+		// The source fades in over a quarter of the eigenvalue's spread below the threshold (Tessendorf et al. switch
+		// it on at once; a soft edge keeps the crest line from aliasing).
+		out.width = static_cast<float>(std::max(0.25 * spread, 0.01));
+		// Var(dDx/dx + dDy/dy) = var(xx) + var(yy) + 2 cov(xx, yy): the scale the shaders measure the local sea by.
+		const double trace = std::sqrt(std::max(deformation[0] + deformation[1] + 2.0 * deformation[2], 1e-12));
+		out.spread = static_cast<float>(trace);
+		out.eigenRatio = static_cast<float>(spread / trace);
+		// A footprint averaging many crests still weighs its breaking by its crest weight.
+		out.averagedDeficit = static_cast<float>(-(spread / trace) * NormalQuantile(std::min(share / std::max(crestShare, 1e-6), 0.5)));
+
+		lastDeformation = deformation;
+		lastCoverage = coverage;
+		last = out;
 		return out;
 	}
 
@@ -585,11 +749,12 @@ namespace PBRWaterModel
 
 		// Bound of the run-up: Stockdon et al. (2006), 2 % exceedance, R = 1.1 (<eta> + S / 2) with set-up
 		// <eta> = 0.35 b sqrt(H0 L0) and swash S = sqrt(H0 L0 (0.563 b^2 + 0.004)), for the highest wave of the biggest set
-		// (ShoreGroup at most 1.55) of the full open sea on a steep (b = 0.2) beach, with a margin.
+		// (ShoreGroup at most 1.55) of the full open sea (its significant height, as Stockdon fit it) on a steep (b = 0.2)
+		// beach, with a margin. Mirrors PBRWater::SwashTip.
 		constexpr float Slope = 0.2f;
-		const float highest = ShoreHeightRatio * 1.55f * p.MaxDeepHeight() / units;
+		const float highest = 1.55f * p.MaxDeepHeight() / units;
 		const float hl = std::sqrt(highest * L0);
-		const float runup = ShoreRunupScale * 1.1f * (0.35f * Slope * hl + 0.5f * hl * std::sqrt(0.563f * Slope * Slope + 0.004f));
+		const float runup = 1.1f * (0.35f * Slope * hl + 0.5f * hl * std::sqrt(0.563f * Slope * Slope + 0.004f));
 		p.maxRunup = runup * units + 20.0f;
 		return p;
 	}
@@ -1408,11 +1573,14 @@ namespace PBRWaterModel
 
 		// Where fronts from different stretches of shore meet (mid-channel, off a headland, in a bay reached from several
 		// sides) tau kinks: the crests meet at an angle and the direction of travel flips across a line. Across such a
-		// kink the averaged gradient of tau is shorter than 1 / c, so |<grad tau>| c measures how coherent the fronts are;
-		// the train fades out where it drops (the FFT sea carries the waves there), and where no front arrived at all (it
-		// would rise and fall in step everywhere). Averaged over ~3.5 m: enough to hide the bend, narrow enough that a
-		// stream, whose fronts meet down its middle, keeps its banks' waves. Applied
-		// to the water before the room is carried up the beach.
+		// kink the directions of travel disagree, so the length of their average (the mean resultant length of the unit
+		// vectors along grad tau) measures how coherent the fronts are; the train fades out where it drops (the FFT sea
+		// carries the waves there), and where no front arrived at all (it would rise and fall in step everywhere).
+		// Directions only: averaging grad tau itself (|<grad tau>| c) also read the wave speed changing over a shoaling
+		// bed as incoherence, which took the room off the steeper bank of a river (its fronts slow down fastest there)
+		// and left the waves on one side only. Averaged over ~3.5 m: enough to hide the bend, narrow enough that a
+		// stream, whose fronts meet down its middle, keeps its banks' waves. Applied to the water before the room is
+		// carried up the beach.
 		{
 			// Averaged over the water only: land around the waterline must not shorten the average there.
 			std::vector<float> gx(n, 0.0f), gy(n, 0.0f), weight(n, 0.0f);
@@ -1421,9 +1589,12 @@ namespace PBRWaterModel
 					const size_t i = static_cast<size_t>(y) * w + x;
 					float dx = 0.0f, dy = 0.0f;
 					if (reached[i] && Gradient(tau, reached, w, h, static_cast<int>(x), static_cast<int>(y), dx, dy)) {
-						gx[i] = dx / stepMetres;
-						gy[i] = dy / stepMetres;
-						weight[i] = 1.0f;
+						const float length = std::sqrt(dx * dx + dy * dy);
+						if (length > 1e-6f) {
+							gx[i] = dx / length;
+							gy[i] = dy / length;
+							weight[i] = 1.0f;
+						}
 					}
 				}
 			}
@@ -1434,12 +1605,14 @@ namespace PBRWaterModel
 				if (!water[i])
 					continue;
 				const float norm = 1.0f / std::max(weight[i], 1e-4f);
-				const float slowness = std::sqrt(gx[i] * gx[i] + gy[i] * gy[i]) * norm;
-				if (!reached[i] || slowness <= 0.0f) {
+				const float coherence = std::sqrt(gx[i] * gx[i] + gy[i] * gy[i]) * norm;
+				if (!reached[i] || coherence <= 0.0f) {
 					field->room[i] = 0.0f;
 					continue;
 				}
-				const float coherence = slowness * PhaseSpeed(omega, std::max(depth[i] * metresPerUnit, MinDepth));
+				// Fronts meeting head-on average to ~0, at right angles to 0.71; fronts all arriving at one bank stay near 1. The
+				// train must be gone well before the line where the directions flip: its orbits run along the direction, which
+				// flips there from one texel to the next and tore the surface into walls when the train reached it.
 				field->room[i] *= Smoothstep(0.75f, 0.95f, coherence);
 			}
 			if (cancelled())
@@ -1571,31 +1744,26 @@ namespace PBRWaterModel
 		}
 
 		/**
-		 * Mirrors PBRWater::ShorePhase (Fluid Flux's MF_CoastlineProfileUV with MF_CoastlineOffsets): the phase at (x, y)
-		 * and its gradient (rad/unit) for the waves travelling along (dirX, dirY).
+		 * Mirrors PBRWater::ShorePhase: the phase at (x, y) and its gradient (rad/unit) for the waves travelling along
+		 * (dirX, dirY).
 		 */
-		double ShorePhase(const ShoreParams& p, float tracedOmega, float x, float y, float coastX, float coastY, const ShoreField::Sample& ray, float dirX, float dirY, float slowness, float& gradX, float& gradY)
+		double ShorePhase(const ShoreParams& p, float tracedOmega, [[maybe_unused]] float x, [[maybe_unused]] float y, float coastX, float coastY, const ShoreField::Sample& ray, float dirX, float dirY, float slowness, float& gradX, float& gradY)
 		{
 			const float L0 = std::max(p.deepLength, 1.0f);
 			const float drift = p.variationTime * 0.004f;
-			float coarse, cx, cy, fine, fx, fy, across, ax, ay;
+			float coarse, cx, cy, fine, fx, fy;
 			ValueNoiseGrad(coastX / (4.0f * L0) + drift, coastY / (4.0f * L0), coarse, cx, cy);
 			ValueNoiseGrad(coastX / (1.7f * L0) + 17.1f, coastY / (1.7f * L0) + 17.1f, fine, fx, fy);
-			ValueNoiseGrad(x / (1.3f * L0) + 5.3f, y / (1.3f * L0) + drift * 1.5f, across, ax, ay);
 			const float along = coarse * 0.67f + fine * 0.33f;
-			const float offshoreRamp = ray.distance / L0 * 0.35f - 0.05f;
-			const float offshore = std::clamp(offshoreRamp, 0.0f, 1.0f);
 			const float alongScale = static_cast<float>(TwoPi) * 1.2f * p.variation;
-			const float acrossScale = static_cast<float>(TwoPi) * 0.35f;
 			float alongX = cx * (0.67f / (4.0f * L0)) + fx * (0.33f / (1.7f * L0));
 			float alongY = cy * (0.67f / (4.0f * L0)) + fy * (0.33f / (1.7f * L0));
 			const float alongDir = alongX * dirX + alongY * dirY;
 			alongX -= dirX * alongDir;
 			alongY -= dirY * alongDir;
-			const float ramp = offshoreRamp > 0.0f && offshoreRamp < 1.0f ? 0.35f / L0 : 0.0f;
-			gradX = -tracedOmega * slowness * dirX + alongScale * alongX + acrossScale * (offshore * ax / (1.3f * L0) - (across - 0.5f) * ramp * dirX);
-			gradY = -tracedOmega * slowness * dirY + alongScale * alongY + acrossScale * (offshore * ay / (1.3f * L0) - (across - 0.5f) * ramp * dirY);
-			return p.phase + static_cast<double>(ray.phaseLag) + alongScale * (along - 0.5f) + acrossScale * offshore * (across - 0.5f);
+			gradX = -tracedOmega * slowness * dirX + alongScale * alongX;
+			gradY = -tracedOmega * slowness * dirY + alongScale * alongY;
+			return p.phase + static_cast<double>(ray.phaseLag) + alongScale * (along - 0.5f);
 		}
 
 		/// Mirrors PBRWater::ShoreShape.
@@ -1604,39 +1772,49 @@ namespace PBRWaterModel
 			float x = 0.0f, z = 0.0f, dx = 0.0f, dz = 0.0f;
 		};
 
-		/// Mirrors PBRWater::ShoreProfile: Airy orbits tilted forward, blending into the bore.
-		ShoreShape ShoreProfile(double theta, float a, float ax, float tilt, float bore, float frontWidth)
+		/// Mirrors PBRWater::ShoreNonlinearity: Ruessink et al. (2012) from the Ursell number, as Abreu et al.'s (2010)
+		/// r and phi.
+		std::pair<float, float> ShoreNonlinearity(float a, float k, float depth)
 		{
-			const float s = static_cast<float>(std::sin(theta)), c = static_cast<float>(std::cos(theta));
-			const float st = std::sin(tilt), ct = std::cos(tilt);
-			const float X = ax * s, Z = a * c, dX = ax * c, dZ = -a * s;
-			ShoreShape o;
-			o.x = X * ct + Z * st;
-			o.z = Z * ct - X * st;
-			o.dx = dX * ct + dZ * st;
-			o.dz = dZ * ct - dX * st;
-			if (bore > 0.0f) {
-				double v = theta / TwoPi;
-				v -= std::floor(v);
-				const float back = 1.0f - frontWidth;
-				const bool onBack = v < back;
-				const float rate = onBack ? 1.0f / back : 1.0f / frontWidth;
-				const float u = onBack ? static_cast<float>(v) * rate : 1.0f + (static_cast<float>(v) - back) * rate;
-				const float su = std::sin(static_cast<float>(Pi) * u), cu = std::cos(static_cast<float>(Pi) * u);
-				o.x += (0.3f * ax * s - o.x) * bore;
-				o.z += (a * cu - o.z) * bore;
-				o.dx += (0.3f * ax * c - o.dx) * bore;
-				o.dz += (-a * static_cast<float>(Pi) * su * rate / static_cast<float>(TwoPi) - o.dz) * bore;
+			const float kh = std::max(k * depth, 1e-3f);
+			const float ursell = std::max(0.375f * (2.0f * std::numbers::sqrt2_v<float> * a) * k / (kh * kh * kh), 1e-6f);
+			const float B = 0.857f / (1.0f + std::exp((-0.471f - std::log10(ursell)) / 0.297f));
+			const float psi = 0.5f * static_cast<float>(Pi) * (std::tanh(0.815f / std::pow(ursell, 0.672f)) - 1.0f);
+			const float b = B * std::sqrt(2.0f / (9.0f + 2.0f * B * B));
+			return { 2.0f * b / (1.0f + b * b), -psi - 0.5f * static_cast<float>(Pi) };
+		}
+
+		/// Mirrors PBRWater::ShoreProfile: Abreu et al.'s (2010) wave form, crest at theta = 0, on Airy orbits.
+		ShoreShape ShoreProfile(double theta, float a, float ax, std::pair<float, float> nonlinearity)
+		{
+			const auto [r, phi] = nonlinearity;
+			const float f = std::sqrt(1.0f - r * r);
+			const float sinPhi = std::sin(phi), cosPhi = std::cos(phi);
+			const float c = r * sinPhi / (1.0f + f);
+			float xc = std::lerp(std::acos(r), 0.5f * static_cast<float>(Pi), std::clamp(-phi / (0.5f * static_cast<float>(Pi)), 0.0f, 1.0f));
+			for (int i = 0; i < 3; ++i) {
+				const float g = std::cos(xc) - r * cosPhi - c * r * std::sin(xc + phi);
+				const float dg = -std::sin(xc) - c * r * std::cos(xc + phi);
+				xc -= g / (std::abs(dg) > 1e-3f ? dg : -1e-3f);
 			}
+			const double x = theta + xc;
+			const float sx = static_cast<float>(std::sin(x)), cx = static_cast<float>(std::cos(x));
+			const float sp = static_cast<float>(std::sin(x + phi)), cp = static_cast<float>(std::cos(x + phi));
+			const float D = 1.0f - r * cp;
+			ShoreShape o;
+			o.z = a * f * (sx + c) / D;
+			o.dz = a * f * (cx * D - (sx + c) * r * sp) / (D * D);
+			o.x = ax * static_cast<float>(std::sin(theta));
+			o.dx = ax * static_cast<float>(std::cos(theta));
 			return o;
 		}
 
 		/**
 		 * Displacement (units) and velocity (units/s) of the shore wave train at (x, y), times the hand-over weight.
 		 * Mirrors PBRWater::ShoreWaves in PBRWater.hlsli at full resolution (scale 0): the phase from the coastline map's
-		 * travel time with Fluid Flux's offsets, the wave set's height shoaled up to the breaking limit, Airy orbits
-		 * pitching forward as the wave nears breaking, then the bore. The velocity is the displacement's rate of change at
-		 * the clock's frequency.
+		 * travel time with Fluid Flux's offsets, the wave set's height shoaled up to the surf zone's limit, Abreu's wave
+		 * form with the nonlinearity of its Ursell number. The velocity is the displacement's rate of change at the clock's
+		 * frequency.
 		 */
 		WaveSnapshot::Displacement ShoreTrain(const ShoreParams& p, float tracedOmega, const ShoreTrainContext& t, const ShoreField::Sample& ray, float x, float y)
 		{
@@ -1656,15 +1834,10 @@ namespace PBRWaterModel
 
 			const float shoaled = ShoreHeightRatio * t.deepHeight * ShoreGroup(p, coastX, coastY, static_cast<float>(p.groupTime) + ray.travelTime) * t.shoaling;
 			const float limit = BreakerIndex * depth;
-			const float stage = shoaled / std::max(limit, 1e-4f);
 			const float a = 0.5f * std::min(shoaled, limit);
 			const float k = std::max(std::sqrt(gradX * gradX + gradY * gradY) * static_cast<float>(UnitsPerMetre), omega * omega / G);
-			const float breaking = Smoothstep(0.75f, 1.0f, stage) * t.beach;
-			const float bore = Smoothstep(1.0f, 1.4f, stage) * t.beach;
-			const float lean = breaking * (1.0f - bore);
 			const float ax = std::min(a / std::max(std::tanh(std::min(k * depth, 20.0f)), 1e-3f), ShoreOrbitLimit / k);
-			const float tilt = 0.5f * std::atan(ray.slope) + 0.6f * lean;
-			const ShoreShape shape = ShoreProfile(theta, a, ax, tilt, bore, 0.2f);
+			const ShoreShape shape = ShoreProfile(theta, a, ax, ShoreNonlinearity(a, k, depth));
 
 			const float rate = std::max(p.omega, 1e-3f);
 			const float units = static_cast<float>(UnitsPerMetre) * t.weight;

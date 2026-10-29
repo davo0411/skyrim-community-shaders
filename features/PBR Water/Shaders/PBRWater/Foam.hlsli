@@ -21,10 +21,28 @@ namespace PBRWaterFoam
 
 	static const float BubblesPerTile = 12.0;  // PBRWaterFoam::BubblesPerTile (FoamPattern.h)
 
-	/// Crest's black-point fade: the share `coverage` of the texture values `value` that turns white, feathered.
+	/**
+	 * Reflectance of foam (linear RGB, Lambertian: Dupuy & Bruneton 2012 after Koepke 1984). Fresh, dense foam reflects
+	 * about 55 % of visible light (Whitlock, Bartlett & Gurganus 1982), a little less towards the red, where the water
+	 * between the bubbles absorbs (Frouin, Schwindling & Deschamps 1996). It drains and thins as it ages and reflects
+	 * less: about 22 % averaged over a whitecap's life (Koepke 1984), which the thinning coverage and this together give.
+	 * @param freshness 1 being made now, 0 aged
+	 */
+	float3 Albedo(float freshness)
+	{
+		return float3(0.47, 0.53, 0.56) * lerp(0.6, 1.0, saturate(freshness));
+	}
+
+	/**
+	 * Crest's black-point fade: the share `coverage` of the (uniform) texture values `value` that turns white, feathered.
+	 * The feather is held within the values' range: a window reaching past 1 whitened far more than the coverage (a 2 %
+	 * coverage feathered by 0.5 covered 11 % of the water).
+	 */
 	float BlackPoint(float value, float coverage, float feather)
 	{
-		float threshold = 1.0 - saturate(coverage);
+		coverage = saturate(coverage);
+		float threshold = 1.0 - coverage;
+		feather = max(min(feather, min(coverage, threshold)), 1e-3);
 		return smoothstep(threshold - feather, threshold + feather, value);
 	}
 
@@ -37,9 +55,24 @@ namespace PBRWaterFoam
 		weights = (1.0 - cos((float3(0.0, 1.0, 2.0) / 3.0 + t) * 6.2831853)) / 3.0;
 	}
 
+	/// How much larger the foam's patches are than its bubbles: the texture tiled this much larger gives the metre-scale
+	/// structure of whitecap and surf foam (patches, streaks and holes) between the bubbles, as Crest draws its foam
+	/// from two scales of one texture.
+	static const float PatchScale = 8.0;
+
+	/// The mean of two independent uniform values, made uniform again (its CDF), so a coverage C still whitens a share C.
+	float UniformMean(float a, float b)
+	{
+		float m = 0.5 * (a + b);
+		return m < 0.5 ? 2.0 * m * m : 1.0 - 2.0 * (1.0 - m) * (1.0 - m);
+	}
+
 	/**
-	 * Surface foam in [0, 1] for a coverage (water pixel shader: needs screen derivatives).
-	 * @param p        Lagrangian absolute position (units), drift already applied
+	 * Surface foam in [0, 1] for a coverage (water pixel shader: needs screen derivatives). Two scales of the foam
+	 * texture are thresholded together: bubbles and lace close up, and the metre-scale patches the foam breaks into, so
+	 * thin foam stays a scatter of crisp patches further off instead of an even grey veil (the bubbles' mips average
+	 * them away well before the patches'); once the patches are sub-pixel too it converges to its coverage.
+	 * @param p        Lagrangian absolute position (units)
 	 * @param coverage share of the surface that is foam
 	 * @param tile     size of the foam texture's tile (units)
 	 * @param flow     advection: xy distance the pattern slides per cycle (units), z cycles per second
@@ -62,14 +95,27 @@ namespace PBRWaterFoam
 			float v0 = FoamTexture.SampleGrad(s, uv + offsets.x * slide, gx, gy).x;
 			float v1 = FoamTexture.SampleGrad(s, uv + offsets.y * slide + float2(0.33, 0.66), gx, gy).x;
 			float v2 = FoamTexture.SampleGrad(s, uv + offsets.z * slide + float2(0.66, 0.33), gx, gy).x;
-			// Texels per pixel along the footprint's long axis: the thresholding holds while the texture is magnified,
-			// and the foam converges to its coverage once the texels are sub-pixel (the mips average the values).
+			// The patches ride with the water: they are not churned.
+			float patch = FoamTexture.SampleGrad(s, uv / PatchScale + float2(0.41, 0.17), gx / PatchScale, gy / PatchScale).x;
+			// The streaks and fields the patches gather into, a scale up again: far off the foam keeps a pattern instead of
+			// fading into an even grey veil once the patches are sub-pixel.
+			const float fieldScale = PatchScale * PatchScale;
+			float field = FoamTexture.SampleGrad(s, uv / fieldScale + float2(0.73, 0.29), gx / fieldScale, gy / fieldScale).x;
+			// Texels per pixel along the footprint's long axis: the thresholding holds while a scale is magnified; the
+			// bubbles hand over to the patches as they turn sub-pixel, the patches to the fields, and only those to the
+			// coverage.
 			uint w, h;
 			FoamTexture.GetDimensions(w, h);
 			float texels = sqrt(max(dot(gx, gx), dot(gy, gy))) * w;
-			float feather = 0.03 + 0.5 * saturate(texels);
-			float foam = weights.x * BlackPoint(v0, coverage, feather) + weights.y * BlackPoint(v1, coverage, feather) + weights.z * BlackPoint(v2, coverage, feather);
-			result = lerp(foam, coverage, saturate(log2(max(texels, 1e-4)) * 0.75 - 0.25));
+			float patchTexels = texels / PatchScale;
+			float fieldTexels = texels / fieldScale;
+			float bubbles = 1.0 - saturate(log2(max(texels, 1e-4)) * 0.75 - 0.25);
+			float patches = 1.0 - saturate(log2(max(patchTexels, 1e-4)) * 0.75 - 0.25);
+			float coarse = lerp(field, UniformMean(patch, field), patches);
+			float feather = 0.03 + 0.5 * saturate(lerp(lerp(fieldTexels, patchTexels, patches), texels, bubbles));
+			float3 values = lerp(coarse.xxx, float3(UniformMean(v0, patch), UniformMean(v1, patch), UniformMean(v2, patch)), bubbles);
+			float foam = weights.x * BlackPoint(values.x, coverage, feather) + weights.y * BlackPoint(values.y, coverage, feather) + weights.z * BlackPoint(values.z, coverage, feather);
+			result = lerp(foam, coverage, saturate(log2(max(fieldTexels, 1e-4)) * 0.75 - 0.25));
 		}
 		return result;
 	}

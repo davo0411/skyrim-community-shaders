@@ -3,6 +3,7 @@
 #include "Feature.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
+#include "PBRWater/FoamSimulation.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
@@ -70,7 +71,6 @@ struct PBRWater : Feature
 		bool EnableShoreWaves = true;        ///< waves shoal, break and run up beaches
 		float ShoreWaveHeight = 1.0f;        ///< scale on the height of the waves reaching the shore
 		float ShoreVariation = 0.5f;         ///< how much the crests' arrival varies along the coast (Fluid Flux's coastline offsets)
-		float SwashFoam = 1.0f;              ///< foam riding the swash up the beach
 		bool WetShores = true;               ///< the swash wets the sand and whatever it reaches (Wetness Effects)
 		bool UnderwaterFollowsWaves = true;  ///< the camera is under water when under the displaced surface
 
@@ -101,19 +101,8 @@ struct PBRWater : Feature
 		float SedimentLayerHeight = 1.5f;  ///< metres the stirred-up sediment reaches above the bed
 
 		// Foam
-		float FoamAmount = 1.0f;
-		float EdgeFoam = 1.0f;  ///< foam lingering at the water's edge
-		float BreakingFoam = 1.0f;
-		float WakeFoam = 1.0f;
-		float WakeFoamLifetime = 8.0f;  ///< seconds foam from wakes and splashes lasts
-		float SplashFoam = 1.0f;        ///< whitewater from bodies hitting the water
-		float WindStreaks = 1.0f;       ///< windrows: slicks in light wind
-		float FoamAlbedo = 0.85f;
-		float FoamDrift = 1.0f;  ///< scales the wind's surface (Stokes) drift that carries foam and bubbles
-
-		float WhitecapAmount = 1.0f;    ///< multiplier on the measured whitecap coverage (Monahan 1980)
-		float WhitecapLifetime = 2.0f;  ///< seconds whitecap foam takes to fade (Jacobian foam decay)
-		float BubbleAmount = 1.0f;
+		float FoamAmount = 1.0f;   ///< multiplier on the measured whitecap coverage (Monahan 1980) and on the surf's foam
+		float WindStreaks = 1.0f;  ///< windrows: slicks in light wind
 
 		// Ripples
 		bool EnableRipples = true;
@@ -184,7 +173,7 @@ struct PBRWater : Feature
 		float4 Terrain0;
 		float4 Terrain1;
 		float4 Shore0;  // x shore waves on (field ready), y blend from the previous shore field (0) to the current one (1), w largest run-up (units)
-		float4 Shore1;  // x breaking foam strength, y swash foam strength, z swell Hs (units), w open-sea wind sea Hs (units)
+		float4 Shore1;  // xy unused, z swell Hs (units), w open-sea wind sea Hs (units)
 		float4 Ripple0;
 		float4 Ripple1;
 		float4 Ripple2;
@@ -200,7 +189,7 @@ struct PBRWater : Feature
 		float4 Surface1;
 		float4 Land0;                                 // xy texel (0,0) corner (absolute units), zw 1 / grid extent (units)
 		float4 Land1;                                 // x enabled, y vertex spacing (units)
-		float4 Foam3;                                 // xy foam drift (units, wrapped), zw extra bubble drift (units, wrapped)
+		float4 Foam3;                                 // x whitecap threshold over many crests, y eigenvalue spread per trace spread, zw bubble drift (units, wrapped)
 		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), y deep-water phase speed of the mean frequency (units/s)
 		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
@@ -211,6 +200,7 @@ struct PBRWater : Feature
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
+		float4 Foam2;                                 // foam simulation's coarse level: xy corner (absolute units), z 1 / extent, w 1 / whitecap source width
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -296,8 +286,10 @@ private:
 	static ShoreTextures UploadShoreField(std::shared_ptr<const PBRWaterModel::ShoreField> field);
 	/** @brief Main thread: a new shore field takes over from the current one over a few seconds. */
 	void UpdateShoreField(float dt, bool enabled);
-	/** @brief Render thread: steps the swash history: wet sand and the foam left on it (needs this frame's constants). */
+	/** @brief Render thread: steps the swash history: how wet the shore is (needs this frame's constants). */
 	void UpdateSwash(float dt);
+	/** @brief Render thread: steps the foam on the water (needs this frame's constants). */
+	void UpdateFoam(float dt);
 	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
 	void UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior);
 	/** @brief Render thread, before the world is drawn: applies the main thread's camera-under-water state again. */
@@ -334,8 +326,7 @@ private:
 	};
 	std::unordered_map<const void*, SourceTrack> lastSources;          ///< main thread: ripple source motion relative to the water
 	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;  ///< main thread: wave velocity added per body
-	double foamDriftX = 0.0, foamDriftY = 0.0;                         ///< main thread: accumulated surface drift (units)
-	double bubbleDriftX = 0.0, bubbleDriftY = 0.0;
+	double bubbleDriftX = 0.0, bubbleDriftY = 0.0;                     ///< main thread: accumulated drift of the bubbles (units)
 	uint32_t uploadedLandGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedLand;
 	winrt::com_ptr<ID3D11SamplerState> linearClampSampler;
@@ -343,6 +334,7 @@ private:
 
 	RippleSimulation ripples;
 	ShoreSimulation swash;                ///< render thread
+	FoamSimulation foam;                  ///< render thread
 	ShoreTextures shoreTextures;          ///< render thread: the current shore field
 	ShoreTextures previousShoreTextures;  ///< render thread: the one it replaces, while they blend
 	OceanSimulation ocean;                ///< render thread
@@ -387,6 +379,7 @@ private:
 	std::atomic<float> cameraSurface{ 0.0f };  ///< displaced water height above the camera (absolute z)
 	std::atomic<bool> cameraSurfaceValid{ false };
 	std::atomic<uint32_t> cameraSurfaceFrame{ 0 };  ///< frame the main thread worked it out in
+	std::atomic<float> cameraStillWater{ 0.0f };    ///< still water level at the camera (absolute z), for the foam where the shore field has none
 	float smoothedRain = 0.0f;
 
 	// Render thread

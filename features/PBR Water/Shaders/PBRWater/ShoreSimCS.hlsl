@@ -46,9 +46,9 @@ RWTexture2D<float4> Wet : register(u0);
 	float2 tip = PBRWater::SwashTip(positionWS, ctx, false);
 
 	// The water surface here, for the lit objects (caustics, wetness): waves, swash and ripples.
-	float surface = PBRWater::EvaluateWaves(positionWS, ctx, TexelSize, false).displacement.z;
+	float surface = PBRWater::EvaluateWaves(positionWS, ctx, TexelSize, false, false).displacement.z;
 	surface += PBRWater::RippleHeight(positionWS, false) * PBRWater::RippleDepthFade(ctx.depth) * ctx.damping;
-	surface = max(surface, PBRWater::SwashTop(elevation, tip.x));
+	surface = max(surface, PBRWater::SwashTop(elevation, tip.x, tip.y));
 	float limit = PBRWater::DisplacementLimit();
 	surface = clamp(surface, -limit, limit);
 

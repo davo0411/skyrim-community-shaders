@@ -46,6 +46,13 @@ namespace PBRWaterModel
 
 	/// Cascades the CPU mirror reproduces for gameplay (all but the smallest).
 	inline constexpr uint32_t MirroredCascades = 3;
+	/// Cascades whose crests whiten: all but the smallest. Its waves (shorter than 0.7 m) only break on the microscale,
+	/// without entraining air (Banner & Phillips 1974; Jessup et al. 1997), so they make no whitecaps.
+	inline constexpr uint32_t FoamCascades = 3;
+	/// Whitecaps break on the crests: the surface's height over its local standard deviation from which a compressed
+	/// crest can break, and from which it fully can (a smoothstep between them). Mirrors PBRWater::WhitecapCrest.
+	inline constexpr float WhitecapCrestLow = 0.8f;
+	inline constexpr float WhitecapCrestHigh = 1.8f;
 	/// Mirror grid size; every mirrored band fits in |index| <= MirrorBandIndex with 3.5+ samples per wavelength.
 	inline constexpr uint32_t MirrorSize = 128;
 	inline constexpr int32_t MirrorBandIndex = 40;
@@ -65,6 +72,33 @@ namespace PBRWaterModel
 		float swellPeriod = 10.0f;    ///< peak period of the swell (s)
 		float swellDirection = 0.0f;  ///< radians, direction the swell travels towards
 		uint32_t resolution = 256;    ///< GPU FFT size; sets the shortest wave of the smallest cascade
+		float foamAmount = 1.0f;      ///< multiplier on the measured whitecap coverage
+	};
+
+	/**
+	 * @brief Where the open sea is breaking: the smallest eigenvalue of the foam Jacobian below `threshold`.
+	 *
+	 * Tessendorf (2001, sec. 4.6) shows that the horizontal displacement folds the surface where the Jacobian of
+	 * x -> x + D(x) turns negative, its smallest eigenvalue first; whitecaps are taken where that eigenvalue drops below
+	 * a threshold (Tessendorf, Reinhard & Gao 2023, after Crest and others). The threshold is set from the wind as in
+	 * their Algorithm 1: the whitecap coverage measured by Monahan & O'Muircheartaigh (1980), W = 3.84e-6 U^3.41, is the
+	 * crests breaking now plus the foam they leave behind, so only W (1 - g) / (1 - g W) of the sea breaks at any
+	 * instant (g = e^-0.15), and the threshold is that quantile of the eigenvalue over the sea.
+	 *
+	 * Monahan's W depends on the local wind, not on how big the waves have grown, so the shaders apply the threshold
+	 * relative to the local spread of the Jacobian: the sea under the same wind breaks as much in a fetch-limited bay or
+	 * over the shoals (where the shore wave train carries the long waves) as in the open sea.
+	 */
+	struct Whitecaps
+	{
+		float threshold = -1.0f;  ///< smallest eigenvalue below which a crest of the open sea is breaking (-1: never)
+		float width = 0.1f;       ///< how far below the threshold the foam source reaches its full strength
+		float spread = 0.0f;      ///< standard deviation of the Jacobian's trace (the divergence of D) over the open sea
+		float eigenRatio = 1.0f;  ///< the smallest eigenvalue's standard deviation per spread of the trace
+		/// Threshold for a footprint that averages many crests, as a deficit below 1 in spreads of the trace: the share of
+		/// a Gaussian eigenvalue (of the measured spread) past it is the breaking share (Dupuy & Bruneton 2012).
+		float averagedDeficit = 1.0e3f;
+		float activeShare = 0.0f;  ///< share of the sea breaking at any instant
 	};
 
 	/** @brief One cascade's share of the spectrum (open sea). */
@@ -105,8 +139,13 @@ namespace PBRWaterModel
 		float shoreScale = 1.0f;         ///< scale on the sea's height where it reaches the shore
 		float meanSquareSlope = 0.0f;    ///< all cascades
 		float displacementBound = 0.0f;  ///< units; no displacement component exceeds this (open sea)
-		float whitecapCoverage = 0.0f;   ///< fraction of the sea covered by whitecaps (Monahan 1980)
-		bool calm = true;                ///< nothing worth displacing
+		float whitecapCoverage = 0.0f;   ///< fraction of the sea covered by whitecaps (Monahan 1980), times the foam amount
+		Whitecaps whitecaps;             ///< where the crests break (ComputeWhitecaps)
+		/// Joint covariance of the foam Jacobian's entries (dDx/dx, dDy/dy, dDx/dy; foam cascades only) and the height h
+		/// (all cascades, m) over the open sea: xx, yy, shear (= cov(xx, yy)), cov(xx, shear), cov(yy, shear), var(h),
+		/// cov(h, xx), cov(h, yy), cov(h, shear).
+		std::array<float, 9> foamDeformation{};
+		bool calm = true;  ///< nothing worth displacing
 
 		/** @brief Amplitude (m) of the wave travelling along (kx, ky) rad/m on a lattice of spacing dk, before the random coefficient. */
 		float Amplitude(float kx, float ky, float dk, uint32_t cascade) const;
@@ -115,39 +154,28 @@ namespace PBRWaterModel
 	/** @brief Builds the sea state for the given wind and swell. */
 	OceanSpectrum GenerateSpectrum(const SpectrumParams& params);
 
-	/** @brief Where a cascade's crests whiten: its Jacobian below `threshold`, reaching the full foam rate `width` below it. */
-	struct WhitecapCriterion
-	{
-		float threshold = -1.0e3f;  ///< Jacobian of the cascade alone below which foam grows (-1e3: never)
-		float width = 1.0f;         ///< how far below the threshold foam grows at the full rate
-		float share = 0.0f;         ///< share of the band's area past the threshold at any instant
-	};
-
 	/**
-	 * @brief The Jacobian threshold of one cascade's whitecaps (GodotOceanWaves' "whitecap", Crest's "wave foam coverage").
+	 * @brief The whitecap threshold for a sea whose foam Jacobian entries and height have the joint covariance
+	 * `deformation` (OceanSpectrum::foamDeformation) and whose whitecap coverage is `coverage` (Whitecaps).
 	 *
-	 * Foam grows where the surface compresses past a threshold (Tessendorf 2001; Godot, Crest and Ocean-URP all
-	 * threshold the Jacobian determinant). Those engines tune the threshold by hand per sea state (Ocean-URP ships a
-	 * preset per Beaufort number); here the weather's wind sets it. Monahan & O'Muircheartaigh (1980) measured the
-	 * share of the sea covered by whitecaps, W = 3.84e-6 U^3.41; half of it is taken to be crests breaking now and half
-	 * the foam they leave. A band's compression is close to Gaussian with a standard deviation of lambda sqrt(mss), so
-	 * the threshold that its most compressed share W / 2 falls below is 1 - z lambda sqrt(mss), z the normal quantile.
-	 * @param amount multiplier on the whitecap share (1 = as measured)
+	 * The entries and the height are linear in the Gaussian wave amplitudes, so they are jointly Gaussian (the height is
+	 * high where the surface compresses: crests sharpen); the smallest eigenvalue is not, and its lower tail matters
+	 * (Tessendorf et al. 2023 measure it on the simulated surface). It is sampled from a fixed set of Gaussian draws, so
+	 * the threshold is deterministic and moves smoothly with the sea state, and it is set for the breaking the shaders
+	 * draw: the compression past the threshold on a crest (WhitecapCrestLow/High).
 	 */
-	WhitecapCriterion CascadeWhitecaps(const OceanSpectrum& spectrum, uint32_t cascade, float amount);
+	Whitecaps ComputeWhitecaps(const std::array<float, 9>& deformation, float coverage);
 
 	/** @brief Deterministic standard complex Gaussian for lattice index (m, n) of a cascade. Mirrors OceanSpectrum.hlsli. */
 	void OceanNoise(int32_t m, int32_t n, uint32_t cascade, float& re, float& im);
 	/** @brief Quantised angular frequency of wavenumber k (rad/m), as a multiple of 2 pi / LoopPeriod. Mirrors the shader. */
 	float DispersionSteps(float k);
 
-	/// Waves break at H = 0.78 h (McCowan 1894). Mirrored by PBRWater::BreakerIndex.
-	inline constexpr float BreakerIndex = 0.78f;
+	/// The rms height of a random sea in the surf zone stays below 0.42 h (Thornton & Guza 1982; the shore train's
+	/// regular waves carry the rms height). Mirrored by PBRWater::BreakerIndex.
+	inline constexpr float BreakerIndex = 0.42f;
 	/// Height of the regular waves that carry a random sea's energy: Hrms = Hs / sqrt(2). Mirrored by PBRWater::ShoreHeightRatio.
 	inline constexpr float ShoreHeightRatio = 0.7071f;
-	/// Run-up over Stockdon et al.'s (2006) 2 % value: the visible swash front carries on as a thin sheet well past the
-	/// mean water line they fit. Mirrors PBRWater::ShoreRunupScale.
-	inline constexpr float ShoreRunupScale = 1.6f;
 	/// The shore waves' horizontal orbits are held to k ax <= this, so the surface never folds. Mirrors PBRWater::ShoreOrbitLimit.
 	inline constexpr float ShoreOrbitLimit = 0.7f;
 
@@ -368,8 +396,8 @@ namespace PBRWaterModel
 		double refX = 0.0, refY = 0.0, refZ = 0.0;        ///< reference camera (absolute units)
 		float windDirection = 0.0f;
 		bool exterior = true;
-		float foamDrift[4]{};          ///< xy foam drift, zw extra bubble drift (units, wrapped)
-		float foamDriftVelocity[2]{};  ///< units/s
+		float bubbleDrift[2]{};        ///< drift of the bubbles under the surface (units, wrapped)
+		float foamDriftVelocity[2]{};  ///< surface drift that carries the wakes' churn (units/s)
 
 		std::shared_ptr<const FetchField> fetch;
 		std::shared_ptr<const Bathymetry> bathymetry;
