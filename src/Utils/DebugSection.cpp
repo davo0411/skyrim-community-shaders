@@ -6,8 +6,29 @@
 #include "Menu/Fonts.h"
 #include "Utils/UI.h"
 
+#include <utility>
+
 namespace Util
 {
+	namespace
+	{
+		bool debugSectionsHidden = false;
+	}
+
+	HideDebugSectionsGuard::HideDebugSectionsGuard(bool hide) :
+		previous(std::exchange(debugSectionsHidden, hide))
+	{}
+
+	HideDebugSectionsGuard::~HideDebugSectionsGuard()
+	{
+		debugSectionsHidden = previous;
+	}
+
+	bool ShowDebugSections()
+	{
+		return !debugSectionsHidden;
+	}
+
 	DebugSection::DebugSection() :
 		visible(ShowDebugSections())
 	{

@@ -2,6 +2,23 @@
 
 namespace Util
 {
+	/** @brief Hides feature Debug sections while alive (CS Editor Features window); restores the previous state. */
+	class HideDebugSectionsGuard
+	{
+	public:
+		explicit HideDebugSectionsGuard(bool hide);
+		~HideDebugSectionsGuard();
+
+		HideDebugSectionsGuard(const HideDebugSectionsGuard&) = delete;
+		HideDebugSectionsGuard& operator=(const HideDebugSectionsGuard&) = delete;
+
+	private:
+		bool previous;
+	};
+
+	/** @brief False while a HideDebugSectionsGuard hides them; DebugSection checks this, so features need not. */
+	bool ShowDebugSections();
+
 	/**
 	 * @brief Uniform "Debug" section for a feature's menu page.
 	 *

@@ -20,6 +20,7 @@
 #include "Menu/FeatureListRenderer.h"
 #include "Menu/FeatureUndo.h"
 #include "Menu/Icons/helpers/IconFonts.h"
+#include "Utils/DebugSection.h"
 #include "Menu/Icons/helpers/SceneActionIcons.h"
 #include "Menu/MenuIcons.h"
 #include "SaveManager.h"
