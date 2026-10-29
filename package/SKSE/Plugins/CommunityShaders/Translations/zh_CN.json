@@ -2551,7 +2551,6 @@
     "feature.screen_space_gi.blur_radius": "模糊半径",
     "feature.screen_space_gi.buffer_viewer": "缓冲区查看器",
     "feature.screen_space_gi.custom": "自定义",
-    "feature.screen_space_gi.debug": "调试",
     "feature.screen_space_gi.denoising": "降噪",
     "feature.screen_space_gi.depth_fade_range": "深度渐隐范围",
     "feature.screen_space_gi.depth_fade_range_tooltip": "基于深度的效果渐隐的距离范围。",
@@ -3758,5 +3757,6 @@
     "ui.post_processing_mode.tooltip": "一次只运行一条管线。原版使用游戏原始的后期处理。",
     "ui.post_processing_mode.vanilla": "原版",
     "ui.search": "搜索...",
-    "ui.search_features": "搜索功能..."
+    "ui.search_features": "搜索功能...",
+    "feature.screen_space_gi.debug": "调试"
 }

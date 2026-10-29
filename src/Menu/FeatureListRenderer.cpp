@@ -1030,6 +1030,9 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettings(Feature* feat, 
 		if (isLoaded) {
 			DrawFeatureBody(feat);
 
+			if (feat->HasDebugSection())
+				feat->DrawDebugSection();
+
 			if (feat != &globals::features::csEditor && ProfilingRenderer::HasFeatureTimers(feat->GetShortName())) {
 				ImGui::SeparatorText(T("menu.features.profiling", "Profiling"));
 				ProfilingRenderer::RenderFeatureTimers(feat->GetShortName());

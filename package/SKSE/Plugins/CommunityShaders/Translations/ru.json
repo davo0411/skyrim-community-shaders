@@ -853,7 +853,6 @@
     "feature.screen_space_gi.blur": "Размытие",
     "feature.screen_space_gi.blur_radius": "Радиус размытия",
     "feature.screen_space_gi.buffer_viewer": "Просмотр буфера",
-    "feature.screen_space_gi.debug": "Отладка",
     "feature.screen_space_gi.denoising": "Шумоподавление",
     "feature.screen_space_gi.depth_fade_range": "Диапазон затухания по глубине",
     "feature.screen_space_gi.depth_fade_range_tooltip": "Диапазон расстояния, на котором затухают эффекты на основе глубины.",
@@ -1917,5 +1916,6 @@
     "ui.copy": "Копировать",
     "ui.dont_ask_again": "Больше не спрашивать",
     "ui.search": "Поиск...",
-    "ui.search_features": "Поиск функций..."
+    "ui.search_features": "Поиск функций...",
+    "feature.screen_space_gi.debug": "Отладка"
 }
