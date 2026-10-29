@@ -132,12 +132,12 @@ void UnifiedWater::DrawDebugSection()
 	if (!section)
 		return;
 
-	if (ImGui::Button(T(TKEY("regenerate_flowmap"), "Regenerate Flowmap")) && flowmap) {
+	if (Util::Button(T(TKEY("regenerate_flowmap"), "Regenerate Flowmap")) && flowmap) {
 		if (flowmap->RegenerateAndLoadFlowmap())
 			SetFlowmapTex();
 	}
 
-	if (ImGui::Button(T(TKEY("regenerate_caches"), "Regenerate Caches")) && waterCache)
+	if (Util::Button(T(TKEY("regenerate_caches"), "Regenerate Caches")) && waterCache)
 		waterCache->RegenerateCaches();
 }
 
