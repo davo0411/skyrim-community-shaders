@@ -171,7 +171,7 @@ namespace Util
 		bool previous;
 	};
 
-	/** @brief False while a HideDebugSectionsGuard hides them; gate each feature's Debug header on this. */
+	/** @brief False while a HideDebugSectionsGuard hides them; DebugSection checks this, so features need not. */
 	bool ShowDebugSections();
 
 	/** @brief Eases fade toward 1 (visible) or 0 (hidden) over ThemeManager::Constants::UI_FADE_SECONDS. */

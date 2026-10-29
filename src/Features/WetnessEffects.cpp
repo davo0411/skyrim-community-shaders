@@ -5,6 +5,7 @@
 #include "Menu.h"
 #include "PerformanceOverlay.h"
 #include "State.h"
+#include "Utils/DebugSection.h"
 
 #define I18N_KEY_PREFIX "feature.wetness_effects."
 
@@ -639,29 +640,36 @@ void WetnessEffects::DrawSettings()
 			ImGui::Text("%s", T(TKEY("open_weather_picker_tooltip"), "Open the Weather Picker widget, which stays open when the main menu is closed"));
 		}
 	}
+}
 
-	if (Util::ShowDebugSections() && ImGui::TreeNodeEx(T(TKEY("debug"), "Debug"), ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Checkbox(T(TKEY("enable_wetness_override"), "Enable Wetness Override"), &debugSettings.EnableWetnessOverride);
-		ImGui::Checkbox(T(TKEY("enable_puddle_override"), "Enable Puddle Override"), &debugSettings.EnablePuddleOverride);
-		ImGui::Checkbox(T(TKEY("enable_rain_override"), "Enable Rain Override"), &debugSettings.EnableRainOverride);
-		ImGui::Checkbox(T(TKEY("enable_interior_exterior_override"), "Enable Interior/Exterior Override"), &debugSettings.EnableIntExOverride);
-		if (auto _tt = Util::HoverTooltipWrapper()) {
-			ImGui::Text(
-				"%s", T(TKEY("interior_exterior_override_tooltip"), "If disabled, will only use the exterior value. "));
-		}
+void WetnessEffects::DrawDebugSection()
+{
+	if (SceneWidgetInterceptor::IsArmed())
+		return;
 
-		if (debugSettings.EnableWetnessOverride) {
-			ImGui::SliderFloat2(T(TKEY("wetness_in_exterior"), "Wetness In/Exterior"), &debugSettings.WetnessOverride.x, 0.0f, 2.0f);
-		}
+	Util::DebugSection section;
+	if (!section)
+		return;
 
-		if (debugSettings.EnablePuddleOverride) {
-			ImGui::SliderFloat2(T(TKEY("puddle_wetness_in_exterior"), "Puddle Wetness In/Exterior"), &debugSettings.PuddleWetnessOverride.x, 0.0f, 2.0f);
-		}
+	ImGui::Checkbox(T(TKEY("enable_wetness_override"), "Enable Wetness Override"), &debugSettings.EnableWetnessOverride);
+	ImGui::Checkbox(T(TKEY("enable_puddle_override"), "Enable Puddle Override"), &debugSettings.EnablePuddleOverride);
+	ImGui::Checkbox(T(TKEY("enable_rain_override"), "Enable Rain Override"), &debugSettings.EnableRainOverride);
+	ImGui::Checkbox(T(TKEY("enable_interior_exterior_override"), "Enable Interior/Exterior Override"), &debugSettings.EnableIntExOverride);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text(
+			"%s", T(TKEY("interior_exterior_override_tooltip"), "If disabled, will only use the exterior value. "));
+	}
 
-		if (debugSettings.EnableRainOverride) {
-			ImGui::SliderFloat2(T(TKEY("rain_in_exterior"), "Rain In/Exterior"), &debugSettings.RainOverride.x, 0.0f, 1.0f);
-		}
-		ImGui::TreePop();
+	if (debugSettings.EnableWetnessOverride) {
+		ImGui::SliderFloat2(T(TKEY("wetness_in_exterior"), "Wetness In/Exterior"), &debugSettings.WetnessOverride.x, 0.0f, 2.0f);
+	}
+
+	if (debugSettings.EnablePuddleOverride) {
+		ImGui::SliderFloat2(T(TKEY("puddle_wetness_in_exterior"), "Puddle Wetness In/Exterior"), &debugSettings.PuddleWetnessOverride.x, 0.0f, 2.0f);
+	}
+
+	if (debugSettings.EnableRainOverride) {
+		ImGui::SliderFloat2(T(TKEY("rain_in_exterior"), "Rain In/Exterior"), &debugSettings.RainOverride.x, 0.0f, 1.0f);
 	}
 }
 

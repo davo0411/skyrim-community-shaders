@@ -12,6 +12,7 @@
 #include "RE/L/LoadingMenu.h"
 #include "RE/M/MapMenu.h"
 #include "RE/P/PlayerCharacter.h"
+#include "Utils/DebugSection.h"
 
 #include <imgui_internal.h>
 
@@ -125,19 +126,19 @@ namespace
 	}
 }
 
-void UnifiedWater::DrawSettings()
+void UnifiedWater::DrawDebugSection()
 {
-	if (Util::ShowDebugSections() && ImGui::TreeNodeEx(T(TKEY("debug"), "Debug"), ImGuiTreeNodeFlags_DefaultOpen)) {
-		if (ImGui::Button(T(TKEY("regenerate_flowmap"), "Regenerate Flowmap")) && flowmap) {
-			if (flowmap->RegenerateAndLoadFlowmap())
-				SetFlowmapTex();
-		}
+	Util::DebugSection section;
+	if (!section)
+		return;
 
-		if (ImGui::Button(T(TKEY("regenerate_caches"), "Regenerate Caches")) && waterCache)
-			waterCache->RegenerateCaches();
-
-		ImGui::TreePop();
+	if (ImGui::Button(T(TKEY("regenerate_flowmap"), "Regenerate Flowmap")) && flowmap) {
+		if (flowmap->RegenerateAndLoadFlowmap())
+			SetFlowmapTex();
 	}
+
+	if (ImGui::Button(T(TKEY("regenerate_caches"), "Regenerate Caches")) && waterCache)
+		waterCache->RegenerateCaches();
 }
 
 void UnifiedWater::DrawOverlay()

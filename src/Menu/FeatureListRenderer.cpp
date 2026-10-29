@@ -991,6 +991,8 @@ void FeatureListRenderer::DrawFeatureBody(Feature* feat)
 		const auto& context = *ImGui::GetCurrentContext();
 		const bool editedBefore = context.ActiveIdHasBeenEditedThisFrame;
 		feat->DrawSettings();
+		if (feat->HasDebugSection())
+			feat->DrawDebugSection();
 		if (feat->UsesMainSettings()) {
 			auto* state = globals::state;
 			const bool edited = !editedBefore && context.ActiveIdHasBeenEditedThisFrame;
@@ -1029,9 +1031,6 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettings(Feature* feat, 
 	} else {
 		if (isLoaded) {
 			DrawFeatureBody(feat);
-
-			if (feat->HasDebugSection())
-				feat->DrawDebugSection();
 
 			if (feat != &globals::features::csEditor && ProfilingRenderer::HasFeatureTimers(feat->GetShortName())) {
 				ImGui::SeparatorText(T("menu.features.profiling", "Profiling"));

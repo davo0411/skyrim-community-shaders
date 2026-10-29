@@ -9,6 +9,7 @@
 #include "Menu/ThemeManager.h"
 #include "Shadercache.h"
 #include "State.h"
+#include "Utils/DebugSection.h"
 #include "Utils/ExternalEmittance.h"
 
 #include <bit>
@@ -116,8 +117,13 @@ void LightLimitFix::DrawSettings()
 
 		ImGui::TreePop();
 	}
+}
 
-	ImGui::SeparatorText(T(TKEY("debug"), "Debug"));
+void LightLimitFix::DrawDebugSection()
+{
+	Util::DebugSection section;
+	if (!section)
+		return;
 
 	if (ImGui::TreeNode(T(TKEY("light_limit_vis"), "Light Limit Visualization"))) {
 		ImGui::Checkbox(T(TKEY("enable_lights_vis"), "Enable Lights Visualisation"), &settings.EnableLightsVisualisation);
