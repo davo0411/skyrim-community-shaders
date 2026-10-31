@@ -360,7 +360,7 @@ void Upscaling::DrawSettings()
 		if (!frameGenerationDx12PathActive)
 			ImGui::EndDisabled();
 
-		ImGui::TextWrapped("Allows frame generation to function on low refresh rate monitors. Detected: %.2f Hz", refreshRate);
+		ImGui::TextWrapped(T(TKEY("force_frame_generation_hint"), "Allows frame generation to function on low refresh rate monitors. Detected: %.2f Hz"), refreshRate);
 		bool fgForce = settings.frameGenerationForceEnable != 0;
 		if (ImGui::Checkbox(T(TKEY("force_enable_frame_generation"), "Force Enable Frame Generation"), &fgForce))
 			settings.frameGenerationForceEnable = fgForce ? 1 : 0;

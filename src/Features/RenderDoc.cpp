@@ -348,7 +348,7 @@ void RenderDoc::DrawSettings()
 				}
 
 				ImGui::SameLine();
-				ImGui::TextDisabled("(%zu files)", captureFiles.size());
+				ImGui::TextDisabled(T(TKEY("capture_file_count"), "(%zu files)"), captureFiles.size());
 
 				if (captureFiles.empty()) {
 					ImGui::TextDisabled("%s", T(TKEY("no_files"), "No capture files found."));

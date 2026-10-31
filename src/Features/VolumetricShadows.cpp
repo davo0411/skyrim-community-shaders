@@ -1,8 +1,12 @@
 #include "VolumetricShadows.h"
 
 #include "Globals.h"
+#include "I18n/I18n.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/DebugSection.h"
+
+#define I18N_KEY_PREFIX "feature.volumetric_shadows."
 
 void VolumetricShadows::SetupResources()
 {
@@ -327,13 +331,15 @@ void VolumetricShadows::SetSharedShadowMapSRV(ID3D11DeviceContext* a_context, ID
 	a_context->PSSetShaderResources(kSharedShadowMapShaderSlot, 1, &a_srv);
 }
 
-void VolumetricShadows::DrawSettings()
+void VolumetricShadows::DrawDebugSection()
 {
-	ImGui::SeparatorText("Debug");
+	Util::DebugSection section;
+	if (!section)
+		return;
 
-	if (ImGui::TreeNode("Buffer Viewer")) {
+	if (ImGui::TreeNode(T(TKEY("buffer_viewer"), "Buffer Viewer"))) {
 		static float debugRescale = .3f;
-		ImGui::SliderFloat("View Resize", &debugRescale, 0.f, 1.f);
+		ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
 
 		auto DisplayRT = [&](const char* label, ID3D11Texture2D* tex, ID3D11ShaderResourceView* srv) {
 			if (srv && tex) {
@@ -391,3 +397,5 @@ bool VolumetricShadows::HasShaderDefine(RE::BSShader::Type)
 {
 	return true;
 }
+
+#undef I18N_KEY_PREFIX

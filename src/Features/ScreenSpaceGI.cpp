@@ -104,7 +104,7 @@ void ScreenSpaceGI::DrawSettings()
 				recompileFlag = true;
 			}
 			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text("1 Slice, 6 Steps, blur enabled, no GI\n");
+				ImGui::Text("%s", T(TKEY("minimal_preset_tooltip"), "1 Slice, 6 Steps, blur enabled, no GI\n"));
 			}
 
 			ImGui::TableNextColumn();

@@ -675,7 +675,7 @@ void SettingsTabRenderer::RenderShadersSection()
 		} else {
 			ImGui::TextUnformatted(i18n->Format("menu.home.shaders_build_time",
 										   { { "time", shaderCache->GetShaderStatsString(true, true) } }, "Last build: {time}")
-					.c_str());
+									   .c_str());
 			ImGui::SameLine();
 			if (failed > 0)
 				ImGui::TextColored(Util::Colors::GetError(), "%s",
@@ -689,7 +689,7 @@ void SettingsTabRenderer::RenderShadersSection()
 			ShaderCacheStatusWidget::DrawBreakdownLegend();
 			if (globals::state->IsDeveloperMode()) {
 				MenuFonts::FontRoleGuard subtext(Menu::FontRole::Subtext);
-				ImGui::TextDisabled("Threads: %d compile, %d background, %d pool | P-cores: %d",
+				ImGui::TextDisabled(T("menu.settings.shader_thread_summary", "Threads: %d compile, %d background, %d pool | P-cores: %d"),
 					(int)shaderCache->compilationThreadCount,
 					(int)shaderCache->backgroundCompilationThreadCount,
 					(int)shaderCache->compilationPool.get_thread_count(),

@@ -147,7 +147,10 @@ python tools/extract-i18n.py --write    # regenerate en.json
 python tools/extract-i18n.py --check
 python tools/extract-i18n.py --orphans
 python tools/sort-i18n.py --check       # if it fails: python tools/sort-i18n.py --write
+python tools/check-hardcoded-ui-strings.py --check   # widget labels/text must go through T()
 ```
+
+The hardcoded-string check flags `ImGui::Text("literal")`, `Util::Button("literal")` and similar. Wrap the text in `T(...)`; for printf-style text keep the format string inside `T` (`ImGui::Text(T(TKEY("dim"), "Dim: %.3f"), v)`) and use `I18n::GetSingleton()->Format(key, {{"name", v}}, "... {name}")` for named placeholders. For deliberate developer-only literals (identifiers, layout column ids) add a trailing `// i18n-ignore: reason`.
 
 When editing non-English files: translate values only, never keys; keep placeholders (`{count}`), format specifiers (`%s`, `%.1f`) and anything after `##` unchanged.
 

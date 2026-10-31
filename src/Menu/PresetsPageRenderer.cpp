@@ -618,10 +618,10 @@ void PresetsPageRenderer::RenderDetail()
 	// Poster | title+author | badges in one table so pills share a baseline and spacing is style-driven.
 	if (ImGui::BeginTable("##PresetDetailHeader", badgesBesideTitle ? 3 : 2,
 			ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX)) {
-		ImGui::TableSetupColumn("poster", ImGuiTableColumnFlags_WidthFixed, posterW);
-		ImGui::TableSetupColumn("title", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("poster", ImGuiTableColumnFlags_WidthFixed, posterW);  // i18n-ignore: layout column, header row is not drawn
+		ImGui::TableSetupColumn("title", ImGuiTableColumnFlags_WidthStretch);          // i18n-ignore: layout column, header row is not drawn
 		if (badgesBesideTitle)
-			ImGui::TableSetupColumn("badges", ImGuiTableColumnFlags_WidthFixed, badgesWidth);
+			ImGui::TableSetupColumn("badges", ImGuiTableColumnFlags_WidthFixed, badgesWidth);  // i18n-ignore: layout column, header row is not drawn
 
 		ImGui::TableNextRow(ImGuiTableRowFlags_None, posterH);
 		ImGui::TableSetColumnIndex(0);
@@ -750,8 +750,8 @@ void PresetsPageRenderer::RenderDetail()
 				DrawRoundedImage(dl, reinterpret_cast<ImTextureID>(pack->screenshotSRVs[i].get()), p0, p1, style.FrameRounding);
 			if (isOpen || ImGui::IsItemHovered()) {
 				const ImU32 border = ImGui::GetColorU32(isOpen ?
-																		theme.StatusPalette.InfoColor :
-																		ImGui::GetStyleColorVec4(ImGuiCol_Border));
+															theme.StatusPalette.InfoColor :
+															ImGui::GetStyleColorVec4(ImGuiCol_Border));
 				dl->AddRect(p0, p1, border, style.FrameRounding, 0, style.FrameBorderSize + (isOpen ? 1.0f : 0.0f));
 			}
 			if (clicked) {

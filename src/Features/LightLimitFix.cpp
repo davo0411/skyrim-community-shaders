@@ -101,7 +101,7 @@ void LightLimitFix::DrawSettings()
 	DrawLocalShadowSettings();
 
 	if (ImGui::TreeNodeEx(T(TKEY("statistics"), "Statistics"), ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Text(std::format("Clustered Light Count : {}", lightCount).c_str());
+		ImGui::Text("%s", std::vformat(T(TKEY("clustered_light_count"), "Clustered Light Count : {}"), std::make_format_args(lightCount)).c_str());
 		ImGui::Text("%s", std::vformat(T(TKEY("particle_light_count"), "Particle Lights : {}"), std::make_format_args(particleLightCount)).c_str());
 		if (IsLocalShadowsEnabled()) {
 			ImGui::Text("%s", std::vformat(T(TKEY("shadow_casters_stats"), "Shadow Casters : {} tracked, {} cached, {} rendered this frame"),

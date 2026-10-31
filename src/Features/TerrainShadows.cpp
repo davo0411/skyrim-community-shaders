@@ -212,24 +212,25 @@ void TerrainShadows::DrawDebugSection()
 			curr_worldspace_name = worldspace->GetName();
 		}
 	}
-	ImGui::TextUnformatted(fmt::format("Current worldspace: {} ({})", curr_worldspace, curr_worldspace_name).c_str());
-	ImGui::TextUnformatted(fmt::format("Has height map: {}", heightmaps.contains(curr_worldspace)).c_str());
+	const auto* i18n = I18n::GetSingleton();
+	ImGui::TextUnformatted(i18n->Format(TKEY("debug_current_worldspace"), { { "editor_id", curr_worldspace }, { "name", curr_worldspace_name } }, "Current worldspace: {editor_id} ({name})").c_str());
+	ImGui::TextUnformatted(i18n->Format(TKEY("debug_has_height_map"), { { "value", heightmaps.contains(curr_worldspace) ? T(TKEY("debug_yes"), "yes") : T(TKEY("debug_no"), "no") } }, "Has height map: {value}").c_str());
 
 	ImGui::Separator();
 
-	ImGui::BulletText("shadowUpdateCBData");
+	ImGui::BulletText("shadowUpdateCBData");  // i18n-ignore: struct name
 	ImGui::Indent();
 	{
-		ImGui::TextUnformatted(fmt::format("LightPxDir: ({}, {})", shadowUpdateCBData.LightPxDir.x, shadowUpdateCBData.LightPxDir.y).c_str());
-		ImGui::TextUnformatted(fmt::format("LightDeltaZ: ({}, {})", shadowUpdateCBData.LightDeltaZ.x, shadowUpdateCBData.LightDeltaZ.y).c_str());
-		ImGui::TextUnformatted(fmt::format("StartPxCoord: {}", shadowUpdateCBData.StartPxCoord).c_str());
-		ImGui::TextUnformatted(fmt::format("PxSize: ({}, {})", shadowUpdateCBData.PxSize.x, shadowUpdateCBData.PxSize.y).c_str());
+		ImGui::TextUnformatted(fmt::format("LightPxDir: ({}, {})", shadowUpdateCBData.LightPxDir.x, shadowUpdateCBData.LightPxDir.y).c_str());     // i18n-ignore: field name
+		ImGui::TextUnformatted(fmt::format("LightDeltaZ: ({}, {})", shadowUpdateCBData.LightDeltaZ.x, shadowUpdateCBData.LightDeltaZ.y).c_str());  // i18n-ignore: field name
+		ImGui::TextUnformatted(fmt::format("StartPxCoord: {}", shadowUpdateCBData.StartPxCoord).c_str());                                          // i18n-ignore: field name
+		ImGui::TextUnformatted(fmt::format("PxSize: ({}, {})", shadowUpdateCBData.PxSize.x, shadowUpdateCBData.PxSize.y).c_str());                 // i18n-ignore: field name
 	}
 	ImGui::Unindent();
 
 	if (ImGui::TreeNode(T(TKEY("buffer_viewer"), "Buffer Viewer"))) {
 		static float debugRescale = .1f;
-		ImGui::SliderFloat("View Resize", &debugRescale, 0.f, 1.f);
+		ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
 
 		if (texShadowHeight) {
 			BUFFER_VIEWER_NODE_BULLET(texShadowHeight, debugRescale)

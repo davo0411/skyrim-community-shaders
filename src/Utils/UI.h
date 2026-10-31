@@ -11,6 +11,7 @@
 #include <windows.h>  // For WPARAM and virtual key constants
 
 #include "../FeatureConstraints.h"
+#include "../I18n/I18n.h"
 #include "../Menu/Fonts.h"
 #include "../Menu/ThemeManager.h"
 #include "Utils/Input.h"
@@ -1614,13 +1615,13 @@ namespace Util
 			char filterBuffer[256] = { 0 };
 			strncpy_s(filterBuffer, filterText.c_str(), sizeof(filterBuffer) - 1);
 
-			ImGui::InputText("Filter", filterBuffer, IM_ARRAYSIZE(filterBuffer));
+			ImGui::InputText(::T("ui.table_filter.filter", "Filter"), filterBuffer, IM_ARRAYSIZE(filterBuffer));
 			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text("Filter table by the selected column. Case-insensitive.");
+				ImGui::Text("%s", ::T("ui.table_filter.filter_tooltip", "Filter table by the selected column. Case-insensitive."));
 			}
 
 			// Create search column options
-			std::vector<std::string> searchOptions = { "All Columns" };
+			std::vector<std::string> searchOptions = { ::T("ui.table_filter.all_columns", "All Columns") };
 			for (const auto& col : columnHeaders) {
 				searchOptions.push_back(col);
 			}
@@ -1629,7 +1630,7 @@ namespace Util
 				searchOptionsCStr.push_back(option.c_str());
 			}
 
-			ImGui::Combo("Search In", &searchColumn, searchOptionsCStr.data(), static_cast<int>(searchOptionsCStr.size()));
+			ImGui::Combo(::T("ui.table_filter.search_in", "Search In"), &searchColumn, searchOptionsCStr.data(), static_cast<int>(searchOptionsCStr.size()));
 
 			// Update filter text from buffer
 			filterText = filterBuffer;
