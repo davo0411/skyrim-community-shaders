@@ -69,7 +69,7 @@ void LensFlare::DrawSettings()
 
 	// Threshold
 	ImGui::Spacing();
-	ImGui::Text(T("feature.post_processing.lens_flare.threshold", "Threshold"));
+	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.threshold", "Threshold"));
 	ImGui::Separator();
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.threshold_ev", "Threshold (EV100)"), &settings.ThresholdEV, -7.0f, 23.0f, "%+.2f EV100");
 	tooltip(T("feature.post_processing.lens_flare.tooltip_threshold_ev", "Brightness threshold in EV100 (0 EV100 = 0.125 linear luminance)."));
@@ -78,7 +78,7 @@ void LensFlare::DrawSettings()
 
 	// Ghost Settings
 	ImGui::Spacing();
-	ImGui::Text(T("feature.post_processing.lens_flare.ghost_settings", "Ghost Settings"));
+	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.ghost_settings", "Ghost Settings"));
 	ImGui::Separator();
 
 	{
@@ -186,7 +186,7 @@ void LensFlare::DrawSettings()
 			ImGui::PopID();
 		}
 		ImGui::BeginDisabled(SceneWidgetInterceptor::IsArmed());
-		if (ImGui::Button(T("feature.post_processing.lens_flare.reset_ghosts_to_default", "Reset Ghosts to Default"))) {
+		if (Util::Button(T("feature.post_processing.lens_flare.reset_ghosts_to_default", "Reset Ghosts to Default"))) {
 			GhostSettings defaults[NUM_GHOSTS] = {
 				{ { { 1.0f, 0.8f, 0.4f, 1.0f } }, -1.5f, true, 1.0f },
 				{ { { 1.0f, 1.0f, 0.6f, 1.0f } }, 2.5f, true, 1.0f },
@@ -205,7 +205,7 @@ void LensFlare::DrawSettings()
 
 	// Halo Settings
 	ImGui::Spacing();
-	ImGui::Text(T("feature.post_processing.lens_flare.halo_settings", "Halo Settings"));
+	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.halo_settings", "Halo Settings"));
 	ImGui::Separator();
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.halo_strength", "Halo Strength"), &settings.HaloStrength, 0.0f, 1.0f, "%.3f");
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.halo_radius", "Halo Radius"), &settings.HaloRadius, 0.0f, 1.0f, "%.3f");
@@ -216,7 +216,7 @@ void LensFlare::DrawSettings()
 
 	// Tint
 	ImGui::Spacing();
-	ImGui::Text(T("feature.post_processing.lens_flare.color_tint", "Color Tint"));
+	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.color_tint", "Color Tint"));
 	ImGui::Separator();
 	ImGui::ColorEdit3(T("feature.post_processing.lens_flare.tint", "Tint"), settings.Tint.data());
 	tooltip(T("feature.post_processing.lens_flare.tooltip_tint", "Radial color gradient applied to the flare effect"));
@@ -414,7 +414,7 @@ void LensFlare::ClearShaderCache()
 	const auto shaderPtrs = std::array{
 		&thresholdCS, &ghostHaloCS, &blurDownCS, &blurUpCS,
 		&fftMultiplyCS,
-		&bokehPrepareCS, &fftThresholdCS, &fftGhostComposeCS
+		&bokehPrepareCS, &fftThresholdCS, &fftGhostComposeCS, &fftGhostComposeFirstCS
 	};
 
 	{
@@ -450,6 +450,7 @@ void LensFlare::CompileComputeShaders()
 		{ &bokehPrepareCS, "lensflare_fft.cs.hlsl", {}, "CSBokehPrepare" },
 		{ &fftThresholdCS, "lensflare_fft.cs.hlsl", {}, "CSFFTThreshold" },
 		{ &fftGhostComposeCS, "lensflare_fft.cs.hlsl", {}, "CSFFTGhostCompose" },
+		{ &fftGhostComposeFirstCS, "lensflare_fft.cs.hlsl", { { "FIRST_GROUP", "" } }, "CSFFTGhostCompose" },
 		{ &fftMultiplyCS, "lensflare_fft.cs.hlsl", {}, "CS_Multiply" },
 	};
 
@@ -468,7 +469,7 @@ bool LensFlare::FFTShadersReady(uint resolution) const
 {
 	const uint variant = GetFFTVariant(resolution);
 	return AllShadersReady({ &fftRowCS[variant], &fftColCS[variant], &fftRowInvCS[variant], &fftColInvCS[variant],
-		&bokehPrepareCS, &fftMultiplyCS, &fftThresholdCS, &fftGhostComposeCS });
+		&bokehPrepareCS, &fftMultiplyCS, &fftThresholdCS, &fftGhostComposeCS, &fftGhostComposeFirstCS });
 }
 
 void LensFlare::DispatchFFT(ID3D11ComputeShader* shader, Texture2D* input, Texture2D* output, uint resolution)
@@ -688,14 +689,11 @@ void LensFlare::DrawQuality(TextureInfo& inout_tex, LensFlareCB& data)
 		groups.push_back({ settings.KernelScale, data.ActiveGhostMask });
 	}
 
-	// === Clear texGhostHalo for additive compositing ===
-	{
+	if (debugsettings.disableGhosts) {
 		const FLOAT clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
 		context->ClearUnorderedAccessViewFloat(texGhostHalo->uav.get(), clearColor);
-	}
-
-	if (debugsettings.disableGhosts)
 		return;
+	}
 
 	for (size_t i = 0; i < bokehFFTCache.size(); ++i) {
 		if (bokehFFTDirty || i >= groups.size())
@@ -770,7 +768,7 @@ void LensFlare::DrawQuality(TextureInfo& inout_tex, LensFlareCB& data)
 		DispatchFFT(fftColInvCS[fftVariant].get(), texFFT[0].get(), texFFT[1].get(), N);
 
 		// 3d: Compose IFFT result → additive into texGhostHalo
-		if (fftGhostComposeCS) {
+		if (auto* composeCS = gi == 0 ? fftGhostComposeFirstCS.get() : fftGhostComposeCS.get()) {
 			data.OutputWidth = (float)halfW;
 			data.OutputHeight = (float)halfH;
 			data.InputWidth = (float)N;
@@ -785,7 +783,7 @@ void LensFlare::DrawQuality(TextureInfo& inout_tex, LensFlareCB& data)
 
 			context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
 			context->CSSetUnorderedAccessViews(0, (uint)uavs.size(), uavs.data(), nullptr);
-			context->CSSetShader(fftGhostComposeCS.get(), nullptr, 0);
+			context->CSSetShader(composeCS, nullptr, 0);
 			context->Dispatch((halfW + 7) >> 3, (halfH + 7) >> 3, 1);
 
 			srvs.fill(nullptr);
