@@ -20,14 +20,14 @@ cbuffer OceanCB : register(b0)
 	float4 Wind;     // xy wind direction, z open-sea peak omega (rad/s), w height scale
 	float4 Spread;   // x Mitsuyasu exponent at the peak, y choppiness (lambda), z swell alpha, w swell peak omega (rad/s)
 	float4 Swell;    // xy swell direction, z gravity (m/s^2), w omega0 = 2 pi / loop period (rad/s)
-	float4 Time;     // x loop fraction (0..1), y fft size, z units per metre, w unused
+	float4 Time;     // x loop fraction (0..1), y fft size, z units per metre, w frame time in 1/60 s (foam)
 	float4 Band[4];  // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
+	float4 Foam;     // x Jacobian bias, y threshold, z amount added per 1/60 s, w decay rate per 1/60 s (OceanAssembleCS)
+	float4 SwellShape;  // x swell JONSWAP peak enhancement gamma, y swell Mitsuyasu exponent (directional spread)
 };
 
 static const float OceanJonswapAlpha = 0.0081;
 static const float OceanJonswapGamma = 3.3;
-static const float OceanSwellGamma = 7.0;
-static const float OceanSwellSpread = 30.0;
 
 uint OceanHash(uint x)
 {
@@ -99,7 +99,7 @@ float OceanAmplitude(float2 k, float dk, uint cascade)
 	                OceanSpreading(cosWind, OceanMitsuyasuExponent(omega, Wind.z, Spread.x));
 	if (Spread.z > 0.0) {
 		float cosSwell = dot(k, Swell.xy) / kl;
-		density += OceanJonswap(omega, Spread.w, Spread.z, OceanSwellGamma) * OceanSpreading(cosSwell, OceanSwellSpread);
+		density += OceanJonswap(omega, Spread.w, Spread.z, SwellShape.x) * OceanSpreading(cosSwell, SwellShape.y);
 	}
 	float energy = density * g / (2.0 * omega * kl);
 	float amplitude = sqrt(max(energy, 0.0) * dk * dk * 0.5);

@@ -10,6 +10,15 @@ namespace
 {
 	constexpr float FixedStep = 1.0f / 60.0f;
 	constexpr uint32_t MaxStepsPerFrame = 4;
+
+	constexpr float GravityMetres = 9.81f;        // m/s^2
+	constexpr float SurfaceTension = 0.074f;      // N/m, clean water against air at 20 C
+	constexpr float WaterDensity = 1000.0f;       // kg/m^3
+	constexpr float MaxCourantSquared = 0.45f;    // the leapfrog scheme is stable up to 0.5 in 2D; the viscous term needs the margin
+	constexpr float WavelengthTexels = 2.0f;      // the shortest wave the grid can hold (Crest: 2 * texel width)
+	constexpr float VanillaFlowScroll = 9.26f;    // mean of the four flow normal layers' multipliers (Water.hlsl GetFlowmapNormal)
+	constexpr float FlowNormalTileUnits = 64.0f;  // units one flow normal tile covers at full strength
+	constexpr float TwoPi = 6.28318530718f;
 }
 
 void RippleSimulation::SetupResources()
@@ -50,6 +59,12 @@ void RippleSimulation::SetupResources()
 	Reset();
 }
 
+void RippleSimulation::SubmitWaterLevels(const WaterLevels& levels)
+{
+	std::scoped_lock lock(sourcesMutex);
+	pendingLevels = levels;
+}
+
 void RippleSimulation::ClearShaderCache()
 {
 	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\RippleSimCS.hlsl", {}, "cs_5_0")));
@@ -86,7 +101,7 @@ ID3D11ShaderResourceView* RippleSimulation::GetPreviousSRV() const
 	return previousFrame ? previousFrame->srv.get() : nullptr;
 }
 
-void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings)
+void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings, const Environment& environment)
 {
 	if (!ready)
 		return;
@@ -116,9 +131,11 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	}
 
 	std::vector<Source> sources;
+	WaterLevels levels;
 	{
 		std::scoped_lock lock(sourcesMutex);
 		sources = pendingSources;
+		levels = pendingLevels;
 	}
 
 	// Sources are placed in the grid the next step writes, i.e. at the new origin.
@@ -142,11 +159,37 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	}
 	sourceBuffer->Update(gpuSources.data(), sizeof(gpuSources));
 
-	// Fixed time step for a stable explicit integrator; C^2 = (c dt / dx)^2 must stay <= 0.5 in 2D.
-	const float speedUnits = settings.waveSpeed * static_cast<float>(PBRWaterModel::UnitsPerMetre);
+	// Fixed time step for a stable explicit integrator. The wave speed is physical rather than tuned: the
+	// gravity-capillary phase speed c^2 = g / k + sigma k / rho at the shortest wavelength the grid holds
+	// (Crest: deep-water g / k at 2 texel widths, here with the capillary term), clamped by the Courant number
+	// C^2 = (c dt / dx)^2, which must stay <= 0.5 in 2D.
+	const float texelMetres = texelSize / static_cast<float>(PBRWaterModel::UnitsPerMetre);
+	const float wavenumber = TwoPi / (WavelengthTexels * texelMetres);
+	const float speed2 = GravityMetres / wavenumber + SurfaceTension * wavenumber / WaterDensity;
 	SimCB base{};
 	base.gridSize = GridSize;
-	base.waveSpeed2 = std::min(std::pow(speedUnits * FixedStep / texelSize, 2.0f), 0.45f);
+	base.waveSpeed2 = std::min(speed2 * FixedStep * FixedStep / (texelMetres * texelMetres), MaxCourantSquared);
+	base.texelSize = texelSize;
+	base.stepTime = FixedStep;
+	base.originX = static_cast<int32_t>(newOriginX);
+	base.originY = static_cast<int32_t>(newOriginY);
+
+	// The bed against the still water: the terrain texture and the water levels of the cells around the eye.
+	// Without the levels the depth is unknown and the water counts as deep.
+	const bool terrainKnown = environment.terrain && environment.terrain1.z > 0.5f && levels.valid;
+	if (terrainKnown) {
+		base.terrain0 = environment.terrain0;
+		base.terrain1 = environment.terrain1;
+		base.cellBaseX = levels.baseCellX;
+		base.cellBaseY = levels.baseCellY;
+		for (size_t i = 0; i < levels.level.size(); ++i)
+			base.cellLevels[i] = levels.level[i];
+	}
+	// Flow: the current the waves ride (PBRWater::FlowVelocity) carries the ripples too.
+	if (environment.flowmap && environment.flow0.x != 0.0f && environment.sampler) {
+		base.flow0 = environment.flow0;
+		base.flowParams = { std::max(settings.flowSpeed, 0.0f), 0.0f, 0.0f, 0.0f };
+	}
 	base.damping = std::pow(0.5f, FixedStep / std::max(settings.halfLife, 0.05f));
 	base.siltDecay = std::pow(0.5f, FixedStep / std::max(settings.siltHalfLife, 0.5f));
 	base.siltDiffusion = std::clamp(settings.siltSpread, 0.0f, 1.0f);
@@ -163,7 +206,7 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 		// it keeps its origin, so the stored state is never re-integrated without time passing.
 		const int32_t shiftX = first ? static_cast<int32_t>(newOriginX - originTexelX) : 0;
 		const int32_t shiftY = first ? static_cast<int32_t>(newOriginY - originTexelY) : 0;
-		Step(shiftX, shiftY, numSources, base);
+		Step(shiftX, shiftY, numSources, base, environment);
 		first = false;
 	}
 	if (!first) {
@@ -175,7 +218,7 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 	stepAlpha = accumulator / FixedStep;
 }
 
-void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base)
+void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base, const Environment& environment)
 {
 	auto context = globals::d3d::context;
 
@@ -186,20 +229,25 @@ void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources,
 	simCB->Update(cb);
 
 	const uint32_t next = current ^ 1;
-	ID3D11ShaderResourceView* srvs[2] = { state[current]->srv.get(), sourceBuffer->SRV(0) };
+	ID3D11ShaderResourceView* srvs[4] = { state[current]->srv.get(), sourceBuffer->SRV(0),
+		cb.terrain1.z > 0.5f ? environment.terrain : nullptr, cb.flow0.x != 0.0f ? environment.flowmap : nullptr };
+	ID3D11SamplerState* sampler = environment.sampler;
 	ID3D11UnorderedAccessView* uav = state[next]->uav.get();
 	ID3D11Buffer* cbs[1] = { simCB->CB() };
 
 	context->CSSetShader(simCS.get(), nullptr, 0);
-	context->CSSetShaderResources(0, 2, srvs);
+	context->CSSetShaderResources(0, 4, srvs);
+	context->CSSetSamplers(0, 1, &sampler);
 	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	context->CSSetConstantBuffers(0, 1, cbs);
 	context->Dispatch(GridSize / 8, GridSize / 8, 1);
 
-	ID3D11ShaderResourceView* nullSrvs[2] = { nullptr, nullptr };
+	ID3D11ShaderResourceView* nullSrvs[4] = {};
+	ID3D11SamplerState* nullSampler = nullptr;
 	ID3D11UnorderedAccessView* nullUav = nullptr;
 	ID3D11Buffer* nullCb = nullptr;
-	context->CSSetShaderResources(0, 2, nullSrvs);
+	context->CSSetShaderResources(0, 4, nullSrvs);
+	context->CSSetSamplers(0, 1, &nullSampler);
 	context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 	context->CSSetConstantBuffers(0, 1, &nullCb);
 	context->CSSetShader(nullptr, nullptr, 0);

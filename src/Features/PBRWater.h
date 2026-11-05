@@ -42,12 +42,13 @@ struct PBRWater : Feature
 				T("feature.pbr_water.key_feature_6", "Swimmers, floating props, boats, ships and ice floes ride the rendered waves, with no patches or configuration") } };
 	}
 
+	/**
+	 * @brief User settings. Physics (gravity, the index of refraction, JONSWAP, Miche and McCowan limits, the foam's
+	 * measured albedo...) stays in the code; everything here is a guess, an artistic scale or a quality knob. Lengths
+	 * are metres unless the comment says units (1 m = 70 units). The defaults are what the water always looked like.
+	 */
 	struct Settings
 	{
-		// Geometry
-		bool EnableTessellation = true;
-		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
-
 		// Waves
 		float WindSpeedCalm = 3.0f;    ///< m/s when the weather has no wind
 		float WindSpeedStorm = 22.0f;  ///< m/s at the strongest weather wind
@@ -55,32 +56,101 @@ struct PBRWater : Feature
 		float SwellHeight = 0.5f;      ///< metres, significant height of the swell from distant storms
 		float SwellPeriod = 10.0f;     ///< seconds
 		float SwellDirection = 35.0f;  ///< degrees from the wind direction
-		int WaveResolution = 1;        ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
+		float SwellPeakedness = 7.0f;  ///< JONSWAP peak enhancement of the swell: narrow-banded, long-travelled
+		float SwellSpread = 30.0f;     ///< Mitsuyasu exponent of the swell: long, parallel crests
+		float Choppiness = 1.0f;       ///< horizontal displacement scale; 1 = linear wave theory
+		float DirectionalSpread = 0.6f;
+		float FetchScale = 15.0f;  ///< Skyrim's distances are compressed: upwind open water counts this many times over
+		float Gusts = 0.6f;        ///< how strongly gusts vary the wind over the water
+		float GustSize = 40.0f;    ///< metres
+		float WindStreaks = 1.0f;  ///< windrows: slicks in light wind
 
 		// Shore
-		bool EnableShoreWaves = true;  ///< waves shoal, break and run up beaches
-		bool WetShores = true;         ///< the swash wets the sand and whatever it reaches (Wetness Effects)
+		bool EnableShoreWaves = true;      ///< waves shoal, break and run up beaches
+		bool WetShores = true;             ///< the swash wets the sand and whatever it reaches (Wetness Effects)
+		float ShoreShortestPeriod = 2.5f;  ///< s: the periods within which the shore train follows the sea
+		float ShoreLongestPeriod = 3.5f;
+		float ShoreTimeScale = 0.7f;     ///< the shore clock runs this much slower than the waves' frequency
+		float ShoreTrainCycles = 7.0f;   ///< how many waves out from the shore the train reaches
+		float ShoreSetMin = 0.45f;       ///< wave sets: one wave's height runs from this factor
+		float ShoreSetMax = 1.55f;       ///< to this one
+		float ShoreResidualFoam = 0.5f;  ///< coverage of the lace that lingers in the surf between breakers
 
-		// Lighting
+		// Surface and light
 		float Roughness = 0.06f;
-		float Visibility = 1.0f;
+		float SunSpecular = 1.0f;
+		float PointLightSpecular = 1.0f;
+		float PointLightEmitterRadius = 8.0f;  ///< units (~a torch flame): Skyrim lights have no emitter size
+		float Subsurface = 1.0f;
+		float VanillaFresnel = 0.0f;
+		float RefractionDistortion = 1.0f;
+		float WindRoughness = 1.0f;      ///< scales the wind-driven micro-roughness (Cox-Munk)
+		float DetailNormalCalm = 0.75f;  ///< strength of the vanilla normal maps on top of the waves in calm air
+		float DetailNormalGale = 1.3f;   ///< and at 8 m/s of wind and over
 
 		// Water clarity
+		float Visibility = 1.0f;
 		float Turbidity = 0.15f;  ///< suspended sediment everywhere (0 = crystal clear)
 		float3 SedimentColor = { 0.34f, 0.29f, 0.2f };
+		float SedimentDensity = 0.35f;        ///< extinction (1/m) per unit of turbidity
+		float TurbidityPatchiness = 0.7f;     ///< how unevenly the sediment is spread
+		float TurbidityPatchSize = 150.0f;    ///< metres
+		float ShoreResuspension = 1.0f;       ///< sediment stirred up by the waves in the shallows
+		float RiverTurbidity = 0.8f;          ///< silt carried by river currents
+		float StormTurbidity = 1.0f;          ///< extra sediment in strong wind and rain
+		float WadingSilt = 1.0f;              ///< silt kicked up by feet on the bed
+		float SedimentLayerHeight = 1.5f;     ///< metres the stirred-up sediment reaches above the bed
+		float SiltHalfLife = 20.0f;           ///< s: how long stirred-up silt takes to settle
+		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
+		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
 
 		// Foam
-		float FoamAmount = 1.0f;  ///< multiplier on the measured whitecap coverage (Monahan 1980)
+		float FoamAmount = 1.0f;        ///< multiplier on the foam the open sea's crests add (FoamAdd)
+		float FoamBias = 0.85f;         ///< the Jacobian below which a texel foams
+		float FoamThreshold = 0.0f;     ///< foam is added only above this biased Jacobian
+		float FoamAdd = 0.1f;           ///< foam added per 1/60 s per unit of biased Jacobian
+		float FoamDecayRate = 0.0175f;  ///< foam decays by exp(-rate) per 1/60 s
+		float FoamOffset0 = 0.04f;      ///< foam offset of each cascade, longest waves first
+		float FoamOffset1 = -0.04f;
+		float FoamOffset2 = -0.46f;
+		float FoamOffset3 = -0.38f;
+		float FoamCascadeWeightFull = 1.0f;  ///< a cascade counts fully in the foam from this share of its amplitude
+		float FoamDepthFalloff = 1.0f;       ///< exponent of the foam's fade with distance
+		float FoamFadeDistance = 1000.0f;    ///< m: distance at which the open sea's foam has faded out
+		float FoamRoughnessModifier = 0.0f;  ///< roughness added per unit of foam
+		float FoamFeather = 0.12f;           ///< how soft the edge of the foam pattern is
+		float FoamBubbleSize = 0.2f;         ///< m: the large bubbles of the foam pattern
 
-		// Ripples
+		// Ripples and rivers
 		bool EnableRipples = true;
+		float RippleExtent = 64.0f;  ///< m covered around the camera
+		float RippleHeight = 0.12f;  ///< m
+		float RippleNormalStrength = 1.0f;
+		float RippleHalfLife = 1.5f;       ///< s
+		float RippleHorizDisplace = 3.0f;  ///< horizontal displacement strength (Crest 3)
+		float RippleDisplaceClamp = 0.3f;  ///< largest horizontal displacement in simulation texels (Crest 0.3)
+		float RiverCurrentSpeed = 1.5f;    ///< m/s at full flow strength: moves the ripples and the waves
+		float RiverWaveDamping = 0.5f;
+		float FlowPeriodScale = 3.0f;  ///< s of flow clock period per metre of a cascade's texel (Crest 3)
+		float FlowPeriodMin = 1.0f;    ///< s
+		float FlowPeriodMax = 16.0f;   ///< s
 
-		// Gameplay
+		// Floating objects and gameplay
 		bool GameplayWaves = true;
-
-		// Floating objects
 		bool EnableFloatingObjects = true;
 		bool CarryActors = true;
+		float BuoyancyStrength = 1.0f;
+		float FloatingRange = 150.0f;   ///< metres around the player in which objects float
+		float MaxFloatingSize = 90.0f;  ///< metres: the longest hull that floats (the large Skyrim ships are ~65 m)
+		float FloatingResponse = 1.0f;  ///< scales how much the hulls move
+
+		// Performance
+		bool EnableTessellation = true;
+		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
+		float TessellationMaxFactor = 32.0f;
+		float DisplacementFadeStart = 16384.0f;  ///< units
+		float DisplacementFadeEnd = 32768.0f;
+		int WaveResolution = 1;  ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
 
 		// Debug
 		int WireframeMode = 0;
@@ -88,46 +158,6 @@ struct PBRWater : Feature
 	};
 
 	Settings settings;
-
-	/// What the water is made of: values that are right everywhere, not choices for a player.
-	struct Tuning
-	{
-		static constexpr float TessellationMaxFactor = 32.0f;
-		static constexpr float DisplacementFadeStart = 16384.0f;  ///< units
-		static constexpr float DisplacementFadeEnd = 32768.0f;
-		static constexpr float Choppiness = 1.0f;  ///< horizontal displacement scale; 1 = linear wave theory
-		static constexpr float DirectionalSpread = 0.6f;
-		static constexpr float FetchScale = 15.0f;  ///< Skyrim's distances are compressed: upwind open water counts this many times over
-		static constexpr float RiverWaveDamping = 0.5f;
-		static constexpr float SunSpecular = 1.0f;
-		static constexpr float PointLightSpecular = 1.0f;
-		static constexpr float Subsurface = 1.0f;
-		static constexpr float VanillaFresnel = 0.0f;
-		static constexpr float RefractionDistortion = 1.0f;
-		static constexpr float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
-		static constexpr float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
-		static constexpr float WindRoughness = 1.0f;           ///< scales the wind-driven micro-roughness (Cox-Munk)
-		static constexpr float Gusts = 0.6f;                   ///< how strongly gusts vary the wind over the water
-		static constexpr float GustSize = 40.0f;               ///< metres
-		static constexpr float TurbidityPatchiness = 0.7f;     ///< how unevenly the sediment is spread
-		static constexpr float TurbidityPatchSize = 150.0f;    ///< metres
-		static constexpr float SedimentDensity = 0.35f;        ///< extinction (1/m) per unit of turbidity
-		static constexpr float ShoreResuspension = 1.0f;       ///< sediment stirred up by the waves in the shallows
-		static constexpr float RiverTurbidity = 0.8f;          ///< silt carried by river currents
-		static constexpr float StormTurbidity = 1.0f;          ///< extra sediment in strong wind and rain
-		static constexpr float WadingSilt = 1.0f;              ///< silt kicked up by feet on the bed
-		static constexpr float SedimentLayerHeight = 1.5f;     ///< metres the stirred-up sediment reaches above the bed
-		static constexpr float WindStreaks = 1.0f;             ///< windrows: slicks in light wind
-		static constexpr float RippleExtent = 64.0f;           ///< metres
-		static constexpr float RippleHeight = 0.12f;           ///< metres
-		static constexpr float RippleNormalStrength = 1.0f;
-		static constexpr float RippleSpeed = 1.2f;  ///< m/s
-		static constexpr float RippleHalfLife = 1.5f;
-		static constexpr float BuoyancyStrength = 1.0f;
-		static constexpr float FloatingRange = 150.0f;   ///< metres around the player in which objects float
-		static constexpr float MaxFloatingSize = 90.0f;  ///< metres: the longest hull that floats (the large Skyrim ships are ~65 m)
-		static constexpr float FloatingResponse = 1.0f;  ///< scales how much the hulls move
-	};
 
 	virtual void DrawSettings() override;
 	virtual void LoadSettings(json& o_json) override;
@@ -159,7 +189,7 @@ struct PBRWater : Feature
 	struct GpuData
 	{
 		float4 Cascade0[PBRWaterModel::NumCascades];  // x 1 / tile size (1/unit), yz tile coordinate of the reference camera, w texel size (units)
-		float4 Cascade1[PBRWaterModel::NumCascades];  // x mean omega (rad/s), y 1 / its PM weight at unlimited fetch, z mean wavenumber (rad/unit)
+		float4 Cascade1[PBRWaterModel::NumCascades];  // x mean omega (rad/s), y 1 / its PM weight at unlimited fetch, z mean wavenumber (rad/unit), w unused
 		float4 Params0;
 		float4 Params1;
 		float4 Params2;
@@ -194,10 +224,16 @@ struct PBRWater : Feature
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
+		float4 Tune0;                                 // x river current speed (m/s), y flow period per metre of texel (s/m), z shortest flow period (s), w longest (s)
+		float4 Tune1;                                 // foam offset of each cascade
+		float4 Tune2;                                 // x foam cascade weight, y foam distance falloff exponent, z foam fade distance (m), w foam roughness modifier
+		float4 Tune3;                                 // x ripple horizontal displacement, y its clamp (texels), z shore train reach (waves), w surf residual foam
+		float4 Tune4;                                 // x shore set min, y shore set max, z detail normal strength calm, w gale
+		float4 Tune5;                                 // x point light emitter radius (units), y foam feather, z foam bubble size (m), w unused
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
-	/** @brief What the lit objects need of the swash (Lighting.hlsl, wetness and caustics); matches PBRWaterSettings in SharedData.hlsli. */
+	/** @brief What the lit objects need of the swash (Lighting.hlsl, wetness); matches PBRWaterSettings in SharedData.hlsli. */
 	struct alignas(16) SharedSettings
 	{
 		float4 SwashGrid;    // xy grid corner (absolute units), z 1 / extent (units), w enabled
@@ -269,6 +305,8 @@ private:
 	void UpdateFetchTexture();
 	void UpdateTerrainTexture();
 	void GatherInteractions(const PBRWaterModel::WaveSnapshot& snapshot, float dt);
+	/** @brief Main thread: the still water level of the exterior cells around the eye, for the ripple simulation's bed depth. */
+	RippleSimulation::WaterLevels GatherWaterLevels(const RE::NiPoint3& eye, bool exterior) const;
 	float WeatherTurbidityTarget() const;
 	/** @brief 0..1 how much of the current weather blend is rainy. */
 	float RainFraction() const;

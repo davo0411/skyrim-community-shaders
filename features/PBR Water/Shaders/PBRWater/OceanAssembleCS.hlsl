@@ -6,8 +6,13 @@
 //   Surface      : squared slopes (LEAN moments: mip-filtered, they keep the variance of the slopes a pixel averages
 //                  away)
 //
-// Foam is not made per band: a band's crests alone are not where the summed surface breaks. The shaders read the
-// Jacobian of the bands together (PBRWater::BreakingFoam).
+//   Foam         : one persistent value per cascade texel, accumulated from the Jacobian of the cascade's own horizontal
+//                  displacement. A direct port of CS_AssembleMaps' foam in GarrettGunnell/Water (Acerola,
+//                  https://github.com/GarrettGunnell/Water, MIT License, Copyright (c) 2023 Garrett Gunnell):
+//                      foam *= exp(-decay); foam = saturate(foam);
+//                      biased = max(0, -(jacobian - bias)); if (biased > threshold) foam += add * biased;
+//                  The rates are per 1/60 s there (one step per frame); here they scale by the frame time, so 60 fps is
+//                  identical and a paused game (frame time 0) neither grows nor decays the foam.
 // ============================================================================
 
 #include "PBRWater/OceanSpectrum.hlsli"
@@ -17,6 +22,7 @@ Texture2DArray<float4> Spatial : register(t0);  // after the inverse FFT, two sl
 RWTexture2DArray<float4> Displacement : register(u0);
 RWTexture2DArray<float4> Derivatives : register(u1);
 RWTexture2DArray<float2> Surface : register(u2);
+RWTexture2DArray<float> FoamField : register(u3);  // persistent: read, decayed and added to in place
 
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	uint size = (uint)Time.y;
@@ -35,4 +41,17 @@ RWTexture2DArray<float2> Surface : register(u2);
 	Displacement[id] = float4(displacement, shear);
 	Derivatives[id] = float4(slopes, compression);
 	Surface[id] = slopes * slopes;
+
+	// Jacobian of x -> x + D(x) from this cascade's own gradient (choppiness is already in the spectrum).
+	float steps = Time.w;  // frame time in 1/60 s: 0 while paused
+	[branch] if (steps > 0.0)
+	{
+		float jacobian = (1.0 + compression.x) * (1.0 + compression.y) - shear * shear;
+		float foam = FoamField[id] * exp(-Foam.w * steps);
+		foam = saturate(foam);
+		float biasedJacobian = max(0.0, -(jacobian - Foam.x));
+		if (biasedJacobian > Foam.y)
+			foam += Foam.z * steps * biasedJacobian;
+		FoamField[id] = foam;
+	}
 }

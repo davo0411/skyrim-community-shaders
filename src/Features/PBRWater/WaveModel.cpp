@@ -17,8 +17,6 @@ namespace PBRWaterModel
 		constexpr float Omega0 = static_cast<float>(TwoPi / LoopPeriod);
 		constexpr float JonswapAlpha = 0.0081f;  // Pierson-Moskowitz Phillips constant (open sea)
 		constexpr float JonswapGamma = 3.3f;
-		constexpr float SwellGamma = 7.0f;    // narrow-banded, long-travelled swell
-		constexpr float SwellSpread = 30.0f;  // Mitsuyasu exponent of the swell: long, parallel crests
 		constexpr float BandMargin = 0.9999f;
 
 		double Wrap(double phase)
@@ -61,7 +59,7 @@ namespace PBRWaterModel
 		float ShoreSet(const ShoreParams& p, float x, float y, float index)
 		{
 			const float scale = std::max(3.0f * p.deepLength, 1.0f);
-			return 0.45f + 1.1f * ValueNoise(x / scale + index * 0.14f, y / scale + index * 0.09f);
+			return p.setMin + (p.setMax - p.setMin) * ValueNoise(x / scale + index * 0.14f, y / scale + index * 0.09f);
 		}
 
 		// ---- Shared with OceanSpectrum.hlsli: keep the two in sync ----
@@ -137,7 +135,7 @@ namespace PBRWaterModel
 			const float omega = std::sqrt(G * k);
 			float density = Jonswap(omega, s.peakOmega, JonswapAlpha, JonswapGamma) * s.heightScale * s.heightScale;
 			if (s.swellAlpha > 0.0f)
-				density += Jonswap(omega, s.swellPeak, s.swellAlpha, SwellGamma);
+				density += Jonswap(omega, s.swellPeak, s.swellAlpha, s.swellGamma);
 			return density * G / (2.0f * omega);
 		}
 
@@ -411,7 +409,7 @@ namespace PBRWaterModel
 		                Spreading(cosWind, MitsuyasuExponent(omega, peakOmega, spreadPeak));
 		if (swellAlpha > 0.0f) {
 			const float cosSwell = (kx * swellDirX + ky * swellDirY) / k;
-			density += Jonswap(omega, swellPeak, swellAlpha, SwellGamma) * Spreading(cosSwell, SwellSpread);
+			density += Jonswap(omega, swellPeak, swellAlpha, swellGamma) * Spreading(cosSwell, swellSpread);
 		}
 		// E(kx, ky) = S(omega) D(theta) (d omega / dk) / k; each travelling wave holds half of its cell's variance.
 		const float energy = density * G / (2.0f * omega * k);
@@ -433,6 +431,8 @@ namespace PBRWaterModel
 		const float narrow = 1.0f - std::clamp(params.spread, 0.0f, 1.0f);
 		s.spreadPeak = 2.0f + 38.0f * narrow * narrow;
 		s.resolution = std::clamp(params.resolution, 64u, 1024u);
+		s.swellGamma = std::max(params.swellGamma, 1.0f);
+		s.swellSpread = std::clamp(params.swellSpread, 1.0f, 120.0f);
 
 		// Swell: a narrow JONSWAP from a distant storm, scaled to the requested significant height.
 		if (params.swellHeight > 0.01f && params.swellPeriod > 1.0f) {
@@ -445,7 +445,7 @@ namespace PBRWaterModel
 			for (int i = 0; i < Samples; ++i) {
 				const double w0 = std::exp(lo + (hi - lo) * i / Samples);
 				const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
-				m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.swellPeak, 1.0f, SwellGamma) * (w1 - w0);
+				m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.swellPeak, 1.0f, s.swellGamma) * (w1 - w0);
 			}
 			const double target = params.swellHeight * 0.25;
 			s.swellAlpha = m0 > 0.0 ? static_cast<float>(target * target / m0) : 0.0f;
@@ -528,13 +528,6 @@ namespace PBRWaterModel
 			s.swellHeight = s.swellAlpha > 0.0f ? params.swellHeight * static_cast<float>(UnitsPerMetre) : 0.0f;
 		}
 		s.displacementBound = 5.0f * sigma * std::max(1.0f, s.choppiness) * static_cast<float>(UnitsPerMetre) + 1.0f;
-		s.whitecapCoverage = std::clamp(3.84e-6f * std::pow(U, 3.41f) * std::max(params.foamAmount, 0.0f), 0.0f, 1.0f);
-		double foamSlope = 0.0;
-		for (const CascadeBand& band : s.cascades) {
-			const double share = FoamShare(band.meanOmega, s.peakOmega);
-			foamSlope += share * share * band.meanSquareSlope;
-		}
-		s.foamThreshold = FoamThreshold(s.choppiness * static_cast<float>(std::sqrt(foamSlope)), s.whitecapCoverage, s.foamDeviations);
 		s.calm = 4.0f * sigma < 0.01f;
 		return s;
 	}
@@ -551,38 +544,12 @@ namespace PBRWaterModel
 		return Smoothstep(0.3f, 0.8f, shoaled / (ShoreBreakerLimit * depth));
 	}
 
-	float FoamShare(float omega, float peak)
-	{
-		return Smoothstep(5.0f, 3.0f, omega / std::max(peak, 1.0f));
-	}
-
-	float FoamThreshold(float spread, float coverage, float& deviations)
-	{
-		// The measured moments of the eigenvalue (isotropic sea): mean 1 - 0.445 s, standard deviation 0.56 s.
-		if (!(coverage > 0.0f)) {
-			deviations = -100.0f;
-			return -1.0f;
-		}
-		constexpr double Retained = 0.8607080;  // g = e^-0.15
-		const double W = std::min(static_cast<double>(coverage), 0.99);
-		const double breaking = W * (1.0 - Retained) / (1.0 - Retained * W);
-		// Foam ramps from 0 at the threshold T to 1 a sigma below it: its mean over the sea has to be the share that breaks.
-		// With z = (T - mean) / sigma that mean is I(z) - I(z - 1), I(z) = z Phi(z) + phi(z) the integral of the normal CDF.
-		auto integral = [](double z) {
-			return z * 0.5 * std::erfc(-z * std::numbers::sqrt2 * 0.5) + std::exp(-0.5 * z * z) * 0.3989422804;
-		};
-		double lo = -6.0, hi = 6.0;
-		for (int i = 0; i < 40; ++i) {
-			const double z = 0.5 * (lo + hi);
-			(integral(z) - integral(z - 1.0) < breaking ? lo : hi) = z;
-		}
-		deviations = static_cast<float>(0.5 * (lo + hi));
-		return std::clamp(1.0f - 0.445f * spread + 0.56f * spread * deviations, 0.3f, 0.8f);
-	}
-
-	ShoreParams UpdateShoreParams(const OceanSpectrum& spectrum, const ShoreParams* previous, double dt)
+	ShoreParams UpdateShoreParams(const OceanSpectrum& spectrum, const ShoreParams* previous, double dt, const ShoreTuning& tuning)
 	{
 		ShoreParams p;
+		p.trainCycles = tuning.trainCycles;
+		p.setMin = tuning.setMin;
+		p.setMax = tuning.setMax;
 		// The shore train carries the open sea's swell and wind sea.
 		p.swellHeight = spectrum.swellHeight;
 		p.windSeaHeight = spectrum.windSeaHeight;
@@ -593,7 +560,7 @@ namespace PBRWaterModel
 		// Skyrim's coast is compressed as its distances are (FetchScale): a bay a few hundred metres across holds the coast of
 		// a real one kilometres across. Waves of the open sea's period would be as long as the beach is deep, one crest at a
 		// time, so its shores get waves of the short periods that fit a train of them on these beds.
-		const float targetOmega = std::clamp(peak, static_cast<float>(TwoPi / ShoreLongestPeriod), static_cast<float>(TwoPi / ShoreShortestPeriod));
+		const float targetOmega = std::clamp(peak, static_cast<float>(TwoPi / tuning.longestPeriod), static_cast<float>(TwoPi / tuning.shortestPeriod));
 		const float targetSwellDirection = std::atan2(spectrum.swellDirY, spectrum.swellDirX);
 
 		if (previous && previous->omega > 0.0f) {
@@ -607,7 +574,7 @@ namespace PBRWaterModel
 			p.swellDirection = targetSwellDirection;
 		}
 		// The clock integrates the frequency, so a frequency that changes never moves the waves.
-		p.rate = p.omega * ShoreTimeScale;
+		p.rate = p.omega * tuning.timeScale;
 		p.phase = previous ? std::fmod(previous->phase + static_cast<double>(p.rate) * dt, TwoPi * ShoreClockCycles) : 0.0;
 
 		const float units = static_cast<float>(UnitsPerMetre);
@@ -617,10 +584,10 @@ namespace PBRWaterModel
 
 		// Bound of the run-up: Stockdon et al. (2006), 2 % exceedance, R = 1.1 (<eta> + S / 2) with set-up
 		// <eta> = 0.35 b sqrt(H0 L0) and swash S = sqrt(H0 L0 (0.563 b^2 + 0.004)), for the highest wave of the biggest set
-		// (ShoreSet at most 1.55) of the full open sea (its significant height, as Stockdon fit it) on a steep (b = 0.2)
+		// (ShoreSet at most setMax) of the full open sea (its significant height, as Stockdon fit it) on a steep (b = 0.2)
 		// beach, with a margin. Mirrors PBRWater::SwashTip.
 		constexpr float Slope = 0.2f;
-		const float highest = 1.55f * p.MaxDeepHeight() / units;
+		const float highest = p.setMax * p.MaxDeepHeight() / units;
 		const float hl = std::sqrt(highest * L0);
 		const float runup = 1.1f * (0.35f * Slope * hl + 0.5f * hl * std::sqrt(0.563f * Slope * Slope + 0.004f));
 		p.maxRunup = runup * units + 20.0f;
@@ -658,7 +625,7 @@ namespace PBRWaterModel
 		{
 			constexpr float t = 1e-3f;
 			return Close(a.peakOmega, b.peakOmega, t) && Close(a.heightScale, b.heightScale, t) && Close(a.spreadPeak, b.spreadPeak, t) &&
-			       Close(a.swellAlpha, b.swellAlpha, t) && Close(a.swellPeak, b.swellPeak, t) && std::abs(a.windDirX - b.windDirX) < t &&
+			       Close(a.swellAlpha, b.swellAlpha, t) && Close(a.swellPeak, b.swellPeak, t) && Close(a.swellGamma, b.swellGamma, t) && Close(a.swellSpread, b.swellSpread, t) && std::abs(a.windDirX - b.windDirX) < t &&
 			       std::abs(a.windDirY - b.windDirY) < t && std::abs(a.swellDirX - b.swellDirX) < t && std::abs(a.swellDirY - b.swellDirY) < t;
 		}
 
@@ -1691,13 +1658,13 @@ namespace PBRWaterModel
 				weight *= breaking;
 		}
 
-		// The shore wave train (PBRWater::BuildWaveContext and ShoreWaves): it reaches ShoreTrainCycles waves out from the
+		// The shore wave train (PBRWater::BuildWaveContext and ShoreWaves): it reaches trainCycles waves out from the
 		// shore and rides on the FFT sea; in the surf (ShoreSurfShare) the cascades carrying the same waves fade out as its
 		// breakers come in, so the energy stays about the same and the short chop stays on top.
 		if (shore.enabled && shoreField && ctx.hasTerrain && ocean) {
 			const auto ray = ShoreAt(fx, fy);
 			const float cycles = ray.travelTime * shoreField->omega / static_cast<float>(TwoPi);
-			const float weight = Smoothstep(ShoreTrainCycles, 0.5f * ShoreTrainCycles, cycles) * ray.weight * ray.room;
+			const float weight = Smoothstep(shore.trainCycles, 0.5f * shore.trainCycles, cycles) * ray.weight * ray.room;
 			if (weight > 0.0f) {
 				ShoreTrainContext& t = ctx.train;
 				t.weight = weight;

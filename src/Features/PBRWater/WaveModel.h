@@ -62,11 +62,12 @@ namespace PBRWaterModel
 		float heightScale = 1.0f;     ///< artistic scale on the wind sea
 		float choppiness = 1.0f;      ///< horizontal displacement scale (1 = linear theory)
 		float spread = 0.6f;          ///< directional spread, 0 = all waves aligned with the wind
+		float swellGamma = 7.0f;      ///< JONSWAP peak enhancement of the swell: higher is narrower banded
+		float swellSpread = 30.0f;    ///< Mitsuyasu exponent of the swell's directional spreading: higher is more parallel
 		float swellHeight = 0.0f;     ///< significant height of the swell (m)
 		float swellPeriod = 10.0f;    ///< peak period of the swell (s)
 		float swellDirection = 0.0f;  ///< radians, direction the swell travels towards
 		uint32_t resolution = 256;    ///< GPU FFT size; sets the shortest wave of the smallest cascade
-		float foamAmount = 1.0f;      ///< multiplier on the measured whitecap coverage
 	};
 
 	/** @brief One cascade's share of the spectrum (open sea). */
@@ -93,10 +94,12 @@ namespace PBRWaterModel
 		float windDirX = 1.0f, windDirY = 0.0f;
 		float peakOmega = 1.0f;  ///< fully developed (Pierson-Moskowitz) peak, rad/s
 		float heightScale = 1.0f;
-		float spreadPeak = 8.0f;  ///< Mitsuyasu spreading exponent at the peak
-		float choppiness = 1.0f;  ///< horizontal displacement scale actually used (folding-limited)
-		float swellAlpha = 0.0f;  ///< swell spectrum level, normalised to the swell height
-		float swellPeak = 0.6f;   ///< rad/s
+		float spreadPeak = 8.0f;    ///< Mitsuyasu spreading exponent at the peak
+		float choppiness = 1.0f;    ///< horizontal displacement scale actually used (folding-limited)
+		float swellAlpha = 0.0f;    ///< swell spectrum level, normalised to the swell height
+		float swellPeak = 0.6f;     ///< rad/s
+		float swellGamma = 7.0f;    ///< JONSWAP peak enhancement of the swell
+		float swellSpread = 30.0f;  ///< Mitsuyasu exponent of the swell's spreading
 		float swellDirX = 1.0f, swellDirY = 0.0f;
 		uint32_t resolution = 256;
 
@@ -106,9 +109,6 @@ namespace PBRWaterModel
 		float swellHeight = 0.0f;        ///< Hs of the swell alone in units
 		float meanSquareSlope = 0.0f;    ///< all cascades
 		float displacementBound = 0.0f;  ///< units; no displacement component exceeds this (open sea)
-		float whitecapCoverage = 0.0f;   ///< fraction of the sea covered by whitecaps (Monahan 1980), times the foam amount
-		float foamThreshold = -1.0f;     ///< the foam Jacobian's smallest eigenvalue below which waves start to break (FoamThreshold)
-		float foamDeviations = -100.0f;  ///< the same in standard deviations from the eigenvalue's mean, for any local sea
 		bool calm = true;                ///< nothing worth displacing
 
 		/** @brief Amplitude (m) of the wave travelling along (kx, ky) rad/m on a lattice of spacing dk, before the random coefficient. */
@@ -118,8 +118,6 @@ namespace PBRWaterModel
 	/** @brief Builds the sea state for the given wind and swell. */
 	OceanSpectrum GenerateSpectrum(const SpectrumParams& params);
 
-	/** @brief The share of a band of mean frequency `omega` in the foam Jacobian, under a spectral peak `peak`. Mirrors PBRWater::FoamShare. */
-	float FoamShare(float omega, float peak);
 	/** @brief The share of a cascade of mean frequency `omega` the shore train takes over. Mirrors PBRWater::ShoreHandOver. */
 	float ShoreHandOver(float omega, float trainOmega);
 	/**
@@ -127,24 +125,6 @@ namespace PBRWaterModel
 	 * breaker limit at `depthMetres`. The train takes the FFT's long waves over only there. Mirrors PBRWater::ShoreSurfShare.
 	 */
 	float ShoreSurfShare(float deepHeightMetres, float depthMetres, float trainOmega);
-
-	/**
-	 * @brief The smallest eigenvalue of the foam Jacobian below which waves break.
-	 *
-	 * Tessendorf, Reinhard & Gao (2023, Algorithm 1): the whitecap coverage W measured by Monahan & O'Muircheartaigh
-	 * (1980) is the crests breaking now plus the foam they leave behind, so a share W (1 - g) / (1 - g W) of the sea breaks
-	 * at any instant (g = e^-0.15), and the threshold is that quantile of the eigenvalue over the sea. Their histogram of
-	 * the simulated surface is replaced by the moments of the eigenvalue, which on this spectrum (measured from 4 to
-	 * 22 m/s, wave heights to 2.2) are those of an isotropic sea: mean 1 - 0.445 s, standard deviation 0.56 s, with s the
-	 * spread of the Jacobian's trace. In deep water the trace is the surface's vertical acceleration over g, so the
-	 * threshold is a crest falling at a fraction of g: it comes out at 0.7 (0.3 g) over the whole range of winds.
-	 * A calm sea has no crests to whiten however rare its steepest are, so the threshold stops at 0.72; the Wave Height
-	 * setting steepens the sea past anything the wind makes, so it may fall below g / 2, down to where the choppiness
-	 * lets the surface fold (0.3).
-	 * @param spread   standard deviation of the trace of the foam Jacobian over the open sea
-	 * @param coverage whitecap coverage (0..1); none: no wave breaks
-	 */
-	float FoamThreshold(float spread, float coverage, float& deviations);
 
 	/** @brief Deterministic standard complex Gaussian for lattice index (m, n) of a cascade. Mirrors OceanSpectrum.hlsli. */
 	void OceanNoise(int32_t m, int32_t n, uint32_t cascade, float& re, float& im);
@@ -157,14 +137,21 @@ namespace PBRWaterModel
 	inline constexpr float ShoreHeightRatio = 0.7071f;
 	/// A wave's water is carried forward by at most this many wave heights. Mirrored by PBRWater::ShoreForwardHeights.
 	inline constexpr float ShoreForwardHeights = 16.0f;
-	/// How many waves out from the shore the train reaches, fading in over the outer half. Mirrored by PBRWater::ShoreTrainCycles.
-	inline constexpr float ShoreTrainCycles = 7.0f;
-	/// The shore train's periods (s), within which it follows the sea.
-	inline constexpr float ShoreShortestPeriod = 2.5f;
-	inline constexpr float ShoreLongestPeriod = 3.5f;
-	/// The shore waves' clock runs this much slower than their frequency: they keep their spacing and heights (the
-	/// coastline map is traced at the frequency) but roll in slower, at a pace that reads on Skyrim's compressed coast.
-	inline constexpr float ShoreTimeScale = 0.4f;
+	/**
+	 * @brief The shore train's artistic scales (Settings): every one is a choice, none a measurement. The shaders read
+	 * the same values from the frame constants, so the CPU mirror and the GPU agree.
+	 */
+	struct ShoreTuning
+	{
+		float shortestPeriod = 2.5f;  ///< s: the shore train's periods, within which it follows the sea
+		float longestPeriod = 3.5f;
+		/// The shore waves' clock runs this much slower than their frequency: they keep their spacing and heights (the
+		/// coastline map is traced at the frequency) but roll in slower, at a pace that reads on Skyrim's compressed coast.
+		float timeScale = 0.7f;
+		float trainCycles = 7.0f;  ///< how many waves out from the shore the train reaches, fading in over the outer half
+		float setMin = 0.45f;      ///< wave sets: the factor on one wave's height runs from setMin to setMax
+		float setMax = 1.55f;
+	};
 	/// No wave is steeper than this height over wavelength (Miche 1944). Mirrored by PBRWater::ShoreSteepestWave.
 	inline constexpr float ShoreSteepestWave = 0.142f;
 	/// The wave clock wraps after this many waves: the number of a wave picks its height, so it must outlast a set.
@@ -179,11 +166,14 @@ namespace PBRWaterModel
 	struct ShoreParams
 	{
 		float omega = 1.0f;           ///< angular frequency of the dominant waves (rad/s), eased
-		float rate = 0.4f;            ///< the clock's rate (rad/s): omega times ShoreTimeScale
+		float rate = 0.7f;            ///< the clock's rate (rad/s): omega times ShoreTimeScale
 		float swellDirection = 0.0f;  ///< direction the swell travels towards (rad): sets which shores it reaches
 		float swellHeight = 0.0f;     ///< significant height of the swell arriving from the open sea (units)
 		float windSeaHeight = 0.0f;   ///< significant height of the open-sea wind sea (units), before the local fetch limit
 		float period = 10.0f;         ///< peak period 2 pi / omega (s)
+		float trainCycles = 7.0f;     ///< ShoreTuning::trainCycles
+		float setMin = 0.45f;         ///< ShoreTuning::setMin
+		float setMax = 1.55f;         ///< ShoreTuning::setMax
 		float deepLength = 1.0f;      ///< deep-water wavelength g T^2 / (2 pi) (units)
 		float maxRunup = 0.0f;        ///< how far above the still water the swash can reach (units), for bounds
 		/// Wave clock (rad, wrapped after ShoreClockCycles waves): integrated frame by frame (phase += omega dt), so a changing period never moves the crests.
@@ -202,8 +192,9 @@ namespace PBRWaterModel
 	 * (phase += omega dt), so a changing sea never makes the waves jump.
 	 * @param previous last frame's parameters (nullptr on the first frame)
 	 * @param dt       seconds of wave time since then
+	 * @param tuning   the periods, clock pace, reach and wave sets (Settings)
 	 */
-	ShoreParams UpdateShoreParams(const OceanSpectrum& spectrum, const ShoreParams* previous, double dt);
+	ShoreParams UpdateShoreParams(const OceanSpectrum& spectrum, const ShoreParams* previous, double dt, const ShoreTuning& tuning);
 
 	/** @brief Depth-limited breaking: the significant height of random waves in the surf zone stays below this share of the depth (Thornton & Guza 1983). */
 	inline constexpr float SurfHeightRatio = 0.6f;

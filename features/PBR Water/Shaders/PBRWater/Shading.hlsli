@@ -97,7 +97,7 @@ namespace PBRWater
 	/// Angular radius of the sun disc (rad).
 	static const float SunAngularRadius = 0.00465;
 	/// Physical radius given to point lights (units, ~a torch flame): Skyrim lights have no emitter size.
-	static const float PointLightEmitterRadius = 8.0;
+	float PointLightEmitterRadius() { return Tune5.x; }
 
 	/// Angular radius (tangent) of a spherical emitter at `distance`; never more than 45 degrees.
 	float EmitterAngularRadius(float radius, float distance)
@@ -135,7 +135,7 @@ namespace PBRWater
 
 	/// Size of the foam texture's tile (units): FoamPattern bakes PBRWaterFoam::BubblesPerTile large bubbles of 20 cm
 	/// across it, with bubbles 2.7 times smaller in the walls between them.
-	static const float FoamTile = 0.2 * UnitsPerMetre * PBRWaterFoam::BubblesPerTile;
+	float FoamTile() { return Tune5.z * UnitsPerMetre * PBRWaterFoam::BubblesPerTile; }
 
 	// ------------------------------------------------------------------------
 	// Per-pixel surface
@@ -144,8 +144,8 @@ namespace PBRWater
 	{
 		float3 normal;
 		float roughness;
-		float foamEigen;   // smallest eigenvalue of the foam Jacobian (debug)
-		float foam;        // 0..1 the waves are breaking at this pixel now
+		float fftFoam;     // 0..1 the open sea's foam here (FftFoam): drawn raw, never through the shore foam's pattern
+		float foam;        // 0..1 the shore waves' white water at this pixel
 		float swashTip;    // the swash tip at this pixel (units above the still water; SwashTip)
 		float swashLens;   // its lens coefficient (1/unit; SwashTop)
 		float3 waveInfo;   // the shore wave here, for the debug view
@@ -175,13 +175,14 @@ namespace PBRWater
 	/**
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
 	 * @param waveParam  xyz undisplaced camera-relative position, w flow damping
+	 * @param flowVelocity the river current here (units/s, interpolated from the vertices; FlowVelocity)
 	 * @param shoreState the vertex shader's swash (SurfaceDisplacement::shore): x tip, y swash mark
 	 * @param gust       wind gust factor (WindGust, interpolated from the vertices)
 	 * @param detailNormal vanilla normal-map normal (z up)
 	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
 	 *                       blended amplitude
 	 */
-	SurfaceShading ShadeSurface(float4 waveParam, float4 shoreState, float gust, float3 detailNormal, float detailVariance)
+	SurfaceShading ShadeSurface(float4 waveParam, float2 flowVelocity, float4 shoreState, float gust, float3 detailNormal, float detailVariance)
 	{
 		SurfaceShading o;
 
@@ -190,6 +191,7 @@ namespace PBRWater
 		float footprint = max(length(dpdx), length(dpdy));
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
+		ctx.flow = flowVelocity;
 		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx);
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
 
@@ -202,7 +204,7 @@ namespace PBRWater
 		float slick = WindrowSlick(windrows);
 		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
 		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
-		float windDetail = lerp(0.75, 1.3, saturate(wind / 8.0));
+		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
 		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
@@ -218,12 +220,12 @@ namespace PBRWater
 		// and turned the roughness into blocks (the ripples are magnified, never sub-pixel, so they need no term).
 		float windVariance = 0.5 * (WindMeanSquareSlope(wind) * (1.0 - 0.8 * slick) + RainMeanSquareSlope());
 		float mapVariance = detailVariance * detailScale * detailScale;
-		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance + windVariance + mapVariance);
+		o.roughness = CombinedRoughness(Light0.x + waves.fftFoam * Tune2.w, waves.slopeVariance + windVariance + mapVariance);
 		o.windSpeed = wind;
-		o.foamEigen = waves.foamEigen;
+		o.fftFoam = waves.fftFoam;
 
-		// Foam (PBRWater.hlsli): what breaks at this pixel now, on the crest line of the open sea's waves, and in the shore waves.
-		o.foam = max(BreakingFoam(waves.foamEigen, waves.displacement.z - ctx.elevation, ctx) * CrestLine(waves.foamPhase), waves.shoreFoam);
+		// Foam (PBRWater.hlsli): the shore waves carry theirs; the open sea's is o.fftFoam.
+		o.foam = waves.shoreFoam;
 		// The swash tip per pixel: interpolated from the vertices it is linear across each triangle, so the sheet ended in
 		// straight lines along the triangle edges.
 		// Also where only the vertices around see the swash (steep rocks and banks where it does not break): keeping the
@@ -273,8 +275,8 @@ namespace PBRWater
 			// Depth (red, 10 m), beach where waves break and run up (green), break stage of the shore waves (blue).
 			return float3(saturate(s.depth / (10.0 * UnitsPerMetre)), s.beach, s.breakStage);
 		case 4:
-			// Foam Jacobian: its compression (red), the waves breaking now (green) and the shore waves' break stage (blue).
-			return float3(saturate(1.0 - s.foamEigen), s.foam, s.breakStage);
+			// Cascade foam: the open sea's (red), the shore waves' (green) and the shore waves' break stage (blue).
+			return float3(s.fftFoam, s.foam, s.breakStage);
 		case 5:
 			return s.roughness.xxx;
 		case 6:

@@ -17,6 +17,8 @@ namespace
 
 	/// Where the bore's front stands in the wave, in phase.
 	constexpr float BoreFront = 0.16f;
+	/// The least the surface may be stretched along a wave by its forward motion (1 = unchanged, 0 = folded over).
+	constexpr float MinStretch = 0.35f;
 
 	struct Shape
 	{
@@ -82,6 +84,19 @@ namespace
 				mean += row[i].up;
 			}
 			mean /= static_cast<float>(W);
+			// The plunging lip carries the crest forward faster than the surface around it moves, and past a point the
+			// surface folds over itself. The mesh carries the wave at a vertex every metre or so, so a fold draws as a flat
+			// top over a vertical wall (a step with right-angled edges) that jumps between vertices as it moves. The
+			// forward displacement is at most a wavelength (ShoreWaves), so 1 + d(forward)/d(phase) bounds the surface's
+			// stretch along the wave: each stage is scaled so it never falls below MinStretch.
+			float steepest = 0.0f;
+			for (uint32_t i = 1; i < W; ++i)
+				steepest = std::min(steepest, (row[i].forward - row[i - 1].forward) / dx);
+			if (1.0f + steepest < MinStretch) {
+				const float scale = (1.0f - MinStretch) / -steepest;
+				for (auto& point : row)
+					point.forward *= scale;
+			}
 			for (uint32_t i = 0; i < W; ++i) {
 				const auto& a = row[i == 0 ? 0 : i - 1];
 				const auto& b = row[i == W - 1 ? W - 1 : i + 1];

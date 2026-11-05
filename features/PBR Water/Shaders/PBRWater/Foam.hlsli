@@ -23,14 +23,11 @@ namespace PBRWaterFoam
 	/// absorbs (Frouin, Schwindling & Deschamps 1996).
 	static const float3 Albedo = float3(0.47, 0.53, 0.56);
 
-	/// How far the white share of the pattern is feathered, in the texture's values.
-	static const float Feather = 0.12;
-
 	/**
 	 * Crest's black-point fade: the share `coverage` of the (uniform) texture values `value` that turns white, feathered.
 	 * The feather is held within the values' range: a window reaching past 1 whitened far more than the coverage.
 	 */
-	float BlackPoint(float value, float coverage)
+	float BlackPoint(float value, float coverage, float Feather)
 	{
 		float threshold = 1.0 - coverage;
 		float feather = max(min(Feather, min(coverage, threshold)), 1e-3);
@@ -46,9 +43,10 @@ namespace PBRWaterFoam
 	 * @param p    Lagrangian absolute position (units)
 	 * @param foam the foam here, 0..1
 	 * @param tile size of the foam texture's tile (units) up close
+	 * @param Feather how far the white share of the pattern is feathered, in the texture's values (0.12 by default)
 	 * @param s    sampler (wrap, anisotropic)
 	 */
-	float SurfaceFoam(float2 p, float foam, float tile, SamplerState s)
+	float SurfaceFoam(float2 p, float foam, float tile, float Feather, SamplerState s)
 	{
 		float amount = saturate(foam);
 		// The gradients are taken first, in uniform control flow; most of the water has no foam and skips the rest.
@@ -72,7 +70,7 @@ namespace PBRWaterFoam
 			// The mix of uniform values is narrower than any of them: back to their contrast, or the foam would thin out.
 			float total = weights.x + weights.y + weights.z;
 			float value = saturate(0.5 + (dot(values, weights) / total - 0.5) * total * rsqrt(dot(weights, weights)));
-			result = BlackPoint(value, amount) * (0.35 + 0.65 * amount);
+			result = BlackPoint(value, amount, Feather) * (0.35 + 0.65 * amount);
 		}
 		return result;
 	}

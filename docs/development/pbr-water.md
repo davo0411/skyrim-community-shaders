@@ -34,7 +34,7 @@ wave train.
     developed Pierson-Moskowitz peak for the weather's wind) plus a narrow JONSWAP swell from distant storms
     (height, period and direction relative to the wind are settings and weather variables). Directional
     spreading is `cos^2s(theta / 2)` (Longuet-Higgins 1963) with the Mitsuyasu exponent, narrowest at the
-    peak (`Tuning::DirectionalSpread`).
+    peak (the Wind Turbulence setting, `DirectionalSpread`).
 -   **Synthesis** (`OceanSpectrumCS` -> `OceanFFTCS` rows -> columns -> `OceanAssembleCS`): each lattice
     point gets `h(k, t) = h0(k) e^(-i w t) + conj(h0(-k)) e^(+i w t)` with `h0 = xi * a(k)`, where `xi` is a
     standard complex Gaussian from a hash of the lattice index (no textures, and the CPU can reproduce it).
@@ -43,7 +43,7 @@ wave train.
     512 per the Wave Detail setting).
 -   **Outputs** (texture arrays, one slice per cascade, full mip chains): displacement + shear, slopes +
     compression, and `slope^2` (RG16F). Last frame's displacement is kept for
-    motion vectors. Foam is not made per cascade (see Foam).
+    motion vectors. The open sea's foam is a persistent R32F array beside them, one slice per cascade, updated in place (see Foam).
 -   **Time**: frequencies are quantised to multiples of `2 pi / 1024 s`, so the sea repeats exactly every
     1024 s and the GPU only ever sees time as a fraction of that loop. Wind changes rescale amplitudes on
     fixed random coefficients, so the sea changes continuously; pausing freezes it.
@@ -97,6 +97,19 @@ Per-weather overrides are registered with the weather variable registry (`Regist
 wave height, choppiness, directional spread, swell height / period / direction, storm wind speed, foam,
 visibility, subsurface, roughness.
 
+### Rivers
+
+Where Unified Water's worldspace flowmap shows a current, the waves are damped (`WaveParam.w`) and carried along it.
+The vertex/domain shader reads the flowmap once by position (`GetWaveFlowDamping`) and gets the current
+(`PBRWater::FlowVelocity`: RG direction, B x A strength, the River Current Speed setting at full strength); the pixel shader gets it as
+a vertex interpolant (`FlowVelocity`). After Crest's `ShapeCombine` flow, `FlowPhases` gives each cascade two reads
+pushed back along the current by two phases of a sawtooth clock half a period apart (period from the cascade's texel, a
+power of two so the clock's 86400 s wrap never jumps), cross-faded with triangle weights. `EvaluateWaves` (with last
+frame's phases for motion vectors) and `EvaluateWavesFiltered` (displacement, derivatives and LEAN moments) use the same
+blend, and only where the current is non-zero (`[branch]`), so still water costs nothing. Anything else sampled per
+cascade with the cascade UV (a foam slice) should take its reads from `FlowPhases` too. The flow clock is the game
+timer (pauses with the game), independent of the FFT clock.
+
 ## Shoreline
 
 Within a few waves of the shore the random sea hands over to Fluid Flux 2-style coastline waves (Imaginary Blend;
@@ -147,21 +160,23 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
     -   _Shape_ (`ShoreProfile.cpp`, t114): Fluid Flux draws its waves from a canned profile animation, a texture by
         position across the wave and life. This one is computed at start-up (256 x 64, two RGBA16F slices): forward and
         upward displacement, their derivatives, and the white water. A sinusoid narrows into a peaked crest over long
-        flat troughs as it shoals (cnoidal), its water is thrown ahead of the front so the surface folds into a lip
+        flat troughs as it shoals (cnoidal), its water is thrown ahead of the front into a lip (each stage's forward motion is
+        scaled so the surface never stretches below 0.35 of itself: a fold drew as a flat top over a right-angled wall at
+        the mesh's vertex spacing)
         (plunging), which falls into a bore: a short front and a long back (Svendsen 2006), lower than the wave that
         broke. Displacement and surface vanish at both ends of a wave, so consecutive waves meet without a step. The sea's
         level comes from the depth at the point (continuous), not from the wave.
-    -   _Hand-over_ (`ctx.train`): the train takes over within `ShoreTrainCycles` (7) waves of the shore, faded over the
+    -   _Hand-over_ (`ctx.train`): the train takes over within `ShoreTrainCycles` (setting, default 7) waves of the shore, faded over the
         outer half, counted in waves rather than depth: the beds fall away within a wave or two of the waterline, and a
         depth limit left room for one wave. Offshore it rides on the FFT sea. Only in the surf, as its shoaled height
         nears the breaker limit (`ShoreSurfShare`), does it take the random sea's energy up to twice its frequency
         (`ShoreHandOver`), so the breakers are the train's with the short chop on top. Handing over wherever the train
         reached replaced a stormy FFT sea with the smooth train hundreds of metres out.
-    -   _Period_: the train follows the sea's peak period held to 2.5-3.5 s (`ShoreShortestPeriod`,
+    -   _Period_: the train follows the sea's peak period held to 2.5-3.5 s by default (settings `ShoreShortestPeriod`,
         `ShoreLongestPeriod`): Skyrim's coast is compressed as its distances are (Fetch Scale), and the open sea's
         period gave one wave as long as the beach is deep.
-        The clock runs at `ShoreTimeScale` (0.4) of that frequency: the crests keep their spacing and heights (the field's
-        phase lag is traced at the frequency) and roll in 2.5 times slower, which reads better on the compressed coast.
+        The clock runs at `ShoreTimeScale` (setting, default 0.7) of that frequency: the crests keep their spacing and heights (the field's
+        phase lag is traced at the frequency) and roll in about 1.4 times slower, which reads better on the compressed coast.
     -   _Surf foam_: besides the bores' white water (the profile), the surf keeps a lace of residual foam
         (`ShoreResidualFoam`) wherever the train is depth-limited (`ShoreBreakRatio` past 0.8): it follows the surf, not a
         wave, so it stays put as the crests run through it.
@@ -340,42 +355,37 @@ camera 64 segments are still 0.9 m apart. The bigger saving from here is structu
     length measured from the depth buffer to the _displaced_ surface. Reflections no longer vanish in
     shallow water.
 -   Wave subsurface scattering (Atlas, GDC 2019).
+-   **Caustics on the bed** come from Water Effects (`WaterEffects::ComputeCaustics`, for every shader that draws them, PBR
+    Water or not): after Crest's `ApplyCaustics`, the pattern is read where the sun's light crossed the surface
+    (`depth * sun.xy / (4 sun.z)` away) and blurs with `|depth - focal depth| / depth of field` mip levels on top of the
+    hardware's (focal depth 2 m, field 0.33 m). Its projection, low-sun limit, focal depth, depth of field and maximum
+    blur are Water Effects settings (`SharedData::waterEffectsSettings`).
 -   Drifting sediment patches and wind gusts are tens of metres across: their noise (`TurbidityPatches`, `WindGust`)
     is baked once per frame around the camera (`SurfaceNoiseCS`), the vertices read it (`PBRWater::SurfaceNoise`,
     evaluating it themselves beyond the bake) and the pixels interpolate it.
 -   **Foam** is made only where waves break, and lit as a diffuse scatterer. One setting, Foam Amount (1 = as measured).
-    -   _Open sea_ (`PBRWater::BreakingFoam`): the smallest eigenvalue of the Jacobian of the horizontal displacement
-        `x -> x + D(x)` (Tessendorf 2001, sec. 4.6) below a threshold (Tessendorf, Reinhard & Gao 2023). In deep water
-        `div D` is the surface's vertical acceleration over `g`, wave by wave, so this is Longuet-Higgins' dynamic
-        breaking criterion. The Jacobian is taken with the waves' height, not the choppy displacement, which is held back
-        in a young sea so the mesh does not fold. How far below the threshold a point lies is how hard it breaks: foam
-        ramps from nothing at the threshold to whole one standard deviation below it, so a wave's edge is thin and only
-        its core dense (a 0.03-wide edge turned every break solid white at once: the white splotches).
-    -   _Which waves_ (`FoamShare`): those around the local spectral peak, up to 3 to 5 times its frequency (from
-        1 rad/s). They are the ones that break and entrain air (Banner, Babanin & Young 2000). Where the shore train
-        takes those waves over from the FFT (`ShoreHandOver`), the train's compression joins the Jacobian, and the
-        threshold keeps the sea's spread from before the hand-over: foam follows the waves that are drawn, not the shore
-        field (without the train the sea broke only in the channels it had no room for).
-    -   _How much_ (`FoamThreshold`): Tessendorf et al.'s Algorithm 1. Monahan & O'Muircheartaigh's (1980) coverage
-        `W = 3.84e-6 U^3.41` (times Foam Amount) is the crests breaking now plus the foam they leave, so
-        `W (1 - g) / (1 - g W)` (`g = e^-0.15`) breaks at any instant. The eigenvalue's moments are those of an isotropic
-        sea, mean `1 - 0.445 s` and standard deviation `0.56 s`, `s` the spread of the waves that break; the threshold is
-        set in standard deviations so that the ramp's mean over the sea is that share (`z` with `I(z) - I(z - 1)` the
-        share, `I` the integral of the normal CDF), and each pixel applies it to its own sea (the cascades' weights there
-        and their mean square steepness, `Cascade1.w`). A threshold set for the open sea had a sheltered bay's younger,
-        steeper sea break all over, in a net of white lines. No water this gentle breaks at all (the threshold stays
-        below 0.8), so ponds and streams need no gate.
+    -   _Open sea_ (`OceanAssembleCS`, `PBRWater::FftFoam`): a direct port of the foam of GarrettGunnell/Water (Acerola, MIT).
+        Every texel of every cascade keeps a foam value (`OceanFoam`, t121, mip-mapped). Each frame, from the Jacobian
+        `J = (1 + dDx/dx)(1 + dDy/dy) - (dDx/dy)^2` of that cascade's own displacement (choppiness is already in the
+        spectrum): `foam *= exp(-decay)`, `foam = saturate(foam)`, `biased = max(0, bias - J)`, and
+        `if (biased > threshold) foam += add * biased`. Acerola steps once per frame; here the decay exponent and the add
+        scale by the frame time in 1/60 s, so 60 fps is identical and a paused game neither grows nor decays the foam.
+        The foam is cleared when the resources are made and when the sea goes calm. Defaults are the sample scene's
+        (bias 0.85, threshold 0, add 0.1, decay 0.0175; the script's defaults differ: -0.5, 0, 0.5, 0.05); Foam Amount
+        multiplies `add`.
+    -   _Drawing it_ (`EvaluateWavesFiltered`, Water.hlsl): the pixel sums the four cascades' foam, each plus its offset
+        (the sample scene's `_FoamSubtract`: 0.04, -0.04, -0.46, -0.38, longest waves first), clamps it, fades it with
+        the camera distance (`pow(1 - distance / FoamFadeDistance, FoamDepthFalloff)`, Acerola's `1 - Linear01Depth`)
+        and blends `lerp(colour, foamColour, foam)` with the foam read at the same cascade UVs (and river flow reads) as
+        the displacement. `foamColour` is `PBRWaterFoam::Albedo` lit as the shore foam is. The only change from Acerola:
+        each cascade counts by its local share (`ctx.cascade`, `FoamCascadeWeightFull`), so ponds, sheltered water and
+        the surf, where the shore train has taken the FFT's waves over, get none. The foam also adds
+        `FoamRoughnessModifier * foam` to the base roughness (0 in the sample scene). It is the raw value: not run
+        through the black-point pattern below, which the shore foam alone uses. Where both foam, the larger coverage wins.
     -   _Shore waves_ carry their white water in their profile (lip and bore front), moving with the wave, scaled by
         how real the breakers are (`BreakerStrength`); the water's edge is a thin line of lace where the swash sheet is
         about to end (Water.hlsl).
-    -   Nothing keeps the open sea's foam once the crest has passed. A camera-centred simulation that held a trail
-        (Crest-style `max(foam * decay, breaking)` on a 46 cm Lagrangian grid) left lace patches standing still on the
-        water, out of step with the crests that made them, and was removed.
-    -   _Crest line_ (`CrestLine`): where a crest breaks, the white water is the crest itself (SideFX's whitecaps come
-        "from the cusp values of the waves at the wave peaks"). Each wave's phase from its crest is atan2(slope,
-        compression) of the waves that break; foam keeps within 2-5 % of a wavelength of the crest line. The eigenvalue
-        alone is low over a broad patch around a breaking crest and whitened all of it, a blob riding on the wave.
-    -   _Pattern_ (`PBRWater/Foam.hlsli`): the "black point fade" of Crest: the foam texture is thresholded so dense
+    -   _Pattern_ (`PBRWater/Foam.hlsli`, shore foam only): the "black point fade" of Crest: the foam texture is thresholded so dense
         foam thins into lace and then specks; thin foam is also translucent. The texture (`FoamPattern.cpp`, t125, 512^2
         R8 with mips, baked at start-up) holds round bubbles of random size, histogram-equalised so a coverage `C`
         whitens a share `C`. It is sampled at three scales four times apart, which gives the edge irregular lace at every
@@ -410,6 +420,29 @@ camera 64 segments are still 0.9 m apart. The bigger saving from here is structu
     the body and move with the waves. Previously they were injected at world positions but sampled at rest
     positions, so in a choppy sea they sat up to a metre off the swimmer and sloshed back and forth. Motion
     is measured relative to the water too: a body bobbing with the waves makes no ripples.
+-   **Ripple physics** (after Crest 4's `UpdateDynWaves.compute` and `ShapeCombine.compute`):
+    -   _Wave speed_ is the gravity-capillary phase speed `c^2 = g / k + sigma k / rho` (sigma 0.074 N/m) at the shortest
+        wavelength the grid holds, two texels (Crest: deep-water `g / k` at the same wavelength), clamped so the leapfrog
+        scheme stays stable (Courant `C^2 = (c dt / dx)^2 <= 0.45`; the limit is 0.5). The viscous term is kept. At the
+        default 64 m grid (12.5 cm texels) that is about 0.6 m/s.
+    -   _Terrain awareness_: the depth per texel is the still water level minus the terrain height (`TerrainTexture`, t112,
+        mapped by `Terrain0` / `Terrain1`). The level comes from the exterior cells around the eye
+        (`PBRWater::GatherWaterLevels`: `GetExteriorWaterHeight` of a 5 x 5 cell table, the eye's own cell from
+        `GetWaterHeight` at the eye so a lake or river at another height than the cell default is followed), the same
+        source as the Skylighting occluder. The grid is for one water level per cell, not per water body: two bodies at
+        different heights in one cell are measured against the same level. Dry texels (depth <= 0) hold 0, so ripples stop at
+        the shore instead of running under the beach; shallower than half a wavelength the amplitude is damped by
+        `1 - (1 - saturate(2 depth / wavelength)) * dt * 2` per step. Interiors, and exteriors without the terrain texture,
+        have no depth (deep water). The terrain and flowmap mappings are those uploaded for the previous frame.
+    -   _River flow_: the previous state (both leapfrog levels, and the silt) is read semi-Lagrangian at `p - dt v`, bilinearly,
+        with `v` from Unified Water's worldspace flowmap (`Flow0`), decoded exactly like `PBRWater::FlowVelocity` so the waves
+        and the ripples are carried by the same current. Without a flowmap there is no advection.
+    -   _Horizontal displacement_ (`RippleDisplacement`): the ripple height displaces the surface vertically and, like a
+        Gerstner wave, horizontally along its gradient, `HorizDisplace * grad(h) / k` with `k = 2 pi / (3 texels)`, clamped to
+        +-0.3 texel. `DisplaceSurface` applies it for this frame and last frame's copy (motion vectors), as a function of the
+        position only, so the stencil and colour passes agree. The pixel shader's ripple normal still comes from the height.
+    -   Results that are not finite are zeroed (checked by bit pattern: the compiler assumes no infinities and would fold
+        `isfinite` away).
 -   **Splashes**: a body hitting the water fast from above (jumping or falling in) digs a crater.
 -   **Swimming**: `TESObjectCELL::GetWaterHeight` returns the wave surface, so swimming actors ride waves.
 -   **Underwater view**: the game's camera-underwater state (`TESWaterSystem`
@@ -477,12 +510,37 @@ configured: no JSON, no patched meshes, no plugin records.
     and moves on the next frame. A reference that unloads or gets new 3D is dropped and found again.
 -   **Bobbing Framework installed**: forms it animates (its JSON configs) are left to it.
 
+## Settings
+
+Physics stays in the code (gravity, the index of refraction, JONSWAP's alpha and gamma, Miche's and McCowan's limits,
+Hrms = Hs / sqrt 2, the sun's angular radius, the foam's measured albedo, surface tension, stability limits, dispersion
+relations); every guess, artistic scale and quality knob is a setting. At the defaults the water renders as it always
+did. The menu has one tab per concern; rarely touched expert knobs sit under an Advanced header in their tab.
+
+| Tab               | Holds                                                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Waves             | wave height, wind speeds, swell (height, period, direction, peakedness, spread), choppiness, wind turbulence, fetch scale, gusts, wind streaks  |
+| Shore             | shore waves, wet shores, train reach and pace, shore periods, wave sets                                                                           |
+| Surface & Light   | roughness, normal map strength, refraction, sun and point light specular, subsurface, Fresnel blend                                               |
+| Water Clarity     | visibility, turbidity and sediment (colour, density, patchiness, river, storm and wading silt, settling), scattering and light attenuation       |
+| Foam              | open-sea foam (coverage, growth, fade, distance, roughness, per-cascade offsets), pattern (bubble size, feather), surf lace                       |
+| Ripples & Rivers  | ripple range, height, strength, lifetime, horizontal displacement; river current speed, wave damping and flow period                              |
+| Floating Objects  | swimming follows waves, floating objects, carrying actors, hull motion, range, size, small object buoyancy                                        |
+| Performance       | wave detail, tessellation (triangle size, maximum factor), wave fade distances                                                                    |
+| Debug             | wireframe, debug views, statistics                                                                                                                |
+
+River Current Speed is one setting that drives both the ripple simulation and the wave shaders. Values the shaders
+read arrive in `GpuData::Tune0..Tune5` (`PBRWater.hlsli`); the
+shore train's periods, pace, reach and wave sets go through `PBRWaterModel::ShoreTuning`, so the CPU mirror
+(swimming, floating objects) follows the same values as the shaders. Ripple Range applies live (the simulation
+re-centres its grid when the texel size changes); all settings are clamped by `SanitizeSettings`.
+
 ## Debugging
 
 -   Settings > PBR Water > Debug: wireframe overlay / wireframe only, and debug views (shore field: train share / room / exposure, wave direction, normals, foam,
-    depth/shore, foam Jacobian (red its compression, green the waves breaking now, blue the shore waves' break stage),
+    depth/shore, cascade foam (red the open sea's foam, green the shore waves' foam, blue the shore waves' break stage),
     roughness, wave height, fetch), plus
-    live sea-state values (whitecap coverage and the foam threshold) and whether
+    live sea-state values (mean square slope) and whether
     the GPU ocean and the gameplay mirror are running, and last frame's water draws: how many were tessellated, with
     how many patches (the meshes' triangles) and what vertex spacing.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
@@ -531,9 +589,9 @@ against the CPU mirror, including slopes and compression against finite differen
 -   [ ] Swell Height 2 m in calm weather: long, regular swell crossing at the Swell Direction; none in ponds.
 -   [ ] Swim in a choppy sea: rings stay on the swimmer, no ripples while floating still.
 -   [ ] Jump off a dock: crater and ring.
--   [ ] Open sea and a bay in a storm vs a fresh breeze: whitecaps where the crests meet (Debug: Foam Jacobian green
-        at the junctions of the red crest network, never in the troughs), thinning into translucent lace over a few
-        seconds, more of them the stronger the wind; none in calm weather or on ponds; Debug shows the threshold.
+-   [ ] Open sea and a bay in a storm vs a fresh breeze: foam where the crests sharpen (Debug: Cascade Foam red),
+        fading over a second or two, more of it the stronger the wind; none in calm weather or on ponds; none while the game
+        is paused with the foam frozen as it was.
 -   [ ] Beach near Dawnstar / the Solitude coast in a fresh breeze: waves shorten, turn to the shore and
         break with foam on the top of each breaking crest, irregular along it, trailing behind the crest and thinning
         out before the next; underwater, no white line along the shore; the sand is wet up
@@ -566,6 +624,8 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Gameplay leaves out the smallest cascade (waves under 0.71 m, ~1 cm rms, up to twice that in sheltered
     water where it carries more of the energy).
 -   Gameplay water heights do not include the flowmap damping on rivers (fetch already keeps river waves small).
+-   Gameplay water heights do not include the waves travelling with river currents either (the CPU mirror ignores the
+    flowmap); Skylighting's occluder grid does not carry them along the current.
 -   Seams between Unified Water tiles of different LOD sizes rely on the displacement distance fade. The
     displacement also fades out over the last 2048 units inside the loaded cells (`LoadedGridFade`): the
     flat LOD water beyond them meets the cells' water in T-junctions, and any wave left on that border
@@ -584,12 +644,13 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Bruneton, Neyret & Holzschuch, _Real-time Realistic Ocean Lighting using Seamless Transitions from
     Geometry to BRDF_ (2010) - filtered slope variance
 -   Mihelich & Tcheblokov, _Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas_ (GDC 2019) - FFT cascades, foam accumulation
+-   GarrettGunnell/Water (Acerola, MIT, Copyright (c) 2023 Garrett Gunnell) - the open sea's foam: per-cascade Jacobian accumulation, decay, per-cascade offsets, distance attenuation
 -   GodotOceanWaves (2Retr0, MIT) - Jacobian whitecap foam: growth below a threshold, exponential decay, summed over cascades
 -   Ocean-URP (gasgiant, MIT) - per-cascade foam weights
 -   Fluid Flux 2 (Imaginary Blend) and DaiZiLing's Flux2-Shoreline-Wave-HLSL port of its coastline waves - coastline
     map, coastline offsets, wave profile by phase and life stage, three-phase foam advection
 -   Unity HDRP water system - CPU re-simulation of the FFT for script queries instead of readback
--   Hasselmann et al. (1973) JONSWAP; Pierson & Moskowitz (1964); Monahan & O'Muircheartaigh (1980) whitecaps
+-   Hasselmann et al. (1973) JONSWAP; Pierson & Moskowitz (1964)
 -   Olano & Baker, _LEAN Mapping_ (2010)
 -   Ang, _The Technical Art of Sea of Thieves_ (SIGGRAPH 2018 Talks) - foam and scattering breakdown
 -   Fatahalian et al., _Reducing Shading on GPUs using Quad-Fragment Merging_ (SIGGRAPH 2010) - small-triangle cost
@@ -598,7 +659,9 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Unity HDRP `TessellationShare.hlsl` - the GCN factor cap, per-vertex attributes interpolated in the domain shader
 -   Johanson, _Real-time Water Rendering: Introducing the Projected Grid Concept_ (Lund 2004); Strugar, _CDLOD_
     (2010); Losasso & Hoppe, _Geometry Clipmaps_ (SIGGRAPH 2004) - ocean mesh LOD without hardware tessellation
--   Crest Ocean System (wave-harmonic/crest, MIT) - foam texture black-point fade, saturated foam growth, bubble layer
+-   Crest Ocean System (wave-harmonic/crest, MIT) - waves carried along river flow (ShapeCombine.compute `Flow()`, two time-offset reads cross-faded with triangle weights)
+-   Crest Ocean System (wave-harmonic/crest, MIT) - foam texture black-point fade, saturated foam growth, bubble layer, caustics projected along the light with a focal depth (OceanEmission.hlsl `ApplyCaustics`)
+-   Crest Ocean System (wave-harmonic/crest, MIT) - interactive ripples: terrain-aware shallow damping, flow advection, Courant-limited wave speed, non-finite guard (UpdateDynWaves.compute) and the horizontal displacement from the ripple gradient (ShapeCombine.compute, `_DYNAMIC_WAVE_SIM_ON`)
 -   Dave Hoskins, _Hash without Sine_ (MIT) - foam noise hashes
 -   Atlas (GDC 2019, above) - subsurface term
 -   Earlier PBR Water / Gerstner branches by davo0411 - tessellation hook points and the wading-mesh replacement
