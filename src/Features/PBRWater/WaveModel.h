@@ -151,6 +151,8 @@ namespace PBRWaterModel
 		float trainCycles = 7.0f;  ///< how many waves out from the shore the train reaches, fading in over the outer half
 		float setMin = 0.45f;      ///< wave sets: the factor on one wave's height runs from setMin to setMax
 		float setMax = 1.55f;
+		float crestWobble = 0.35f;  ///< how far the crests bend and drift along the coast (waves): ShoreWobble
+		float splitWaves = 0.6f;    ///< height of the surf's split waves relative to the main train: ShoreSplitTrains
 	};
 	/// No wave is steeper than this height over wavelength (Miche 1944). Mirrored by PBRWater::ShoreSteepestWave.
 	inline constexpr float ShoreSteepestWave = 0.142f;
@@ -174,6 +176,8 @@ namespace PBRWaterModel
 		float trainCycles = 7.0f;     ///< ShoreTuning::trainCycles
 		float setMin = 0.45f;         ///< ShoreTuning::setMin
 		float setMax = 1.55f;         ///< ShoreTuning::setMax
+		float crestWobble = 0.35f;    ///< ShoreTuning::crestWobble
+		float splitWaves = 0.6f;      ///< ShoreTuning::splitWaves
 		float deepLength = 1.0f;      ///< deep-water wavelength g T^2 / (2 pi) (units)
 		float maxRunup = 0.0f;        ///< how far above the still water the swash can reach (units), for bounds
 		/// Wave clock (rad, wrapped after ShoreClockCycles waves): integrated frame by frame (phase += omega dt), so a changing period never moves the crests.

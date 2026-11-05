@@ -1,6 +1,7 @@
 #include "WaveModel.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -550,6 +551,8 @@ namespace PBRWaterModel
 		p.trainCycles = tuning.trainCycles;
 		p.setMin = tuning.setMin;
 		p.setMax = tuning.setMax;
+		p.crestWobble = tuning.crestWobble;
+		p.splitWaves = tuning.splitWaves;
 		// The shore train carries the open sea's swell and wind sea.
 		p.swellHeight = spectrum.swellHeight;
 		p.windSeaHeight = spectrum.windSeaHeight;
@@ -1532,11 +1535,37 @@ namespace PBRWaterModel
 
 	namespace
 	{
+		/// The shore trains' frequencies as multiples of the main train's. Mirrors PBRWater::ShoreTrainMultiple.
+		constexpr std::array<float, 3> ShoreTrainMultiple = { 1.0f, 1792.0f / 1024.0f, 2688.0f / 1024.0f };
+
+		/// How far train `j`'s crests run ahead of a straight front along the coast (waves). Mirrors PBRWater::ShoreWobble.
+		float ShoreWobble(const ShoreParams& p, float coastX, float coastY, float clock, uint32_t j)
+		{
+			const float scale = std::max(2.0f * p.deepLength, 1.0f);
+			const float qx = coastX / scale, qy = coastY / scale;
+			const float seed = 2.39996f * static_cast<float>(j);
+			auto along = [&](float angle) { return qx * std::cos(angle) + qy * std::sin(angle); };
+			const float w = 0.5f * std::sin(along(seed) + clock * (37.0f / 1024.0f) + seed) +
+			                0.3f * std::sin(1.73f * along(seed + 2.1f) - clock * (61.0f / 1024.0f) + 1.3f * seed) +
+			                0.2f * std::sin(2.91f * along(seed + 4.3f) + clock * (89.0f / 1024.0f) + 2.7f * seed);
+			return p.crestWobble * w;
+		}
+
+		/// Share of the split trains, 0..1. Mirrors PBRWater::ShoreSplitShare.
+		float ShoreSplitShare(const ShoreParams& p, float tracedOmega, const ShoreTrainContext& t)
+		{
+			if (p.splitWaves <= 0.0f)
+				return 0.0f;
+			const float depth = std::max(t.depth, 0.05f);
+			const float shoaled = ShoreHeightRatio * t.deepHeight * ShoalingCoefficient(std::max(tracedOmega, 1e-3f), depth);
+			return Smoothstep(0.7f, 1.2f, shoaled / (ShoreBreakerLimit * depth)) * t.beach;
+		}
+
 		/**
-		 * Displacement (units) and velocity (units/s) of the shore wave train at (x, y), times the hand-over weight.
-		 * Mirrors PBRWater::ShoreWaveAt and ShoreWaves in PBRWater.hlsli at full resolution (scale 0): each wave's height
-		 * and stage from the depth under its own crest, its shape from the profile table. The velocity is the displacement's
-		 * rate of change as the wave passes.
+		 * Displacement (units) and velocity (units/s) of the shore wave trains at (x, y), times the hand-over weight.
+		 * Mirrors PBRWater::ShoreWaveAt, AddShoreWaves and ShoreWaves in PBRWater.hlsli at full resolution (scale 0): each
+		 * wave's height and stage from the depth under its own crest, its shape from the profile table (uncurled: the curl
+		 * is the shaders' alone). The velocity is the displacement's rate of change as the wave passes.
 		 */
 		WaveSnapshot::Displacement ShoreTrain(const ShoreParams& p, float tracedOmega, const ShoreTrainContext& t, const ShoreField::Sample& ray, const Bathymetry& bed, float x, float y)
 		{
@@ -1548,40 +1577,51 @@ namespace PBRWaterModel
 			const float dirY = -ray.slownessY / slowness;
 			const float coastX = x + dirX * ray.distance;
 			const float coastY = y + dirY * ray.distance;
-			const float omega = std::max(tracedOmega, 1e-3f);
 			const float units = static_cast<float>(UnitsPerMetre);
+			const float split = ShoreSplitShare(p, tracedOmega, t);
+			const double mainCycles = (p.phase + static_cast<double>(ray.phaseLag)) / TwoPi + static_cast<double>(ray.along);
 
-			const double cycles = (p.phase + static_cast<double>(ray.phaseLag)) / TwoPi + static_cast<double>(ray.along);
-			const double index = std::floor(cycles);
-			const float phase = static_cast<float>(cycles - index);
-			const float wavelength = static_cast<float>(TwoPi) / (omega * slowness);  // m
+			for (uint32_t j = 0; j < ShoreTrainMultiple.size(); ++j) {
+				const float gate = j == 0 ? 1.0f : split;
+				if (gate <= 0.0f)
+					continue;
+				const float multiple = ShoreTrainMultiple[j];
+				const float omega = std::max(tracedOmega, 1e-3f) * multiple;
+				const double cycles = multiple * mainCycles + static_cast<double>(ShoreWobble(p, coastX, coastY, static_cast<float>(p.phase), j));
+				const double index = std::floor(cycles);
+				const float phase = static_cast<float>(cycles - index);
+				const float wavelength = static_cast<float>(TwoPi) / (omega * slowness);  // m
 
-			const float crestX = x + dirX * (phase - 0.5f) * wavelength * units;
-			const float crestY = y + dirY * (phase - 0.5f) * wavelength * units;
-			const float crestDepth = std::max((t.waterZ - (bed.Contains(crestX, crestY) ? bed.Sample(crestX, crestY) : -1.0e9f)) / units, 0.05f);
-			const float deep = ShoreHeightRatio * t.deepHeight;
-			const float shoaled = deep * ShoreSet(p, coastX, coastY, static_cast<float>(index)) * ShoalingCoefficient(omega, crestDepth);
-			const float limit = ShoreBreakerLimit * crestDepth;
-			const float height = std::min(std::min(shoaled, limit), ShoreSteepestWave * wavelength);
-			const float breaking = shoaled / limit;
-			const float stage = std::min(breaking / (1.0f + breaking), 0.42f + 0.58f * t.beach);
-			const auto shape = GetShoreProfile().At(phase, stage);
+				const float crestX = x + dirX * (phase - 0.5f) * wavelength * units;
+				const float crestY = y + dirY * (phase - 0.5f) * wavelength * units;
+				const float crestDepth = std::max((t.waterZ - (bed.Contains(crestX, crestY) ? bed.Sample(crestX, crestY) : -1.0e9f)) / units, 0.05f);
+				// ShoreDeepHeight: the split trains carry a share of the main train's height that shrinks with their frequency.
+				const float deep = ShoreHeightRatio * t.deepHeight * (j == 0 ? 1.0f : p.splitWaves / multiple);
+				const float setX = coastX + static_cast<float>(j) * 5113.0f;
+				const float setY = coastY - static_cast<float>(j) * 3271.0f;
+				const float shoaled = deep * ShoreSet(p, setX, setY, static_cast<float>(index)) * ShoalingCoefficient(omega, crestDepth);
+				const float limit = ShoreBreakerLimit * crestDepth;
+				const float height = std::min(std::min(shoaled, limit), ShoreSteepestWave * wavelength);
+				const float breaking = shoaled / limit;
+				const float stage = std::min(breaking / (1.0f + breaking), 0.42f + 0.58f * t.beach);
+				const auto shape = GetShoreProfile().At(phase, stage);
 
-			const float forward = std::min(wavelength, ShoreForwardHeights * height);
-			const float localDepth = std::max(t.depth, 0.05f);
-			const float localShoaled = deep * ShoalingCoefficient(omega, localDepth);
-			const float localLimit = ShoreBreakerLimit * localDepth;
-			const float meanLevel = std::min(localShoaled, localLimit) * (0.5f - 0.28f * std::clamp(2.0f * localShoaled / (localShoaled + localLimit), 0.0f, 1.0f));
+				const float forward = std::min(wavelength, ShoreForwardHeights * height);
+				const float localDepth = std::max(t.depth, 0.05f);
+				const float localShoaled = deep * ShoalingCoefficient(omega, localDepth);
+				const float localLimit = ShoreBreakerLimit * localDepth;
+				const float meanLevel = std::min(localShoaled, localLimit) * (0.5f - 0.28f * std::clamp(2.0f * localShoaled / (localShoaled + localLimit), 0.0f, 1.0f));
 
-			// A wave passes a fixed point in one period.
-			const float rate = std::max(p.rate, 1e-3f) / static_cast<float>(TwoPi);
-			const float scale = units * t.weight;
-			out.dx = dirX * shape.forward * forward * scale;
-			out.dy = dirY * shape.forward * forward * scale;
-			out.dz = (shape.up * height - meanLevel) * scale;
-			out.vx = dirX * shape.dForward * forward * rate * scale;
-			out.vy = dirY * shape.dForward * forward * rate * scale;
-			out.vz = shape.dUp * height * rate * scale;
+				// A wave passes a fixed point in one period.
+				const float rate = std::max(p.rate, 1e-3f) * multiple / static_cast<float>(TwoPi);
+				const float scale = units * t.weight * gate;
+				out.dx += dirX * shape.forward * forward * scale;
+				out.dy += dirY * shape.forward * forward * scale;
+				out.dz += (shape.up * height - meanLevel) * scale;
+				out.vx += dirX * shape.dForward * forward * rate * scale;
+				out.vy += dirY * shape.dForward * forward * rate * scale;
+				out.vz += shape.dUp * height * rate * scale;
+			}
 			return out;
 		}
 	}

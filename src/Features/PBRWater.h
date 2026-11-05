@@ -75,6 +75,11 @@ struct PBRWater : Feature
 		float ShoreSetMin = 0.45f;       ///< wave sets: one wave's height runs from this factor
 		float ShoreSetMax = 1.55f;       ///< to this one
 		float ShoreResidualFoam = 0.5f;  ///< coverage of the lace that lingers in the surf between breakers
+		float ShoreCrestWobble = 0.35f;  ///< how far the crests bend and drift along the coast (waves)
+		float ShoreSplitWaves = 0.6f;    ///< height of the shorter waves the breakers split into in the surf, relative to the main train
+		float ShoreCurl = 1.0f;          ///< how far plunging breakers curl over (0: lip only)
+		float ShoreCurlDetail = 2.0f;    ///< tessellation multiplier where shore waves can curl
+		float SwashLinger = 2.0f;        ///< backwash duration over the uprush's
 
 		// Surface and light
 		float Roughness = 0.06f;
@@ -201,7 +206,7 @@ struct PBRWater : Feature
 		float4 Terrain0;
 		float4 Terrain1;
 		float4 Shore0;  // x shore waves on (field ready), y blend from the previous shore field (0) to the current one (1), w largest run-up (units)
-		float4 Shore1;  // xy unused, z swell Hs (units), w open-sea wind sea Hs (units)
+		float4 Shore1;  // x crest wobble (waves), y curl tessellation multiplier, z swell Hs (units), w open-sea wind sea Hs (units)
 		float4 Ripple0;
 		float4 Ripple1;
 		float4 Ripple2;
@@ -219,7 +224,7 @@ struct PBRWater : Feature
 		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
 		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
 		float4 Shore2;                                // x wave clock (rad, wrapped), y the clock last frame, z its rate (rad/s), w peak period Tp (s)
-		float4 Shore3;                                // w deep-water wavelength L0 (units)
+		float4 Shore3;                                // x swash linger, y surf splitting, z breaker curl, w deep-water wavelength L0 (units)
 		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none

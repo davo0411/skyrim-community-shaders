@@ -246,7 +246,7 @@ namespace PBRWater
 		o.waveInfo = 0.0;
 		[branch] if ((uint)Draw0.z == DebugShoreWave && ctx.train > 0.0)
 		{
-			ShoreWave wave = ShoreWaveAt(absXY, CoastPoint(absXY, ctx.shore), ctx, Shore2.x);
+			ShoreWave wave = ShoreWaveAt(absXY, CoastPoint(absXY, ctx.shore), ctx, Shore2.x, 0);
 			o.waveInfo = float3(wave.phase, wave.stage, wave.height / 4.0) * ctx.train;
 		}
 		o.levelError = 0.0;

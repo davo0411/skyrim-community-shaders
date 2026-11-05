@@ -182,6 +182,24 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         wave, so it stays put as the crests run through it.
     -   _Breaking or surging_: the Iribarren number of the beach (Battjes 1974): waves spill and plunge on gentle beaches
         (`xi < 2`) and surge against rock faces and cliffs (`xi > 3.3`), where their stage stops short of breaking.
+    -   _Crest wobble_ (`ShoreWobble`, setting `ShoreCrestWobble`, default 0.35 waves): the phase of every train is
+        offset by three slow sines of the waterline point and the clock, so crest lines bend and drift and stretches of
+        beach break at different times. Each sine turns over a whole number of times per wrap of the clock (1024 waves).
+    -   _Split waves_ (`ShoreTrainMultiple`, `ShoreSplitShare`, setting `ShoreSplitWaves`, default 0.6): inshore of
+        where the main train breaks, two shorter trains at 1.75 and 2.625 times its frequency (whole 1024ths, so the
+        clock's wrap never moves them) run on that multiple of its phase (shallow water is not dispersive), each with
+        its own wobble and sets and a height of `ShoreSplitWaves / multiple` of the main train's. They shoal and break
+        on their own in the shallows, crossing and overtaking the main crests. Mirrored on the CPU.
+    -   _Curl_ (`ShoreCurlShape`, setting `ShoreCurl`, default 1): where the mesh is fine enough (`ShoreCurlWeight`:
+        vertex spacing below 1/25 of the wavelength, full at 1/50; tessellated draws only) the plunging stages
+        (0.40-0.80) turn the water above a pivot on the front face (45 % of the crest's height) forward about it, by up
+        to 2.3 rad at the crest and less behind it, and throw it 1.2 wave heights ahead, so the crest becomes the lip's
+        tip and falls into the trough in front. The curl grows over stages 0.44-0.64 and goes as the bore forms
+        (0.64-0.76). It depends on the wave's aspect, so the shader works it out (three evaluations for the phase
+        derivative) instead of the table, blended in from it at the ends of the stage window. The surface stays one
+        sheet, so `FinishWaves` keeps the downward normals of the lip's underside where a curl is shown. The hull shader
+        divides the target triangle size by `ShoreCurlDetail` (default 2) on the shore wherever a curl can show.
+        Geometry only: the CPU mirror rides the table's uncurled wave.
 -   **Room for the train** (`ShoreField::room`, `t124`): a train of shoaling, breaking waves needs open water
     a few wavelengths across. Each water texel gets the width of the largest disc of water around it (twice
     the distance to the waterline at that disc's centre, propagated by raster sweeps) against the shore waves'
@@ -199,9 +217,11 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
     0.45-1.55 from a value noise over about three deep-water wavelengths of coast and, slowly, over the wave's number, so
     neighbours are alike (groupiness: Longuet-Higgins 1984) and a wave keeps its height all the way in.
 -   **Swash** (`PBRWater::SwashTip`): from the crests that reached the waterline of the ray through a point
-    over the last three periods (a crest at every whole cycle of the train's phase there, each with its own
-    height), the tip runs up as far as Stockdon et al. (2006) give and moves ballistically, decelerating at `g sin^2 beta` (Shen & Meyer 1963; Peregrine &
-    Williams 2001). The water over the beach is a thin sheet (`SwashTop`: 15 % of the height below the tip,
+    over the last four periods (an uprush each time a bore's front, `ShoreBoreFront` into the cycle, reaches the
+    waterline, each with its own height), the tip runs up as far as Stockdon et al. (2006) give and moves ballistically, decelerating at `g sin^2 beta` (Shen & Meyer 1963; Peregrine &
+    Williams 2001). The backwash takes `SwashLinger` (setting, default 2) times as long as the uprush (deceleration
+    divided by its square, and the sheet thins on the stretched time): the water soaks in and drags on the sand
+    on the way down, so the sheet and its foam stay on the beach longer. The water over the beach is a thin sheet (`SwashTop`: 15 % of the height below the tip,
     at most 30 cm), never a raised mesh. Once a crest has drained the tip keeps falling below the still water
     rather than resting at it, so the vertices interpolate it linearly (a tip clamped at 0 put the swash front
     on the triangle edges). The swash mark (the highest a drained crest reached) goes to the pixels with the

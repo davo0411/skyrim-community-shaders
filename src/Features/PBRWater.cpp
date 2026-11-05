@@ -43,6 +43,11 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		ShoreSetMin,
 		ShoreSetMax,
 		ShoreResidualFoam,
+		ShoreCrestWobble,
+		ShoreSplitWaves,
+		ShoreCurl,
+		ShoreCurlDetail,
+		SwashLinger,
 		Roughness,
 		SunSpecular,
 		PointLightSpecular,
@@ -143,6 +148,11 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		ShoreSetMin,
 		ShoreSetMax,
 		ShoreResidualFoam,
+		ShoreCrestWobble,
+		ShoreSplitWaves,
+		ShoreCurl,
+		ShoreCurlDetail,
+		SwashLinger,
 		Roughness,
 		SunSpecular,
 		PointLightSpecular,
@@ -305,6 +315,11 @@ void PBRWater::SanitizeSettings()
 	clamp(s.ShoreSetMin, 0.01f, 10.0f, d.ShoreSetMin);
 	clamp(s.ShoreSetMax, 0.01f, 10.0f, d.ShoreSetMax);
 	clamp(s.ShoreResidualFoam, 0.0f, 1.0f, d.ShoreResidualFoam);
+	clamp(s.ShoreCrestWobble, 0.0f, 2.0f, d.ShoreCrestWobble);
+	clamp(s.ShoreSplitWaves, 0.0f, 2.0f, d.ShoreSplitWaves);
+	clamp(s.ShoreCurl, 0.0f, 2.0f, d.ShoreCurl);
+	clamp(s.ShoreCurlDetail, 1.0f, 4.0f, d.ShoreCurlDetail);
+	clamp(s.SwashLinger, 1.0f, 8.0f, d.SwashLinger);
 	clamp(s.Roughness, 0.001f, 1.0f, d.Roughness);
 	clamp(s.SunSpecular, 0.0f, Huge, d.SunSpecular);
 	clamp(s.PointLightSpecular, 0.0f, Huge, d.PointLightSpecular);
@@ -451,6 +466,14 @@ void PBRWater::DrawSettings()
 			T(TKEY("shore_train_cycles_tooltip"), "How many waves out from the shore the breaking wave train reaches. Beyond it the open sea's waves carry on. Default 7."));
 		Util::SliderFloatTip(T(TKEY("shore_time_scale"), "Shore Wave Pace"), &s.ShoreTimeScale, 0.1f, 1.0f, "%.2f",
 			T(TKEY("shore_time_scale_tooltip"), "How fast the shore waves roll in compared with real waves of the same spacing. Slower reads better on Skyrim's compressed coasts. Default 0.7."));
+		Util::SliderFloatTip(T(TKEY("shore_crest_wobble"), "Crest Irregularity"), &s.ShoreCrestWobble, 0.0f, 1.0f, "%.2f",
+			T(TKEY("shore_crest_wobble_tooltip"), "How far the crests bend and drift along the coast, in waves, so stretches of beach break at different times instead of in one straight line. Default 0.35."));
+		Util::SliderFloatTip(T(TKEY("shore_split_waves"), "Surf Splitting"), &s.ShoreSplitWaves, 0.0f, 1.5f, "%.2f",
+			T(TKEY("shore_split_waves_tooltip"), "Smaller, shorter waves that form in the surf as the breakers split up, each breaking on its own as it reaches the shallows. 0 leaves only the main waves. Default 0.6."));
+		Util::SliderFloatTip(T(TKEY("shore_curl"), "Breaker Curl"), &s.ShoreCurl, 0.0f, 1.5f, "%.2f",
+			T(TKEY("shore_curl_tooltip"), "How far plunging breakers curl over: the crest is thrown ahead of the wave and falls into the trough in front. 0 keeps the lip without the curl. Needs tessellation. Default 1."));
+		Util::SliderFloatTip(T(TKEY("swash_linger"), "Swash Linger"), &s.SwashLinger, 1.0f, 5.0f, "%.1fx",
+			T(TKEY("swash_linger_tooltip"), "How much longer than its uprush each sheet of swash takes to drain back down the beach, and so how long its foam lingers on the sand. Default 2."));
 
 		if (ImGui::CollapsingHeader(T(TKEY("advanced"), "Advanced"))) {
 			Util::SliderFloatTip(T(TKEY("shore_shortest_period"), "Shortest Shore Period"), &s.ShoreShortestPeriod, 1.0f, 6.0f, "%.1f s",
@@ -461,6 +484,8 @@ void PBRWater::DrawSettings()
 				T(TKEY("shore_set_min_tooltip"), "Waves come in sets: a few big ones between smaller ones. This is the smallest wave's height as a share of the average. Default 0.45."));
 			Util::SliderFloatTip(T(TKEY("shore_set_max"), "Wave Set Maximum"), &s.ShoreSetMax, 1.0f, 3.0f, "%.2f",
 				T(TKEY("shore_set_max_tooltip"), "The biggest wave of a set, as a multiple of the average height. It also sets how far the biggest uprush reaches. Default 1.55."));
+			Util::SliderFloatTip(T(TKEY("shore_curl_detail"), "Curl Detail"), &s.ShoreCurlDetail, 1.0f, 4.0f, "%.1fx",
+				T(TKEY("shore_curl_detail_tooltip"), "Extra tessellation near the camera where shore waves can curl, so their lips hold their shape further away. Costs triangles. Default 2."));
 		}
 		ImGui::EndTabItem();
 	}
@@ -1424,12 +1449,12 @@ void PBRWater::UpdateFrameConstants()
 		const bool shoreReady = shore.enabled && snap->shoreField && shoreTextures.field == snap->shoreField;
 		const bool blending = shoreReady && snap->shoreBlend < 1.0f && snap->shorePrevious && previousShoreTextures.field == snap->shorePrevious;
 		d.Shore0 = { shoreReady ? 1.0f : 0.0f, blending ? snap->shoreBlend : 1.0f, 0.0f, shore.enabled ? shore.maxRunup : 0.0f };
-		d.Shore1 = { 0.0f, 0.0f, shore.swellHeight, shore.windSeaHeight };
+		d.Shore1 = { shore.crestWobble, settings.ShoreCurlDetail, shore.swellHeight, shore.windSeaHeight };
 		// The clock now and as last frame drew it (motion vectors); the first frame has no motion.
 		const float shoreClock = static_cast<float>(shore.phase);
 		const bool consecutive = lastFrame != UINT32_MAX && frame == lastFrame + 1 && frameData.Shore2.w > 0.0f;
 		d.Shore2 = { shoreClock, consecutive ? frameData.Shore2.x : shoreClock, shore.rate, shore.period };
-		d.Shore3 = { 0.0f, 0.0f, 0.0f, shore.deepLength };
+		d.Shore3 = { settings.SwashLinger, shore.splitWaves, settings.ShoreCurl, shore.deepLength };
 		d.Shore4 = { shoreReady ? snap->shoreField->omega : shore.omega, blending ? snap->shorePrevious->omega : shore.omega, 0.0f, 0.0f };
 		auto fieldMap = [](const PBRWaterModel::ShoreField& f) {
 			return float4{ f.minX - 0.5f * f.step, f.minY - 0.5f * f.step, 1.0f / (static_cast<float>(f.width) * f.step), 1.0f / (static_cast<float>(f.height) * f.step) };
@@ -1867,6 +1892,8 @@ void PBRWater::MainThreadUpdate()
 	shoreTuning.trainCycles = settings.ShoreTrainCycles;
 	shoreTuning.setMin = settings.ShoreSetMin;
 	shoreTuning.setMax = settings.ShoreSetMax;
+	shoreTuning.crestWobble = settings.ShoreCrestWobble;
+	shoreTuning.splitWaves = settings.ShoreSplitWaves;
 	shoreState = PBRWaterModel::UpdateShoreParams(*spectrum, hasShoreState ? &shoreState : nullptr, dt, shoreTuning);
 	hasShoreState = true;
 	const bool shoreEnabled = exterior && settings.EnableShoreWaves;

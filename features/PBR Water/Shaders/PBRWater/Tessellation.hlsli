@@ -90,10 +90,16 @@ namespace PBRWater
 		float2 rippleUV;
 		bool detailed = RippleUV(absXY, Ripple0.xy, rippleUV);
 		float2 shoreUV;
-		if (!detailed && ShoreFieldUV(absXY, shoreUV))
-			detailed = ShoreField0.SampleLevel(LinearClampSampler, shoreUV, 0).y < 2.0 * Shore3.w;
+		bool shore = false;
+		if (ShoreFieldUV(absXY, shoreUV))
+			shore = ShoreField0.SampleLevel(LinearClampSampler, shoreUV, 0).y < 2.0 * Shore3.w;
 		float edgePixels = length(hi - lo) * Tess0.w / max(length(mid), 1.0);
-		return clamp(edgePixels / (max(Tess0.y, 1.0) * (detailed ? 1.0 : 2.0)), 1.0, Tess0.z);
+		float target = max(Tess0.y, 1.0) * (detailed || shore ? 1.0 : 2.0);
+		// Breakers curl where the mesh is fine enough to carry the lip (ShoreCurlWeight): the shore gets Shore1.y times the
+		// triangles out to where that is in reach. The breakers' wavelength is about 0.6 of the deep-water one or less.
+		if (shore && Shore3.z > 0.0 && ShoreCurlSpacing(mid) < 0.6 * Shore3.w / 25.0)
+			target /= max(Shore1.y, 1.0);
+		return clamp(edgePixels / target, 1.0, Tess0.z);
 	}
 
 	/// Conservative frustum test of the patch bounds grown by the largest possible displacement.
