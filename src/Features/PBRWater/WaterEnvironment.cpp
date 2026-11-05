@@ -1,13 +1,14 @@
 #include "WaterEnvironment.h"
 
-#include "Features/TerrainShadows.h"
 #include "Features/UnifiedWater.h"
 #include "Globals.h"
+#include "LandRecords.h"
 
-#include <DirectXTex.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace
 {
@@ -15,157 +16,30 @@ namespace
 	constexpr float MaxFetchCells = 160.0f;  // ~9.6 km marched; a ray that gets this far reaches the open sea
 	constexpr float OpenSeaKm = 500.0f;      // fully developed: no fetch limit for any wind
 	constexpr float StepCells = 0.5f;
-	constexpr uint32_t BathymetryDownsample = 2;
-	/// Exact terrain is carried this many 128-unit texels (half a cell) past the cells it is known for, fading into the
-	/// coarse heightmap.
-	constexpr int FeatherTexels = 16;
 
-	float Smooth01(float t)
+	/// The worldspace whose LAND records are this one's terrain: child worldspaces can share their parent's.
+	const RE::TESWorldSpace* LandWorld(const RE::TESWorldSpace* worldSpace)
 	{
-		t = std::clamp(t, 0.0f, 1.0f);
-		return t * t * (3.0f - 2.0f * t);
-	}
-
-	/**
-	 * Blends exact terrain heights into the coarse heightmap where the exact ones end, so the bed - and every depth the
-	 * waves take from it - has no step there. The coarse BC4 heightmap is metres off: a hard switch put a straight cliff
-	 * in the depth along the edge of the exact data, and the waves' height, breaking and arrival times jumped along it.
-	 * Exact values are carried outwards ring by ring for `radius` texels (each the mean of its already known neighbours)
-	 * and faded into the coarse heights over that distance.
-	 * @param bed    exact heights, NaN where unknown; replaced by the blended bed (NaN only where neither is known)
-	 * @param coarse coarse heights of the same texels (NaN where unknown)
-	 */
-	void FeatherBed(std::vector<float>& bed, const std::vector<float>& coarse, uint32_t w, uint32_t h, int radius)
-	{
-		const size_t n = bed.size();
-		std::vector<float> carried(bed);
-		std::vector<int> ring(n), nextRing(n);
-		for (size_t i = 0; i < n; ++i)
-			ring[i] = std::isfinite(bed[i]) ? 0 : -1;
-		for (int k = 1; k <= radius; ++k) {
-			nextRing = ring;
-			bool any = false;
-			for (uint32_t y = 0; y < h; ++y) {
-				for (uint32_t x = 0; x < w; ++x) {
-					const size_t i = static_cast<size_t>(y) * w + x;
-					if (ring[i] >= 0)
-						continue;
-					float sum = 0.0f;
-					int count = 0;
-					auto take = [&](size_t j) {
-						if (ring[j] >= 0) {
-							sum += carried[j];
-							++count;
-						}
-					};
-					if (x > 0)
-						take(i - 1);
-					if (x + 1 < w)
-						take(i + 1);
-					if (y > 0)
-						take(i - w);
-					if (y + 1 < h)
-						take(i + w);
-					if (count) {
-						carried[i] = sum / static_cast<float>(count);
-						nextRing[i] = k;
-						any = true;
-					}
-				}
-			}
-			ring.swap(nextRing);
-			if (!any)
-				break;
-		}
-		for (size_t i = 0; i < n; ++i) {
-			if (ring[i] == 0)
-				continue;
-			if (ring[i] < 0) {
-				bed[i] = coarse[i];
-				continue;
-			}
-			const float weight = 1.0f - Smooth01(static_cast<float>(ring[i]) / static_cast<float>(radius + 1));
-			bed[i] = std::isfinite(coarse[i]) ? coarse[i] + (carried[i] - coarse[i]) * weight : carried[i];
-		}
-	}
-
-	struct HeightmapRequest
-	{
-		std::filesystem::path path;
-		float3 pos0;
-		float3 pos1;
-		float2 heightRange;  ///< pos0.z..pos1.z: what the normalised texels decode to
-	};
-
-	std::optional<HeightmapRequest> FindHeightmap(const RE::TESWorldSpace* worldSpace)
-	{
-		auto& terrainShadows = globals::features::terrainShadows;
-		if (!terrainShadows.loaded || !worldSpace)
-			return std::nullopt;
-
-		// Same resolution rule as TerrainShadows::LoadHeightmap: child worldspaces share their parent's land.
 		while (worldSpace->parentWorld && worldSpace->parentUseFlags.any(RE::TESWorldSpace::ParentUseFlag::kUseLandData))
 			worldSpace = worldSpace->parentWorld;
-
-		const char* editorID = worldSpace->GetFormEditorID();
-		if (!editorID)
-			return std::nullopt;
-		const auto it = terrainShadows.heightmaps.find(editorID);
-		if (it == terrainShadows.heightmaps.end())
-			return std::nullopt;
-
-		HeightmapRequest request;
-		request.path = std::filesystem::path(it->second.dir) / it->second.filename;
-		request.pos0 = it->second.pos0;
-		request.pos1 = it->second.pos1;
-		request.heightRange = { it->second.pos0.z, it->second.pos1.z };
-		return request;
+		return worldSpace;
 	}
 
-	std::shared_ptr<PBRWaterModel::Bathymetry> LoadBathymetry(const HeightmapRequest& request, std::stop_token stop)
+	std::optional<PBRWaterLand::Request> LandRequest(const RE::TESWorldSpace* worldSpace)
 	{
-		DirectX::ScratchImage image;
-		if (FAILED(DirectX::LoadFromDDSFile(request.path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image))) {
-			logger::warn("[PBR Water] Could not load heightmap {} for bathymetry", request.path.string());
-			return nullptr;
+		auto* dataHandler = RE::TESDataHandler::GetSingleton();
+		const auto* owner = worldSpace->GetFile(0);
+		if (!dataHandler || !owner)
+			return std::nullopt;
+
+		PBRWaterLand::Request request;
+		request.owner = owner->GetFilename();
+		request.worldSpace = worldSpace->GetLocalFormID();
+		for (const auto* file : dataHandler->files) {
+			if (file && file->compileIndex != 0xFF)
+				request.plugins.push_back(std::filesystem::path(file->path) / file->fileName);
 		}
-
-		DirectX::ScratchImage converted;
-		const auto& meta = image.GetMetadata();
-		HRESULT hr = DirectX::IsCompressed(meta.format) ?
-		                 DirectX::Decompress(*image.GetImage(0, 0, 0), DXGI_FORMAT_R32_FLOAT, converted) :
-		                 DirectX::Convert(*image.GetImage(0, 0, 0), DXGI_FORMAT_R32_FLOAT, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, converted);
-		if (FAILED(hr)) {
-			logger::warn("[PBR Water] Could not convert heightmap {} ({:X})", request.path.string(), static_cast<uint32_t>(hr));
-			return nullptr;
-		}
-
-		const auto* src = converted.GetImage(0, 0, 0);
-		auto bathymetry = std::make_shared<PBRWaterModel::Bathymetry>();
-		bathymetry->width = static_cast<uint32_t>(src->width / BathymetryDownsample);
-		bathymetry->height = static_cast<uint32_t>(src->height / BathymetryDownsample);
-		if (bathymetry->width < 2 || bathymetry->height < 2)
-			return nullptr;
-
-		// Texel (i, j) centre sits at pos0 + (pos1 - pos0) * (i, j + 1) / size (see TerrainShadows::GetCommonBufferData).
-		const float texelX = (request.pos1.x - request.pos0.x) / static_cast<float>(src->width);
-		const float texelY = (request.pos1.y - request.pos0.y) / static_cast<float>(src->height);
-		bathymetry->minX = request.pos0.x;
-		bathymetry->minY = request.pos0.y + texelY;
-		bathymetry->stepX = texelX * BathymetryDownsample;
-		bathymetry->stepY = texelY * BathymetryDownsample;
-
-		bathymetry->heights.resize(static_cast<size_t>(bathymetry->width) * bathymetry->height);
-		for (uint32_t y = 0; y < bathymetry->height; ++y) {
-			if (stop.stop_requested())
-				return nullptr;
-			const auto* row = reinterpret_cast<const float*>(src->pixels + static_cast<size_t>(y * BathymetryDownsample) * src->rowPitch);
-			for (uint32_t x = 0; x < bathymetry->width; ++x) {
-				const float normalised = row[x * BathymetryDownsample];
-				bathymetry->heights[static_cast<size_t>(y) * bathymetry->width + x] = request.heightRange.x + (request.heightRange.y - request.heightRange.x) * normalised;
-			}
-		}
-		return bathymetry;
+		return request;
 	}
 }
 
@@ -176,34 +50,6 @@ float CellLevels::At(int32_t cellX, int32_t cellY) const
 	if (x < 0 || y < 0 || x >= static_cast<int32_t>(width) || y >= static_cast<int32_t>(height))
 		return std::numeric_limits<float>::quiet_NaN();
 	return level[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
-}
-
-float LandCache::Sample(float x, float y) const
-{
-	const int32_t cellX = static_cast<int32_t>(std::floor(x / CellSize));
-	const int32_t cellY = static_cast<int32_t>(std::floor(y / CellSize));
-	const auto it = cells.find(Key(cellX, cellY));
-	if (it == cells.end())
-		return std::numeric_limits<float>::quiet_NaN();
-	const auto& heights = *it->second;
-	const float spacing = CellSize / QuadsPerCell;
-	const float fx = std::clamp((x - cellX * CellSize) / spacing, 0.0f, static_cast<float>(QuadsPerCell));
-	const float fy = std::clamp((y - cellY * CellSize) / spacing, 0.0f, static_cast<float>(QuadsPerCell));
-	const uint32_t x0 = std::min(static_cast<uint32_t>(fx), static_cast<uint32_t>(QuadsPerCell - 1));
-	const uint32_t y0 = std::min(static_cast<uint32_t>(fy), static_cast<uint32_t>(QuadsPerCell - 1));
-	const float tx = fx - static_cast<float>(x0);
-	const float ty = fy - static_cast<float>(y0);
-	const float* row0 = &heights[static_cast<size_t>(y0) * CellVertices];
-	const float* row1 = row0 + CellVertices;
-	const float a = row0[x0] + (row0[x0 + 1] - row0[x0]) * tx;
-	const float b = row1[x0] + (row1[x0 + 1] - row1[x0]) * tx;
-	return a + (b - a) * ty;
-}
-
-float LandCache::Level(int32_t cellX, int32_t cellY) const
-{
-	const auto it = levels.find(Key(cellX, cellY));
-	return it != levels.end() ? it->second : std::numeric_limits<float>::quiet_NaN();
 }
 
 WaterEnvironment::~WaterEnvironment()
@@ -302,138 +148,6 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 	return field;
 }
 
-void WaterEnvironment::UpdateLoadedLand(bool exterior)
-{
-	struct LoadedCell
-	{
-		int32_t x, y;
-		const RE::TESObjectLAND::LoadedLandData* data;
-		float waterLevel;
-	};
-	std::vector<LoadedCell> cells;
-	uint64_t signature = 1469598103934665603ull;
-	if (auto tes = RE::TES::GetSingleton(); tes && exterior) {
-		tes->ForEachCell([&](RE::TESObjectCELL* cell) {
-			if (!cell || !cell->IsExteriorCell() || !cell->IsAttached())
-				return;
-			const auto* coords = cell->GetCoordinates();
-			const auto* landRecord = cell->GetRuntimeData().cellLand;
-			if (!coords || !landRecord || !landRecord->loadedData)
-				return;
-			const float waterLevel = cell->GetExteriorWaterHeight();
-			cells.push_back({ coords->cellX, coords->cellY, landRecord->loadedData, waterLevel > -1.0e6f ? waterLevel : std::numeric_limits<float>::quiet_NaN() });
-			signature = (signature ^ (static_cast<uint64_t>(static_cast<uint32_t>(coords->cellX)) << 32 | static_cast<uint32_t>(coords->cellY))) * 1099511628211ull;
-			signature = (signature ^ reinterpret_cast<uintptr_t>(landRecord->loadedData)) * 1099511628211ull;
-		});
-	}
-	// The coarse heightmap fills the cells never loaded; it is built after the worldspace loads, so its arrival refreshes the
-	// grid too (until then those cells read as deep water).
-	signature = (signature ^ reinterpret_cast<uintptr_t>(bathymetry.load(std::memory_order_acquire).get())) * 1099511628211ull;
-	if (signature == landSignature)
-		return;
-	landSignature = signature;
-
-	if (cells.empty()) {
-		land.store(nullptr, std::memory_order_release);
-		landGeneration.fetch_add(1, std::memory_order_acq_rel);
-		return;
-	}
-
-	// Remember every loaded cell's exact heights and water level for as long as the player stays in the worldspace.
-	// Quadrants: 0 south-west, 1 south-east, 2 north-west, 3 north-east; 17 x 17 vertices each, row-major from the south.
-	// The streamed heights are relative to a per-cell base; heightExtents holds the cell's absolute min / max, which
-	// recovers that base.
-	constexpr int32_t QuadsPerCell = LandCache::QuadsPerCell;
-	constexpr uint32_t CellVertices = LandCache::CellVertices;
-	constexpr float VertexSpacing = CellSize / QuadsPerCell;
-	const auto previousCache = landCache.load(std::memory_order_acquire);
-	auto cache = previousCache ? std::make_shared<LandCache>(*previousCache) : std::make_shared<LandCache>();
-	bool added = false;
-	for (const auto& c : cells) {
-		auto heights = std::make_shared<std::vector<float>>(static_cast<size_t>(CellVertices) * CellVertices, std::numeric_limits<float>::quiet_NaN());
-		const auto [minH, maxH] = std::minmax_element(&c.data->heights[0][0], &c.data->heights[0][0] + 4 * 289);
-		const float base = 0.5f * ((c.data->heightExtents.x - *minH) + (c.data->heightExtents.y - *maxH));
-		for (uint32_t quad = 0; quad < 4; ++quad) {
-			const uint32_t qx = (quad & 1) * 16;
-			const uint32_t qy = (quad >> 1) * 16;
-			for (uint32_t vy = 0; vy < 17; ++vy) {
-				for (uint32_t vx = 0; vx < 17; ++vx) {
-					const float h = c.data->heights[quad][vy * 17 + vx];
-					if (std::isfinite(h))
-						(*heights)[static_cast<size_t>(qy + vy) * CellVertices + qx + vx] = base + h;
-				}
-			}
-		}
-		const uint64_t key = LandCache::Key(c.x, c.y);
-		added = added || !cache->cells.contains(key);
-		cache->cells[key] = std::move(heights);
-		cache->levels[key] = c.waterLevel;
-	}
-	if (added)
-		cache->version = (previousCache ? previousCache->version : 0) + 1;
-	landCache.store(cache, std::memory_order_release);
-
-	// The grid the shaders and gameplay sample: 11 x 11 cells around the loaded block, exact wherever a cell was ever
-	// loaded, feathered into the coarse heightmap elsewhere.
-	constexpr int32_t WindowRadius = 5;
-	int32_t minX = INT32_MAX, minY = INT32_MAX, maxX = INT32_MIN, maxY = INT32_MIN;
-	for (const auto& c : cells) {
-		minX = std::min(minX, c.x);
-		minY = std::min(minY, c.y);
-		maxX = std::max(maxX, c.x);
-		maxY = std::max(maxY, c.y);
-	}
-	const int32_t centreX = (minX + maxX) / 2;
-	const int32_t centreY = (minY + maxY) / 2;
-	const int32_t windowX = centreX - WindowRadius;
-	const int32_t windowY = centreY - WindowRadius;
-	const int32_t windowCells = 2 * WindowRadius + 1;
-
-	auto grid = std::make_shared<PBRWaterModel::Bathymetry>();
-	grid->width = static_cast<uint32_t>(windowCells * QuadsPerCell + 1);
-	grid->height = grid->width;
-	grid->minX = windowX * CellSize;
-	grid->minY = windowY * CellSize;
-	grid->stepX = grid->stepY = VertexSpacing;
-	const size_t count = static_cast<size_t>(grid->width) * grid->height;
-	grid->heights.assign(count, std::numeric_limits<float>::quiet_NaN());
-	std::vector<float> coarseHeights(count, std::numeric_limits<float>::quiet_NaN());
-	const auto coarse = bathymetry.load(std::memory_order_acquire);
-	for (uint32_t y = 0; y < grid->height; ++y) {
-		for (uint32_t x = 0; x < grid->width; ++x) {
-			const float wx = grid->minX + x * VertexSpacing;
-			const float wy = grid->minY + y * VertexSpacing;
-			if (coarse && coarse->Valid())
-				coarseHeights[static_cast<size_t>(y) * grid->width + x] = coarse->Sample(wx, wy);
-		}
-	}
-	for (int32_t cy = 0; cy < windowCells; ++cy) {
-		for (int32_t cx = 0; cx < windowCells; ++cx) {
-			const auto it = cache->cells.find(LandCache::Key(windowX + cx, windowY + cy));
-			if (it == cache->cells.end())
-				continue;
-			const auto& heights = *it->second;
-			for (uint32_t vy = 0; vy < CellVertices; ++vy) {
-				for (uint32_t vx = 0; vx < CellVertices; ++vx) {
-					const float h = heights[static_cast<size_t>(vy) * CellVertices + vx];
-					if (std::isfinite(h))
-						grid->heights[static_cast<size_t>(cy * QuadsPerCell + vy) * grid->width + cx * QuadsPerCell + vx] = h;
-				}
-			}
-		}
-	}
-	FeatherBed(grid->heights, coarseHeights, grid->width, grid->height, FeatherTexels);
-	for (auto& h : grid->heights) {
-		if (!std::isfinite(h))
-			h = -1.0e5f;  // neither known: deep water
-	}
-
-	const auto [lo, hi] = std::minmax_element(grid->heights.begin(), grid->heights.end());
-	logger::info("[PBR Water] Terrain grid {}x{} cells at ({}, {}), {} cells cached, z {:.0f}..{:.0f}", windowCells, windowCells, windowX, windowY, cache->cells.size(), *lo, *hi);
-	land.store(std::move(grid), std::memory_order_release);
-	landGeneration.fetch_add(1, std::memory_order_acq_rel);
-}
-
 void WaterEnvironment::Update(const RE::TESWorldSpace* worldSpace)
 {
 	if (worldSpace == currentWorldSpace)
@@ -450,12 +164,7 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 	}
 
 	fetch.store(nullptr, std::memory_order_release);
-	bathymetry.store(nullptr, std::memory_order_release);
 	cellLevels.store(nullptr, std::memory_order_release);
-	// Cells are per worldspace.
-	landCache.store(nullptr, std::memory_order_release);
-	land.store(nullptr, std::memory_order_release);
-	landSignature = 0;
 	// The old worldspace's shore field (and any build still running for it) no longer applies.
 	shoreEpoch.fetch_add(1, std::memory_order_acq_rel);
 	PublishShore(nullptr);
@@ -480,13 +189,22 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 		levels->level = coverage->level;
 		cellLevels.store(std::move(levels), std::memory_order_release);
 	}
-	auto heightmap = FindHeightmap(worldSpace);
 
-	if (!hasCoverage && !heightmap)
+	// The land stays what it was on the way into an interior and back, or into a city that shares it.
+	const auto* landWorld = LandWorld(worldSpace);
+	std::optional<PBRWaterLand::Request> landRequest;
+	if (landWorld != bathymetryWorld.load(std::memory_order_acquire)) {
+		bathymetryWorld.store(nullptr, std::memory_order_release);
+		bathymetry.store(nullptr, std::memory_order_release);
+		bathymetryGeneration.fetch_add(1, std::memory_order_acq_rel);
+		landRequest = LandRequest(landWorld);
+	}
+
+	if (!hasCoverage && !landRequest)
 		return;
 
 	building.store(true, std::memory_order_release);
-	worker = std::jthread([this, coverage, hasCoverage, heightmap](std::stop_token stop) {
+	worker = std::jthread([this, coverage, hasCoverage, landRequest = std::move(landRequest), landWorld](std::stop_token stop) {
 		if (hasCoverage && !stop.stop_requested()) {
 			WaterCoverageView view{ coverage->minX, coverage->minY, coverage->width, coverage->height, coverage->water.data() };
 			auto baked = BakeFetch(view);
@@ -496,10 +214,14 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 				logger::info("[PBR Water] Fetch field baked ({}x{} cells)", view.width, view.height);
 			}
 		}
-		if (heightmap && !stop.stop_requested()) {
-			if (auto loaded = LoadBathymetry(*heightmap, stop); loaded && !stop.stop_requested()) {
-				logger::info("[PBR Water] Bathymetry loaded ({}x{})", loaded->width, loaded->height);
+		if (landRequest && !stop.stop_requested()) {
+			const auto start = std::chrono::steady_clock::now();
+			if (auto loaded = PBRWaterLand::Load(*landRequest, stop); loaded && !stop.stop_requested()) {
+				const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+				logger::info("[PBR Water] Terrain read from {} plugins in {} ms ({}x{}, z {:.0f}..{:.0f})", landRequest->plugins.size(), elapsed.count(), loaded->width, loaded->height, loaded->minZ, loaded->maxZ);
 				bathymetry.store(std::move(loaded), std::memory_order_release);
+				bathymetryWorld.store(landWorld, std::memory_order_release);
+				bathymetryGeneration.fetch_add(1, std::memory_order_acq_rel);
 			}
 		}
 		building.store(false, std::memory_order_release);
@@ -526,10 +248,9 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 	if (shoreBuilding.load(std::memory_order_acquire))
 		return;
 
-	auto cache = landCache.load(std::memory_order_acquire);
-	auto coarse = bathymetry.load(std::memory_order_acquire);
+	auto terrain = bathymetry.load(std::memory_order_acquire);
 	auto levels = cellLevels.load(std::memory_order_acquire);
-	if ((!cache && !coarse) || (!levels && !cache)) {
+	if (!terrain) {
 		if (shore.load(std::memory_order_acquire))
 			PublishShore(nullptr);
 		return;
@@ -537,12 +258,7 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 
 	const float half = 0.5f * ShoreTexels * ShoreStep;
 	const bool moved = std::abs(playerX - shoreCentreX) > 0.25f * half || std::abs(playerY - shoreCentreY) > 0.25f * half;
-	// Newly loaded cells refine the bed: picked up, but not more often than every 10 s (each field takes over over a few
-	// seconds, and walking along a coast loads a cell every few seconds).
-	const uint32_t landVersion = cache ? cache->version : 0;
-	const auto now = std::chrono::steady_clock::now();
-	const bool newLand = landVersion != shoreLandVersion && now - shoreBuiltAt > std::chrono::seconds(10);
-	const bool newData = newLand || coarse != shoreCoarse || levels != shoreLevels;
+	const bool newData = terrain != shoreBathymetry || levels != shoreLevels;
 	// The travel times hold for the period they were traced for, the exposure for the swell's direction; a new field
 	// takes over smoothly.
 	auto turned = [](float a, float b, float degrees) { return std::abs(std::remainder(a - b, static_cast<float>(PBRWaterModel::TwoPi))) > degrees * std::numbers::pi_v<float> / 180.0f; };
@@ -553,9 +269,7 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 	shoreCentreX = playerX;
 	shoreCentreY = playerY;
 	shoreTraced = waves;
-	shoreLandVersion = landVersion;
-	shoreBuiltAt = now;
-	shoreCoarse = coarse;
+	shoreBathymetry = terrain;
 	shoreLevels = levels;
 
 	// Whole texels, so a rebuild never shifts the sampling grid.
@@ -567,7 +281,7 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 	shoreBuilding.store(true, std::memory_order_release);
 	const uint32_t epoch = shoreEpoch.load(std::memory_order_acquire);
 	const float seaLevel = currentWorldSpace ? currentWorldSpace->GetDefaultWaterHeight() : std::numeric_limits<float>::quiet_NaN();
-	shoreWorker = std::jthread([this, minX, minY, waves, fetchField, fetchScale, cache, coarse, levels, seaLevel, epoch]() {
+	shoreWorker = std::jthread([this, minX, minY, waves, fetchField, fetchScale, terrain, levels, seaLevel, epoch]() {
 		PBRWaterModel::ShoreInputs inputs;
 		inputs.width = ShoreTexels;
 		inputs.height = ShoreTexels;
@@ -582,16 +296,10 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 		const size_t count = static_cast<size_t>(ShoreTexels) * ShoreTexels;
 		inputs.bed.assign(count, std::numeric_limits<float>::quiet_NaN());
 		inputs.level.assign(count, std::numeric_limits<float>::quiet_NaN());
-		std::vector<float> coarseBed(count, std::numeric_limits<float>::quiet_NaN());
 
-		// Still water level per cell: Unified Water's cache, else the loaded cells. A dry cell takes the highest
-		// level around it, so the beach above a shoreline on a cell edge still knows the water below it.
-		auto cellLevel = [&](int32_t cx, int32_t cy) {
-			float level = levels ? levels->At(cx, cy) : std::numeric_limits<float>::quiet_NaN();
-			if (!std::isfinite(level) && cache)
-				level = cache->Level(cx, cy);
-			return level;
-		};
+		// Still water level per cell: Unified Water's cache, else the sea's. A dry cell takes the highest level around it,
+		// so the beach above a shoreline on a cell edge still knows the water below it.
+		auto cellLevel = [&](int32_t cx, int32_t cy) { return levels ? levels->At(cx, cy) : seaLevel; };
 		const int32_t cellMinX = static_cast<int32_t>(std::floor(minX / CellSize)) - 1;
 		const int32_t cellMinY = static_cast<int32_t>(std::floor(minY / CellSize)) - 1;
 		const int32_t cellCount = static_cast<int32_t>(std::ceil(ShoreTexels * ShoreStep / CellSize)) + 3;
@@ -618,16 +326,13 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 			for (uint32_t x = 0; x < ShoreTexels; ++x) {
 				const float wx = minX + static_cast<float>(x) * ShoreStep;
 				const size_t i = static_cast<size_t>(y) * ShoreTexels + x;
-				inputs.bed[i] = cache ? cache->Sample(wx, wy) : std::numeric_limits<float>::quiet_NaN();
-				if (coarse && coarse->Contains(wx, wy))
-					coarseBed[i] = coarse->Sample(wx, wy);
+				if (terrain->Contains(wx, wy))
+					inputs.bed[i] = terrain->Sample(wx, wy);
 				const int32_t cx = static_cast<int32_t>(std::floor(wx / CellSize)) - cellMinX;
 				if (cx >= 0 && cy >= 0 && cx < cellCount && cy < cellCount)
 					inputs.level[i] = cellLevelsLocal[static_cast<size_t>(cy) * cellCount + static_cast<size_t>(cx)];
 			}
 		}
-
-		FeatherBed(inputs.bed, coarseBed, ShoreTexels, ShoreTexels, FeatherTexels);
 
 		std::shared_ptr<PBRWaterModel::ShoreField> field;
 		if (!shoreCancel.load(std::memory_order_relaxed)) {

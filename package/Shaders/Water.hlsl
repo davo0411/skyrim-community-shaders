@@ -253,7 +253,11 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 #		if defined(PBR_WATER)
 	{
 		float flowDamping = GetWaveFlowDamping(scrollWorldPos.xyz);
-		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, spacing);
+#			if defined(STENCIL)
+		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, spacing, true);
+#			else
+		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, spacing, false);
+#			endif
 		float3x3 worldToModel = InverseLinear(World);
 		previousInputPosition.xyz += mul(worldToModel, surface.previous);
 		inputPosition.xyz += mul(worldToModel, surface.current);
@@ -982,7 +986,10 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				endif
 #			endif
 
-#			if defined(WADING_RT) || defined(WADING)
+	// PBR water has no vanilla wading displacement (TESWaterSystem_InitializeWater: noDisplacement), its ripple simulation
+	// stirs the real surface instead. The engine still flags the water as waded while the player is in it: reading the
+	// never-written DisplacementTex then tipped every pixel's normal over and the whole surface turned into a mirror.
+#			if (defined(WADING_RT) || defined(WADING)) && !defined(PBR_WATER)
 #				if defined(WADING_RT)
 	const bool isWading = Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Wading;
 #				else
@@ -1650,7 +1657,7 @@ PS_OUTPUT main(PS_INPUT input)
 	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
 	float pbrFlow = saturate((1.0 - input.WaveParam.w) / max(PBRWater::Foam1.w, 0.01));
 	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
-	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.breaking, pbrFlow);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.breakStage, pbrFlow);
 	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
 	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
 
@@ -1692,31 +1699,24 @@ PS_OUTPUT main(PS_INPUT input)
 	// and ISWaterBlend composites whatever this target holds there - after a discard, an old frame's water.
 	float pbrEdge = smoothstep(0.0, 0.06 * PBRWater::UnitsPerMetre, pbrFilm);
 
-	// Foam (PBRWater.hlsli): made only where waves break - the sharpest crests of the sea, the shore waves' rollers and
-	// the front of each uprush - and kept where the water carries it while it thins out (FoamSimCS), so crests leave
-	// trails and the surf leaves foam at the water's edge. Nothing is drawn from what the depth buffer shows through the
-	// water: that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from below. It is
-	// drawn with the foam texture (Crest's black-point fade) at the Lagrangian position it is kept at, churned on the
-	// water by Fluid Flux's flow advection and still where the water has drained from the sand.
-	float2 pbrFoamCoverage = PBRWater::FoamCoverage(pbrSurface);
-	float2 pbrFoamPosition = input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy;
-	float3 pbrFoamFlow = float3(PBRWater::Params1.xy * PBRWater::FoamAdvectionSlide, PBRWater::FoamAdvectionRate) * pbrEdge;
-	float pbrFoamPattern = PBRWaterFoam::SurfaceFoam(pbrFoamPosition, pbrFoamCoverage.x, PBRWater::FoamTile, pbrFoamFlow, PBRWater::Foam1.y, PBRWater::OceanSampler);
-	// Bubble specks under the surface (Crest's bubble foam) from the breaking and from air churned in by anything moving
-	// through the water, seen with parallax through the surface.
-	float2 pbrParallax = viewDirection.xy / max(abs(viewDirection.z), 0.2) * PBRWater::BubbleDepth;
-	float pbrBubbles = PBRWaterFoam::Bubbles(pbrFoamPosition - PBRWater::Foam3.zw, pbrFoamCoverage.y, PBRWater::FoamTile, pbrParallax, PBRWater::OceanSampler);
-	// Foam scatters light diffusely (Lambertian: Dupuy & Bruneton 2012), lit by the sun and the sky like any surface,
-	// with the wave normal bumped by its own relief so it shades with the slopes instead of reading as a flat decal.
-	float3 pbrFoamNormal = PBRWater::FoamNormal(normal, pbrFoamPattern, input.WaveParam.xy);
-	float3 pbrFoamIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * (dirShadow * saturate(dot(pbrFoamNormal, SunDir.xyz)));
+	// Foam (PBRWater.hlsli): made only where the waves break, by the Jacobian of their displacement, while they break.
+	// Nothing is drawn from what the depth buffer shows through the water:
+	// that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from below. It is drawn
+	// with the foam texture (Crest's black-point fade) at the Lagrangian (undisplaced) position, a diffuse scatterer
+	// (Dupuy & Bruneton 2012) lit by the sun and the sky like any surface.
+	// The swash sheet runs up the beach foaming: broken white water over all of the sheet, densest at its leading edge
+	// and thinning behind it. The sheet is where the bed is under the swash tip but near or above the still water (out
+	// in the surf the residual surf foam takes over, PBRWater::ShoreWaves).
+	float pbrTipGap = pbrSurface.swashTip - pbrBed;
+	float pbrSheet = step(0.0, pbrTipGap) * smoothstep(-0.15 * PBRWater::UnitsPerMetre, 0.0, pbrBed);
+	float pbrShoreLace = pbrSurface.surf * pbrSheet * lerp(0.45, 1.0, saturate(1.0 - pbrTipGap / (0.05 * PBRWater::UnitsPerMetre)));
+	float pbrFoamPattern = PBRWaterFoam::SurfaceFoam(input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy, max(pbrSurface.foam, pbrShoreLace), PBRWater::FoamTile, PBRWater::OceanSampler);
+	float3 pbrFoamIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * (dirShadow * saturate(dot(normal, SunDir.xyz)));
 	float3 pbrSkyIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting());
 #							if defined(SKYLIGHTING)
 	pbrSkyIrradiance *= skylightingDiffuse;
 #							endif
-	float3 pbrFoamColor = ColorManagement::LinearToScene(PBRWaterFoam::Albedo(pbrSurface.freshness) * (pbrFoamIrradiance + pbrSkyIrradiance));
-	// The bubbles scatter like the foam; as specks under the surface they cover about half of what they lie over.
-	pbrTransmitted = lerp(pbrTransmitted, pbrFoamColor, pbrBubbles * 0.5);
+	float3 pbrFoamColor = ColorManagement::LinearToScene(PBRWaterFoam::Albedo * (pbrFoamIrradiance + pbrSkyIrradiance));
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);

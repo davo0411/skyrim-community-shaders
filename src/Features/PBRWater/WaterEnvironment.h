@@ -3,10 +3,8 @@
 #include "WaveModel.h"
 
 #include <atomic>
-#include <chrono>
 #include <memory>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 /** @brief Minimal view of a cell coverage grid (decoupled from Unified Water's cache type). */
@@ -33,37 +31,15 @@ struct CellLevels
 };
 
 /**
- * @brief Exact terrain heights of every exterior cell loaded so far in the worldspace (immutable once published).
- *
- * Skyrim streams only the cells around the player, so the exact heights used to exist for a 5 x 5 block that moved with
- * the camera; everything else fell back to the coarse Terrain Shadows heightmap, which is metres off. Kept here, the
- * bathymetry stays exact wherever the player has been, and the shore field no longer changes each time a cell loads.
- */
-struct LandCache
-{
-	static constexpr int32_t QuadsPerCell = 32;
-	static constexpr uint32_t CellVertices = QuadsPerCell + 1;
-
-	std::unordered_map<uint64_t, std::shared_ptr<const std::vector<float>>> cells;  ///< CellVertices^2 absolute z per cell, row-major from the south-west
-	std::unordered_map<uint64_t, float> levels;                                     ///< still water level of each cached cell (NaN: none)
-	uint32_t version = 0;                                                           ///< bumped whenever a cell is added
-
-	static uint64_t Key(int32_t cellX, int32_t cellY) { return (static_cast<uint64_t>(static_cast<uint32_t>(cellX)) << 32) | static_cast<uint32_t>(cellY); }
-	/** @brief Exact terrain z at absolute (x, y) (bilinear), NaN where no cached cell covers it. */
-	float Sample(float x, float y) const;
-	/** @brief The cached cell's still water level, NaN when it is not cached or has none. */
-	float Level(int32_t cellX, int32_t cellY) const;
-};
-
-/**
  * @brief Per-worldspace data the wave model needs: directional fetch and bathymetry.
  *
- * Both are rebuilt on a background thread whenever the player's worldspace changes:
+ * Both are built on a background thread when the player's worldspace changes:
  *  - Fetch: for every water cell and 16 wind directions, the open-water distance upwind, ray-marched
  *    over Unified Water's cell coverage. Short fetch makes small, short waves (ponds, rivers), long
  *    fetch lets swell develop (open sea). Uploaded to the GPU as a Texture2DArray.
- *  - Bathymetry: a downsampled CPU copy of the Terrain Shadows heightmap so gameplay queries
- *    (swimming, buoyancy) see the same depth-limited and shoreline waves as the GPU.
+ *  - Bathymetry: the terrain of the whole worldspace, read from the plugins' LAND records (PBRWaterLand): the GPU's
+ *    depth, the shore field's bed, and what gameplay queries (swimming, buoyancy) see. Kept while the player stays on
+ *    the same land: child worldspaces share their parent's, and interiors have none.
  */
 class WaterEnvironment
 {
@@ -73,20 +49,13 @@ public:
 	/** @brief Main thread: detects worldspace changes and starts a rebuild when needed. */
 	void Update(const RE::TESWorldSpace* worldSpace);
 
-	/**
-	 * @brief Main thread: rebuilds the exact terrain grid of the loaded exterior cells when they change.
-	 * The streamed LAND records give the true terrain (33 x 33 vertices per cell, 128 units apart), far
-	 * finer than the 8-bit Terrain Shadows heightmap, which cannot resolve beaches at all.
-	 */
-	void UpdateLoadedLand(bool exterior);
-	std::shared_ptr<const PBRWaterModel::Bathymetry> GetLand() const { return land.load(std::memory_order_acquire); }
-	uint32_t GetLandGeneration() const { return landGeneration.load(std::memory_order_acquire); }
-
 	std::shared_ptr<const PBRWaterModel::FetchField> GetFetch() const { return fetch.load(std::memory_order_acquire); }
 	std::shared_ptr<const PBRWaterModel::Bathymetry> GetBathymetry() const { return bathymetry.load(std::memory_order_acquire); }
 
 	/** @brief Incremented every time a new fetch field is published (render thread re-uploads on change). */
 	uint32_t GetFetchGeneration() const { return fetchGeneration.load(std::memory_order_acquire); }
+	/** @brief The same for the bathymetry. */
+	uint32_t GetBathymetryGeneration() const { return bathymetryGeneration.load(std::memory_order_acquire); }
 
 	bool IsBuilding() const { return building.load(std::memory_order_acquire); }
 
@@ -96,7 +65,7 @@ public:
 	/**
 	 * @brief Main thread: keeps the shore field around the player current (the coastline map: the shore waves' travel
 	 * times to the waterline, beach slopes, exposure, room). It is rebuilt on a worker whenever the player leaves its
-	 * middle, the terrain or water data change (cells load), or the sea's dominant waves change period or the swell its
+	 * middle, the terrain or water data change, or the sea's dominant waves change period or the swell its
 	 * direction.
 	 * @param shore      the shore waves to trace
 	 * @param fetch      open water upwind, for the exposure to the swell (null: every shore is open)
@@ -106,7 +75,7 @@ public:
 	std::shared_ptr<const PBRWaterModel::ShoreField> GetShore() const { return shore.load(std::memory_order_acquire); }
 	bool IsBuildingShore() const { return shoreBuilding.load(std::memory_order_acquire); }
 
-	/// Shore field size (texels per side) and texel size (units: the loaded terrain's vertex spacing).
+	/// Shore field size (texels per side) and texel size (units: the terrain's vertex spacing).
 	static constexpr uint32_t ShoreTexels = 768;
 	static constexpr float ShoreStep = 128.0f;
 
@@ -121,12 +90,10 @@ private:
 
 	std::atomic<std::shared_ptr<const PBRWaterModel::FetchField>> fetch;
 	std::atomic<std::shared_ptr<const PBRWaterModel::Bathymetry>> bathymetry;
-	std::atomic<std::shared_ptr<const PBRWaterModel::Bathymetry>> land;
-	std::atomic_uint32_t landGeneration{ 0 };
-	uint64_t landSignature = 0;
+	std::atomic_uint32_t bathymetryGeneration{ 0 };
+	std::atomic<const RE::TESWorldSpace*> bathymetryWorld{ nullptr };  ///< whose land `bathymetry` holds
 
 	std::atomic<std::shared_ptr<const CellLevels>> cellLevels;  ///< Unified Water's cache for the worldspace
-	std::atomic<std::shared_ptr<const LandCache>> landCache;    ///< exact heights of every cell loaded so far (main thread writes)
 
 	// Shore field (main thread state, worker build)
 	std::jthread shoreWorker;
@@ -136,8 +103,6 @@ private:
 	std::atomic_uint32_t shoreEpoch{ 0 };  ///< bumped per worldspace: a build for an old one is never published
 	float shoreCentreX = 0.0f, shoreCentreY = 0.0f;
 	PBRWaterModel::ShoreParams shoreTraced;  ///< the waves the current field was traced for
-	std::shared_ptr<const PBRWaterModel::Bathymetry> shoreCoarse;
+	std::shared_ptr<const PBRWaterModel::Bathymetry> shoreBathymetry;
 	std::shared_ptr<const CellLevels> shoreLevels;
-	uint32_t shoreLandVersion = 0;
-	std::chrono::steady_clock::time_point shoreBuiltAt{};
 };

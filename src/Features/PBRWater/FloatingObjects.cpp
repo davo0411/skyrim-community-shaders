@@ -232,11 +232,6 @@ namespace
 	 */
 	bool BedHeight(RE::TES* tes, const PBRWaterModel::WaveSnapshot& snapshot, float x, float y, float aboveZ, float& z)
 	{
-		if (snapshot.land && snapshot.land->Contains(x, y)) {
-			z = snapshot.land->Sample(x, y);
-			if (z > -1.0e5f)
-				return true;
-		}
 		if (snapshot.bathymetry && snapshot.bathymetry->Contains(x, y)) {
 			z = snapshot.bathymetry->Sample(x, y);
 			return true;

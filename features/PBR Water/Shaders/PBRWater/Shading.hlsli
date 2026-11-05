@@ -21,8 +21,8 @@
 //   Wind      : micro-roughness from the local wind (Cox & Munk 1954): gusts sweep across the water as
 //               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
 //               roughens the surface.
-//   Foam      : a coverage from every source (Jacobian whitecaps, breaking shore waves, the swash front, the
-//               water's edge, wakes) drawn with the baked foam texture (PBRWater/Foam.hlsli).
+//   Foam      : a coverage made where the waves break (PBRWater.hlsli) drawn with the baked foam texture
+//               (PBRWater/Foam.hlsli).
 // ============================================================================
 
 namespace PBRWater
@@ -133,46 +133,9 @@ namespace PBRWater
 		return D * Vis * FresnelDielectric(VdotH, eta) * NdotL;
 	}
 
-	// ------------------------------------------------------------------------
-	// Foam
-	//
-	// The foam's coverage (PBRWater.hlsli: made where waves break, kept by FoamSimCS) is drawn by PBRWaterFoam
-	// (Foam.hlsli) with the baked foam texture, thresholded at the coverage (Crest's black-point fade) and churned by
-	// Fluid Flux's flow advection.
-	// ------------------------------------------------------------------------
-
 	/// Size of the foam texture's tile (units): FoamPattern bakes PBRWaterFoam::BubblesPerTile large bubbles of 20 cm
 	/// across it, with bubbles 2.7 times smaller in the walls between them.
 	static const float FoamTile = 0.2 * UnitsPerMetre * PBRWaterFoam::BubblesPerTile;
-	/// Fluid Flux's advection: the pattern slides 30 cm downwind and back every five seconds, so it churns in place.
-	static const float FoamAdvectionRate = 0.2;  // cycles per second
-	static const float FoamAdvectionSlide = 0.3 * UnitsPerMetre;
-	/// Depth the bubble specks are seen at under the surface (units), for their parallax.
-	static const float BubbleDepth = 0.3 * UnitsPerMetre;
-
-	/**
-	 * World-space xy gradient of a per-pixel scalar from its screen derivatives and those of the
-	 * world position (inverse of the 2x2 screen-to-world Jacobian). Lets the procedural foam bump
-	 * the surface normal without evaluating its pattern several times.
-	 */
-	float2 WorldGradient(float value, float2 positionWS)
-	{
-		float2 dpdx = ddx_fine(positionWS);
-		float2 dpdy = ddy_fine(positionWS);
-		float dfdx = ddx_fine(value);
-		float dfdy = ddy_fine(value);
-		float det = dpdx.x * dpdy.y - dpdx.y * dpdy.x;
-		det = abs(det) > 1e-6 ? det : 1e-6;
-		return float2(dfdx * dpdy.y - dfdy * dpdx.y, dpdx.x * dfdy - dpdy.x * dfdx) / det;
-	}
-
-	/// Normal of the foam layer: the water normal it rests on, bumped by the foam's own relief.
-	float3 FoamNormal(float3 waterNormal, float foam, float2 positionWS)
-	{
-		float2 g = WorldGradient(foam, positionWS) * (0.04 * UnitsPerMetre);  // foam relief ~4 cm
-		g = clamp(g, -1.5, 1.5);
-		return normalize(waterNormal - float3(g, 0.0));
-	}
 
 	// ------------------------------------------------------------------------
 	// Per-pixel surface
@@ -181,22 +144,18 @@ namespace PBRWater
 	{
 		float3 normal;
 		float roughness;
-		float jacobian;
 		float foamEigen;   // smallest eigenvalue of the foam Jacobian (debug)
-		float whitecap;    // 0..1 a whitecap breaking at this pixel now (debug)
-		float foam;        // foam thickness: what broke lately (FoamSimCS) and what is breaking at this pixel; 1 covers the surface
+		float foam;        // 0..1 the waves are breaking at this pixel now
 		float swashTip;    // the swash tip at this pixel (units above the still water; SwashTip)
 		float swashLens;   // its lens coefficient (1/unit; SwashTop)
-		float foamKept;  // the simulation's part of it: what the swash left where the water has drained
-		float freshness;   // 0..1 the foam is being made now (brighter; aerates the water below)
-		float breaking;    // 0..1 a shore wave breaking here now (stirs up the bottom)
+		float3 waveInfo;   // the shore wave here, for the debug view
+		float surf;        // 0..1 real breakers run onto this shore: the water's edge carries foam
 		float beach;       // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
 		float train;       // 0..1 share of the shore wave train (debug)
 		float room;        // 0..1 room the shore field gives the train here (debug)
 		float exposure;    // 0..1 exposure to the swell (debug)
 		float levelError;  // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
-		float breakStage;  // 0..1 how far the shore waves here have got with breaking (debug)
-		float rippleFoam;  // air churned in by bodies moving through the water
+		float breakStage;  // 0..1 how far the shore waves here have got with breaking (stirs up the bottom)
 		float depth;
 		float height;     // water surface above the still water at this pixel (units): waves, without the swash
 		float elevation;  // bed above the still water at this pixel (units, -1e6 unknown)
@@ -210,8 +169,8 @@ namespace PBRWater
 
 	/// The debug view (Settings::DebugView) that compares the shore field's water level with this water's.
 	static const uint DebugShoreLevel = 12;
-	/// The debug view of the foam simulation.
-	static const uint DebugFoamSimulation = 13;
+	/// The debug view of one shore wave.
+	static const uint DebugShoreWave = 13;
 
 	/**
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
@@ -232,7 +191,7 @@ namespace PBRWater
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
 		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx);
-		float3 ripple = RippleSlopeFoam(waveParam.xyz, ctx.depth);
+		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
 		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
@@ -247,7 +206,7 @@ namespace PBRWater
 		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
-		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05) + ripple.xy;
+		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05) + ripple;
 		slope += detailNormal.xy / max(detailNormal.z, 0.05) * detailScale;
 		o.normal = normalize(float3(-slope, 1.0));
 
@@ -261,18 +220,12 @@ namespace PBRWater
 		float mapVariance = detailVariance * detailScale * detailScale;
 		o.roughness = CombinedRoughness(Light0.x, waves.slopeVariance + windVariance + mapVariance);
 		o.windSpeed = wind;
-		o.jacobian = waves.jacobian;
 		o.foamEigen = waves.foamEigen;
-		o.whitecap = Whitecap(waves);
 
-		// Foam (PBRWater.hlsli): what broke lately and has not thinned out yet (FoamSimCS), and what breaks at this pixel
-		// now, which keeps the crest line as sharp as the pixels. Foam is only made on water: the shore train runs on up
-		// the beach, but breaks only where its surface or the swash sheet covers the bed.
-		float2 kept = SampleFoamSim(absXY);
-		float2 made = BreakingFoam(waves, ctx);
-		// The swash tip per pixel: interpolated from the vertices it is linear across each triangle, so the sheet and its
-		// foam ended in straight lines along the triangle edges. The front's foam is made here too: the simulation's
-		// texels (~half a metre) stepped and diamonded its leading edge.
+		// Foam (PBRWater.hlsli): what breaks at this pixel now, on the crest line of the open sea's waves, and in the shore waves.
+		o.foam = max(BreakingFoam(waves.foamEigen, waves.displacement.z - ctx.elevation, ctx) * CrestLine(waves.foamPhase), waves.shoreFoam);
+		// The swash tip per pixel: interpolated from the vertices it is linear across each triangle, so the sheet ended in
+		// straight lines along the triangle edges.
 		// Also where only the vertices around see the swash (steep rocks and banks where it does not break): keeping the
 		// interpolated tip there put its triangles back into the sheet. SwashTip fades out with the beach, so this is smooth.
 		o.swashTip = shoreState.x;
@@ -283,22 +236,21 @@ namespace PBRWater
 			o.swashTip = swashTip.x;
 			o.swashLens = swashTip.y;
 		}
-		if (ctx.hasTerrain > 0.5)
-			made *= smoothstep(0.0, 0.03 * UnitsPerMetre, max(waves.displacement.z, SwashTop(ctx.elevation, o.swashTip, o.swashLens)) - ctx.elevation);
-		o.foam = max(kept.x, made.x);
-		o.foamKept = kept.x;
-		o.freshness = max(kept.y, made.y);
-		o.breaking = saturate(waves.whitewater);
 		o.beach = ctx.beach;
+		o.surf = ctx.beach * BreakerStrength(ctx);
 		o.train = ctx.train;
 		o.room = ctx.shore.room;
 		o.exposure = ctx.shore.exposure;
+		o.waveInfo = 0.0;
+		[branch] if ((uint)Draw0.z == DebugShoreWave && ctx.train > 0.0)
+		{
+			ShoreWave wave = ShoreWaveAt(absXY, CoastPoint(absXY, ctx.shore), ctx, Shore2.x);
+			o.waveInfo = float3(wave.phase, wave.stage, wave.height / 4.0) * ctx.train;
+		}
 		o.levelError = 0.0;
 		[branch] if ((uint)Draw0.z == DebugShoreLevel)
 			o.levelError = ShoreLevel(absXY) - (waveParam.z + FrameBuffer::CameraPosAdjust.z);
 		o.breakStage = waves.breakStage;
-
-		o.rippleFoam = ripple.z;
 		o.depth = ctx.depth;
 		o.height = waves.displacement.z;
 		o.elevation = ctx.hasTerrain > 0.5 ? ctx.elevation : -1e6;
@@ -308,15 +260,6 @@ namespace PBRWater
 		o.turbidity = 0.0;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
-	}
-
-	/// x foam coverage, y aeration: the air the breaking crests and anything moving through the water churn in (bubbles).
-	/// The churn saturates softly, so a wake fades out at its rim instead of ending in a circle.
-	float2 FoamCoverage(SurfaceShading s)
-	{
-		// Even the densest whitecap keeps its holes and bubbles: at full coverage the black point turned it into a
-		// featureless white sheet (thicker foam lasts longer instead).
-		return float2(0.88 * saturate(s.foam), s.freshness);
 	}
 
 	float3 DebugView(uint mode, SurfaceShading s, float foam, float waveHeight)
@@ -330,13 +273,17 @@ namespace PBRWater
 			// Depth (red, 10 m), beach where waves break and run up (green), break stage of the shore waves (blue).
 			return float3(saturate(s.depth / (10.0 * UnitsPerMetre)), s.beach, s.breakStage);
 		case 4:
-			// Foam Jacobian: its compression (red), the crests breaking now (green) and the shore waves' whitewater (blue).
-			return float3(saturate(1.0 - s.foamEigen), s.whitecap, s.breaking);
+			// Foam Jacobian: its compression (red), the waves breaking now (green) and the shore waves' break stage (blue).
+			return float3(saturate(1.0 - s.foamEigen), s.foam, s.breakStage);
 		case 5:
 			return s.roughness.xxx;
 		case 6:
-			// Height in units of Hs / 2: crests red, troughs green.
-			return float3(saturate(2.0 * waveHeight / max(Optics0.w, 1.0)) * 0.5 + 0.5, saturate(-2.0 * waveHeight / max(Optics0.w, 1.0)), 0.0);
+			// Height against the still water, signed and in metres: red 0.5 at the still water, 0 at -4 m, 1 at +4 m. Green the
+			// metres again as contour lines, blue how far the shore waves here have got with breaking.
+			{
+				float metres = waveHeight * MetresPerUnit;
+				return float3(saturate(0.5 + metres / 8.0), frac(metres), s.breakStage);
+			}
 		case 7:
 			{
 				// Fetch on a log scale: blue 100 m (pond, river), green ~3 km (bay, harbour), red 100 km+ (open sea).
@@ -355,9 +302,10 @@ namespace PBRWater
 		case 11:
 			// Direction the waves travel in (red east, green north).
 			return float3(s.waveDir * 0.5 + 0.5, 0.0);
-		case DebugFoamSimulation:
-			// The foam: its coverage (red), how fresh it is (green) and how much thicker than covering it is (blue).
-			return float3(saturate(s.foam), s.freshness, saturate((s.foam - 1.0) * 0.5));
+		case DebugShoreWave:
+			// The shore wave here: where on it this point is (red, 0 ahead of the wave to 1 behind), how far through its life
+			// (green, 0.5 reaching its limit) and its height (blue, 4 m).
+			return s.waveInfo;
 		case DebugShoreLevel:
 			// The shore field's water level against this water's: green within 0.5 m, red where the field's is lower (it
 			// sees this water as land), blue where higher; black outside the field.

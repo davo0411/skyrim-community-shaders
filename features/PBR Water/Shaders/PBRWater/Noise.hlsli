@@ -27,18 +27,6 @@ namespace PBRWater
 			lerp(Hash12(i + float2(0, 1)), Hash12(i + float2(1, 1)), u.x), u.y);
 	}
 
-	/// ValueNoise and its gradient: x the value, yz d/dp.
-	float3 ValueNoiseGrad(float2 p)
-	{
-		float2 i = floor(p);
-		float2 f = frac(p);
-		float2 u = f * f * (3.0 - 2.0 * f);
-		float2 du = 6.0 * f * (1.0 - f);
-		float a = Hash12(i), b = Hash12(i + float2(1, 0)), c = Hash12(i + float2(0, 1)), d = Hash12(i + float2(1, 1));
-		float k = a - b - c + d;
-		return float3(a + (b - a) * u.x + (c - a) * u.y + k * u.x * u.y, du * float2(b - a + k * u.y, c - a + k * u.x));
-	}
-
 	/// Three-octave fBm with rotated octaves (no grid-aligned artefacts), in [0, 1].
 	float Fbm(float2 p)
 	{

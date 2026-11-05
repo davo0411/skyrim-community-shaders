@@ -3,7 +3,6 @@
 #include "Feature.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
-#include "PBRWater/FoamSimulation.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
@@ -48,80 +47,39 @@ struct PBRWater : Feature
 		// Geometry
 		bool EnableTessellation = true;
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
-		float TessellationMaxFactor = 32.0f;
-		float DisplacementFadeStart = 16384.0f;  ///< units
-		float DisplacementFadeEnd = 32768.0f;
 
 		// Waves
 		float WindSpeedCalm = 3.0f;    ///< m/s when the weather has no wind
 		float WindSpeedStorm = 22.0f;  ///< m/s at the strongest weather wind
 		float WaveHeight = 1.0f;
-		float Choppiness = 1.0f;  ///< horizontal displacement scale; 1 = linear wave theory
-		float DirectionalSpread = 0.6f;
 		float SwellHeight = 0.5f;      ///< metres, significant height of the swell from distant storms
 		float SwellPeriod = 10.0f;     ///< seconds
 		float SwellDirection = 35.0f;  ///< degrees from the wind direction
 		int WaveResolution = 1;        ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
-		bool UseFetch = true;
-		float FetchScale = 15.0f;  ///< Skyrim's distances are compressed: upwind open water counts this many times over
-		bool UseBathymetry = true;
-		float RiverWaveDamping = 0.5f;
 
 		// Shore
-		bool EnableShoreWaves = true;        ///< waves shoal, break and run up beaches
-		float ShoreWaveHeight = 1.0f;        ///< scale on the height of the waves reaching the shore
-		float ShoreVariation = 0.5f;         ///< how much the crests' arrival varies along the coast (Fluid Flux's coastline offsets)
-		bool WetShores = true;               ///< the swash wets the sand and whatever it reaches (Wetness Effects)
-		bool UnderwaterFollowsWaves = true;  ///< the camera is under water when under the displaced surface
+		bool EnableShoreWaves = true;  ///< waves shoal, break and run up beaches
+		bool WetShores = true;         ///< the swash wets the sand and whatever it reaches (Wetness Effects)
 
 		// Lighting
 		float Roughness = 0.06f;
-		float SunSpecular = 1.0f;
-		float PointLightSpecular = 1.0f;
-		float Subsurface = 1.0f;
-		float VanillaFresnel = 0.0f;
 		float Visibility = 1.0f;
-		float RefractionDistortion = 1.0f;
-		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
-		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
-		float WindRoughness = 1.0f;           ///< scales the wind-driven micro-roughness (Cox-Munk)
-		float Gusts = 0.6f;                   ///< how strongly gusts vary the wind over the water
-		float GustSize = 40.0f;               ///< metres
 
 		// Water clarity
-		float Turbidity = 0.15f;            ///< suspended sediment everywhere (0 = crystal clear)
-		float TurbidityPatchiness = 0.7f;   ///< how unevenly it is spread
-		float TurbidityPatchSize = 150.0f;  ///< metres
-		float SedimentDensity = 0.35f;      ///< extinction (1/m) per unit of turbidity
+		float Turbidity = 0.15f;  ///< suspended sediment everywhere (0 = crystal clear)
 		float3 SedimentColor = { 0.34f, 0.29f, 0.2f };
-		float ShoreResuspension = 1.0f;    ///< sediment stirred up by the waves in the shallows
-		float RiverTurbidity = 0.8f;       ///< silt carried by river currents
-		float StormTurbidity = 1.0f;       ///< extra sediment in strong wind and rain
-		float WadingSilt = 1.0f;           ///< silt kicked up by feet on the bed
-		float SedimentLayerHeight = 1.5f;  ///< metres the stirred-up sediment reaches above the bed
 
 		// Foam
-		float FoamAmount = 1.0f;   ///< multiplier on the measured whitecap coverage (Monahan 1980) and on the surf's foam
-		float WindStreaks = 1.0f;  ///< windrows: slicks in light wind
+		float FoamAmount = 1.0f;  ///< multiplier on the measured whitecap coverage (Monahan 1980)
 
 		// Ripples
 		bool EnableRipples = true;
-		bool PhysicsObjectRipples = true;
-		float RippleExtent = 64.0f;  ///< metres
-		float RippleHeight = 0.12f;  ///< metres
-		float RippleNormalStrength = 1.0f;
-		float RippleSpeed = 1.2f;  ///< m/s
-		float RippleHalfLife = 1.5f;
 
 		// Gameplay
 		bool GameplayWaves = true;
-		float BuoyancyStrength = 1.0f;
 
 		// Floating objects
 		bool EnableFloatingObjects = true;
-		float FloatingRange = 150.0f;   ///< metres around the player in which objects float
-		float MaxFloatingSize = 90.0f;  ///< metres: the longest hull that floats (the large Skyrim ships are ~65 m)
-		float FloatingResponse = 1.0f;  ///< scales how much the hulls move
 		bool CarryActors = true;
 
 		// Debug
@@ -130,6 +88,46 @@ struct PBRWater : Feature
 	};
 
 	Settings settings;
+
+	/// What the water is made of: values that are right everywhere, not choices for a player.
+	struct Tuning
+	{
+		static constexpr float TessellationMaxFactor = 32.0f;
+		static constexpr float DisplacementFadeStart = 16384.0f;  ///< units
+		static constexpr float DisplacementFadeEnd = 32768.0f;
+		static constexpr float Choppiness = 1.0f;  ///< horizontal displacement scale; 1 = linear wave theory
+		static constexpr float DirectionalSpread = 0.6f;
+		static constexpr float FetchScale = 15.0f;  ///< Skyrim's distances are compressed: upwind open water counts this many times over
+		static constexpr float RiverWaveDamping = 0.5f;
+		static constexpr float SunSpecular = 1.0f;
+		static constexpr float PointLightSpecular = 1.0f;
+		static constexpr float Subsurface = 1.0f;
+		static constexpr float VanillaFresnel = 0.0f;
+		static constexpr float RefractionDistortion = 1.0f;
+		static constexpr float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
+		static constexpr float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
+		static constexpr float WindRoughness = 1.0f;           ///< scales the wind-driven micro-roughness (Cox-Munk)
+		static constexpr float Gusts = 0.6f;                   ///< how strongly gusts vary the wind over the water
+		static constexpr float GustSize = 40.0f;               ///< metres
+		static constexpr float TurbidityPatchiness = 0.7f;     ///< how unevenly the sediment is spread
+		static constexpr float TurbidityPatchSize = 150.0f;    ///< metres
+		static constexpr float SedimentDensity = 0.35f;        ///< extinction (1/m) per unit of turbidity
+		static constexpr float ShoreResuspension = 1.0f;       ///< sediment stirred up by the waves in the shallows
+		static constexpr float RiverTurbidity = 0.8f;          ///< silt carried by river currents
+		static constexpr float StormTurbidity = 1.0f;          ///< extra sediment in strong wind and rain
+		static constexpr float WadingSilt = 1.0f;              ///< silt kicked up by feet on the bed
+		static constexpr float SedimentLayerHeight = 1.5f;     ///< metres the stirred-up sediment reaches above the bed
+		static constexpr float WindStreaks = 1.0f;             ///< windrows: slicks in light wind
+		static constexpr float RippleExtent = 64.0f;           ///< metres
+		static constexpr float RippleHeight = 0.12f;           ///< metres
+		static constexpr float RippleNormalStrength = 1.0f;
+		static constexpr float RippleSpeed = 1.2f;  ///< m/s
+		static constexpr float RippleHalfLife = 1.5f;
+		static constexpr float BuoyancyStrength = 1.0f;
+		static constexpr float FloatingRange = 150.0f;   ///< metres around the player in which objects float
+		static constexpr float MaxFloatingSize = 90.0f;  ///< metres: the longest hull that floats (the large Skyrim ships are ~65 m)
+		static constexpr float FloatingResponse = 1.0f;  ///< scales how much the hulls move
+	};
 
 	virtual void DrawSettings() override;
 	virtual void LoadSettings(json& o_json) override;
@@ -179,7 +177,6 @@ struct PBRWater : Feature
 		float4 Ripple2;
 		float4 Light0;
 		float4 Light1;
-		float4 Foam0;
 		float4 Foam1;
 		float4 Clarity0;
 		float4 Clarity1;
@@ -187,20 +184,16 @@ struct PBRWater : Feature
 		float4 Optics0;
 		float4 Surface0;
 		float4 Surface1;
-		float4 Land0;                                 // xy texel (0,0) corner (absolute units), zw 1 / grid extent (units)
-		float4 Land1;                                 // x enabled, y vertex spacing (units)
-		float4 Foam3;                                 // x whitecap threshold over many crests, y eigenvalue spread per trace spread, zw bubble drift (units, wrapped)
 		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), y deep-water phase speed of the mean frequency (units/s)
 		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
 		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
 		float4 Shore2;                                // x wave clock (rad, wrapped), y the clock last frame, z its rate (rad/s), w peak period Tp (s)
-		float4 Shore3;                                // x variation along the coast, y its drift clock (s), w deep-water wavelength L0 (units)
+		float4 Shore3;                                // w deep-water wavelength L0 (units)
 		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
-		float4 Foam2;                                 // foam simulation's coarse level: xy corner (absolute units), z 1 / extent, w 1 / whitecap source width
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -243,6 +236,17 @@ struct PBRWater : Feature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/**
+	 * The engine's "camera under water" setter. Besides TESWaterSystem::playerUnderwater it writes a global copy, from
+	 * which every water shader property takes its kUnderwater flag (the underwater technique). The engine also calls it
+	 * from the player: touching the water with the camera above drew the surface as seen from below, a mirror.
+	 */
+	struct TESWaterSystem_SetUnderwater
+	{
+		static void thunk(RE::TESWaterSystem* waterSystem, bool underwater, float height);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	struct TESObjectCELL_GetWaterHeight
 	{
 		static bool thunk(RE::TESObjectCELL* cell, const RE::NiPoint3& position, float& waterHeight);
@@ -263,7 +267,7 @@ private:
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
 	void RestoreDraw();
 	void UpdateFetchTexture();
-	void UpdateLandTexture();
+	void UpdateTerrainTexture();
 	void GatherInteractions(const PBRWaterModel::WaveSnapshot& snapshot, float dt);
 	float WeatherTurbidityTarget() const;
 	/** @brief 0..1 how much of the current weather blend is rainy. */
@@ -273,6 +277,8 @@ private:
 	uint32_t WaveResolutionSize() const;
 	/** @brief Render thread: the SRVs of slots t110-t126. */
 	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[WaterSRVCount]) const;
+	/// False for a water tile wholly outside the waves' reach: flat, so it needs no tessellation.
+	bool WavesReach(const RE::NiAVObject& geometry) const;
 	/** @brief One shore field on the GPU. */
 	struct ShoreTextures
 	{
@@ -288,14 +294,11 @@ private:
 	void UpdateShoreField(float dt, bool enabled);
 	/** @brief Render thread: steps the swash history: how wet the shore is (needs this frame's constants). */
 	void UpdateSwash(float dt);
-	/** @brief Render thread: steps the foam on the water (needs this frame's constants). */
-	void UpdateFoam(float dt);
 	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
 	void UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior);
 	/** @brief Render thread, before the world is drawn: applies the main thread's camera-under-water state again. */
 	void ApplyCameraWater();
 	/** @brief Render thread: puts back the samplers SetupDraw replaced. */
-	void RestoreSamplers();
 	/** @brief Render thread: compiles the Skylighting occluder's vertex shader. */
 	void CompileOccluder();
 	/** @brief Render thread: uploads the foam texture once its bake (started in SetupResources) is done. */
@@ -306,6 +309,8 @@ private:
 	void UpdateSurfaceNoise();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
+	std::unique_ptr<ConstantBuffer> drawBuffer;      ///< this frame's constants for the tessellated water draws
+	std::unique_ptr<ConstantBuffer> flatDrawBuffer;  ///< and for the rest
 	GpuData frameData{};
 	ID3D11ShaderResourceView* worldFlowmap = nullptr;  ///< render thread: Unified Water's worldspace flowmap (not owned)
 	uint32_t frameDataFrame = UINT32_MAX;
@@ -317,7 +322,8 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> noiseCS;
 	uint32_t uploadedFetchGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::FetchField> uploadedFetch;
-	std::unique_ptr<Texture2D> landTexture;
+	std::unique_ptr<Texture2D> terrainTexture;
+	std::unique_ptr<Texture2D> shoreProfileTexture;  ///< the shore wave through its life (ShoreProfile.h)
 	/** @brief Where a body last met the water: its rest (Lagrangian) position and height above the surface. */
 	struct SourceTrack
 	{
@@ -326,15 +332,13 @@ private:
 	};
 	std::unordered_map<const void*, SourceTrack> lastSources;          ///< main thread: ripple source motion relative to the water
 	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;  ///< main thread: wave velocity added per body
-	double bubbleDriftX = 0.0, bubbleDriftY = 0.0;                     ///< main thread: accumulated drift of the bubbles (units)
-	uint32_t uploadedLandGeneration = UINT32_MAX;
-	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedLand;
+	uint32_t uploadedTerrainGeneration = UINT32_MAX;
+	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedTerrain;
 	winrt::com_ptr<ID3D11SamplerState> linearClampSampler;
 	winrt::com_ptr<ID3D11SamplerState> oceanSampler;
 
 	RippleSimulation ripples;
 	ShoreSimulation swash;                ///< render thread
-	FoamSimulation foam;                  ///< render thread
 	ShoreTextures shoreTextures;          ///< render thread: the current shore field
 	ShoreTextures previousShoreTextures;  ///< render thread: the one it replaces, while they blend
 	OceanSimulation ocean;                ///< render thread
@@ -379,7 +383,6 @@ private:
 	std::atomic<float> cameraSurface{ 0.0f };  ///< displaced water height above the camera (absolute z)
 	std::atomic<bool> cameraSurfaceValid{ false };
 	std::atomic<uint32_t> cameraSurfaceFrame{ 0 };  ///< frame the main thread worked it out in
-	std::atomic<float> cameraStillWater{ 0.0f };    ///< still water level at the camera (absolute z), for the foam where the shore field has none
 	float smoothedRain = 0.0f;
 
 	// Render thread
@@ -387,22 +390,19 @@ private:
 	// Per-draw tessellation state (render thread)
 	bool tessellationBound = false;
 	bool geometryShaderBound = false;
-	/// Samplers s12-s13 as the game left them. Its renderer caches sampler state per slot and would not
-	/// rebind a slot it believes unchanged, so ours must not outlive the water draw (Lighting uses both).
-	std::array<ID3D11SamplerState*, 2> savedVSSamplers{};
-	std::array<ID3D11SamplerState*, 2> savedPSSamplers{};
-	bool samplersSaved = false;
 	bool tessellationFailureLogged = false;
 	/// The water draws of one frame, for the Debug section.
 	struct DrawStats
 	{
 		uint32_t draws = 0;
 		uint32_t tessellated = 0;
-		uint32_t patches = 0;                        ///< triangles of the tessellated draws: the tessellator's patches
-		float minSpacing = 0.0f, maxSpacing = 0.0f;  ///< their meshes' vertex spacing (units)
+		uint32_t patches = 0;  ///< triangles of the tessellated draws: the tessellator's patches
 	};
-	DrawStats drawStats;      ///< this frame so far
-	DrawStats lastDrawStats;  ///< the last complete frame
+	GpuData uploadedDrawData{};                              ///< what the draw buffers hold
+	ID3D11ShaderResourceView* drawSRVs[WaterSRVCount] = {};  ///< the views for those constants
+	uint32_t drawResourcesFrame = UINT32_MAX;                ///< the frame the views were last bound in
+	DrawStats drawStats;                                     ///< this frame so far
+	DrawStats lastDrawStats;                                 ///< the last complete frame
 	uint32_t drawStatsFrame = UINT32_MAX;
 	uint32_t tessellationMissingSince = UINT32_MAX;
 };

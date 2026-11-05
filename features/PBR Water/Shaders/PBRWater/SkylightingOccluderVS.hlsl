@@ -55,7 +55,7 @@ VS_OUTPUT main(uint id : SV_VertexID)
 	float3 positionWS = absPos - FrameBuffer::CameraPosAdjust.xyz;
 	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * PBRWater::LoadedGridFade(absXY) * FlowDamping(absXY);
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping);
-	float3 displacement = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false, false).displacement;
+	float3 displacement = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false).displacement;
 	if (ctx.beach > 0.0) {
 		float2 tip = PBRWater::SwashTip(positionWS, ctx, false);
 		displacement.z = max(displacement.z, PBRWater::SwashTop(ctx.elevation, tip.x, tip.y));

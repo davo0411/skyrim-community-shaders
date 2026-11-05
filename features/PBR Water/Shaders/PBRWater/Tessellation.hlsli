@@ -15,7 +15,7 @@
 namespace PBRWater
 {
 	/// Wave filter spacing for a tessellated vertex at camera-relative `positionWS`: the on-screen
-	/// target triangle size (doubled, as most edges end up between the curvature and the baseline
+	/// target triangle size (doubled, as most edges end up between the near-shore and the open-water
 	/// density) projected to that distance. Depends on the position only, so it is crack-free.
 	float TessellatedSpacing(float3 positionWS)
 	{
@@ -75,48 +75,25 @@ namespace PBRWater
 		return mul(World, float4(cp.HPosition.xyz, 1.0)).xyz;
 	}
 
-	/// Tessellation factor of one edge, from the endpoints in canonical order so both patches sharing
-	/// it agree. Two terms:
-	///  - curvature: enough segments that the chord error of the local wave curvature stays below a
-	///    fraction of a pixel (sagitta = curvature * segment^2 / 8), so sharp crests are dense and
-	///    troughs / calm water stay coarse, but never finer than the target triangle size: smaller
-	///    triangles waste the rasterizer (8 x 8 pixel tiles) and the pixel shader's 2 x 2 quads more
-	///    than their silhouette gains;
-	///  - a coarse on-screen baseline (finer inside the ripple simulation, which has no analytic
-	///    curvature to measure), so nothing is ever more than a few target triangles across.
+	/// Tessellation factor of one edge, from the endpoints in canonical order so both patches sharing it agree. It runs
+	/// for every edge of every patch, so it reads no waves: triangles of the target size where the surface has detail the
+	/// spectrum does not show (the ripples, the shore waves' fronts and the waterline), twice that on the open water.
 	float EdgeTessFactor(float3 a, float3 b)
 	{
 		float3 lo = PositionLess(a, b) ? a : b;
 		float3 hi = PositionLess(a, b) ? b : a;
-		float len = length(hi - lo);
 		float3 mid = (lo + hi) * 0.5;
-		float dist = max(length(mid), 1.0);
-
-		float fade = DisplacementFade(mid);
-		if (fade <= 0.0)
+		if (DisplacementFade(mid) <= 0.0)
 			return 1.0;
 
-		float pixelsPerUnit = Tess0.w / dist;
-		float targetPixels = max(Tess0.y, 1.0);
-
-		WaveContext ctx = BuildWaveContext(mid, fade);
-		float2 e = (hi.xy - lo.xy) / max(len, 1e-3);
-		// Curvature at the scale of the target triangles here: what the subdivided edge will have to follow, including
-		// the steep front of the breaking shore waves.
-		float curvature = SurfaceCurvature(mid, ctx, e, targetPixels / pixelsPerUnit);
-		float errorPixels = targetPixels * 0.05;  // 0.5 px at the default 10 px target
-		float edgePixels = len * pixelsPerUnit;
-		float curvatureFactor = min(len * sqrt(curvature * pixelsPerUnit / (8.0 * errorPixels)), edgePixels / targetPixels);
-
-		float2 rippleUV = (mid.xy + FrameBuffer::CameraPosAdjust.xy - Ripple0.xy) * Ripple0.z;
-		bool inRipples = Ripple0.w > 0.5 && all(rippleUV > 0.0) && all(rippleUV < 1.0);
-		// Near the waterline the mesh is held just above the bed (DisplaceSurface), so it has to follow the terrain, up to
-		// the largest run-up on beaches.
-		bool atWaterline = ctx.hasTerrain > 0.5 && ctx.elevation > -2.0 * UnitsPerMetre && ctx.elevation < max(Shore0.w * ctx.beach, 0.5 * UnitsPerMetre);
-		float baselinePixels = targetPixels * ((inRipples || atWaterline) ? 1.0 : 4.0);
-		float screenFactor = edgePixels / baselinePixels;
-
-		return clamp(max(curvatureFactor, screenFactor), 1.0, Tess0.z);
+		float2 absXY = mid.xy + FrameBuffer::CameraPosAdjust.xy;
+		float2 rippleUV;
+		bool detailed = RippleUV(absXY, Ripple0.xy, rippleUV);
+		float2 shoreUV;
+		if (!detailed && ShoreFieldUV(absXY, shoreUV))
+			detailed = ShoreField0.SampleLevel(LinearClampSampler, shoreUV, 0).y < 2.0 * Shore3.w;
+		float edgePixels = length(hi - lo) * Tess0.w / max(length(mid), 1.0);
+		return clamp(edgePixels / (max(Tess0.y, 1.0) * (detailed ? 1.0 : 2.0)), 1.0, Tess0.z);
 	}
 
 	/// Conservative frustum test of the patch bounds grown by the largest possible displacement.

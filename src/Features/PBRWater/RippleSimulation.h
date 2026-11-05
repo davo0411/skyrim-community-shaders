@@ -10,7 +10,7 @@
  *
  * Replaces the vanilla wading displacement mesh: instead of a separate mesh that follows the player,
  * every actor limb and loose Havok object touching the water pushes the surface of a scrolling
- * heightfield, which the water shaders sample for displacement, normals and foam.
+ * heightfield, which the water shaders sample for displacement and normals.
  */
 class RippleSimulation
 {
@@ -26,22 +26,15 @@ public:
 		float radius = 0.0f;  ///< units
 		float depth = 0.0f;   ///< how far the body pushes the surface down (simulation units)
 		float silt = 0.0f;    ///< sediment kicked up from the bed per simulation step
-		float foam = 0.0f;    ///< whitewater churned up under the footprint per simulation step
 	};
 
 	struct Settings
 	{
-		float extent = 4096.0f;     ///< world units covered by the grid
-		float waveSpeed = 1.2f;     ///< m/s
-		float halfLife = 1.5f;      ///< s, amplitude decay
-		float foamHalfLife = 3.0f;  ///< s
-		float foamFromMotion = 6.0f;
-		float foamSpread = 0.04f;    ///< foam diffusion per step (0..1): patches slowly widen and soften
+		float extent = 4096.0f;      ///< world units covered by the grid
+		float waveSpeed = 1.2f;      ///< m/s
+		float halfLife = 1.5f;       ///< s, amplitude decay
 		float siltHalfLife = 20.0f;  ///< s, settling time of stirred-up sediment
 		float siltSpread = 0.3f;     ///< diffusion per step (0..1)
-		float heightScale = 8.4f;    ///< units per simulation unit of height (for the ripple slope)
-		float driftX = 0.0f;         ///< surface drift that carries the foam (units/s)
-		float driftY = 0.0f;
 	};
 
 	void SetupResources();
@@ -79,8 +72,7 @@ private:
 		float radius;
 		float depth;
 		float silt;
-		float foam;
-		float pad[2];
+		float pad[3];
 	};
 	static_assert(sizeof(GpuSource) == 32);
 
@@ -91,17 +83,11 @@ private:
 		uint32_t numSources;
 		uint32_t gridSize;
 		float damping;
-		float foamDecay;
 		float waveSpeed2;
-		float foamFromMotion;
 		float siltDecay;
 		float siltDiffusion;
 		float viscosity;
-		float foamDiffusion;
-		float foamDriftX;  ///< texels per step
-		float foamDriftY;
-		float slopeScale;  ///< simulation height difference per texel -> surface slope
-		uint32_t seed;     ///< step counter: varies where churned-in air lands from step to step
+		float pad[3];
 	};
 	STATIC_ASSERT_ALIGNAS_16(SimCB);
 
@@ -112,9 +98,7 @@ private:
 	std::unique_ptr<StructuredBuffer> sourceBuffer;
 	std::unique_ptr<ConstantBuffer> simCB;
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
-	winrt::com_ptr<ID3D11SamplerState> linearSampler;
 	uint32_t current = 0;
-	uint32_t stepCount = 0;
 
 	int64_t originTexelX = 0;
 	int64_t originTexelY = 0;

@@ -8,8 +8,8 @@
  *
  * Every frame each cascade is synthesised from the spectrum (OceanSpectrumCS), transformed along rows and
  * columns (OceanFFTCS) and unpacked into mip-mapped texture arrays (OceanAssembleCS): displacement,
- * slopes and compression, LEAN slope moments and curvature. The water shaders sample them for geometry,
- * normals, roughness, foam (FoamSimulation) and tessellation; last frame's displacement is kept for
+ * slopes and compression, and LEAN slope moments. The water shaders sample them for geometry,
+ * normals, roughness, foam and tessellation; last frame's displacement is kept for
  * motion vectors.
  */
 class OceanSimulation

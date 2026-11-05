@@ -74,24 +74,6 @@ namespace PBRWaterFoam
 			return result / std::max(weights, 1e-12f);
 		}
 
-		/// Distance to the nearest speck centre over its radius (no merging): bubbles in the water are separate.
-		float SpeckDistance(float x, float y, int32_t period, uint32_t seed)
-		{
-			const float fx = std::floor(x), fy = std::floor(y);
-			const auto cx = static_cast<int32_t>(fx), cy = static_cast<int32_t>(fy);
-			float nearest = 1e9f;
-			for (int32_t j = -1; j <= 1; ++j) {
-				for (int32_t i = -1; i <= 1; ++i) {
-					const int32_t gx = cx + i, gy = cy + j;
-					const float ox = static_cast<float>(gx) + 0.5f + (Hash01(gx, gy, period, seed) - 0.5f) * 0.8f;
-					const float oy = static_cast<float>(gy) + 0.5f + (Hash01(gx, gy, period, seed + 7u) - 0.5f) * 0.8f;
-					const float radius = 0.1f + 0.2f * Hash01(gx, gy, period, seed + 13u);
-					nearest = std::min(nearest, std::sqrt((ox - x) * (ox - x) + (oy - y) * (oy - y)) / radius);
-				}
-			}
-			return nearest;
-		}
-
 		/// Replaces every value by its rank in [0, 1): a threshold at 1 - C then keeps exactly a share C.
 		void Equalise(std::vector<float>& values)
 		{
@@ -113,10 +95,9 @@ namespace PBRWaterFoam
 	{
 		size = std::max(size, 4u);
 		const size_t count = static_cast<size_t>(size) * size;
-		std::vector<float> foam(count), bubbles(count);
+		std::vector<float> foam(count);
 		constexpr int32_t Large = static_cast<int32_t>(BubblesPerTile);
 		constexpr int32_t Small = 32;  // ~2.7 times smaller bubbles in the walls between the large ones
-		constexpr int32_t Specks = 40;
 
 		for (uint32_t y = 0; y < size; ++y) {
 			for (uint32_t x = 0; x < size; ++x) {
@@ -137,45 +118,31 @@ namespace PBRWaterFoam
 				const float r = std::clamp((1.45f - wall) / 1.4f, 0.0f, 1.0f);
 				const float onset = r * r / (0.45f + 1.1f * clumps);
 				foam[static_cast<size_t>(y) * size + x] = 1.0f - onset;
-				bubbles[static_cast<size_t>(y) * size + x] = -SpeckDistance(tx * Specks, ty * Specks, Specks, 83u);
 			}
 		}
 		Equalise(foam);
-		Equalise(bubbles);
-
-		std::vector<Level> levels;
-		Level top;
-		top.size = size;
-		top.texels.resize(count * 2);
-		for (size_t i = 0; i < count; ++i) {
-			top.texels[i * 2 + 0] = ToUnorm(foam[i]);
-			top.texels[i * 2 + 1] = ToUnorm(bubbles[i]);
-		}
-		levels.push_back(std::move(top));
 
 		// Box-filtered mips: far away the texture averages to the coverage it is thresholded at.
-		std::vector<float> fr(foam), fg(bubbles);
+		std::vector<Level> levels;
+		std::vector<float> values(foam);
 		uint32_t s = size;
-		while (s > 1) {
+		for (;;) {
+			Level level;
+			level.size = s;
+			level.texels.resize(values.size());
+			std::transform(values.begin(), values.end(), level.texels.begin(), ToUnorm);
+			levels.push_back(std::move(level));
+			if (s == 1)
+				break;
 			const uint32_t n = s / 2;
-			std::vector<float> nr(static_cast<size_t>(n) * n), ng(static_cast<size_t>(n) * n);
+			std::vector<float> next(static_cast<size_t>(n) * n);
 			for (uint32_t y = 0; y < n; ++y) {
 				for (uint32_t x = 0; x < n; ++x) {
 					const size_t a = static_cast<size_t>(2 * y) * s + 2 * x;
-					nr[static_cast<size_t>(y) * n + x] = 0.25f * (fr[a] + fr[a + 1] + fr[a + s] + fr[a + s + 1]);
-					ng[static_cast<size_t>(y) * n + x] = 0.25f * (fg[a] + fg[a + 1] + fg[a + s] + fg[a + s + 1]);
+					next[static_cast<size_t>(y) * n + x] = 0.25f * (values[a] + values[a + 1] + values[a + s] + values[a + s + 1]);
 				}
 			}
-			Level level;
-			level.size = n;
-			level.texels.resize(static_cast<size_t>(n) * n * 2);
-			for (size_t i = 0; i < nr.size(); ++i) {
-				level.texels[i * 2 + 0] = ToUnorm(nr[i]);
-				level.texels[i * 2 + 1] = ToUnorm(ng[i]);
-			}
-			levels.push_back(std::move(level));
-			fr.swap(nr);
-			fg.swap(ng);
+			values.swap(next);
 			s = n;
 		}
 		return levels;

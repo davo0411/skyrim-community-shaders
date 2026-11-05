@@ -3,12 +3,11 @@
 //
 //   Displacement : xyz Lagrangian displacement (units), w dDx/dy
 //   Derivatives  : xy height slopes dDz/dx, dDz/dy; zw compression dDx/dx, dDy/dy
-//   Surface      : xy squared slopes (LEAN moments: mip-filtered, they keep the variance of the slopes a
-//                  pixel averages away), z squared trace of the compression (dDx/dx + dDy/dy)^2 (the same for the
-//                  whitecaps: Dupuy & Bruneton 2012), w |laplacian of the height| (1/unit, tessellation)
+//   Surface      : squared slopes (LEAN moments: mip-filtered, they keep the variance of the slopes a pixel averages
+//                  away)
 //
 // Foam is not made per band: a band's crests alone are not where the summed surface breaks. The shaders read the
-// Jacobian of all the bands together (PBRWater::Whitecap).
+// Jacobian of the bands together (PBRWater::BreakingFoam).
 // ============================================================================
 
 #include "PBRWater/OceanSpectrum.hlsli"
@@ -17,13 +16,7 @@ Texture2DArray<float4> Spatial : register(t0);  // after the inverse FFT, two sl
 
 RWTexture2DArray<float4> Displacement : register(u0);
 RWTexture2DArray<float4> Derivatives : register(u1);
-RWTexture2DArray<float4> Surface : register(u2);
-
-float2 SlopesAt(int2 p, uint size, uint cascade)
-{
-	uint2 q = uint2(p + (int)size) % size;
-	return Spatial.Load(int4(q, cascade * 2 + 1, 0)).xy;
-}
+RWTexture2DArray<float2> Surface : register(u2);
 
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	uint size = (uint)Time.y;
@@ -39,15 +32,7 @@ float2 SlopesAt(int2 p, uint size, uint cascade)
 	float2 slopes = second.xy;
 	float2 compression = second.zw;
 
-	// Laplacian of the height from the neighbouring slopes (periodic tile).
-	float texel = Band[cascade].x * unitsPerMetre / (float)size;
-	int2 p = int2(id.xy);
-	float dxx = SlopesAt(p + int2(1, 0), size, cascade).x - SlopesAt(p - int2(1, 0), size, cascade).x;
-	float dyy = SlopesAt(p + int2(0, 1), size, cascade).y - SlopesAt(p - int2(0, 1), size, cascade).y;
-	float curvature = abs(dxx + dyy) / (2.0 * texel);
-
 	Displacement[id] = float4(displacement, shear);
 	Derivatives[id] = float4(slopes, compression);
-	float trace = compression.x + compression.y;
-	Surface[id] = float4(slopes * slopes, trace * trace, curvature);
+	Surface[id] = slopes * slopes;
 }
