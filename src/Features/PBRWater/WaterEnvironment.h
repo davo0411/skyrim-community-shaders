@@ -74,6 +74,10 @@ public:
 	void UpdateShore(float playerX, float playerY, const PBRWaterModel::ShoreParams& shore, std::shared_ptr<const PBRWaterModel::FetchField> fetch, float fetchScale, bool enabled);
 	std::shared_ptr<const PBRWaterModel::ShoreField> GetShore() const { return shore.load(std::memory_order_acquire); }
 	bool IsBuildingShore() const { return shoreBuilding.load(std::memory_order_acquire); }
+	/** @brief Wall time of the last finished fetch / terrain build (worker thread, ms; Debug section). */
+	float GetLastBuildMs() const { return lastBuildMs.load(std::memory_order_relaxed); }
+	/** @brief Wall time of the last finished shore field trace (worker thread, ms; Debug section). */
+	float GetLastShoreBuildMs() const { return lastShoreBuildMs.load(std::memory_order_relaxed); }
 	/**
 	 * @brief Main thread: forgets what the shore field was traced for. A build in flight is cancelled and the next
 	 * UpdateShore traces a new field at once; the current one stays published until that is ready.
@@ -103,6 +107,8 @@ private:
 	// Shore field (main thread state, worker build)
 	std::jthread shoreWorker;
 	std::atomic_bool shoreBuilding{ false };
+	std::atomic<float> lastBuildMs{ 0.0f };
+	std::atomic<float> lastShoreBuildMs{ 0.0f };
 	std::atomic_bool shoreCancel{ false };
 	std::atomic<std::shared_ptr<const PBRWaterModel::ShoreField>> shore;
 	std::atomic_uint32_t shoreEpoch{ 0 };  ///< bumped per worldspace: a build for an old one is never published

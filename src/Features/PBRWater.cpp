@@ -1,4 +1,5 @@
 #include "PBRWater.h"
+#include "PBRWater/Profiling.h"
 
 #include "Features/UnifiedWater.h"
 #include "Features/Upscaling.h"
@@ -237,14 +238,22 @@ namespace
 
 	using SC = SIE::ShaderCache;
 
-	/// Names the GPU work of a scope for RenderDoc, Nsight and the nvperf ranges.
-	struct PerfScope
-	{
-		explicit PerfScope(std::string_view title) { globals::state->BeginPerfEvent(title); }
-		~PerfScope() { globals::state->EndPerfEvent(); }
-		PerfScope(const PerfScope&) = delete;
-		PerfScope& operator=(const PerfScope&) = delete;
+	/// Profiler names of the water draw batches by technique (DrawPassIndex): the surface, its point light passes, then
+	/// Underwater, LOD, Stencil and Simple; in the world and off it (reflections, cubemaps, the map).
+	constexpr const char* DrawPassNames[2][6] = {
+		{ "PBRWater::Draw Surface", "PBRWater::Draw Point Lights", "PBRWater::Draw Underwater", "PBRWater::Draw LOD", "PBRWater::Draw Stencil", "PBRWater::Draw Simple" },
+		{ "PBRWater::Draw Surface (Offscreen)", "PBRWater::Draw Point Lights (Offscreen)", "PBRWater::Draw Underwater (Offscreen)", "PBRWater::Draw LOD (Offscreen)", "PBRWater::Draw Stencil (Offscreen)", "PBRWater::Draw Simple (Offscreen)" },
 	};
+
+	/// Row of DrawPassNames for a water technique (WaterTechnique): 0 the surface, 1-7 its point light passes, 8-11 the rest.
+	uint32_t DrawPassIndex(uint32_t technique)
+	{
+		if (technique == 0)
+			return 0;
+		if (technique < 8)
+			return 1;
+		return technique <= 11 ? technique - 6 : 0;
+	}
 
 	uint32_t WaterTechnique(uint32_t descriptor)
 	{
@@ -711,6 +720,14 @@ void PBRWater::DrawSettings()
 			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
 		ImGui::Text("Water draws last frame: %u, %u tessellated with %u patches", lastDrawStats.draws, lastDrawStats.tessellated, lastDrawStats.patches);
+		{
+			const auto& n = lastDrawStats.byTechnique;
+			ImGui::Text("  surface %u, point lights %u, underwater %u, LOD %u, stencil %u, simple %u", n[0], n[1], n[2], n[3], n[4], n[5]);
+		}
+		ImGui::Text("Main thread update: %.3f ms (peak %.3f ms)", mainUpdateMs.load(std::memory_order_relaxed), mainUpdatePeakMs.load(std::memory_order_relaxed));
+		ImGui::Text("Last builds: fetch and terrain %.0f ms, shore field %.0f ms (worker threads)", environment.GetLastBuildMs(), environment.GetLastShoreBuildMs());
+		ImGui::Text("Steps last frame: ripples %u, swash %u", settings.EnableRipples ? ripples.GetLastSteps() : 0u, frameData.Shore0.x > 0.5f ? swash.GetLastSwashSteps() : 0u);
+		ImGui::TextUnformatted("GPU and CPU timings per pass: Profiling menu, PBRWater::");
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
 		ImGui::Text("Shore field: %s%s, swash: %s", environment.GetShore() ? "ready" : "none", environment.IsBuildingShore() ? " (building)" : "",
 			frameData.Swash0.w > 0.5f ? "running" : "idle");
@@ -1059,10 +1076,12 @@ uint32_t PBRWater::WaveResolutionSize() const
 
 void PBRWater::Prepass()
 {
-	PerfScope perf("PBR Water - Simulation");
-	UpdateFoamTexture();
-	UpdateFetchTexture();
-	UpdateTerrainTexture();
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::Uploads");
+		UpdateFoamTexture();
+		UpdateFetchTexture();
+		UpdateTerrainTexture();
+	}
 
 	// Last frame's water draws leave our textures bound; the simulations below write them.
 	{
@@ -1075,7 +1094,10 @@ void PBRWater::Prepass()
 		context->PSSetShaderResources(WaveHeightfieldSlot, 1, nullSrvs);
 	}
 	drawResourcesFrame = UINT32_MAX;
-	UpdateShoreTextures();
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::Uploads");
+		UpdateShoreTextures();
+	}
 
 	const float dt = renderDelta.load(std::memory_order_acquire);
 	if (const auto snap = snapshot.load(std::memory_order_acquire)) {
@@ -1086,7 +1108,6 @@ void PBRWater::Prepass()
 		oceanSettings.foamThreshold = settings.FoamThreshold;
 		oceanSettings.foamAdd = settings.FoamAdd * settings.FoamAmount;
 		oceanSettings.foamDecayRate = settings.FoamDecayRate;
-		PerfScope oceanPerf("PBR Water - Ocean FFT");
 		ocean.Update(*snap, oceanSettings);
 	}
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
@@ -1110,8 +1131,9 @@ void PBRWater::Prepass()
 			rippleEnvironment.flow0 = frameData.Flow0;
 		}
 		rippleEnvironment.sampler = linearClampSampler.get();
-		PerfScope ripplePerf("PBR Water - Ripples");
 		ripples.Update(cameraPos.x, cameraPos.y, dt, rippleSettings, rippleEnvironment);
+	} else {
+		PBRWaterProfiling::Skipped("PBRWater::RippleStep");
 	}
 
 	UpdateFrameConstants();
@@ -1199,6 +1221,10 @@ void PBRWater::UpdateSwash(float dt)
 	if (!gpuBuffer || frameData.Shore0.x < 0.5f) {
 		frameData.Swash0 = {};
 		frameData.Foam2 = {};
+		PBRWaterProfiling::Skipped("PBRWater::ShoreFoam");
+		PBRWaterProfiling::Skipped("PBRWater::SwashStep");
+		PBRWaterProfiling::Skipped("PBRWater::SwashOut");
+		PBRWaterProfiling::Skipped("PBRWater::ShoreWetness");
 		return;
 	}
 
@@ -1206,7 +1232,6 @@ void PBRWater::UpdateSwash(float dt)
 		swash.Reset();
 
 	// The swash steps with this frame's wave constants and textures.
-	PerfScope perf("PBR Water - Swash");
 	auto context = globals::d3d::context;
 	GpuData d = frameData;
 	d.Tess0.x = 0.0f;
@@ -1280,9 +1305,10 @@ void PBRWater::UpdateSurfaceNoise()
 {
 	if (!gpuBuffer || !noiseCS || !noiseTexture || frameData.Noise0.z <= 0.0f) {
 		frameData.Noise0.w = 0.0f;
+		PBRWaterProfiling::Skipped("PBRWater::SurfaceNoise");
 		return;
 	}
-	PerfScope perf("PBR Water - Surface Noise");
+	PBRWaterProfiling::Scope pass("PBRWater::SurfaceNoise");
 	auto context = globals::d3d::context;
 	GpuData d = frameData;
 	d.Tess0.x = 0.0f;
@@ -1313,6 +1339,7 @@ void PBRWater::CompileOccluder()
 
 void PBRWater::DrawSkylightingOccluder(Texture2D& occlusion, const REX::W32::XMFLOAT4X4& occlusionViewProj)
 {
+	PBRWaterProfiling::SkipUnlessRun row("PBRWater::SkylightingOccluder");
 	ID3D11DepthStencilView* dsv = occlusion.dsv.get();
 	if (!loaded || !dsv || !occluderVS || !occluderIndices || !occluderCB || !occluderDepthState || !occluderRasterizer || !gpuBuffer || !globals::shaderCache->IsEnabled())
 		return;
@@ -1320,7 +1347,8 @@ void PBRWater::DrawSkylightingOccluder(Texture2D& occlusion, const REX::W32::XMF
 	const auto snap = snapshot.load(std::memory_order_acquire);
 	if (!snap || !snap->exterior || (frameData.Params0.x < 0.5f && frameData.Shore0.x < 0.5f))
 		return;
-	PerfScope perf("PBR Water - Skylighting Occluder");
+	row.ran = true;
+	PBRWaterProfiling::Scope pass("PBRWater::SkylightingOccluder");
 
 	OccluderCB cb{};
 	cb.occlusionViewProj = occlusionViewProj;
@@ -1486,6 +1514,7 @@ void PBRWater::UpdateSunMap(bool waves)
 		return;
 	sunMapFrame = frame;
 	frameData.SunMap0.w = 0.0f;
+	PBRWaterProfiling::SkipUnlessRun row("PBRWater::WaveHeightfield");
 	// Calm water casts no shadow on itself: the heightfield is only drawn where waves stand.
 	ID3D11DepthStencilView* dsv = sunMapTexture ? sunMapTexture->dsv.get() : nullptr;
 	if (!waves || !dsv || !occluderVS || !sunMapIndices || !occluderCB || !occluderDepthState || !occluderRasterizer || !gpuBuffer)
@@ -1493,7 +1522,8 @@ void PBRWater::UpdateSunMap(bool waves)
 	const auto snap = snapshot.load(std::memory_order_acquire);
 	if (!snap || !snap->exterior || (frameData.Params0.x < 0.5f && frameData.Shore0.x < 0.5f))
 		return;
-	PerfScope perf("PBR Water - Wave Heightfield");
+	row.ran = true;
+	PBRWaterProfiling::Scope pass("PBRWater::WaveHeightfield");
 
 	const auto eye = Util::GetEyePosition();
 	const float eyeCellX = std::floor(eye.x / CellSize);
@@ -1731,8 +1761,6 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 
 	const auto snap = snapshot.load(std::memory_order_acquire);
 	const bool hasWaves = waves && snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled || settings.EnableRipples);
-	// Before the constants are uploaded: they say where the heightfield is.
-	UpdateSunMap(snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled) && shaderCache->IsEnabled());
 
 	// Our hull/domain shaders only match our own vertex and pixel shaders of the same descriptor. While
 	// those are still compiling the vanilla shaders are bound, and tessellating them would break the
@@ -1780,6 +1808,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		drawStatsFrame = state->frameCount;
 	}
 	++drawStats.draws;
+	++drawStats.byTechnique[DrawPassIndex(technique)];
 	if (tessellate) {
 		++drawStats.tessellated;
 		drawStats.patches += triangleCount;
@@ -1890,6 +1919,32 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->GSSetShader(geometryShader, nullptr, 0);
 		geometryShaderBound = true;
 	}
+}
+
+void PBRWater::SetupBatch()
+{
+	if (!gpuBuffer)
+		return;
+	UpdateFrameConstants();
+	// Before the batch's pass and before the draws upload the constants, which say where the heightfield is.
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	UpdateSunMap(snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled) && globals::shaderCache->IsEnabled());
+	// A batch the engine never closed (none should be) ends here rather than swallowing the next.
+	EndDrawBatch();
+	BeginDrawBatch(WaterTechnique(globals::state->modifiedVertexDescriptor));
+}
+
+void PBRWater::BeginDrawBatch(uint32_t technique)
+{
+	drawBatchOpen = true;
+	PBRWaterProfiling::Begin(DrawPassNames[globals::state->inWorld ? 0 : 1][DrawPassIndex(technique)]);
+}
+
+void PBRWater::EndDrawBatch()
+{
+	if (!std::exchange(drawBatchOpen, false))
+		return;
+	PBRWaterProfiling::End();
 }
 
 bool PBRWater::WavesReach(const RE::NiAVObject& geometry) const
@@ -2484,6 +2539,8 @@ void PBRWater::PostPostLoad()
 
 	stl::write_vfunc<0x6, BSWaterShader_SetupGeometry>(RE::VTABLE_BSWaterShader[0]);
 	stl::write_vfunc<0x7, BSWaterShader_RestoreGeometry>(RE::VTABLE_BSWaterShader[0]);
+	stl::write_vfunc<0x2, BSWaterShader_SetupTechnique>(RE::VTABLE_BSWaterShader[0]);
+	stl::write_vfunc<0x3, BSWaterShader_RestoreTechnique>(RE::VTABLE_BSWaterShader[0]);
 
 	stl::detour_thunk<TESObjectCELL_GetWaterHeight>(REL::RelocationID(18543, 19002));
 	// SE 31409 sits with its neighbours AddWater (31406 / 32213) and AddRipple (31410 / 32217).
@@ -2543,7 +2600,29 @@ void PBRWater::SavingGame()
 void PBRWater::MainUpdate::thunk()
 {
 	func();
-	globals::features::pbrWater.MainThreadUpdate();
+	auto& feature = globals::features::pbrWater;
+	const auto start = std::chrono::steady_clock::now();
+	feature.MainThreadUpdate();
+	const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+	// About a second of smoothing at 60 Hz; the peak decays over a few seconds.
+	feature.mainUpdateMs.store(feature.mainUpdateMs.load(std::memory_order_relaxed) * 0.98f + ms * 0.02f, std::memory_order_relaxed);
+	feature.mainUpdatePeakMs.store(std::max(feature.mainUpdatePeakMs.load(std::memory_order_relaxed) * 0.995f, ms), std::memory_order_relaxed);
+}
+
+bool PBRWater::BSWaterShader_SetupTechnique::thunk(RE::BSShader* waterShader, uint32_t technique)
+{
+	// After the original: its BeginTechnique sets the descriptors the batch is named by. Before any draw of the batch, so
+	// the batch's pass encloses every draw's own markers (Frame Annotations) instead of interleaving with them.
+	const bool ok = func(waterShader, technique);
+	if (ok)
+		globals::features::pbrWater.SetupBatch();
+	return ok;
+}
+
+void PBRWater::BSWaterShader_RestoreTechnique::thunk(RE::BSShader* waterShader, uint32_t technique)
+{
+	func(waterShader, technique);
+	globals::features::pbrWater.EndDrawBatch();
 }
 
 #undef I18N_KEY_PREFIX

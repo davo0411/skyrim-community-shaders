@@ -91,6 +91,8 @@ public:
 	float GetPreviousStepAlpha() const { return previousStepAlpha; }
 	float GetExtent() const { return texelSize * GridSize; }
 	bool IsReady() const { return ready; }
+	/** @brief Fixed steps the last Update took (Debug section). */
+	uint32_t GetLastSteps() const { return lastSteps; }
 
 private:
 	struct alignas(16) GpuSource
@@ -147,6 +149,7 @@ private:
 	float previousStepAlpha = 0.0f;
 	float texelSize = 8.0f;
 	float accumulator = 0.0f;
+	uint32_t lastSteps = 0;
 	bool hasOrigin = false;
 	bool ready = false;
 

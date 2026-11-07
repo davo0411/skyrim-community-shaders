@@ -281,6 +281,20 @@ struct PBRWater : Feature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/// Opens the profiler's pass for a batch of water draws (one technique), after drawing the frame's wave heightfield.
+	struct BSWaterShader_SetupTechnique
+	{
+		static bool thunk(RE::BSShader* waterShader, uint32_t technique);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/// Closes it.
+	struct BSWaterShader_RestoreTechnique
+	{
+		static void thunk(RE::BSShader* waterShader, uint32_t technique);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	/**
 	 * The engine's "camera under water" setter. Besides TESWaterSystem::playerUnderwater it writes a global copy, from
 	 * which every water shader property takes its kUnderwater flag (the underwater technique). The engine also calls it
@@ -471,13 +485,24 @@ private:
 	{
 		uint32_t draws = 0;
 		uint32_t tessellated = 0;
-		uint32_t patches = 0;  ///< triangles of the tessellated draws: the tessellator's patches
+		uint32_t patches = 0;          ///< triangles of the tessellated draws: the tessellator's patches
+		uint32_t byTechnique[6] = {};  ///< draws per technique (DrawPassIndex)
 	};
 	GpuData uploadedDrawData{};                              ///< what the draw buffers hold
 	ID3D11ShaderResourceView* drawSRVs[WaterSRVCount] = {};  ///< the views for those constants
 	uint32_t drawResourcesFrame = UINT32_MAX;                ///< the frame the views were last bound in
 	DrawStats drawStats;                                     ///< this frame so far
-	DrawStats lastDrawStats;                                 ///< the last complete frame
+	bool drawBatchOpen = false;                              ///< a profiler pass is open for the current batch of water draws
+	/** @brief Render thread, a batch of water draws begins: the frame's wave heightfield, then the batch's pass. */
+	void SetupBatch();
+	/** @brief Render thread: opens the profiler's pass for this batch of water draws, named by its technique. */
+	void BeginDrawBatch(uint32_t technique);
+	/** @brief Render thread: closes it (RestoreTechnique). */
+	void EndDrawBatch();
+	// Main thread update cost (MainThreadUpdate), for the Debug section.
+	std::atomic<float> mainUpdateMs{ 0.0f };      ///< smoothed (about 1 s)
+	std::atomic<float> mainUpdatePeakMs{ 0.0f };  ///< decaying peak
+	DrawStats lastDrawStats;                      ///< the last complete frame
 	uint32_t drawStatsFrame = UINT32_MAX;
 	uint32_t tessellationMissingSince = UINT32_MAX;
 };

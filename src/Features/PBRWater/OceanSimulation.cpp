@@ -1,4 +1,5 @@
 #include "OceanSimulation.h"
+#include "Profiling.h"
 
 #include "Utils/D3D.h"
 
@@ -126,13 +127,22 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 		CreateTextures(settings.resolution);
 		CompileShaders();
 	}
-	if (!ready || !snapshot.ocean)
+	auto skipped = [] {
+		PBRWaterProfiling::Skipped("PBRWater::OceanSpectrum");
+		PBRWaterProfiling::Skipped("PBRWater::OceanFFT");
+		PBRWaterProfiling::Skipped("PBRWater::OceanAssemble");
+		PBRWaterProfiling::Skipped("PBRWater::OceanMips");
+	};
+	if (!ready || !snapshot.ocean) {
+		skipped();
 		return;
+	}
 	const OceanSpectrum& ocean = *snapshot.ocean;
 	if (ocean.calm) {
 		// Nothing to displace (indoors, still air): the shaders skip the cascades, so skip building them.
 		hasHistory = false;
 		foamClear = true;
+		skipped();
 		return;
 	}
 
@@ -174,6 +184,7 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 
 	// 1. Spectrum at the current time.
 	{
+		PBRWaterProfiling::Scope pass("PBRWater::OceanSpectrum");
 		ID3D11UnorderedAccessView* uav = spectrum[0]->uav.get();
 		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 		context->CSSetShader(spectrumCS.get(), nullptr, 0);
@@ -192,11 +203,15 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 		context->CSSetShaderResources(0, 1, nullSrvs);
 		context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
 	};
-	fft(fftRowsCS.get(), *spectrum[0], *spectrum[1]);
-	fft(fftColumnsCS.get(), *spectrum[1], *spectrum[0]);
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::OceanFFT");
+		fft(fftRowsCS.get(), *spectrum[0], *spectrum[1]);
+		fft(fftColumnsCS.get(), *spectrum[1], *spectrum[0]);
+	}
 
 	// 3. Unpack.
 	{
+		PBRWaterProfiling::Scope pass("PBRWater::OceanAssemble");
 		ID3D11ShaderResourceView* srv = spectrum[0]->srv.get();
 		ID3D11UnorderedAccessView* uavs[4] = { displacement->uav.get(), derivatives->uav.get(), surface->uav.get(), foam->uav.get() };
 		context->CSSetShaderResources(0, 1, &srv);
@@ -211,10 +226,13 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 	context->CSSetConstantBuffers(0, 1, &nullCb);
 	context->CSSetShader(nullptr, nullptr, 0);
 
-	context->GenerateMips(displacement->srv.get());
-	context->GenerateMips(derivatives->srv.get());
-	context->GenerateMips(surface->srv.get());
-	context->GenerateMips(foam->srv.get());
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::OceanMips");
+		context->GenerateMips(displacement->srv.get());
+		context->GenerateMips(derivatives->srv.get());
+		context->GenerateMips(surface->srv.get());
+		context->GenerateMips(foam->srv.get());
+	}
 
 	if (!hasHistory) {
 		context->CopyResource(previousDisplacement->resource.get(), displacement->resource.get());

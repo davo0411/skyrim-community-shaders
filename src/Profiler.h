@@ -136,6 +136,9 @@ public:
 	/** @brief Ends the current timing pass and records the CPU/GPU timestamps. */
 	void EndPass();
 
+	/** @brief True while a timed pass is open: passes are flat, so a caller that nests its own can suspend it first. */
+	bool IsPassOpen() const { return passOpen; }
+
 	/**
 	 * @brief Records a zero sample for a pass skipped on purpose this frame, so its row reads 0 instead of its last cost.
 	 * @param name Pass identifier, as given to BeginPass. Ignored if that pass began this frame or has no row yet.

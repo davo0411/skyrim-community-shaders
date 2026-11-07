@@ -56,6 +56,8 @@ public:
 	float GetFoamOriginY() const { return static_cast<float>(foamOriginY) * FoamTexelSize; }
 	float GetFoamExtent() const { return FoamTexelSize * FoamGridSize; }
 	bool IsFoamReady() const { return foamReady && foamHasOrigin; }
+	/** @brief Swash steps the last UpdateFoam took (Debug section). */
+	uint32_t GetLastSwashSteps() const { return lastSwashSteps; }
 
 private:
 	struct alignas(16) SimCB
@@ -92,6 +94,7 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> outCS;
 	uint32_t sweCurrent = 0;
 	uint32_t foamCurrent = 0;
+	uint32_t lastSwashSteps = 0;
 	int64_t foamOriginX = 0;
 	int64_t foamOriginY = 0;
 	bool foamHasOrigin = false;

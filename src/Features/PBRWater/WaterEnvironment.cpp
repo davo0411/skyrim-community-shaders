@@ -205,6 +205,7 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 
 	building.store(true, std::memory_order_release);
 	worker = std::jthread([this, coverage, hasCoverage, landRequest = std::move(landRequest), landWorld](std::stop_token stop) {
+		const auto buildStart = std::chrono::steady_clock::now();
 		if (hasCoverage && !stop.stop_requested()) {
 			WaterCoverageView view{ coverage->minX, coverage->minY, coverage->width, coverage->height, coverage->water.data() };
 			auto baked = BakeFetch(view);
@@ -224,6 +225,7 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 				bathymetryGeneration.fetch_add(1, std::memory_order_acq_rel);
 			}
 		}
+		lastBuildMs.store(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - buildStart).count(), std::memory_order_relaxed);
 		building.store(false, std::memory_order_release);
 	});
 }
@@ -293,6 +295,7 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 	const uint32_t epoch = shoreEpoch.load(std::memory_order_acquire);
 	const float seaLevel = currentWorldSpace ? currentWorldSpace->GetDefaultWaterHeight() : std::numeric_limits<float>::quiet_NaN();
 	shoreWorker = std::jthread([this, minX, minY, waves, fetchField, fetchScale, terrain, levels, seaLevel, epoch]() {
+		const auto buildStart = std::chrono::steady_clock::now();
 		PBRWaterModel::ShoreInputs inputs;
 		inputs.width = ShoreTexels;
 		inputs.height = ShoreTexels;
@@ -355,6 +358,7 @@ void WaterEnvironment::UpdateShore(float playerX, float playerY, const PBRWaterM
 		}
 		if (field && !shoreCancel.load(std::memory_order_relaxed) && epoch == shoreEpoch.load(std::memory_order_acquire))
 			PublishShore(std::move(field));
+		lastShoreBuildMs.store(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - buildStart).count(), std::memory_order_relaxed);
 		shoreBuilding.store(false, std::memory_order_release);
 	});
 }

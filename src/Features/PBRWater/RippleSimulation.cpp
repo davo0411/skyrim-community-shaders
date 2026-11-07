@@ -1,4 +1,5 @@
 #include "RippleSimulation.h"
+#include "Profiling.h"
 
 #include "Utils/D3D.h"
 #include "WaveModel.h"
@@ -200,7 +201,9 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 
 	accumulator = std::min(accumulator + std::max(dt, 0.0f), FixedStep * MaxStepsPerFrame);
 	bool first = true;
+	lastSteps = 0;
 	while (accumulator >= FixedStep) {
+		++lastSteps;
 		accumulator -= FixedStep;
 		// The grid only scrolls together with a real step; between steps (high frame rates, pause)
 		// it keeps its origin, so the stored state is never re-integrated without time passing.
@@ -220,6 +223,7 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 
 void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base, const Environment& environment)
 {
+	PBRWaterProfiling::Scope pass("PBRWater::RippleStep");
 	auto context = globals::d3d::context;
 
 	SimCB cb = base;

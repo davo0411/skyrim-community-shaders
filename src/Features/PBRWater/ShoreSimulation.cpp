@@ -1,4 +1,5 @@
 #include "ShoreSimulation.h"
+#include "Profiling.h"
 
 #include "Utils/D3D.h"
 
@@ -114,6 +115,7 @@ void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Setti
 	cb.dryRate = std::max(settings.dryRate, 0.0f);
 	simCB->Update(cb);
 
+	PBRWaterProfiling::Scope pass("PBRWater::ShoreWetness");
 	const uint32_t next = current ^ 1;
 	ID3D11ShaderResourceView* srv = wet[current]->srv.get();
 	ID3D11UnorderedAccessView* uav = wet[next]->uav.get();
@@ -176,6 +178,7 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 
 	// The surf's foam, and what the waves bring the swash this frame.
 	{
+		PBRWaterProfiling::Scope pass("PBRWater::ShoreFoam");
 		ID3D11ShaderResourceView* srvs[2] = { foam[foamCurrent]->srv.get(), swe[sweCurrent]->srv.get() };
 		ID3D11UnorderedAccessView* uavs[2] = { stage->uav.get(), prep->uav.get() };
 		context->CSSetShader(foamCS.get(), nullptr, 0);
@@ -188,6 +191,7 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	// The swash: explicit steps within the shallow water's stability limit (bores of a few metres a second over 35 cm
 	// cells). The first step of the frame takes the grid's scroll; a fresh grid starts with the water at rest.
 	{
+		PBRWaterProfiling::Scope pass("PBRWater::SwashStep");
 		constexpr float maxStep = 0.007f;  // s
 		const float stepDt = std::clamp(dt, 0.0f, 8.0f * maxStep);
 		const uint32_t steps = std::max(1u, static_cast<uint32_t>(std::ceil(stepDt / maxStep)));
@@ -210,10 +214,12 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 			context->CSSetShaderResources(0, 3, nullSrvs);
 			sweCurrent = next;
 		}
+		lastSwashSteps = steps;
 	}
 
 	// Packed for the draws.
 	{
+		PBRWaterProfiling::Scope pass("PBRWater::SwashOut");
 		const uint32_t next = foamCurrent ^ 1;
 		ID3D11ShaderResourceView* srvs[3] = { stage->srv.get(), swe[sweCurrent]->srv.get(), prep->srv.get() };
 		ID3D11UnorderedAccessView* uav = foam[next]->uav.get();
