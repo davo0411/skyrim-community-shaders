@@ -179,6 +179,8 @@ namespace PBRWaterModel
 		float crestWobble = 0.35f;    ///< ShoreTuning::crestWobble
 		float splitWaves = 0.6f;      ///< ShoreTuning::splitWaves
 		float deepLength = 1.0f;      ///< deep-water wavelength g T^2 / (2 pi) (units)
+		float seaOmega = 1.0f;        ///< angular frequency of the dominant sea itself (rad/s), eased: the shore periods are held short, the run-up is not
+		float seaLength = 1.0f;       ///< the dominant sea's deep-water wavelength (units), for the run-up
 		float maxRunup = 0.0f;        ///< how far above the still water the swash can reach (units), for bounds
 		/// Wave clock (rad, wrapped after ShoreClockCycles waves): integrated frame by frame (phase += omega dt), so a changing period never moves the crests.
 		double phase = 0.0;

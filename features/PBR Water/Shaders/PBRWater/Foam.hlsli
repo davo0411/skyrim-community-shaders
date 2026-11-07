@@ -8,8 +8,9 @@
 // (wave-harmonic/crest, MIT, OceanFoam.hlsl WhiteFoamTexture): the foam texture is thresholded at 1 - coverage, so as
 // the coverage falls the bubbles in the foam grow and merge and dense foam thins into lace and then specks. The
 // texture (t125, baked at start-up: src/Features/PBRWater/FoamPattern.cpp) stores the coverage at which each texel
-// whitens, equalised, so the thresholded share equals the coverage. It is sampled at the Lagrangian (undisplaced) position,
-// so the pattern moves and compresses with the water.
+// whitens, equalised, so the thresholded share equals the coverage. The water shader samples it still, where the surface
+// is, projected from the side as well on steep faces (triplanar): at the rest position the waves' horizontal displacement
+// drew it out into streaks over every breaker's face, and from above alone it ran down a rising face.
 // ============================================================================
 
 namespace PBRWaterFoam
@@ -35,14 +36,15 @@ namespace PBRWaterFoam
 	}
 
 	/**
-	 * Surface foam in [0, 1] (water pixel shader: needs screen derivatives). The texture at three scales, each four times the
-	 * last, gives the foam an irregular edge at every size: patches, streaks and holes with lace around them, where one
-	 * scale alone drew smooth spots. The scales follow the pixel: as the finest would turn sub-pixel it fades out and a new
-	 * coarsest fades in, so foam stays a crisp pattern at any distance and never melts into a flat wash. Thin foam is a
-	 * translucent lace, fresh foam dense.
-	 * @param p    Lagrangian absolute position (units)
+	 * Surface foam in [0, 1] (water pixel shader: needs screen derivatives). The texture at three fixed scales, each three
+	 * times the last (the bubbles, and lace a few and ten bubbles across), so the foam is a microfoam with a ragged edge;
+	 * the larger structure comes from the coverage itself (the simulated foam). Each scale drops out as its bubbles shrink
+	 * below a few pixels, and with none left the foam is drawn as the coverage it stands for: a pattern held at any
+	 * distance by moving to coarser scales drew distant foam as metre-sized blotches, and a thresholded mip of the pattern
+	 * would turn into a hard-edged mask.
+	 * @param p    absolute position (units)
 	 * @param foam the foam here, 0..1
-	 * @param tile size of the foam texture's tile (units) up close
+	 * @param tile size of the foam texture's tile (units): BubblesPerTile bubbles across
 	 * @param Feather how far the white share of the pattern is feathered, in the texture's values (0.12 by default)
 	 * @param s    sampler (wrap, anisotropic)
 	 */
@@ -55,22 +57,19 @@ namespace PBRWaterFoam
 		float result = 0.0;
 		[branch] if (amount > 0.002)
 		{
-			uint size, unused;
-			FoamTexture.GetDimensions(size, unused);
-			// The finest bubbles (BubblesPerTile per tile) stay some five pixels across.
-			float bubblePixels = float(size) / BubblesPerTile / max(sqrt(max(dot(gx, gx), dot(gy, gy))) * size / tile, 1e-4);
-			float level = max(0.5 * log2(5.0 / bubblePixels) + 1.0, 0.0);
-			float octave = floor(level);
-			float blend = level - octave;
-			float3 weights = float3(1.0 - blend, 1.0, blend);
-			float3 scales = tile * pow(4.0, octave) * float3(1.0, 4.0, 16.0);
+			// Pixels across one bubble of the finest scale, along the footprint's long axis (anisotropic filtering keeps the short one).
+			float footprint = max(sqrt(max(dot(gx, gx), dot(gy, gy))), 1e-4);
+			float bubblePixels = tile / BubblesPerTile / footprint;
+			float3 scales = tile * float3(1.0, 3.0, 9.0);
+			float3 shown = saturate((bubblePixels * float3(1.0, 3.0, 9.0) - 2.0) / 4.0);
 			float3 values;
 			[unroll] for (uint i = 0; i < 3; i++)
-				values[i] = FoamTexture.SampleGrad(s, p / scales[i] + (octave + i) * float2(0.41, 0.17), gx / scales[i], gy / scales[i]);
+				values[i] = FoamTexture.SampleGrad(s, p / scales[i] + i * float2(0.41, 0.17), gx / scales[i], gy / scales[i]);
 			// The mix of uniform values is narrower than any of them: back to their contrast, or the foam would thin out.
-			float total = weights.x + weights.y + weights.z;
-			float value = saturate(0.5 + (dot(values, weights) / total - 0.5) * total * rsqrt(dot(weights, weights)));
-			result = BlackPoint(value, amount, Feather) * (0.35 + 0.65 * amount);
+			float total = dot(shown, 1.0.xxx);
+			float value = saturate(0.5 + dot(values - 0.5, shown) * rsqrt(max(dot(shown, shown), 1e-4)));
+			float pattern = BlackPoint(value, amount, Feather);
+			result = lerp(amount, pattern, saturate(total)) * (0.35 + 0.65 * amount);
 		}
 		return result;
 	}

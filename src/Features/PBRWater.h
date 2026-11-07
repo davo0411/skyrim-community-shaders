@@ -70,16 +70,17 @@ struct PBRWater : Feature
 		bool WetShores = true;             ///< the swash wets the sand and whatever it reaches (Wetness Effects)
 		float ShoreShortestPeriod = 2.5f;  ///< s: the periods within which the shore train follows the sea
 		float ShoreLongestPeriod = 3.5f;
-		float ShoreTimeScale = 0.7f;     ///< the shore clock runs this much slower than the waves' frequency
-		float ShoreTrainCycles = 7.0f;   ///< how many waves out from the shore the train reaches
-		float ShoreSetMin = 0.45f;       ///< wave sets: one wave's height runs from this factor
-		float ShoreSetMax = 1.55f;       ///< to this one
-		float ShoreResidualFoam = 0.5f;  ///< coverage of the lace that lingers in the surf between breakers
-		float ShoreCrestWobble = 0.35f;  ///< how far the crests bend and drift along the coast (waves)
-		float ShoreSplitWaves = 0.6f;    ///< height of the shorter waves the breakers split into in the surf, relative to the main train
-		float ShoreCurl = 1.0f;          ///< how far plunging breakers curl over (0: lip only)
-		float ShoreCurlDetail = 2.0f;    ///< tessellation multiplier where shore waves can curl
-		float SwashLinger = 2.0f;        ///< backwash duration over the uprush's
+		float ShoreTimeScale = 0.7f;      ///< the shore clock runs this much slower than the waves' frequency
+		float ShoreTrainCycles = 7.0f;    ///< how many waves out from the shore the train reaches
+		float ShoreSetMin = 0.45f;        ///< wave sets: one wave's height runs from this factor
+		float ShoreSetMax = 1.55f;        ///< to this one
+		float ShoreResidualFoam = 0.5f;   ///< share of the breakers' white water they leave behind on the water (ShoreFoamCS)
+		float ShoreFoamLifetime = 12.0f;  ///< s: how long the foam the surf leaves on the water takes to fade (e-folding)
+		float ShoreCrestWobble = 0.35f;   ///< how far the crests bend and drift along the coast (waves)
+		float ShoreSplitWaves = 0.6f;     ///< height of the shorter waves the breakers split into in the surf, relative to the main train
+		float ShoreCurl = 1.0f;           ///< how far plunging breakers curl over (0: lip only)
+		float ShoreCurlDetail = 2.0f;     ///< tessellation multiplier where shore waves can curl
+		float SwashLinger = 2.0f;         ///< backwash duration over the uprush's
 
 		// Surface and light
 		float Roughness = 0.06f;
@@ -124,7 +125,7 @@ struct PBRWater : Feature
 		float FoamFadeDistance = 1000.0f;    ///< m: distance at which the open sea's foam has faded out
 		float FoamRoughnessModifier = 0.0f;  ///< roughness added per unit of foam
 		float FoamFeather = 0.12f;           ///< how soft the edge of the foam pattern is
-		float FoamBubbleSize = 0.2f;         ///< m: the large bubbles of the foam pattern
+		float FoamBubbleSize = 0.03f;        ///< m: the bubbles of the foam pattern (surf foam is a microfoam of centimetre bubbles)
 
 		// Ripples and rivers
 		bool EnableRipples = true;
@@ -225,7 +226,7 @@ struct PBRWater : Feature
 		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
 		float4 Shore2;                                // x wave clock (rad, wrapped), y the clock last frame, z its rate (rad/s), w peak period Tp (s)
 		float4 Shore3;                                // x swash linger, y surf splitting, z breaker curl, w deep-water wavelength L0 (units)
-		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's
+		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's, z the sea's own deep-water wavelength (units, run-up)
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
@@ -234,7 +235,10 @@ struct PBRWater : Feature
 		float4 Tune2;                                 // x foam cascade weight, y foam distance falloff exponent, z foam fade distance (m), w foam roughness modifier
 		float4 Tune3;                                 // x ripple horizontal displacement, y its clamp (texels), z shore train reach (waves), w surf residual foam
 		float4 Tune4;                                 // x shore set min, y shore set max, z detail normal strength calm, w gale
-		float4 Tune5;                                 // x point light emitter radius (units), y foam feather, z foam bubble size (m), w unused
+		float4 Tune5;                                 // x point light emitter radius (units), y foam feather, z foam bubble size (m), w shore foam lifetime (s)
+		float4 Foam2;                                 // xy shore foam grid corner (absolute units), z 1 / extent, w enabled
+		float4 SunMap0;                               // xy wave heightfield centre (absolute units), z 1 / extent, w drawn this frame
+		float4 SunMap1;                               // x its reference level (absolute z), y height range either side (units), zw unused
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -301,8 +305,9 @@ struct PBRWater : Feature
 	};
 
 private:
-	static constexpr uint32_t WaterSRVCount = 17;      ///< t110-t126
-	static constexpr uint32_t SurfaceNoiseSize = 128;  ///< texels per side of the surface noise bake
+	static constexpr uint32_t WaterSRVCount = 18;        ///< t110-t127
+	static constexpr uint32_t WaveHeightfieldSlot = 27;  ///< t27, pixel stage: the waves' heightfield (sunMapTexture)
+	static constexpr uint32_t SurfaceNoiseSize = 128;    ///< texels per side of the surface noise bake
 
 	void UpdateFrameConstants();
 	void SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass);
@@ -335,6 +340,13 @@ private:
 	static ShoreTextures UploadShoreField(std::shared_ptr<const PBRWaterModel::ShoreField> field);
 	/** @brief Main thread: a new shore field takes over from the current one over a few seconds. */
 	void UpdateShoreField(float dt, bool enabled);
+	/** @brief The settings that change the shore waves' timing or shape, in a fixed order (see UpdateShoreReset). */
+	std::array<float, 24> ShoreSignature() const;
+	/**
+	 * @brief Main thread: after a shore or sea-state setting changes and then holds still for a moment, restarts the shore
+	 * train from the new settings: true when this frame resets it.
+	 */
+	bool UpdateShoreReset(float dt);
 	/** @brief Render thread: steps the swash history: how wet the shore is (needs this frame's constants). */
 	void UpdateSwash(float dt);
 	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
@@ -402,7 +414,22 @@ private:
 	winrt::com_ptr<ID3D11DepthStencilState> occluderDepthState;
 	winrt::com_ptr<ID3D11RasterizerState> occluderRasterizer;
 	std::unique_ptr<ConstantBuffer> occluderCB;
-	uint32_t occluderFrame = UINT32_MAX;    ///< State frame the occluder was last drawn in
+	uint32_t occluderFrame = UINT32_MAX;  ///< State frame the occluder was last drawn in
+	/** @brief Render thread: the still water level of the 5x5 exterior cells around the eye; false when none has water. */
+	bool FillOccluderLevels(OccluderCB& cb, float eyeCellX, float eyeCellY) const;
+	/** @brief Render thread: draws the displaced water grid `cb` describes, depth only, into `dsv`; restores the state it changes. */
+	void DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height, const OccluderCB& cb, ID3D11Buffer* indices, DXGI_FORMAT indexFormat, UINT indexCount);
+
+	// The waves' heightfield around the eye, which the water marches towards the sun through for their sun shadows (render thread)
+	static constexpr uint32_t SunMapQuads = 512;    ///< grid quads per side
+	static constexpr float SunMapExtent = 4096.0f;  ///< units across, centred on the eye
+	static constexpr uint32_t SunMapSize = 1024;    ///< texels per side
+	static constexpr float SunMapRange = 4096.0f;   ///< height range either side of the reference level (units)
+	winrt::com_ptr<ID3D11Buffer> sunMapIndices;
+	std::unique_ptr<Texture2D> sunMapTexture;  ///< t27: the highest water surface over each point around the eye
+	uint32_t sunMapFrame = UINT32_MAX;         ///< State frame the heightfield was last drawn in
+	/** @brief Render thread, first water draw of a frame: draws the waves' heightfield and records it in frameData.SunMap0/1. */
+	void UpdateSunMap(bool waves);
 	std::atomic<bool> oceanReady{ false };  ///< the GPU ocean is live; until then gameplay sees no FFT waves
 	WaterEnvironment environment;
 	FloatingObjects floating;  ///< main thread
@@ -415,6 +442,11 @@ private:
 	std::shared_ptr<const PBRWaterModel::ShoreField> currentShore;   ///< the shore field the waves follow
 	std::shared_ptr<const PBRWaterModel::ShoreField> previousShore;  ///< the one it is taking over from
 	float shoreBlend = 1.0f;                                         ///< 0..1 from previousShore's travel times to currentShore's
+	std::array<float, 24> shoreSignature{};                          ///< the settings the shore train's timing follows (ShoreSignature)
+	bool hasShoreSignature = false;
+	float shoreResetDelay = -1.0f;                  ///< s until the shore train resets after a settings change (< 0: none pending)
+	bool shoreHardSwap = false;                     ///< the next shore field replaces the current one at once instead of blending in
+	std::atomic_bool swashResetRequested{ false };  ///< render thread: clear the swash history on its next step
 	float smoothedWindSpeed = -1.0f;
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;

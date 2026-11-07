@@ -74,6 +74,11 @@ public:
 	void UpdateShore(float playerX, float playerY, const PBRWaterModel::ShoreParams& shore, std::shared_ptr<const PBRWaterModel::FetchField> fetch, float fetchScale, bool enabled);
 	std::shared_ptr<const PBRWaterModel::ShoreField> GetShore() const { return shore.load(std::memory_order_acquire); }
 	bool IsBuildingShore() const { return shoreBuilding.load(std::memory_order_acquire); }
+	/**
+	 * @brief Main thread: forgets what the shore field was traced for. A build in flight is cancelled and the next
+	 * UpdateShore traces a new field at once; the current one stays published until that is ready.
+	 */
+	void InvalidateShore();
 
 	/// Shore field size (texels per side) and texel size (units: the terrain's vertex spacing).
 	static constexpr uint32_t ShoreTexels = 768;

@@ -232,6 +232,17 @@ void WaterEnvironment::Rebuild(const RE::TESWorldSpace* worldSpace)
 // Shore field
 // ============================================================================
 
+void WaterEnvironment::InvalidateShore()
+{
+	shoreCancel.store(true, std::memory_order_release);
+	if (shoreWorker.joinable())
+		shoreWorker.join();
+	shoreBuilding.store(false, std::memory_order_release);
+	shoreCancel.store(false, std::memory_order_release);
+	shoreTraced = {};
+	shoreTraced.omega = 0.0f;
+}
+
 void WaterEnvironment::PublishShore(std::shared_ptr<const PBRWaterModel::ShoreField> field)
 {
 	shore.store(std::move(field), std::memory_order_release);

@@ -53,7 +53,9 @@ namespace
 		const float waveFoam = Smoothstep(0.46f, 0.56f, v) * crown;
 
 		const float b = Smoothstep(0.58f, 0.80f, v);
-		const float frontWidth = 0.022f + 0.02f * (1.0f - b);
+		// The bore's front is its roller, a slope of about 30 degrees, not a step (Svendsen 1984's roller is about a wave
+		// height long).
+		const float frontWidth = 0.035f + 0.02f * (1.0f - b);
 		const float bore = x < BoreFront ? Smoothstep(BoreFront - 3.0f * frontWidth, BoreFront, x) :
 		                                   std::exp(-(x - BoreFront) / 0.34f) * (1.0f - Smoothstep(0.82f, 1.0f, x));
 		// A thin line of white water riding the front, trailing off quickly along the back; the rest of the wave stays clear.
@@ -63,7 +65,8 @@ namespace
 		Shape o;
 		o.up = (1.0f - b) * wave + b * bore * collapse;
 		o.forward = (1.0f - b) * waveForward + b * 0.05f * bore;
-		o.foam = std::max((1.0f - b) * waveFoam, b * boreFoam * (1.0f - Smoothstep(0.92f, 1.0f, v)));
+		// The bore keeps its white water to the waterline, where it collapses into the swash and the uprush carries it on.
+		o.foam = std::max((1.0f - b) * waveFoam, b * boreFoam);
 		return o;
 	}
 

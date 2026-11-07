@@ -201,8 +201,10 @@ namespace PBRWater
 	 * colour. Multiply by the sun irradiance.
 	 * @param crest     0..1 height of the point within the wave amplitude
 	 * @param thickness crest thickness scale (units)
+	 * @param sunPath   water the sunlight crosses to reach the point (units; SunPathThroughWaves), < 0: estimated from
+	 *                  the height within the crest
 	 */
-	float3 WaveTranslucency(float3 N, float3 toEye, float3 toLight, float crest, WaterOptics o, float thickness)
+	float3 WaveTranslucency(float3 N, float3 toEye, float3 toLight, float crest, WaterOptics o, float thickness, float sunPath)
 	{
 		float3 viewIn = refract(-toEye, N, 1.0 / WaterIOR);
 		if (dot(viewIn, viewIn) < 1e-6)
@@ -216,7 +218,7 @@ namespace PBRWater
 		float transmission = (1.0 - FresnelDielectric(dot(backNormal, toLight), 1.0 / WaterIOR)) *
 		                     (1.0 - FresnelDielectric(dot(N, toEye), 1.0 / WaterIOR));
 		float tip = saturate(crest);
-		float sunPath = thickness * (1.1 - tip);
+		sunPath = sunPath < 0.0 ? thickness * (1.1 - tip) : sunPath;
 		float3 scattered = o.scattering / max(o.extinction, 1e-8) * (1.0 - exp(-o.extinction * thickness)) * exp(-o.extinction * sunPath);
 		return scattered * phase * transmission * tip;
 	}

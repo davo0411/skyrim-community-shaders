@@ -1,8 +1,7 @@
 // ============================================================================
 // PBR Water - how far the water reaches up the shore, for the lit terrain and objects.
 //
-// The swash itself is analytic (PBRWater::SwashTip): every crest's run-up and backwash follows from the waves that
-// reached the waterline of the ray through a point, so it needs no history. What does need history is kept here,
+// The swash itself is simulated near the camera and analytic beyond (PBRWater::SwashSheet). What else needs history is kept here,
 // on a camera-centred grid (scrolled in whole texels, like the ripple simulation): the wet level follows the highest
 // water (the swash on beaches, the waves on rocks and piers) and sinks slowly as it drains and dries.
 //
@@ -43,18 +42,19 @@ RWTexture2D<float4> Wet : register(u0);
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS));
 	float elevation = ctx.elevation;
 
-	float2 tip = PBRWater::SwashTip(positionWS, ctx, false);
+	float2 sheet = PBRWater::SwashSheet(positionWS, ctx);
+	float swashTop = PBRWater::SwashSurface(elevation, sheet.x, sheet.y);
 
 	// The water surface here, for the lit objects (caustics, wetness): waves, swash and ripples.
 	float surface = PBRWater::EvaluateWaves(positionWS, ctx, TexelSize, false).displacement.z;
 	surface += PBRWater::RippleHeight(positionWS, false) * PBRWater::RippleDepthFade(ctx.depth) * ctx.damping;
-	surface = max(surface, PBRWater::SwashTop(elevation, tip.x, tip.y));
+	surface = max(surface, swashTop);
 	float limit = PBRWater::DisplacementLimit();
 	surface = clamp(surface, -limit, limit);
 
 	// Wet: whatever the water reached lately - the swash up the beach, the waves against rocks, piers and hulls.
 	// It sinks slowly as the water drains and the surface dries.
-	float reached = ctx.beach > 0.0 ? max(surface, tip.x) : surface;
+	float reached = surface;
 	float wetLevel = clamp(max(wet.x - DryRate * Dt, reached), -limit, limit);
 
 	Wet[id.xy] = float4(wetLevel, 0.0, 0.0, surface);

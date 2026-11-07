@@ -18,6 +18,9 @@
 //               form's shallow colour and visibility plus spatially varying sediment, light reaching
 //               the bottom attenuated by K_d, and in-scattering towards the body colour (Optics.hlsli).
 //   Scatter   : sunlight transmitted through thin wave crests (Optics.hlsli).
+//   Sun       : the waves shade themselves from the sun: each point marches towards it through a heightfield of the
+//               displaced surface around the eye (PBRWater::UpdateSunMap). The water it crosses hides the sun's glint
+//               and attenuates the light reaching the foam and the water below; the crest glow reads its thickness.
 //   Wind      : micro-roughness from the local wind (Cox & Munk 1954): gusts sweep across the water as
 //               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
 //               roughens the surface.
@@ -27,6 +30,73 @@
 
 namespace PBRWater
 {
+	Texture2D<float> WaveHeightfield : register(t27);  // the highest water surface around the eye, as depth against SunMap1 (PBRWater::UpdateSunMap)
+
+	/// Height (absolute z) of the highest water surface over an absolute point; far below anything off the heightfield.
+	float WaveHeightfieldTop(float2 absXY)
+	{
+		float2 uv = (absXY - SunMap0.xy) * SunMap0.z * float2(1.0, -1.0) + 0.5;
+		if (any(uv != saturate(uv)))
+			return -1e9;
+		float depth = WaveHeightfield.SampleLevel(LinearClampSampler, uv, 0);
+		return depth < 0.9999 ? SunMap1.x + (0.5 - depth) * 2.0 * SunMap1.y : -1e9;
+	}
+
+	/// The sunlight's way to a point of the surface through the waves around it.
+	struct SunThroughWaves
+	{
+		float path;     // water it crosses (units)
+		float visible;  // 0..1 how much of the sun is seen past the crests: its glint
+		bool valid;     // the point is on the heightfield
+	};
+
+	/**
+	 * Marches from a point of the water surface towards the sun through the heightfield of the displaced surface, adding up
+	 * the stretches below the water: a crest between the point and the sun, the point's own wave on its far side from the
+	 * sun, the lip curling over a breaker's face. Air between two waves counts for nothing. Jittered per pixel and frame:
+	 * the temporal filter integrates the steps into a smooth path, so thin lips are not missed between them.
+	 * @param positionWS camera-relative position of the surface
+	 * @param toSun      direction towards the sun
+	 * @param stillLevel camera-relative still water level here (SurfaceDisplacement::shore.w)
+	 * @param jitter     0..1 per pixel and frame
+	 */
+	SunThroughWaves SunPathThroughWaves(float3 positionWS, float3 toSun, float stillLevel, float jitter)
+	{
+		SunThroughWaves o;
+		o.path = 0.0;
+		o.visible = 1.0;
+		o.valid = false;
+		if (SunMap0.w < 0.5 || toSun.z < 0.02)
+			return o;
+		float3 absPos = positionWS + FrameBuffer::CameraPosAdjust.xyz;
+		// Fades out towards the heightfield's edge, past which the crests are missing.
+		float2 edge = abs(absPos.xy - SunMap0.xy) * (2.0 * SunMap0.z);
+		float fade = saturate((1.0 - max(edge.x, edge.y)) / 0.2);
+		[branch] if (fade <= 0.0) return o;
+		o.valid = true;
+
+		// Nothing stands higher than the still water plus the largest displacement: the march ends there.
+		float3 dir = normalize(toSun);
+		float rise = stillLevel + FrameBuffer::CameraPosAdjust.z + DisplacementLimit() - absPos.z;
+		float reach = min(max(rise, 0.0) / dir.z, 20.0 * UnitsPerMetre);
+		static const uint Steps = 12;
+		float stepLength = reach / Steps;
+		// The heightfield's grid filters out waves shorter than its spacing, which the surface here still carries.
+		static const float Bias = 0.04 * UnitsPerMetre;
+		static const float Soft = 0.04 * UnitsPerMetre;
+		float path = 0.0;
+		[loop] for (uint i = 0; i < Steps; i++)
+		{
+			float t = (i + jitter) * stepLength;
+			float3 p = absPos + dir * t;
+			path += saturate((WaveHeightfieldTop(p.xy) - p.z - Bias) / Soft) * stepLength;
+		}
+		o.path = path * fade;
+		// Any water at all in the way refracts the sun's direct beam away: its glint is gone past a few centimetres.
+		o.visible = saturate(1.0 - o.path / (0.1 * UnitsPerMetre));
+		return o;
+	}
+
 	/// Perceptual roughness from the base roughness plus filtered-out slope variance.
 	float CombinedRoughness(float baseRoughness, float slopeVariance)
 	{
@@ -144,18 +214,21 @@ namespace PBRWater
 	{
 		float3 normal;
 		float roughness;
-		float fftFoam;     // 0..1 the open sea's foam here (FftFoam): drawn raw, never through the shore foam's pattern
-		float foam;        // 0..1 the shore waves' white water at this pixel
-		float swashTip;    // the swash tip at this pixel (units above the still water; SwashTip)
-		float swashLens;   // its lens coefficient (1/unit; SwashTop)
-		float3 waveInfo;   // the shore wave here, for the debug view
-		float surf;        // 0..1 real breakers run onto this shore: the water's edge carries foam
-		float beach;       // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
-		float train;       // 0..1 share of the shore wave train (debug)
-		float room;        // 0..1 room the shore field gives the train here (debug)
-		float exposure;    // 0..1 exposure to the swell (debug)
-		float levelError;  // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
-		float breakStage;  // 0..1 how far the shore waves here have got with breaking (stirs up the bottom)
+		float fftFoam;       // 0..1 the open sea's foam here (FftFoam): drawn raw, never through the shore foam's pattern
+		float foam;          // 0..1 the shore waves' white water at this pixel
+		float swashSurface;  // the swash's surface at this pixel (units above the still water; SwashSheet)
+		float swashDepth;    // its depth (units; 0 where dry)
+		float3 waveInfo;     // the shore wave here, for the debug view
+		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
+		float faceRise;      // units/s the water climbs a breaker's front face here (ShoreFaceRise)
+		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
+		float surf;          // 0..1 real breakers run onto this shore: the water's edge carries foam
+		float beach;         // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
+		float train;         // 0..1 share of the shore wave train (debug)
+		float room;          // 0..1 room the shore field gives the train here (debug)
+		float exposure;      // 0..1 exposure to the swell (debug)
+		float levelError;    // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
+		float breakStage;    // 0..1 how far the shore waves here have got with breaking (stirs up the bottom)
 		float depth;
 		float height;     // water surface above the still water at this pixel (units): waves, without the swash
 		float elevation;  // bed above the still water at this pixel (units, -1e6 unknown)
@@ -171,6 +244,8 @@ namespace PBRWater
 	static const uint DebugShoreLevel = 12;
 	/// The debug view of one shore wave.
 	static const uint DebugShoreWave = 13;
+	/// The debug view of the waves' sun shadows (Water.hlsl).
+	static const uint DebugWaveSun = 14;
 
 	/**
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
@@ -209,8 +284,27 @@ namespace PBRWater
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
 		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05) + ripple;
-		slope += detailNormal.xy / max(detailNormal.z, 0.05) * detailScale;
+		float2 detailSlope = detailNormal.xy / max(detailNormal.z, 0.05) * detailScale;
+		slope += detailSlope;
 		o.normal = normalize(float3(-slope, 1.0));
+		// Slopes (a height field) cannot hold a surface turned vertical or past it: a breaker's face, and the lip of a curl whose
+		// underside faces down. There the ripples and the detail maps tilt the waves' own normal within its tangent plane
+		// instead. Both forms give the waves' own normal exactly, so blending them by how steep the surface is leaves no seam.
+		// (Blended by the curl's weight, which falls off sharply at the lip's edge, the two were averaged across a normal
+		// facing down and drew a line of normals along the crest.)
+		float steep = smoothstep(0.35, 0.1, waves.normal.z);
+		[branch] if (steep > 0.0)
+		{
+			// The detail's slopes laid onto the face: what runs along the crest tilts the normal along the crest, what runs
+			// along the way the face looks tilts it up or down the face. (Projected into the tangent plane as a horizontal
+			// tilt, all but the along-crest part was lost on a face near vertical, and breakers' faces shaded flat.)
+			float2 facing = SafeNormalize(float3(waves.normal.xy, 0.0), float3(1.0, 0.0, 0.0)).xy;
+			float3 alongCrest = float3(-facing.y, facing.x, 0.0);
+			float3 upFace = SafeNormalize(cross(waves.normal, alongCrest), float3(0.0, 0.0, 1.0));
+			float2 detail = ripple + detailSlope;
+			float3 tilted = SafeNormalize(waves.normal - alongCrest * dot(detail, alongCrest.xy) - upFace * dot(detail, facing), waves.normal);
+			o.normal = SafeNormalize(lerp(o.normal, tilted, steep), tilted);
+		}
 
 		// Specular anti-aliasing: the normal varies within the pixel, so widen the lobe by that variance. Without it
 		// a mirror-like sun glint lands on single pixels at ~1e4x the sky radiance and blooms into blobs.
@@ -225,18 +319,19 @@ namespace PBRWater
 		o.fftFoam = waves.fftFoam;
 
 		// Foam (PBRWater.hlsli): the shore waves carry theirs; the open sea's is o.fftFoam.
+		// The breakers' white water, the crest of a curling lip included: breaking starts at the lip's tip. (Thinning it by the
+		// lip's stretch, from when its pattern was drawn at the rest position and drawn out along the lip, cut a dark line
+		// along every curling crest.)
 		o.foam = waves.shoreFoam;
-		// The swash tip per pixel: interpolated from the vertices it is linear across each triangle, so the sheet ended in
+		// The swash per pixel: interpolated from the vertices it is linear across each triangle, so the sheet ended in
 		// straight lines along the triangle edges.
-		// Also where only the vertices around see the swash (steep rocks and banks where it does not break): keeping the
-		// interpolated tip there put its triangles back into the sheet. SwashTip fades out with the beach, so this is smooth.
-		o.swashTip = shoreState.x;
-		o.swashLens = shoreState.y;
-		[branch] if (ctx.beach > 0.0 || shoreState.x != 0.0)
+		o.swashSurface = shoreState.x;
+		o.swashDepth = shoreState.y;
+		[branch] if (ctx.beach > 0.0 || shoreState.y > 0.0)
 		{
-			float2 swashTip = SwashTip(waveParam.xyz, ctx, false);
-			o.swashTip = swashTip.x;
-			o.swashLens = swashTip.y;
+			float2 sheet = SwashSheet(waveParam.xyz, ctx);
+			o.swashSurface = sheet.x;
+			o.swashDepth = sheet.y;
 		}
 		o.beach = ctx.beach;
 		o.surf = ctx.beach * BreakerStrength(ctx);
@@ -260,6 +355,9 @@ namespace PBRWater
 		o.fetchMetres = ctx.fetchMetres;
 		o.footprint = footprint;
 		o.turbidity = 0.0;
+		o.waveNormal = waves.normal;
+		o.faceRise = waves.rise;
+		o.crest = waves.crest;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
 	}

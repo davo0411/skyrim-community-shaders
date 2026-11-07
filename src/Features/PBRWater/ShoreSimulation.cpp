@@ -7,11 +7,11 @@
 
 namespace
 {
-	std::unique_ptr<Texture2D> CreateStateTexture(DXGI_FORMAT format, const char* name)
+	std::unique_ptr<Texture2D> CreateStateTexture(DXGI_FORMAT format, const char* name, uint32_t size = ShoreSimulation::GridSize)
 	{
 		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = ShoreSimulation::GridSize;
-		desc.Height = ShoreSimulation::GridSize;
+		desc.Width = size;
+		desc.Height = size;
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
 		desc.Format = format;
@@ -39,6 +39,12 @@ void ShoreSimulation::SetupResources()
 {
 	wet[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet0");
 	wet[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet1");
+	foam[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam0", FoamGridSize);
+	foam[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam1", FoamGridSize);
+	stage = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashStage", FoamGridSize);
+	prep = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashPrep", FoamGridSize);
+	swe[0] = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Swash0", FoamGridSize);
+	swe[1] = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Swash1", FoamGridSize);
 	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::SwashCB");
 	ClearShaderCache();
 	Reset();
@@ -50,6 +56,12 @@ void ShoreSimulation::ClearShaderCache()
 	ready = simCS && wet[0] && wet[1] && simCB;
 	if (!simCS)
 		logger::warn("[PBR Water] Swash shader failed to compile; the swash leaves no wet sand behind");
+	foamCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\ShoreFoamCS.hlsl", {}, "cs_5_0")));
+	stepCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashStepCS.hlsl", {}, "cs_5_0")));
+	outCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashOutCS.hlsl", {}, "cs_5_0")));
+	foamReady = foamCS && stepCS && outCS && foam[0] && foam[1] && stage && prep && swe[0] && swe[1] && simCB;
+	if (!foamReady)
+		logger::warn("[PBR Water] Shore foam or swash shaders failed to compile; the surf leaves no foam behind and the swash is analytic");
 }
 
 void ShoreSimulation::Reset()
@@ -60,7 +72,12 @@ void ShoreSimulation::Reset()
 	for (uint32_t i = 0; i < 2; ++i) {
 		if (wet[i])
 			context->ClearUnorderedAccessViewFloat(wet[i]->uav.get(), dry);
+		if (foam[i])
+			context->ClearUnorderedAccessViewFloat(foam[i]->uav.get(), dry);
+		if (swe[i])
+			context->ClearUnorderedAccessViewFloat(swe[i]->uav.get(), dry);
 	}
+	foamHasOrigin = false;
 }
 
 void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings)
@@ -118,4 +135,101 @@ void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Setti
 	current = next;
 	originTexelX = newOriginX;
 	originTexelY = newOriginY;
+}
+
+void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
+{
+	if (!foamReady)
+		return;
+	auto context = globals::d3d::context;
+
+	// Whole texels, so scrolling never resamples (and never smears) the foam and the swash.
+	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / FoamTexelSize)) - FoamGridSize / 2;
+	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / FoamTexelSize)) - FoamGridSize / 2;
+	bool fresh = false;
+	if (!foamHasOrigin || std::abs(newOriginX - foamOriginX) >= FoamGridSize || std::abs(newOriginY - foamOriginY) >= FoamGridSize) {
+		const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		for (auto& texture : foam)
+			context->ClearUnorderedAccessViewFloat(texture->uav.get(), clear);
+		foamOriginX = newOriginX;
+		foamOriginY = newOriginY;
+		foamHasOrigin = true;
+		fresh = true;
+	}
+
+	SimCB cb{};
+	cb.shiftX = static_cast<int32_t>(newOriginX - foamOriginX);
+	cb.shiftY = static_cast<int32_t>(newOriginY - foamOriginY);
+	cb.gridSize = FoamGridSize;
+	// A long hitch must not carry the foam off in one step.
+	cb.dt = std::clamp(dt, 0.0f, 0.1f);
+	cb.originX = static_cast<float>(newOriginX) * FoamTexelSize;
+	cb.originY = static_cast<float>(newOriginY) * FoamTexelSize;
+	cb.texelSize = FoamTexelSize;
+	simCB->Update(cb);
+
+	ID3D11Buffer* cbs[1] = { simCB->CB() };
+	context->CSSetConstantBuffers(0, 1, cbs);
+	const UINT groups = FoamGridSize / 8;
+	ID3D11ShaderResourceView* nullSrvs[3] = {};
+	ID3D11UnorderedAccessView* nullUavs[2] = {};
+
+	// The surf's foam, and what the waves bring the swash this frame.
+	{
+		ID3D11ShaderResourceView* srvs[2] = { foam[foamCurrent]->srv.get(), swe[sweCurrent]->srv.get() };
+		ID3D11UnorderedAccessView* uavs[2] = { stage->uav.get(), prep->uav.get() };
+		context->CSSetShader(foamCS.get(), nullptr, 0);
+		context->CSSetShaderResources(0, 2, srvs);
+		context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+		context->Dispatch(groups, groups, 1);
+		context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+	}
+
+	// The swash: explicit steps within the shallow water's stability limit (bores of a few metres a second over 35 cm
+	// cells). The first step of the frame takes the grid's scroll; a fresh grid starts with the water at rest.
+	{
+		constexpr float maxStep = 0.007f;  // s
+		const float stepDt = std::clamp(dt, 0.0f, 8.0f * maxStep);
+		const uint32_t steps = std::max(1u, static_cast<uint32_t>(std::ceil(stepDt / maxStep)));
+		context->CSSetShader(stepCS.get(), nullptr, 0);
+		for (uint32_t i = 0; i < steps; ++i) {
+			SimCB stepCb = cb;
+			stepCb.dt = stepDt / static_cast<float>(steps);
+			if (i > 0)
+				stepCb.shiftX = stepCb.shiftY = 0;
+			else if (fresh)
+				stepCb.shiftX = static_cast<int32_t>(FoamGridSize) * 4;
+			simCB->Update(stepCb);
+			const uint32_t next = sweCurrent ^ 1;
+			ID3D11ShaderResourceView* srvs[3] = { swe[sweCurrent]->srv.get(), prep->srv.get(), stage->srv.get() };
+			ID3D11UnorderedAccessView* uav = swe[next]->uav.get();
+			context->CSSetShaderResources(0, 3, srvs);
+			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+			context->Dispatch(groups, groups, 1);
+			context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+			context->CSSetShaderResources(0, 3, nullSrvs);
+			sweCurrent = next;
+		}
+	}
+
+	// Packed for the draws.
+	{
+		const uint32_t next = foamCurrent ^ 1;
+		ID3D11ShaderResourceView* srvs[3] = { stage->srv.get(), swe[sweCurrent]->srv.get(), prep->srv.get() };
+		ID3D11UnorderedAccessView* uav = foam[next]->uav.get();
+		context->CSSetShader(outCS.get(), nullptr, 0);
+		context->CSSetShaderResources(0, 3, srvs);
+		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		context->Dispatch(groups, groups, 1);
+		foamCurrent = next;
+	}
+
+	ID3D11Buffer* nullCb = nullptr;
+	context->CSSetShaderResources(0, 3, nullSrvs);
+	context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+	context->CSSetConstantBuffers(0, 1, &nullCb);
+	context->CSSetShader(nullptr, nullptr, 0);
+
+	foamOriginX = newOriginX;
+	foamOriginY = newOriginY;
 }

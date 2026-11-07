@@ -153,10 +153,17 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
     -   _Whole waves_: the phase, `clock + omega tau` plus the offset along the coast, is cut into cycles, one per wave
         (as Fluid Flux's `frac` of its wave distance). Each wave is decided once, at its own crest half a wave away at
         most, so all of it agrees: its height (the sea's `Hrms = Hs / sqrt(2)`, its set, Green's law shoaling over the
-        depth under the crest, up to the breaking limit `H = 0.78 h` of McCowan 1894 and no steeper than Miche's
-        `H / L = 0.142`) and its life stage, `xi / (1 + xi)` with `xi` the shoaled height over the limit. So a wave peaks
-        where it shoals, pitches over and collapses where it reaches its limit, on a sandbar as on the beach, and sooner if
-        it is a big one; several waves at different stages stand along a ray at once.
+        depth under the crest, up to the breaking limit `H = gamma h` and no steeper than Miche's `H / L = 0.142`) and its
+        life stage. The breaker index `gamma` is Weggel's (1972) `b(m) - a(m) Hb / (g T^2)`, `a = 43.75 (1 - e^-19m)`,
+        `b = 1.56 / (1 + e^-19.5m)` on the beach slope `m` (`ShoreBreakerIndex`): McCowan's 0.78 on a flat bed, higher on
+        steep beaches. Up to the limit the stage is `r / (1 + r)` with `r` the shoaled height over the limit (the wave
+        peaks as it shoals). Past it the stage runs on the distance travelled since the break point, in breaker heights,
+        `(1 - r^-4/5) / (gamma m)` (Green's law puts the depth at `h_b r^-4/5`; `ShoreBreakerStage`): the crest overturns
+        until it reaches the trough ahead at Galvin's (1969) plunge distance `(4.0 - 9.25 m) Hb` (at least 2), the tube
+        collapses into a bore over as far again, and the bore runs to the waterline. Driven by `r` alone the curl lasted
+        while the depth fell to a third of the breaking depth, tens of metres on a gentle beach. So a wave peaks where it
+        shoals, breaks where it reaches its limit, on a sandbar as on the beach, and sooner if it is a big one; several
+        waves at different stages stand along a ray at once.
     -   _Shape_ (`ShoreProfile.cpp`, t114): Fluid Flux draws its waves from a canned profile animation, a texture by
         position across the wave and life. This one is computed at start-up (256 x 64, two RGBA16F slices): forward and
         upward displacement, their derivatives, and the white water. A sinusoid narrows into a peaked crest over long
@@ -177,9 +184,32 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         period gave one wave as long as the beach is deep.
         The clock runs at `ShoreTimeScale` (setting, default 0.7) of that frequency: the crests keep their spacing and heights (the field's
         phase lag is traced at the frequency) and roll in about 1.4 times slower, which reads better on the compressed coast.
-    -   _Surf foam_: besides the bores' white water (the profile), the surf keeps a lace of residual foam
-        (`ShoreResidualFoam`) wherever the train is depth-limited (`ShoreBreakRatio` past 0.8): it follows the surf, not a
-        wave, so it stays put as the crests run through it.
+    -   _Surf foam_ (`ShoreFoamCS`, `ShoreSimulation::UpdateFoam`, t127 `ShoreFoamAt`): the bores' white water rides the
+        wave (the profile); what the breakers leave behind is simulated on a camera-centred grid (512 x 512, 35 cm, in
+        the water's rest coordinates). Foam is a tracer on the surface: the profile's white water is its source (a share
+        `ShoreResidualFoam`, "Foam Left Behind", of it), the water carries it semi-Lagrangian (as Crest 4 moves its foam)
+        and it decays with the e-folding time `ShoreFoamLifetime` (default 12 s; surf foam outlasts the bubble plume under
+        it where coastal surfactants stabilise it) on the water and within a second stranded on dry sand. Under the waves
+        the water moves at `u = c eta / (h + eta)` less the drawn displacement's own rate; at the waterline with the
+        simulated swash's own velocity. Up the beach the profile makes none: the swash carries its own (below). The advection
+        reads Catmull-Rom, clamped to the four texels around (a bilinear read every frame blurred the foam into smears over
+        its lifetime), and the water shader reads the grid as a cubic B-spline (bilinear drew its 35 cm texels as
+        diamonds). The pattern holds still where the surface is and the foam moves over it as its coverage; on steep faces it is also
+        projected from the side (triplanar, by the waves' own normal), and those side projections climb a breaker's face with
+        its water at one speed per wave (`ShoreFaceRise`: the wave's own speed, wavelength times its frequency at the shore
+        clock's pace: in the wave's frame the water streams up its face at about that; `ShoreFaceFoamPhases`, two flow
+        phases, 2 s cycle). Held still there the face swept up through a
+        pattern that stood in the air; carried at the water's own speed, which changes over the face, it streaked. Every
+        other way of carrying the pattern tore it: at the rest
+        position the waves' horizontal displacement drew it out across every breaker's face, from above alone it ran down a
+        rising face, and carried along (with the water sloshing under the waves, with the breakers, with the swash, where
+        neighbouring water belonged to different uprushes, or as a texture offset per texel) it was torn into streaks. The
+        stencil pass writes no sideways motion for the pixels the foam covers, so temporal AA and upscalers do not
+        reproject it from where the mesh was. The
+        pattern is a microfoam (`FoamBubbleSize`, default 3 cm, lace at 3 and 9 times that, `Foam.hlsli` SurfaceFoam);
+        each scale drops out as it shrinks below a few pixels and distant foam is drawn as its coverage, not as coarser
+        blotches. The swash sheet's edge is antialiased over the pixel. This replaced a fixed lace wherever the surf was depth-limited and a
+        coverage window sliding over a still pattern, which smeared as the waves moved.
     -   _Breaking or surging_: the Iribarren number of the beach (Battjes 1974): waves spill and plunge on gentle beaches
         (`xi < 2`) and surge against rock faces and cliffs (`xi > 3.3`), where their stage stops short of breaking.
     -   _Crest wobble_ (`ShoreWobble`, setting `ShoreCrestWobble`, default 0.35 waves): the phase of every train is
@@ -190,14 +220,36 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         clock's wrap never moves them) run on that multiple of its phase (shallow water is not dispersive), each with
         its own wobble and sets and a height of `ShoreSplitWaves / multiple` of the main train's. They shoal and break
         on their own in the shallows, crossing and overtaking the main crests. Mirrored on the CPU.
-    -   _Curl_ (`ShoreCurlShape`, setting `ShoreCurl`, default 1): where the mesh is fine enough (`ShoreCurlWeight`:
+    -   _Curl_ (`ShoreCurlShape`, setting `ShoreCurl`, default 1): only plunging breakers curl, by the beach's surf
+        similarity `xi0 = tan(beta) / sqrt(H0 / L0)` with the sea's real peak period (Battjes 1974: spilling below 0.5,
+        surging above 3.3; `ctx.iribarren`). Where the mesh is fine enough (`ShoreCurlWeight`:
         vertex spacing below 1/25 of the wavelength, full at 1/50; tessellated draws only) the plunging stages
         (0.40-0.80) turn the water above a pivot on the front face (45 % of the crest's height) forward about it, by up
         to 2.3 rad at the crest and less behind it, and throw it 1.2 wave heights ahead, so the crest becomes the lip's
-        tip and falls into the trough in front. The curl grows over stages 0.44-0.64 and goes as the bore forms
-        (0.64-0.76). It depends on the wave's aspect, so the shader works it out (three evaluations for the phase
-        derivative) instead of the table, blended in from it at the ends of the stage window. The surface stays one
-        sheet, so `FinishWaves` keeps the downward normals of the lip's underside where a curl is shown. The hull shader
+        tip and falls into the trough in front. The curl grows over stages 0.44-0.64 (to Galvin's plunge point), then
+        the tube is crushed into the plunge point (0.62-0.72) while the bore, its front pushed up ahead of it, takes over
+        (to 0.80); unrolling the lip instead raised a wall of glassy water. The bore's front is a roller of about 30
+        degrees (`frontWidth` 0.035 of a wave in ShoreProfile.cpp), not a step. It depends on the wave's aspect, so the shader works it out (three evaluations for the phase
+        derivative) instead of the table, blended in from it at the ends of the stage window and where the mesh first
+        resolves the face (spacing 1/12 to 1/25 of the wavelength). A weaker plunger (surf similarity 0.35-0.6) or a
+        mesh between 1/25 and 1/50 curls less (a smaller turn and throw: the curl's `amount`), rather than blending a
+        share of the full curl into the table's wave: that moved the vertices little while the full curl's turn about
+        the lip took over the normal, so a plain standing face was lit as an overhang. The surface stays one
+        sheet, so `FinishWaves` keeps the downward normals of the lip's underside where a curl is shown, and the pixel
+        shader lays the ripples' and detail maps' slopes onto the face wherever the surface is near vertical or past it
+        (along the crest, and up and down the face for what runs along the way the face looks: projected as a horizontal
+        tilt, a near-vertical face lost all but the along-crest part and shaded flat) (blended in by `waves.normal.z`, not by the curl's weight, which drew a line of sideways normals
+        along the crest). A shading normal facing away from the camera (a lip's far side, seen from behind or where it
+        passes through the water behind it) is mirrored across the view direction (Water.hlsl). On a steep face the refracted
+        path is held to the crest's thickness at that height (about three times the height still above it,
+        `ShoreTrain::crest`): the view ray runs into the crest nearly level and leaves through its back, where the slab
+        model took it down to the bed far behind and every face shaded as the same deep body colour. Where a wave stands
+        above the still water, anything behind it that is also above the still water (icebergs, cliffs, the far shore)
+        is not its background: the refracted ray bends down into the sea and never reaches it, so the path is taken as
+        endless there and only the bed shows through. The water is one depth-tested layer, so the nearest wave hides
+        those behind it without any order-independent transparency. Foam is lit about the normal bent halfway up with the sun wrapped around it (whitewater scatters
+        light through itself), so the foam on a lip's underside does not go dark.
+        The hull shader
         divides the target triangle size by `ShoreCurlDetail` (default 2) on the shore wherever a curl can show.
         Geometry only: the CPU mirror rides the table's uncurled wave.
 -   **Room for the train** (`ShoreField::room`, `t124`): a train of shoaling, breaking waves needs open water
@@ -216,18 +268,42 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
 -   **Wave sets** (`ShoreSet`, mirrored on the CPU): the shore waves come in sets. Each wave's height is scaled by
     0.45-1.55 from a value noise over about three deep-water wavelengths of coast and, slowly, over the wave's number, so
     neighbours are alike (groupiness: Longuet-Higgins 1984) and a wave keeps its height all the way in.
--   **Swash** (`PBRWater::SwashTip`): from the crests that reached the waterline of the ray through a point
+-   **Swash, simulated** (`SwashStepCS`, near the camera): every bore's uprush is water of its own. The shallow water
+    equations with wetting and drying run on the foam's grid (512 x 512, 35 cm, scrolled in whole texels): Rusanov
+    fluxes on the hydrostatic reconstruction of Audusse et al. (2004), which keeps water at rest over any bed, keeps
+    depths positive and lets the edge run over dry sand; explicit steps of at most 7 ms (up to eight a frame), the bed
+    held no deeper than 2.5 m. The surf hands its water over: `ShoreFoamCS` lays out the bed and, from deeper than about a
+    third of the waves' height, the analytic waves' level, their water's velocity (`u = c eta / h`, running to
+    `sqrt(g eta)` at the waterline) and their foam, and the state is relaxed to them there (50 ms), so each bore enters
+    as itself. Each wave comes in turned by up to 10 degrees of its own (a hash of its number and stretch of coast), so
+    neighbouring uprushes cross. Inshore of that the water is free: it runs up the slope, slows, drains back, meets the
+    next uprush (a hydraulic jump) and the ones beside it. Bed friction is implicit, its drag coefficient
+    `0.006 * SwashLinger` (setting, default 2): more drag, a shorter uprush that drains back more slowly. The foam is a
+    tracer per area carried upwind with the water: the bores' foam rides in with them, thins as the sheet spreads, decays
+    over `ShoreFoamLifetime` on the water and within a second stranded on the sand, and white water forms where the
+    water converges hard (uprush into backwash or into another uprush). `SwashOutCS` packs the swash's surface, depth
+    and foam with the surf's foam into `ShoreFoamTexture` (t127); the draws (`SwashSheet`, `SwashSurface`), the wet
+    sand (`ShoreSimCS`) and the foam read it. Where the surf holds the water the analytic waves are drawn and the swash
+    has no depth. Past the grid (beyond about 80 m, faded over its outer tenth) the analytic swash below takes over.
+-   **Swash, analytic** (`PBRWater::SwashTip`, past the simulation's grid): from the crests that reached the waterline of the ray through a point
     over the last four periods (an uprush each time a bore's front, `ShoreBoreFront` into the cycle, reaches the
     waterline, each with its own height), the tip runs up as far as Stockdon et al. (2006) give and moves ballistically, decelerating at `g sin^2 beta` (Shen & Meyer 1963; Peregrine &
     Williams 2001). The backwash takes `SwashLinger` (setting, default 2) times as long as the uprush (deceleration
     divided by its square, and the sheet thins on the stretched time): the water soaks in and drags on the sand
-    on the way down, so the sheet and its foam stay on the beach longer. The water over the beach is a thin sheet (`SwashTop`: 15 % of the height below the tip,
+    on the way down, so the sheet and its foam stay on the beach longer. Stockdon's `L0` is the real sea's deep-water
+    wavelength (`ShoreParams::seaLength`, Shore4.z), not the shore train's held-short period: run-up grows with
+    `sqrt(H0 L0)`, and the train's 3 s wavelength cut it to about a third. The bore keeps its white water to the waterline
+    (the profile no longer fades it over the last stages); a fresh uprush is all foam and drains as lace, by its age
+    from the lens coefficient (`swashFresh`), its leading 15 cm white. The water over the beach is a thin sheet (`SwashTop`: 15 % of the height below the tip,
     at most 30 cm), never a raised mesh. Once a crest has drained the tip keeps falling below the still water
     rather than resting at it, so the vertices interpolate it linearly (a tip clamped at 0 put the swash front
     on the triangle edges). The swash mark (the highest a drained crest reached) goes to the pixels with the
     tip; up to it the mesh stays above the bed and both passes keep the pixels.
 -   **Waterline per pixel**: near the waterline the vertex shader holds the mesh just above the bed
-    (`WaterlineLift`), so where the water ends is decided per pixel. Both passes first drop the pixels whose
+    (`WaterlineLift`), so where the water ends is decided per pixel. The bed is read where the waves have carried the
+    vertex, not under its rest position, and as high as the game's terrain triangles can stand there
+    (`TerrainCeiling`: the bilinear height plus a quarter of the LAND quad's twist): held above the bed at its rest
+    position, a vertex carried up the slope sank its triangles into the sand and left pockets of ground in the water. Both passes first drop the pixels whose
     bed (terrain heights at the pixel) lies more than 5 cm above the interpolated waves and the swash sheet
     rebuilt over that bed (`AboveWaterline`), so the stencil pass (water mask, motion vectors) and the colour
     pass cover the same pixels; the vertices carry the waves without the sheet, as the sheet ends abruptly at its
@@ -696,6 +772,8 @@ against the CPU mirror, including slopes and compression against finite differen
     Engineering 2006) - run-up
 -   Shen & Meyer (1963); Peregrine & Williams, _Swash Overtopping a Truncated Plane Beach_ (JFM 2001) -
     ballistic swash and the swash lens
+-   Audusse, Bouchut, Bristeau, Klein & Perthame, _A Fast and Stable Well-Balanced Scheme with Hydrostatic
+    Reconstruction for Shallow Water Flows_ (SIAM J. Sci. Comput. 2004) - the simulated swash's wetting and drying
 -   Whitlock, Bartlett & Gurganus, _Sea Foam Reflectance_ (GRL 1982) - foam albedo
 -   Bobbing Framework (RavenKZP, GPL-3.0-or-later WITH Modding Exception) - moving placed references with
     keyframed collision, their children and the actors standing on them; the floating objects build on it
