@@ -199,9 +199,14 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         simulated swash's own velocity. Up the beach the profile makes none: the swash carries its own (below). The advection
         reads Catmull-Rom, clamped to the four texels around (a bilinear read every frame blurred the foam into smears over
         its lifetime), and the water shader reads the grid as a cubic B-spline (bilinear drew its 35 cm texels as
-        diamonds). The breaking wave's own white water (`BreakerFoam`) is drawn as the open sea's is, a raw coverage with no
-        texture: from the folding of its surface (the Jacobian of the shore train's horizontal displacement below 0.6,
-        while it breaks) and the profile's foam slice. The foam texture is kept for the flat white water: the bore once it
+        diamonds). The breaking wave's own white water (`BreakerFoam`) follows its stages. Until the jet lands the face,
+        lip and tube are clear water (`ShoreClearFace` draws the sea's foam and the surf's leftover foam off them), white
+        only at the lip's crown (the profile's foam slice). When it lands (stage 0.60 to 0.68) the crushed tube, the
+        splash-up and then the roller riding the bore's front are churned through (`ShoreAeration`; void fractions to 0.6,
+        Na et al. 2016) and drawn opaque white with no pattern, the roller's surface boiling in lumps of half a wave height
+        (`ShoreRollerLumps`); the folding of the surface (Jacobian below 0.6) counts from then on. Where the aeration thins
+        behind the roller the white water is the sea's lace (`BreakerFoamDrawn`). The swash's foam stranded on the dry sand
+        (the swash mark, the lace of a draining sheet) is drawn on the ground there, the mesh held on the sand under it. The foam texture is kept for the flat white water: the bore once it
         has formed and lies near horizontal, what the surf left on the water and the swash sheet's; the two cross-fade by
         the surface's flatness and the wave's stage. A texture on the face, projected from the side and climbing with the
         water (the former `ShoreFaceRise` / `ShoreFaceFoamPhases`), streaked. The pattern holds still where the surface is

@@ -820,11 +820,13 @@ namespace PBRWater
 	/**
 	 * How much of a plunger a breaker is on a beach of surf similarity `iribarren` (Battjes 1974: spilling below 0.5,
 	 * plunging above it, surging beyond 3.3): a spiller rolls over without a tube, a plunger throws one, and by 2 the waves
-	 * collapse or surge instead. Mirrors PBRWaterModel::ShoreBreakerPlunging.
+	 * collapse or surge instead. The change is centred on Battjes' 0.5: ramped from there to 1, a beach's breakers were
+	 * half spillers well inside the plunging range and curled their lips only up to a cliff. Mirrors
+	 * PBRWaterModel::ShoreBreakerPlunging.
 	 */
 	float ShoreBreakerPlunging(float iribarren)
 	{
-		return smoothstep(0.5, 1.0, iribarren) * (1.0 - smoothstep(2.0, 3.3, iribarren));
+		return smoothstep(0.35, 0.6, iribarren) * (1.0 - smoothstep(2.0, 3.3, iribarren));
 	}
 
 	/// How far a full onshore (+1) or offshore (-1) wind moves the breaker type, as a share of the surf similarity. Mirrors PBRWaterModel::ShoreWindPlunge.
@@ -932,6 +934,38 @@ namespace PBRWater
 		return amplitude * float2(e * tail * b, e * (dTail * b + tail * dB - c / 2.2 * tail * b));
 	}
 
+	/// Half the stretch of crest the bed under a breaking wave is averaged over (units): a LAND quad at least, a quarter
+	/// wave at most. Mirrors PBRWaterModel::ShoreCrestBedHalfWidth.
+	float ShoreCrestBedHalfWidth(float wavelength)
+	{
+		return max(128.0, 0.25 * wavelength);
+	}
+
+	/**
+	 * The bed (absolute z) under a wave's crest at absolute `crest`, averaged along the crest (`along`, unit) over
+	 * ShoreCrestBedHalfWidth either way, or -1e9 where no terrain is there. A wave answers to the bottom over a stretch of its
+	 * crest, not to the point under it: read at one point, the stage followed every crease of the terrain's 128-unit facets
+	 * (the distance a breaker has run multiplies a depth difference by 1 / (gamma m), twenty to fifty times on a gentle
+	 * beach), and neighbouring stretches of one crest stood at the curl and at the landed lip a few units apart, joined by a
+	 * right-angled wall. Mirrors PBRWaterModel::ShoreCrestBed.
+	 */
+	float ShoreCrestBed(float2 crest, float2 along, float halfWidth)
+	{
+		static const float Offsets[5] = { -1.0, -0.5, 0.0, 0.5, 1.0 };
+		static const float Weights[5] = { 1.0, 2.0, 3.0, 2.0, 1.0 };
+		float sum = 0.0;
+		float weight = 0.0;
+		[unroll] for (uint i = 0; i < 5; i++)
+		{
+			float z = TerrainHeight(crest + along * (Offsets[i] * halfWidth));
+			if (z > -1e8) {
+				sum += z * Weights[i];
+				weight += Weights[i];
+			}
+		}
+		return weight > 0.0 ? sum / weight : -1e9;
+	}
+
 	/// The wave of train `j` (always 0) passing absolute `absXY` at `clock`.
 	ShoreWave ShoreWaveAt(float2 absXY, float2 coast, WaveContext ctx, float clock, uint j)
 	{
@@ -944,7 +978,7 @@ namespace PBRWater
 		o.wavelength = Math::TAU / (omega * max(ray.slowness, 1e-6));
 
 		// Everything about the wave is decided at its crest, half a wave away at most, so all of it agrees.
-		float crestBed = TerrainHeight(absXY + ray.direction * ((o.phase - 0.5) * o.wavelength));
+		float crestBed = ShoreCrestBed(absXY + ray.direction * ((o.phase - 0.5) * o.wavelength), float2(-ray.direction.y, ray.direction.x), ShoreCrestBedHalfWidth(o.wavelength));
 		float crestDepth = max((ctx.waterZ - crestBed) * MetresPerUnit, 0.05);
 		float deep = ShoreDeepHeight(ctx) * ShoreSet(coast, o.index);
 		float shoaled = deep * ShoalingCoefficient(omega, crestDepth);
@@ -1007,6 +1041,40 @@ namespace PBRWater
 	}
 
 	/**
+	 * Where a curling wave's lip comes down (phase; ShoreCurlShape's plunge point), for a wave of stage `v`, wavelength
+	 * `lambda`, height `height` (units), the table's forward scale `forward` and curl strength `amount`.
+	 */
+	float ShoreCurlLanding(float v, float lambda, float height, float forward, float amount)
+	{
+		float s = ShoreSmooth(0.0, 0.5, v);
+		float crest = 0.5 - 0.18 * s;
+		float front = 0.5 * (1.0 - s) + 0.075 * s;
+		float n = 1.0 + 1.2 * s;
+		float lean = 0.10 * ShoreSmooth(0.25, 0.55, v);
+		float ap = acos(2.0 * pow(ShoreCurlPivot, 1.0 / n) - 1.0) / Math::PI;
+		float xp = crest - ap * front;
+		float sp = -xp * lambda + lean * ShoreCurlPivot * forward;
+		float zp = ShoreCurlPivot * height;
+		float T = ShoreCurlAngle * min(amount, 1.0);
+		float crestS = -crest * lambda + lean * forward - sp;
+		float crestZ = height - zp;
+		float plungeS = sp + crestS * cos(T) + crestZ * sin(T) + ShoreCurlThrow * amount * height;
+		return -plungeS / max(lambda, 1e-3);
+	}
+
+	/**
+	 * The phase of a curled wave's bore front: where its lip came down as the bore rises out of the splash-up, easing to
+	 * the table's (ShoreBoreFront) by the time the bore has formed (0.80), where ShoreCurlWeight hands back. At the table's
+	 * front from the start, the bore and its white water ran out ahead of a lip that landed behind it, as if the wave the
+	 * curl rode on had gone on without it.
+	 */
+	float ShoreCurlFront(float v, float lambda, float height, float forward, float amount)
+	{
+		float landing = clamp(ShoreCurlLanding(v, lambda, height, forward, amount), 0.04, 0.45);
+		return lerp(landing, ShoreBoreFront, ShoreSmooth(0.68, 0.80, v));
+	}
+
+	/**
 	 * The curled wave at phase `x` and stage `v`: x its displacement along the direction of travel, y its height above
 	 * the trough (units).
 	 * @param lambda  the wavelength (units)
@@ -1038,9 +1106,17 @@ namespace PBRWater
 
 		// The curl grows until the tip reaches the trough ahead (stage 0.64, Galvin's plunge distance: ShoreBreakerStage).
 		float life = amount * ShoreSmooth(0.44, 0.64, v);
-		float behind = (x - crest) / 0.035;
+		// Behind the crest the turn falls off over the top of the lip. The water there sits about a wave height from the
+		// pivot, so the falloff has to be longer than ~2.5 height/wavelength or the turn carries each point further than the
+		// surface runs between them: over 0.035 of a wave the back of the wave folded over itself just behind the crest, and
+		// a strip of its underside showed along the top of every curl.
+		float behind = (x - crest) / clamp(2.5 * height / max(lambda, 1e-3), 0.05, 0.15);
 		float g = x <= xp ? 0.0 : (x <= crest ? ((x - xp) * (x - xp)) / max((crest - xp) * (crest - xp), 1e-8) : exp(-behind * behind));
-		float t = ShoreCurlAngle * life * g;
+		// The lip turns at most ShoreCurlAngle: a stronger curl (Shore3.z above 1) throws it further, it does not turn it
+		// further. Turned by the strength as well, the lip went past pointing down and folded back under itself, its
+		// underside showing over the crest.
+		float turn = min(amount, 1.0);
+		float t = ShoreCurlAngle * turn * ShoreSmooth(0.44, 0.64, v) * g;
 		float ct = cos(t);
 		float st = sin(t);
 		float dS = S - sp;
@@ -1051,20 +1127,21 @@ namespace PBRWater
 		// Then the tube is crushed: the jet has hit the trough, the air under it is trapped and the lip falls into the
 		// plunge point (where the crest landed, on the trough), the splash-up ahead of it becoming the bore's front. Turning
 		// the lip back instead raised it into a wall of glassy water.
-		float T = ShoreCurlAngle * amount;
-		float crestS = -crest * lambda + lean * forward - sp;
-		float crestZ = height - zp;
-		float plungeS = sp + crestS * cos(T) + crestZ * sin(T) + ShoreCurlThrow * amount * height;
+		float plungeS = -ShoreCurlLanding(v, lambda, height, forward, amount) * lambda;
 		float crush = ShoreSmooth(0.62, 0.70, v) * saturate(3.0 * g);
 		Sc = lerp(Sc, plungeS, crush);
 		Zc = lerp(Zc, 0.0, crush);
 
-		// The bore the wave collapses into.
-		float b = ShoreSmooth(0.58, 0.80, v);
+		// The bore the wave collapses into: it rises out of the splash-up once the lip has landed (0.64), its front where
+		// the lip came down (ShoreCurlFront). Blended in from 0.58 as the table's is, a low rolling hump rose under the lip
+		// while it was still in the air and took over from it. It has formed by 0.80, as the table's has: from there the two
+		// shapes are the same bore (ShoreCurlWeight hands back).
+		float b = ShoreSmooth(0.64, 0.80, v);
 		float frontWidth = 0.035 + 0.02 * (1.0 - b);
-		float bore = x < ShoreBoreFront ? ShoreSmooth(ShoreBoreFront - 3.0 * frontWidth, ShoreBoreFront, x) :
-		                                  exp(-(x - ShoreBoreFront) / 0.34) * (1.0 - ShoreSmooth(0.82, 1.0, x));
-		float collapse = 1.0 - 0.42 * ShoreSmooth(0.58, 0.72, v);
+		float boreFront = ShoreCurlFront(v, lambda, height, forward, amount);
+		float bore = x < boreFront ? ShoreSmooth(boreFront - 3.0 * frontWidth, boreFront, x) :
+		                             exp(-(x - boreFront) / 0.34) * (1.0 - ShoreSmooth(0.82, 1.0, x));
+		float collapse = 1.0 - 0.42 * ShoreSmooth(0.64, 0.76, v);
 		float Sb = -x * lambda + 0.05 * bore * forward;
 		float Zb = bore * collapse * height;
 
@@ -1096,16 +1173,22 @@ namespace PBRWater
 	{
 		float weight = 0.0;
 		amount = 0.0;
-		[branch] if (Shore3.z > 0.0 && stage > 0.40 && stage < 0.80)
+		[branch] if (Shore3.z > 0.0 && stage > 0.40 && stage < 0.88)
 		{
 			// Only plungers curl (Battjes 1974): on gentle beaches waves spill, white water tumbling down the face; on the
-			// steepest they collapse or surge up the beach without breaking. The tube is full from xi 1 to 2.
+			// steepest they collapse or surge up the beach without breaking. A wave that plunges at all throws its lip all the
+			// way over into the trough: scaled by how much of a plunger it is, the curl's turn stopped part way and the
+			// lip stood as a cliff that rode in until the bore caught up with it.
 			float plunging = ShoreBreakerPlunging(iribarren);
 			// The lip is fed from about a tenth of the wave, which needs a few dozen vertices across it to hold its shape.
 			float spacing = ShoreCurlSpacing(positionWS);
-			amount = Shore3.z * plunging * smoothstep(wavelength / 25.0, wavelength / 50.0, spacing);
+			amount = Shore3.z * smoothstep(0.0, 0.3, plunging) * smoothstep(wavelength / 25.0, wavelength / 50.0, spacing);
 			if (amount > 0.0)
-				weight = smoothstep(wavelength / 12.0, wavelength / 25.0, spacing) * smoothstep(0.40, 0.46, stage) * (1.0 - smoothstep(0.72, 0.78, stage));
+				// Handed back to the table once both are the same bore (ShoreCurlShape has formed it by 0.80, collapsed by
+				// 0.76, as the table has). Handed back at 0.72 to 0.78, the crushed lip lying out at the plunge point was
+				// blended straight into the table's bore at the old crest: along the crest, where the stage passed through
+				// those values, the blend stood up as flat walls meeting at right angles.
+				weight = smoothstep(wavelength / 12.0, wavelength / 25.0, spacing) * smoothstep(0.40, 0.46, stage) * (1.0 - smoothstep(0.82, 0.88, stage));
 		}
 		return weight;
 	}
@@ -1122,7 +1205,56 @@ namespace PBRWater
 		float curl;                   // 0..1 how much of a breaker's curl is shown here: the surface may face down
 		float crest;                  // units above the still water the crest of the shore wave here stands (its top)
 		float bore;                   // 0..1 the wave has broken into a bore: its white water lies on a flattened surface (stage 0.7..0.85)
+		float aeration;               // 0..1 air churned into the water here (ShoreAeration): the crushed tube, the splash-up and the roller
+		float impact;                 // 0..1 the wave's jet has landed (stage past 0.6): its folding surface is white water from now on
+		float clearFace;              // 0..1 the steepening face, the lip and the tube of a wave about to plunge: clear water (ShoreClearFace)
 	};
+
+	static const float ShoreRollerLumps = 0.12;  // the roller's churning lumps, in wave heights at full aeration
+
+	/**
+	 * Air in the breaking wave at phase `x` and stage `v`, 0..1. Before the jet lands the water is clear (white only at the
+	 * lip's tip: the profile's crown foam). When it lands, the tube collapses and the splash-up rises: the air under it and
+	 * the air the jet drives in turn the whole crushed region opaque (void fractions to 0.6 in the collapsing cavity and
+	 * 0.35 in the splash-up: Na et al. 2016; Lubin et al. 2011). That becomes the roller riding the bore's front, the
+	 * aerated water thinning behind it into the residual foam, and weakening as the bore runs into the shallows.
+	 */
+	float ShoreAeration(float x, float v, float front)
+	{
+		float impact = ShoreSmooth(0.60, 0.68, v);
+		[branch] if (impact <= 0.0) return 0.0;
+		// Behind the front (ShoreCurlFront where the wave curled: the splash-up rises where the lip came down): the whole
+		// crushed tube at first (to about the old crest), the roller a wave height long once the bore has formed.
+		float tail = lerp(0.28, 0.08, ShoreSmooth(0.70, 0.88, v));
+		float ahead = ShoreSmooth(front - 0.04, front, x);
+		float behind = x <= front ? 1.0 : exp(-(x - front) / tail);
+		float roller = ahead * behind * (1.0 - ShoreSmooth(0.82, 1.0, x));
+		return impact * roller * (1.0 - 0.5 * ShoreSmooth(0.88, 1.0, v));
+	}
+
+	/**
+	 * The part of a wave about to plunge that is clear water, 0..1: its face from the trough ahead up over the crest, the
+	 * lip and the tube under it, from when it steepens until the jet lands. The foam the surf left on the water and the sea's
+	 * own foam are drawn off it (BreakerFoam keeps the lip's crown): drawn on, they showed through the tube as a texture
+	 * where a real tube is glassy water.
+	 */
+	float ShoreClearFace(float x, float v)
+	{
+		float window = ShoreSmooth(0.38, 0.46, v) * (1.0 - ShoreSmooth(0.64, 0.72, v));
+		float crest = 0.5 - 0.18 * ShoreSmooth(0.0, 0.5, v);
+		return window * (1.0 - ShoreSmooth(crest + 0.04, crest + 0.12, x));
+	}
+
+	/**
+	 * The roller's churning lumps at `q` (the position in lump lengths), boiling at `clock`: x the height (-0.5..0.5),
+	 * yz its gradient in lump lengths.
+	 */
+	float3 ShoreRollerChurn(float2 q, float clock)
+	{
+		float3 a = ValueNoiseGrad(q + float2(0.31, -0.17) * clock);
+		float3 b = ValueNoiseGrad(q * 2.1 + float2(-0.23, 0.29) * clock + 5.3);
+		return float3(0.65 * (a.x - 0.5) + 0.35 * (b.x - 0.5), 0.65 * a.yz + 0.35 * 2.1 * b.yz);
+	}
 
 	/**
 	 * Adds train `j` to the shore waves at undisplaced camera-relative `positionWS` (absolute `absXY`, running to the
@@ -1189,10 +1321,30 @@ namespace PBRWater
 		o.bore = max(o.bore, smoothstep(0.70, 0.85, wave.stage) * gate);
 		o.crest = max(o.crest, (height - meanLevel) * w);
 
+		float front = curl > 0.0 ? lerp(ShoreBoreFront, ShoreCurlFront(wave.stage, wave.wavelength, height, forward, curlAmount), curl) : ShoreBoreFront;
+		float aeration = ShoreAeration(wave.phase, wave.stage, front) * BreakerStrength(ctx);
+		o.aeration = max(o.aeration, aeration * gate);
+		o.impact = max(o.impact, ShoreSmooth(0.60, 0.68, wave.stage) * gate);
+		o.clearFace = max(o.clearFace, ShoreClearFace(wave.phase, wave.stage) * gate);
+
 		o.displacement += float3(dir * along, up - meanLevel) * w;
 		// The phase rises towards the sea, a wavelength per cycle.
 		float2 gradPhase = -dir / wave.wavelength;
 		o.slope += (dUp * w) * gradPhase;
+
+		// The aerated water churns: the roller is a heap of boiling lumps about half a wave height across, not a smooth
+		// sheet with foam on it, and catches the light unevenly. Lumps shorter than the vertex spacing or pixel fade out.
+		float lumpLength = max(0.6 * height, 8.0);
+		float lumps = ShoreRollerLumps * height * aeration * smoothstep(Math::PI, 0.5 * Math::PI, Math::TAU / lumpLength * scale);
+		[branch] if (lumps > 0.0)
+		{
+			float2 q = absXY / lumpLength;
+			float3 churn = ShoreRollerChurn(q, Shore2.x);
+			o.displacement.z += lumps * churn.x * w;
+			o.slope += (lumps * w / lumpLength) * churn.yz;
+			if (previous)
+				o.previousDisplacement.z += lumps * ShoreRollerChurn(q, Shore2.y).x * w;
+		}
 		o.compression += float3(dir.x * gradPhase.x, dir.y * gradPhase.y, dir.x * gradPhase.y) * (dAlong * w);
 		o.breakStage = max(o.breakStage, smoothstep(0.45, 0.6, wave.stage) * gate);
 		if (shading)
@@ -1278,6 +1430,8 @@ namespace PBRWater
 		float crest;                  // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
 		float bore;                   // 0..1 the shore wave has flattened into a bore (ShoreTrain::bore)
 		float breakerFoam;            // 0..1 the breaking wave's own white water, a raw coverage like the sea's (BreakerFoam)
+		float aeration;               // 0..1 churned white water (ShoreTrain::aeration): drawn solid, without the foam's pattern
+		float clearFace;              // 0..1 a face about to plunge, clear of foam (ShoreTrain::clearFace)
 	};
 
 	// The open sea's foam settings (Tune1, Tune2), after the sample scene's _FoamSubtract0..3, the cascade weighting (ours:
@@ -1349,7 +1503,9 @@ namespace PBRWater
 		static const float FoldStart = 0.6;  // Jacobian at which the surface starts to count as folding (the sea's bias)
 		float jacobian = (1.0 + train.compression.x) * (1.0 + train.compression.y) - train.compression.z * train.compression.z;
 		float fold = saturate((FoldStart - jacobian) / FoldStart);
-		return saturate(max(train.foam, fold * train.breakStage));
+		// The fold counts once the jet has landed: before that the overturning face is clear water, white only at the lip's
+		// crown (the profile's foam). The churned water (ShoreAeration) is white throughout.
+		return saturate(max(max(train.foam, train.aeration), fold * train.breakStage * train.impact));
 	}
 
 	/**
@@ -1393,6 +1549,8 @@ namespace PBRWater
 		o.crest = train.crest;
 		o.bore = train.bore;
 		o.breakerFoam = BreakerFoam(train);
+		o.aeration = train.aeration;
+		o.clearFace = train.clearFace;
 	}
 
 	WaveResult FinishWaves(WaveSums sums, WaveResult o)
@@ -1539,13 +1697,19 @@ namespace PBRWater
 		}
 		AddShoreTrain(sums, o, DrawnShoreWaves(positionWS, ctx, footprint, false, true));
 		o = FinishWaves(sums, o);
-		o.fftFoam = FftFoam(sums.foam, length(positionWS));
+		// A face about to plunge is clear water: the sea's foam and what the surf left on it are drawn off it (ShoreClearFace).
+		float clear = 1.0 - o.clearFace;
+		o.fftFoam = FftFoam(sums.foam, length(positionWS)) * clear;
 		// The breaker's own white water, drawn with the sea's foam; once the bore lies flat the foam texture takes over.
 		// The surf's leftover foam rides the water up every rising face: there it is drawn with the sea's foam too, as
 		// thickened lace. Added raw, as a coverage with no pattern, it laid a flat grey veil over every breaker's face.
 		float flatness = smoothstep(0.80, 0.95, o.normal.z);
 		float boreFlat = o.bore * flatness;
-		o.breakerFoam = BreakerFoamDrawn(max(o.breakerFoam * (1.0 - boreFlat), saturate(surfFoam) * (1.0 - flatness)), sums, length(positionWS));
+		o.breakerFoam = BreakerFoamDrawn(max(o.breakerFoam * (1.0 - boreFlat), saturate(surfFoam) * clear * (1.0 - flatness)), sums, length(positionWS));
+		// Where the water is churned through (the crushed tube, the splash-up, the roller) and at the lip's crown it is
+		// opaque white, with no pattern: drawn as the sea's lace thickened, the impact showed the foam texture's holes. The lace
+		// stays where the aeration thins, behind the roller and around it.
+		o.breakerFoam = max(o.breakerFoam, smoothstep(0.40, 0.80, max(o.aeration, o.shoreFoam * (1.0 - boreFlat))));
 		return o;
 	}
 
@@ -1963,6 +2127,9 @@ namespace PBRWater
 	 * @param positionWS camera-relative position of the displaced surface
 	 * @param shoreState the vertex shader's SurfaceDisplacement::shore
 	 */
+	/// The swash's foam (ShoreFoamBoth().y) above which what it stranded on the sand is drawn there.
+	static const float StrandedFoamShown = 0.03;
+
 	bool AboveWaterline(float3 positionWS, float4 shoreState)
 	{
 		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
@@ -1975,6 +2142,9 @@ namespace PBRWater
 		// thinned, and cut straight-edged, right-angled holes into the water.
 		float film = shoreState.y > 0.0 ? shoreState.x : -1e6;
 		if (bed <= max(shoreState.z, film) + 0.05 * UnitsPerMetre)
+			return false;
+		// Foam the swash stranded on the sand is drawn on the ground there (Water.hlsl).
+		if (ShoreFoamBoth(absXY).y > StrandedFoamShown)
 			return false;
 		// Kept up to where the water reached in the last moments, per pixel: the tip interpolated from the vertices runs ahead of or
 		// behind the true one inside each triangle, which cut straight-edged holes into a fresh uprush. The colour pass
@@ -2029,16 +2199,26 @@ namespace PBRWater
 			float ceiling = TerrainCeiling(absXY + o.current.xy);
 			float bed = ceiling > -1e8 ? ceiling - (positionWS.z + FrameBuffer::CameraPosAdjust.z) : ctx.elevation;
 			// Any sheet holds it, however thin, as AboveWaterline keeps it: a vertex let down under a film the pixels
-			// still draw stood a wall of triangles up from the sand.
-			float film = sheet.y > 0.0 ? sheet.x : -1e6;
+			// still draw stood a wall of triangles up from the sand. The film's level comes in over its first few
+			// millimetres, from a metre below the reach: switched on at any depth, it stepped along the crest of a wave
+			// whose water the simulation was just taking over, and lifted part of a curling lip into a right-angled jog.
+			float dry = 1.0 - saturate(sheet.y / SwashMinDepth);
+			float film = sheet.x - dry * (reach + UnitsPerMetre);
 			float level = max(max(o.current.z, film), SwashReach(absXY));
+			// Held on the sand under the foam the swash stranded there too, so its pixels exist (AboveWaterline); eased in
+			// the same way.
+			float stranded = saturate((ShoreFoamBoth(absXY).y - StrandedFoamShown) / 0.05);
+			level = max(level, bed - (1.0 - stranded) * (reach + UnitsPerMetre));
 			// Held at the bed up to `reach` above the water, and no higher than that past it, so the vertex slides into the
 			// sand continuously as the bed rises or the water drains. Held or dropped back to the waves, neighbouring
 			// vertices on either side of the cut stood a wall of triangles up along a straight row of the grid.
 			float lift = WaterlineLift(spacing, ctx.terrainGrad);
 			float lifted = min(bed, level + reach) + lift;
-			o.current.z = max(o.current.z, lifted);
-			o.previous.z = max(o.previous.z, lifted);
+			// Not a breaker's lip: thrown ahead over the trough it is measured against the ground where it lands, and was
+			// lifted onto a ledge it plunges into. The ground stands in front of it there.
+			float hold = 1.0 - saturate(now.curl);
+			o.current.z = max(o.current.z, lerp(o.current.z, lifted, hold));
+			o.previous.z = max(o.previous.z, lerp(o.previous.z, lifted, hold));
 		}
 
 		// Hard bound. Clamping also flushes NaN (D3D min/max return the non-NaN operand), so a bad input can never throw

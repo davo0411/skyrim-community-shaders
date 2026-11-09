@@ -34,7 +34,11 @@ RWTexture2D<float4> Output : register(u0);
 	float free = 1.0 - prep.y;
 	// No ground (a wall): no swash, and a surface that pulls no neighbour's up.
 	bool wall = prep.x > 100.0;
-	float surface = wall ? 0.0 : (prep.x + swash.x) * PBRWater::UnitsPerMetre;
+	// The surface stands the shared depth above the bed. At the simulation's full surface over a share of its depth, the
+	// first millimetres of share (SwashSurface's SwashMinDepth) switched the whole bore's level on over the analytic waves,
+	// and lifted the trough and the side of a curling lip half a metre in one row of vertices: a right-angled step along
+	// the hand-over.
 	float depth = wall ? 0.0 : swash.x * free * PBRWater::UnitsPerMetre;
+	float surface = wall ? 0.0 : prep.x * PBRWater::UnitsPerMetre + depth;
 	Output[id.xy] = float4(stage.x, surface, depth, swash.w * free);
 }

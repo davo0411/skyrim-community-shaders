@@ -144,6 +144,17 @@ float4 SampleFoam(float2 q)
 	float boreFoam = 0.0;
 	[branch] if (ctx.train > 0.0)
 	{
+		// The hand-over is by the sea's height, but each wave breaks at its own (ShoreSet): one smaller than the rest still
+		// curls inshore of it. Until the wave here has become a bore the waves keep the water, and the simulation's is not
+		// drawn (SwashOutCS). Run free under a curling lip, the simulation carried its own copy of the wave, a metre high
+		// and smooth, and the surface took whichever stood higher (DisplaceSurface): the copy cut into the curl along
+		// straight, right-angled edges.
+		[branch] if (depthMetres > 0.05)
+		{
+			PBRWater::ShoreWave wave = PBRWater::ShoreWaveAt(absXY, PBRWater::CoastPoint(absXY, ctx.shore), ctx, PBRWater::Shore2.x, 0);
+			forcing = max(forcing, 1.0 - smoothstep(0.66, 0.80, wave.stage));
+		}
+
 		// The shore waves here and as they were last frame: their white water is the source, their displacement's rate
 		// is the part of the water's motion the drawn surface already carries.
 		PBRWater::ShoreTrain train = PBRWater::ShoreWaves(positionWS, ctx, TexelSize, dt > 0.0, true);

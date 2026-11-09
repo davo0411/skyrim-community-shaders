@@ -1593,7 +1593,7 @@ namespace PBRWaterModel
 		/// How much of a plunger a breaker is on a beach of surf similarity `iribarren`. Mirrors PBRWater::ShoreBreakerPlunging.
 		float ShoreBreakerPlunging(float iribarren)
 		{
-			return Smoothstep(0.5f, 1.0f, iribarren) * (1.0f - Smoothstep(2.0f, 3.3f, iribarren));
+			return Smoothstep(0.35f, 0.6f, iribarren) * (1.0f - Smoothstep(2.0f, 3.3f, iribarren));
 		}
 
 		/// A broken wave's height (m) as a bore: saturated in the inner surf (H/h 0.4 to 0.6 with the slope), never below a
@@ -1678,7 +1678,25 @@ namespace PBRWaterModel
 
 				const float crestX = x + dirX * (phase - 0.5f) * wavelength * units;
 				const float crestY = y + dirY * (phase - 0.5f) * wavelength * units;
-				const float crestDepth = std::max((t.waterZ - (bed.Contains(crestX, crestY) ? bed.Sample(crestX, crestY) : -1.0e9f)) / units, 0.05f);
+				// The bed averaged along the crest (PBRWater::ShoreCrestBed): a LAND quad at least, a quarter wave at most.
+				const float halfWidth = std::max(128.0f, 0.25f * wavelength * units);
+				float crestBed = -1.0e9f;
+				{
+					constexpr float offsets[5] = { -1.0f, -0.5f, 0.0f, 0.5f, 1.0f };
+					constexpr float weights[5] = { 1.0f, 2.0f, 3.0f, 2.0f, 1.0f };
+					float sum = 0.0f, weight = 0.0f;
+					for (int k = 0; k < 5; ++k) {
+						const float sx = crestX - dirY * offsets[k] * halfWidth;
+						const float sy = crestY + dirX * offsets[k] * halfWidth;
+						if (bed.Contains(sx, sy)) {
+							sum += bed.Sample(sx, sy) * weights[k];
+							weight += weights[k];
+						}
+					}
+					if (weight > 0.0f)
+						crestBed = sum / weight;
+				}
+				const float crestDepth = std::max((t.waterZ - crestBed) / units, 0.05f);
 				const float deep = ShoreHeightRatio * t.deepHeight;
 				const float shoaled = deep * ShoreSet(p, coastX, coastY, static_cast<float>(index)) * ShoalingCoefficient(omega, crestDepth);
 				// An onshore wind makes the wave break earlier, an offshore wind later (ShoreWindBreaking).

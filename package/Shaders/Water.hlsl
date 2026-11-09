@@ -1794,7 +1794,10 @@ PS_OUTPUT main(PS_INPUT input)
 		pbrFoamPosition += viewDirection * min(pbrMeshAbove / -viewDirection.z, pbrPathLength);
 	float pbrFlat = smoothstep(0.80, 0.95, pbrSurface.waveNormal.z);
 	float pbrBoreFlat = pbrSurface.bore * pbrFlat;
-	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSimFoam.x * pbrFlat), pbrSimFoam.y * pbrSheet);
+	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSimFoam.x * pbrFlat * (1.0 - pbrSurface.clearFace)), pbrSimFoam.y * pbrSheet);
+	// What the swash stranded on the sand as it drained (the swash mark at the top of each uprush, lace where the sheet
+	// thinned): drawn on the ground where no water covers it, the pattern held where it lies.
+	float pbrStrandedFoam = PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrSimFoam.y * (1.0 - pbrSheet), PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler);
 	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
 	float pbrRawCoverage = pbrSurface.breakerFoam;
 	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);
@@ -1821,6 +1824,13 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrFoam = max(pbrFoamPattern * pbrFilmFoam, saturate(pbrSurface.fftFoam) * pbrFilmFoam);
 	// Foam scatters the glint with the rest of the light that reaches it.
 	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + pbrSunGlint * (1.0 - pbrFoam);
+#							if defined(REFRACTIONS)
+	// The foam stranded on the dry sand lies on the ground the final blend shows where there is no water (pbrEdge).
+	float pbrStrandedShown = (1.0 - pbrEdge) * pbrStrandedFoam;
+	float pbrCover = pbrEdge + pbrStrandedShown;
+	finalColorPreFog = (pbrEdge * finalColorPreFog + pbrStrandedShown * pbrFoamColor) / max(pbrCover, 1e-4);
+	pbrEdge = pbrCover;
+#							endif
 #						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float waterOpacity = diffuseOutput.refractionMul;

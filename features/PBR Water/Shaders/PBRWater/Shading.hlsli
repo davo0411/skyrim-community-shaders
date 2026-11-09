@@ -222,6 +222,7 @@ namespace PBRWater
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
 		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat: drawn raw, like fftFoam
 		float2 simFoam;      // ShoreFoamBoth here: x the foam the surf left on the water, y the swash's
+		float clearFace;     // 0..1 a breaker's face about to plunge: clear water, no leftover foam (ShoreClearFace)
 		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
 		float surf;          // 0..1 real breakers run onto this shore: the water's edge carries foam
@@ -284,6 +285,9 @@ namespace PBRWater
 		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
 		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
 		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
+		// A breaker's face drawn up to plunge is stretched glassy: the wind's ripples on it are pulled out along the face.
+		detailScale *= 1.0 - 0.5 * waves.clearFace;
+		o.clearFace = waves.clearFace;
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
 		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05) + ripple;
