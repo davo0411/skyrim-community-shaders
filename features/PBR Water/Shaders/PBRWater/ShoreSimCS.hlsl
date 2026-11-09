@@ -3,9 +3,10 @@
 //
 // The swash itself is simulated near the camera and analytic beyond (PBRWater::SwashSheet). What else needs history is kept here,
 // on a camera-centred grid (scrolled in whole texels, like the ripple simulation): the wet level follows the highest
-// water (the swash on beaches, the waves on rocks and piers) and sinks slowly as it drains and dries.
+// water (the swash on beaches, the waves on rocks and piers) and sinks slowly as it drains and dries; the reach follows
+// the same water but drains with it, for the water's mesh (PBRWater::SwashReach).
 //
-// Output: Wet (x wet level, yz unused, w water surface height), in units above the still water level, read by the lit
+// Output: Wet (x wet level, y reach, z unused, w water surface height), in units above the still water level, read by the lit
 // terrain and objects (wetness, and the water height their caustics and shore wetness follow).
 // ============================================================================
 
@@ -56,6 +57,10 @@ RWTexture2D<float4> Wet : register(u0);
 	// It sinks slowly as the water drains and the surface dries.
 	float reached = surface;
 	float wetLevel = clamp(max(wet.x - DryRate * Dt, reached), -limit, limit);
+	// The reach: the same, but sinking about as fast as a backwash drains down the beach. It holds the water's mesh on the
+	// sand only until the swash has passed; held at the slow-drying wet level, the mesh stayed draped over the sand for
+	// seconds after the water left and stood in steps along the grid's texels.
+	float reach = clamp(max(wet.y - PBRWater::ReachDrainRate * Dt, reached), -limit, limit);
 
-	Wet[id.xy] = float4(wetLevel, 0.0, 0.0, surface);
+	Wet[id.xy] = float4(wetLevel, reach, 0.0, surface);
 }

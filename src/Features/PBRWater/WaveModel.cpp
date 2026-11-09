@@ -56,11 +56,17 @@ namespace PBRWaterModel
 			return a + (b - a) * uy;
 		}
 
-		/// Wave sets: the factor on the height of wave `index` running to the waterline point (x, y). Mirrors PBRWater::ShoreSet.
+		/// One wave's height as a factor on the sea's: a group envelope times a Rayleigh draw per wave, varying along the
+		/// crest over the crest length. The factor on wave `index` running to the waterline point (x, y). Mirrors PBRWater::ShoreSet.
 		float ShoreSet(const ShoreParams& p, float x, float y, float index)
 		{
-			const float scale = std::max(3.0f * p.deepLength, 1.0f);
-			return p.setMin + (p.setMax - p.setMin) * ValueNoise(x / scale + index * 0.14f, y / scale + index * 0.09f);
+			const float crest = std::max(p.crestLength * p.deepLength, 1.0f);
+			const float group = ValueNoise(x / (3.0f * crest) + index * 0.13f, y / (3.0f * crest) + index * 0.07f);
+			const float seedX = Hash12(index, 3.7f) * 61.0f;
+			const float seedY = Hash12(index, 11.3f) * 61.0f;
+			const float u = std::clamp(0.5f + 1.7f * (ValueNoise(x / crest + seedX, y / crest + seedY) - 0.5f), 0.03f, 0.97f);
+			const float rayleigh = std::sqrt(-std::log(1.0f - u)) * 1.128379f;
+			return std::clamp(1.0f + p.setVariation * ((0.6f + 0.8f * group) * rayleigh - 1.0f), 0.1f, ShoreSetCeiling);
 		}
 
 		// ---- Shared with OceanSpectrum.hlsli: keep the two in sync ----
@@ -549,10 +555,10 @@ namespace PBRWaterModel
 	{
 		ShoreParams p;
 		p.trainCycles = tuning.trainCycles;
-		p.setMin = tuning.setMin;
-		p.setMax = tuning.setMax;
+		p.setVariation = tuning.setVariation;
+		p.crestLength = tuning.crestLength;
 		p.crestWobble = tuning.crestWobble;
-		p.splitWaves = tuning.splitWaves;
+		p.whelps = tuning.whelps;
 		// The shore train carries the open sea's swell and wind sea.
 		p.swellHeight = spectrum.swellHeight;
 		p.windSeaHeight = spectrum.windSeaHeight;
@@ -579,7 +585,7 @@ namespace PBRWaterModel
 			p.swellDirection = targetSwellDirection;
 		}
 		// The clock integrates the frequency, so a frequency that changes never moves the waves.
-		p.rate = p.omega * tuning.timeScale;
+		p.rate = p.omega;
 		p.phase = previous ? std::fmod(previous->phase + static_cast<double>(p.rate) * dt, TwoPi * ShoreClockCycles) : 0.0;
 
 		const float units = static_cast<float>(UnitsPerMetre);
@@ -594,10 +600,10 @@ namespace PBRWaterModel
 
 		// Bound of the run-up: Stockdon et al. (2006), 2 % exceedance, R = 1.1 (<eta> + S / 2) with set-up
 		// <eta> = 0.35 b sqrt(H0 L0) and swash S = sqrt(H0 L0 (0.563 b^2 + 0.004)), for the highest wave of the biggest set
-		// (ShoreSet at most setMax) of the full open sea (its significant height, as Stockdon fit it) on a steep (b = 0.2)
+		// (ShoreSet at most ShoreSetCeiling) of the full open sea (its significant height, as Stockdon fit it) on a steep (b = 0.2)
 		// beach, with a margin. Mirrors PBRWater::SwashTip.
 		constexpr float Slope = 0.2f;
-		const float highest = p.setMax * p.MaxDeepHeight() / units;
+		const float highest = ShoreSetCeiling * p.MaxDeepHeight() / units;
 		const float hl = std::sqrt(highest * seaL0);
 		const float runup = 1.1f * (0.35f * Slope * hl + 0.5f * hl * std::sqrt(0.563f * Slope * Slope + 0.004f));
 		p.maxRunup = runup * units + 20.0f;
@@ -1542,9 +1548,6 @@ namespace PBRWaterModel
 
 	namespace
 	{
-		/// The shore trains' frequencies as multiples of the main train's. Mirrors PBRWater::ShoreTrainMultiple.
-		constexpr std::array<float, 3> ShoreTrainMultiple = { 1.0f, 1792.0f / 1024.0f, 2688.0f / 1024.0f };
-
 		/// How far train `j`'s crests run ahead of a straight front along the coast (waves). Mirrors PBRWater::ShoreWobble.
 		float ShoreWobble(const ShoreParams& p, float coastX, float coastY, float clock, uint32_t j)
 		{
@@ -1568,16 +1571,17 @@ namespace PBRWaterModel
 		}
 
 		/// A wave's stage from its shoaled height over its breaker limit: past the limit, by the distance it has travelled
-		/// since breaking (Galvin's plunge distance, then the bore). Mirrors PBRWater::ShoreBreakerStage.
-		float ShoreBreakerStage(float ratio, float slope, float index)
+		/// since breaking (Galvin's plunge distance, shorter for spillers, then a half-length transition into the bore).
+		/// Mirrors PBRWater::ShoreBreakerStage.
+		float ShoreBreakerStage(float ratio, float slope, float index, float plunging)
 		{
 			if (ratio <= 1.0f)
 				return ratio / (1.0f + ratio);
 			const float m = std::clamp(slope, 0.01f, 0.3f);
 			const float depthShare = std::pow(ratio, -0.8f);
 			const float travelled = (1.0f - depthShare) / (index * m);
-			const float plunge = std::max(4.0f - 9.25f * m, 2.0f);
-			const float transition = plunge;
+			const float plunge = std::max(4.0f - 9.25f * m, 2.0f) * (0.35f + 0.65f * plunging);
+			const float transition = 0.5f * plunge;
 			const float formed = 1.0f - (plunge + transition) * index * m;
 			if (travelled < plunge)
 				return 0.5f + 0.16f * travelled / plunge;
@@ -1586,14 +1590,63 @@ namespace PBRWaterModel
 			return 0.80f + 0.20f * std::clamp(1.0f - depthShare / std::max(formed, 1e-3f), 0.0f, 1.0f);
 		}
 
-		/// Share of the split trains, 0..1. Mirrors PBRWater::ShoreSplitShare.
-		float ShoreSplitShare(const ShoreParams& p, float tracedOmega, const ShoreTrainContext& t)
+		/// How much of a plunger a breaker is on a beach of surf similarity `iribarren`. Mirrors PBRWater::ShoreBreakerPlunging.
+		float ShoreBreakerPlunging(float iribarren)
 		{
-			if (p.splitWaves <= 0.0f)
-				return 0.0f;
-			const float depth = std::max(t.depth, 0.05f);
-			const float shoaled = ShoreHeightRatio * t.deepHeight * ShoalingCoefficient(std::max(tracedOmega, 1e-3f), depth);
-			return Smoothstep(0.7f, 1.2f, shoaled / (ShoreBreakerLimit * depth)) * t.beach;
+			return Smoothstep(0.5f, 1.0f, iribarren) * (1.0f - Smoothstep(2.0f, 3.3f, iribarren));
+		}
+
+		/// A broken wave's height (m) as a bore: saturated in the inner surf (H/h 0.4 to 0.6 with the slope), never below a
+		/// share of the breaker's height at the waterline. Mirrors PBRWater::ShoreBoreHeight.
+		float ShoreBoreHeight(float height, float stage, float ratio, float slope, float index, float depth)
+		{
+			if (ratio <= 1.0f)
+				return height;
+			const float m = std::clamp(slope, 0.01f, 0.3f);
+			const float breakerHeight = index * depth * std::pow(ratio, 0.8f);
+			const float saturated = (0.4f + 0.2f * std::clamp((m - 0.02f) / 0.08f, 0.0f, 1.0f)) * depth;
+			const float front = std::max(saturated, 0.15f * breakerHeight * Smoothstep(0.05f, 0.4f, depth)) / 0.58f;
+			return height + (front - height) * Smoothstep(0.66f, 0.80f, stage);
+		}
+
+		/// The signed share of the wind that reaches the waves, -1..1 (positive onshore): its strength times its component
+		/// along the waves' travel. Mirrors PBRWater::ShoreOnshoreWind.
+		float ShoreOnshoreWind(const ShoreTrainContext& t, float dirX, float dirY)
+		{
+			return t.windStrength * (t.windX * dirX + t.windY * dirY);
+		}
+
+		/// The surf similarity the breakers take their type from, moved by the wind. Mirrors PBRWater::ShoreBreakerIribarren.
+		float ShoreBreakerIribarren(const ShoreTrainContext& t, float dirX, float dirY)
+		{
+			return t.iribarren * (1.0f - ShoreWindPlunge * ShoreOnshoreWind(t, dirX, dirY));
+		}
+
+		/// The height (m) of the first whelp behind a wave's front: a weak bore (Froude number below 1.3) or the lee of a bar.
+		/// Mirrors PBRWater::ShoreWhelpAmplitude.
+		float ShoreWhelpAmplitude(const ShoreParams& p, float height, float stage, float depthA, float crestDepth)
+		{
+			const float froude = 0.58f * height / depthA;
+			const float weakBore = (1.0f - Smoothstep(0.25f, 0.5f, froude)) * Smoothstep(0.7f, 0.85f, stage);
+			const float barLee = Smoothstep(1.0f, 1.6f, depthA / crestDepth) * Smoothstep(0.25f, 0.4f, stage);
+			return p.whelps * std::max(weakBore, barLee) * 0.3f * height;
+		}
+
+		/// The whelps' height above the wave's profile and its rate of change with the phase. Mirrors PBRWater::ShoreWhelps.
+		std::array<float, 2> ShoreWhelps(float x, float stage, float amplitude, float lambda, float spacing)
+		{
+			const float anchor = 0.5f + (0.16f - 0.5f) * Smoothstep(0.5f, 0.8f, stage);  // 0.16: BoreFront
+			if (amplitude <= 0.0f || x <= anchor)
+				return { 0.0f, 0.0f };
+			const float c = lambda / spacing;
+			const float s = (x - anchor) * c;
+			const float e = std::exp(-s / 2.2f);
+			const float t = std::clamp((x - 0.75f) / 0.22f, 0.0f, 1.0f);
+			const float tail = 1.0f - t * t * (3.0f - 2.0f * t);
+			const float dTail = -6.0f * t * (1.0f - t) / 0.22f;
+			const float b = 0.5f - 0.5f * std::cos(static_cast<float>(TwoPi) * s);
+			const float dB = static_cast<float>(Pi) * c * std::sin(static_cast<float>(TwoPi) * s);
+			return { amplitude * e * tail * b, amplitude * e * (dTail * b + tail * dB - c / 2.2f * tail * b) };
 		}
 
 		/**
@@ -1613,16 +1666,12 @@ namespace PBRWaterModel
 			const float coastX = x + dirX * ray.distance;
 			const float coastY = y + dirY * ray.distance;
 			const float units = static_cast<float>(UnitsPerMetre);
-			const float split = ShoreSplitShare(p, tracedOmega, t);
 			const double mainCycles = (p.phase + static_cast<double>(ray.phaseLag)) / TwoPi + static_cast<double>(ray.along);
 
-			for (uint32_t j = 0; j < ShoreTrainMultiple.size(); ++j) {
-				const float gate = j == 0 ? 1.0f : split;
-				if (gate <= 0.0f)
-					continue;
-				const float multiple = ShoreTrainMultiple[j];
-				const float omega = std::max(tracedOmega, 1e-3f) * multiple;
-				const double cycles = multiple * mainCycles + static_cast<double>(ShoreWobble(p, coastX, coastY, static_cast<float>(p.phase), j));
+			// The sea's dominant waves: one train, whose higher harmonics are the whelps behind a weak bore's front.
+			{
+				const float omega = std::max(tracedOmega, 1e-3f);
+				const double cycles = mainCycles + static_cast<double>(ShoreWobble(p, coastX, coastY, static_cast<float>(p.phase), 0));
 				const double index = std::floor(cycles);
 				const float phase = static_cast<float>(cycles - index);
 				const float wavelength = static_cast<float>(TwoPi) / (omega * slowness);  // m
@@ -1630,16 +1679,28 @@ namespace PBRWaterModel
 				const float crestX = x + dirX * (phase - 0.5f) * wavelength * units;
 				const float crestY = y + dirY * (phase - 0.5f) * wavelength * units;
 				const float crestDepth = std::max((t.waterZ - (bed.Contains(crestX, crestY) ? bed.Sample(crestX, crestY) : -1.0e9f)) / units, 0.05f);
-				// ShoreDeepHeight: the split trains carry a share of the main train's height that shrinks with their frequency.
-				const float deep = ShoreHeightRatio * t.deepHeight * (j == 0 ? 1.0f : p.splitWaves / multiple);
-				const float setX = coastX + static_cast<float>(j) * 5113.0f;
-				const float setY = coastY - static_cast<float>(j) * 3271.0f;
-				const float shoaled = deep * ShoreSet(p, setX, setY, static_cast<float>(index)) * ShoalingCoefficient(omega, crestDepth);
-				const float breakerIndex = ShoreBreakerIndex(ray.slope, std::min(shoaled, ShoreBreakerLimit * crestDepth), static_cast<float>(TwoPi) / omega);
+				const float deep = ShoreHeightRatio * t.deepHeight;
+				const float shoaled = deep * ShoreSet(p, coastX, coastY, static_cast<float>(index)) * ShoalingCoefficient(omega, crestDepth);
+				// An onshore wind makes the wave break earlier, an offshore wind later (ShoreWindBreaking).
+				const float breakerIndex = ShoreBreakerIndex(ray.slope, std::min(shoaled, ShoreBreakerLimit * crestDepth), static_cast<float>(TwoPi) / omega) * (1.0f - ShoreWindBreaking * ShoreOnshoreWind(t, dirX, dirY));
 				const float limit = breakerIndex * crestDepth;
-				const float height = std::min(std::min(shoaled, limit), ShoreSteepestWave * wavelength);
-				const float stage = std::min(ShoreBreakerStage(shoaled / limit, ray.slope, breakerIndex), 0.42f + 0.58f * t.beach);
+				const float stage = std::min(ShoreBreakerStage(shoaled / limit, ray.slope, breakerIndex, ShoreBreakerPlunging(ShoreBreakerIribarren(t, dirX, dirY))), 0.42f + 0.58f * t.beach);
+				const float height = ShoreBoreHeight(std::min(std::min(shoaled, limit), ShoreSteepestWave * wavelength), stage, shoaled / limit, ray.slope, breakerIndex, crestDepth);
 				const auto shape = GetShoreProfile().At(phase, stage);
+
+				// The whelps trail the front (or, before the wave breaks, the crest): see PBRWater::ShoreWaveAt.
+				float whelpUp = 0.0f, whelpDUp = 0.0f;
+				if (p.whelps > 0.0f && stage > 0.25f) {
+					const float anchor = 0.5f + (0.16f - 0.5f) * Smoothstep(0.5f, 0.8f, stage);
+					const float anchorX = x + dirX * (phase - anchor) * wavelength * units;
+					const float anchorY = y + dirY * (phase - anchor) * wavelength * units;
+					const float anchorDepth = std::max((t.waterZ - (bed.Contains(anchorX, anchorY) ? bed.Sample(anchorX, anchorY) : -1.0e9f)) / units, 0.05f);
+					const float amplitude = ShoreWhelpAmplitude(p, height, stage, anchorDepth, crestDepth);
+					const float spacing = std::clamp(8.0f * anchorDepth, wavelength / 24.0f, wavelength / 2.5f);  // m
+					const auto whelps = ShoreWhelps(phase, stage, amplitude, wavelength, spacing);
+					whelpUp = whelps[0];
+					whelpDUp = whelps[1];
+				}
 
 				const float forward = std::min(wavelength, ShoreForwardHeights * height);
 				const float localDepth = std::max(t.depth, 0.05f);
@@ -1648,14 +1709,14 @@ namespace PBRWaterModel
 				const float meanLevel = std::min(localShoaled, localLimit) * (0.5f - 0.28f * std::clamp(2.0f * localShoaled / (localShoaled + localLimit), 0.0f, 1.0f));
 
 				// A wave passes a fixed point in one period.
-				const float rate = std::max(p.rate, 1e-3f) * multiple / static_cast<float>(TwoPi);
-				const float scale = units * t.weight * gate;
+				const float rate = std::max(p.rate, 1e-3f) / static_cast<float>(TwoPi);
+				const float scale = units * t.weight;
 				out.dx += dirX * shape.forward * forward * scale;
 				out.dy += dirY * shape.forward * forward * scale;
-				out.dz += (shape.up * height - meanLevel) * scale;
+				out.dz += (shape.up * height + whelpUp - meanLevel) * scale;
 				out.vx += dirX * shape.dForward * forward * rate * scale;
 				out.vy += dirY * shape.dForward * forward * rate * scale;
-				out.vz += shape.dUp * height * rate * scale;
+				out.vz += (shape.dUp * height + whelpDUp) * rate * scale;
 			}
 			return out;
 		}
@@ -1750,11 +1811,23 @@ namespace PBRWaterModel
 				const float wind = shore.windSeaHeight * ctx.fetchRatio;
 				t.deepHeight = std::sqrt(swell * swell + wind * wind) * static_cast<float>(MetresPerUnit);
 				t.waterZ = waterZ;
-				// Breaking or surging: the Iribarren number tan(beta) / sqrt(H0 / L0) of the local sea (Battjes 1974),
-				// as ctx.beach in the shader.
+				// Breaking or surging: the Iribarren number tan(beta) / sqrt(H0 / L0) of the waves that break here (Battjes
+				// 1974), the shore train's own height and period, as ctx.beach in the shader.
 				const float deepHeight = 4.0f * std::sqrt(deepVariance) * static_cast<float>(UnitsPerMetre);
-				const float steepness = deepHeight * static_cast<float>(MetresPerUnit) / (static_cast<float>(TwoPi) * G / std::max(peakOmega * peakOmega, 1e-4f));
+				float breakerHeight = ShoreHeightRatio * t.deepHeight;
+				float breakerOmega = shoreField->omega;
+				if (breakerHeight <= 0.0f || breakerOmega <= 1e-3f) {
+					breakerHeight = deepHeight * static_cast<float>(MetresPerUnit);
+					breakerOmega = peakOmega;
+				}
+				const float steepness = breakerHeight / (static_cast<float>(TwoPi) * G / std::max(breakerOmega * breakerOmega, 1e-4f));
 				const float iribarren = ray.slope / std::sqrt(std::max(steepness, 1e-4f));
+				t.iribarren = iribarren;
+				// The wind that makes the waves spill and break early (onshore) or plunge and break late (offshore), as
+				// PBRWater::ShoreOnshoreWind reads it (Params0.y, Params1.xy).
+				t.windX = std::cos(windDirection);
+				t.windY = std::sin(windDirection);
+				t.windStrength = Smoothstep(2.0f, 12.0f, windSpeed);
 				t.beach = Smoothstep(3.3f, 2.0f, iribarren) * ray.weight * ray.room * std::clamp(deepHeight - 1.0f, 0.0f, 1.0f);
 				const float handOver = weight * ShoreSurfShare(t.deepHeight, depthMetres, shoreField->omega);
 				for (uint32_t c = 0; c < NumCascades; ++c) {

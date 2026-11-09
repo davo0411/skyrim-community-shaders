@@ -39,14 +39,12 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		WindStreaks,
 		ShoreShortestPeriod,
 		ShoreLongestPeriod,
-		ShoreTimeScale,
 		ShoreTrainCycles,
-		ShoreSetMin,
-		ShoreSetMax,
+		ShoreWaveVariation,
 		ShoreResidualFoam,
 		ShoreFoamLifetime,
 		ShoreCrestWobble,
-		ShoreSplitWaves,
+		ShoreBoreWhelps,
 		ShoreCurl,
 		ShoreCurlDetail,
 		SwashLinger,
@@ -145,14 +143,12 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		WindStreaks,
 		ShoreShortestPeriod,
 		ShoreLongestPeriod,
-		ShoreTimeScale,
 		ShoreTrainCycles,
-		ShoreSetMin,
-		ShoreSetMax,
+		ShoreWaveVariation,
 		ShoreResidualFoam,
 		ShoreFoamLifetime,
 		ShoreCrestWobble,
-		ShoreSplitWaves,
+		ShoreBoreWhelps,
 		ShoreCurl,
 		ShoreCurlDetail,
 		SwashLinger,
@@ -321,14 +317,12 @@ void PBRWater::SanitizeSettings()
 	clamp(s.WindStreaks, 0.0f, 1.0f, d.WindStreaks);
 	clamp(s.ShoreShortestPeriod, 0.5f, 60.0f, d.ShoreShortestPeriod);
 	clamp(s.ShoreLongestPeriod, 0.5f, 120.0f, d.ShoreLongestPeriod);
-	clamp(s.ShoreTimeScale, 0.01f, 10.0f, d.ShoreTimeScale);
 	clamp(s.ShoreTrainCycles, 1.0f, 64.0f, d.ShoreTrainCycles);
-	clamp(s.ShoreSetMin, 0.01f, 10.0f, d.ShoreSetMin);
-	clamp(s.ShoreSetMax, 0.01f, 10.0f, d.ShoreSetMax);
+	clamp(s.ShoreWaveVariation, 0.0f, 1.5f, d.ShoreWaveVariation);
 	clamp(s.ShoreResidualFoam, 0.0f, 1.0f, d.ShoreResidualFoam);
 	clamp(s.ShoreFoamLifetime, 0.5f, 120.0f, d.ShoreFoamLifetime);
 	clamp(s.ShoreCrestWobble, 0.0f, 2.0f, d.ShoreCrestWobble);
-	clamp(s.ShoreSplitWaves, 0.0f, 2.0f, d.ShoreSplitWaves);
+	clamp(s.ShoreBoreWhelps, 0.0f, 2.0f, d.ShoreBoreWhelps);
 	clamp(s.ShoreCurl, 0.0f, 2.0f, d.ShoreCurl);
 	clamp(s.ShoreCurlDetail, 1.0f, 4.0f, d.ShoreCurlDetail);
 	clamp(s.SwashLinger, 1.0f, 8.0f, d.SwashLinger);
@@ -393,7 +387,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.SedimentColor.z, 0.0f, Huge, d.SedimentColor.z);
 	// Ranges whose ends depend on each other.
 	s.ShoreLongestPeriod = std::max(s.ShoreLongestPeriod, s.ShoreShortestPeriod);
-	s.ShoreSetMax = std::max(s.ShoreSetMax, s.ShoreSetMin);
 	s.FlowPeriodMax = std::max(s.FlowPeriodMax, s.FlowPeriodMin);
 	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
@@ -476,12 +469,10 @@ void PBRWater::DrawSettings()
 		}
 		Util::SliderFloatTip(T(TKEY("shore_train_cycles"), "Shore Wave Reach"), &s.ShoreTrainCycles, 2.0f, 16.0f, "%.1f waves",
 			T(TKEY("shore_train_cycles_tooltip"), "How many waves out from the shore the breaking wave train reaches. Beyond it the open sea's waves carry on. Default 7."));
-		Util::SliderFloatTip(T(TKEY("shore_time_scale"), "Shore Wave Pace"), &s.ShoreTimeScale, 0.1f, 1.0f, "%.2f",
-			T(TKEY("shore_time_scale_tooltip"), "How fast the shore waves roll in compared with real waves of the same spacing. Slower reads better on Skyrim's compressed coasts. Default 0.7."));
 		Util::SliderFloatTip(T(TKEY("shore_crest_wobble"), "Crest Irregularity"), &s.ShoreCrestWobble, 0.0f, 1.0f, "%.2f",
 			T(TKEY("shore_crest_wobble_tooltip"), "How far the crests bend and drift along the coast, in waves, so stretches of beach break at different times instead of in one straight line. Default 0.35."));
-		Util::SliderFloatTip(T(TKEY("shore_split_waves"), "Surf Splitting"), &s.ShoreSplitWaves, 0.0f, 1.5f, "%.2f",
-			T(TKEY("shore_split_waves_tooltip"), "Smaller, shorter waves that form in the surf as the breakers split up, each breaking on its own as it reaches the shallows. 0 leaves only the main waves. Default 0.6."));
+		Util::SliderFloatTip(T(TKEY("shore_bore_whelps"), "Bore Whelps"), &s.ShoreBoreWhelps, 0.0f, 1.5f, "%.2f",
+			T(TKEY("shore_bore_whelps_tooltip"), "A weak bore, or a wave that has passed over a sandbar into deeper water, trails a short string of smaller crests that follow its front and die away behind it. This scales their height. 0 leaves only the main waves. Default 0.6."));
 		Util::SliderFloatTip(T(TKEY("shore_curl"), "Breaker Curl"), &s.ShoreCurl, 0.0f, 1.5f, "%.2f",
 			T(TKEY("shore_curl_tooltip"), "How far plunging breakers curl over: the crest is thrown ahead of the wave and falls into the trough in front. 0 keeps the lip without the curl. Needs tessellation. Default 1."));
 		Util::SliderFloatTip(T(TKEY("swash_linger"), "Swash Linger"), &s.SwashLinger, 1.0f, 5.0f, "%.1fx",
@@ -492,10 +483,8 @@ void PBRWater::DrawSettings()
 				T(TKEY("shore_shortest_period_tooltip"), "The shore waves follow the sea's period, held between this and the longest period: the open sea's own periods would be as long as a beach is deep. Default 2.5 s."));
 			Util::SliderFloatTip(T(TKEY("shore_longest_period"), "Longest Shore Period"), &s.ShoreLongestPeriod, 2.0f, 8.0f, "%.1f s",
 				T(TKEY("shore_longest_period_tooltip"), "The longest period the shore waves take. Default 3.5 s."));
-			Util::SliderFloatTip(T(TKEY("shore_set_min"), "Wave Set Minimum"), &s.ShoreSetMin, 0.1f, 1.0f, "%.2f",
-				T(TKEY("shore_set_min_tooltip"), "Waves come in sets: a few big ones between smaller ones. This is the smallest wave's height as a share of the average. Default 0.45."));
-			Util::SliderFloatTip(T(TKEY("shore_set_max"), "Wave Set Maximum"), &s.ShoreSetMax, 1.0f, 3.0f, "%.2f",
-				T(TKEY("shore_set_max_tooltip"), "The biggest wave of a set, as a multiple of the average height. It also sets how far the biggest uprush reaches. Default 1.55."));
+			Util::SliderFloatTip(T(TKEY("shore_wave_variation"), "Wave Height Variation"), &s.ShoreWaveVariation, 0.0f, 1.5f, "%.2f",
+				T(TKEY("shore_wave_variation_tooltip"), "How much one wave's height differs from the next. Real waves are random and come in groups of big and small ones, and the big ones break further out: at 1 each wave breaks at its own distance from the shore, at 0 every wave is alike and they all break at the same place. How short the crests are (so how much one wave varies along its length) follows Wind Turbulence. Default 1."));
 			Util::SliderFloatTip(T(TKEY("shore_curl_detail"), "Curl Detail"), &s.ShoreCurlDetail, 1.0f, 4.0f, "%.1fx",
 				T(TKEY("shore_curl_detail_tooltip"), "Extra tessellation near the camera where shore waves can curl, so their lips hold their shape further away. Costs triangles. Default 2."));
 		}
@@ -1610,7 +1599,7 @@ void PBRWater::UpdateFrameConstants()
 		const float shoreClock = static_cast<float>(shore.phase);
 		const bool consecutive = lastFrame != UINT32_MAX && frame == lastFrame + 1 && frameData.Shore2.w > 0.0f;
 		d.Shore2 = { shoreClock, consecutive ? frameData.Shore2.x : shoreClock, shore.rate, shore.period };
-		d.Shore3 = { settings.SwashLinger, shore.splitWaves, settings.ShoreCurl, shore.deepLength };
+		d.Shore3 = { settings.SwashLinger, shore.whelps, settings.ShoreCurl, shore.deepLength };
 		d.Shore4 = { shoreReady ? snap->shoreField->omega : shore.omega, blending ? snap->shorePrevious->omega : shore.omega, shore.seaLength, renderDelta.load(std::memory_order_acquire) };
 		auto fieldMap = [](const PBRWaterModel::ShoreField& f) {
 			return float4{ f.minX - 0.5f * f.step, f.minY - 0.5f * f.step, 1.0f / (static_cast<float>(f.width) * f.step), 1.0f / (static_cast<float>(f.height) * f.step) };
@@ -1729,7 +1718,7 @@ void PBRWater::UpdateFrameConstants()
 	d.Tune1 = { settings.FoamOffset0, settings.FoamOffset1, settings.FoamOffset2, settings.FoamOffset3 };
 	d.Tune2 = { settings.FoamCascadeWeightFull, settings.FoamDepthFalloff, settings.FoamFadeDistance, settings.FoamRoughnessModifier };
 	d.Tune3 = { settings.RippleHorizDisplace, settings.RippleDisplaceClamp, settings.ShoreTrainCycles, settings.ShoreResidualFoam };
-	d.Tune4 = { settings.ShoreSetMin, settings.ShoreSetMax, settings.DetailNormalCalm, settings.DetailNormalGale };
+	d.Tune4 = { settings.ShoreWaveVariation, PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread), settings.DetailNormalCalm, settings.DetailNormalGale };
 	d.Tune5 = { settings.PointLightEmitterRadius, settings.FoamFeather, settings.FoamBubbleSize, settings.ShoreFoamLifetime };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
@@ -2045,7 +2034,12 @@ void PBRWater::MainThreadUpdate()
 	if (exterior) {
 		if (const auto sky = globals::game::sky) {
 			windNormalised = std::clamp(sky->windSpeed, 0.0f, 1.0f);
-			windAngle = sky->windAngle;
+			// Sky::windAngle is the weather's wind direction (radians) measured from north, counter-clockwise: the
+			// engine's own wind (the vector it drives precipitation and the like with, AE 1.6.1170 0x140E13930, called
+			// from TES's per-frame update with windSpeed and windAngle) is speed * (-sin a, cos a). As a maths angle
+			// from +X that is a + pi/2. Read as one directly, every wind-driven field (fetch, the sea's direction,
+			// swell exposure, onshore wind) was a quarter turn clockwise off the game's wind.
+			windAngle = sky->windAngle + 0.5f * std::numbers::pi_v<float>;
 		}
 	}
 	const float targetWind = exterior ? settings.WindSpeedCalm + (settings.WindSpeedStorm - settings.WindSpeedCalm) * windNormalised : 0.5f;
@@ -2076,12 +2070,11 @@ void PBRWater::MainThreadUpdate()
 	PBRWaterModel::ShoreTuning shoreTuning;
 	shoreTuning.shortestPeriod = settings.ShoreShortestPeriod;
 	shoreTuning.longestPeriod = settings.ShoreLongestPeriod;
-	shoreTuning.timeScale = settings.ShoreTimeScale;
 	shoreTuning.trainCycles = settings.ShoreTrainCycles;
-	shoreTuning.setMin = settings.ShoreSetMin;
-	shoreTuning.setMax = settings.ShoreSetMax;
+	shoreTuning.setVariation = settings.ShoreWaveVariation;
+	shoreTuning.crestLength = PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread);
 	shoreTuning.crestWobble = settings.ShoreCrestWobble;
-	shoreTuning.splitWaves = settings.ShoreSplitWaves;
+	shoreTuning.whelps = settings.ShoreBoreWhelps;
 	// After a settings change the train starts over from the new settings (UpdateShoreReset): no easing towards the new
 	// period, and its clock carries on at the new rate, so nothing pauses or races while the old state catches up.
 	const bool resetShore = UpdateShoreReset(dt);
@@ -2168,8 +2161,8 @@ void PBRWater::UpdateShoreField(float dt, bool enabled)
 std::array<float, 24> PBRWater::ShoreSignature() const
 {
 	const auto& s = settings;
-	return { s.EnableShoreWaves ? 1.0f : 0.0f, s.ShoreShortestPeriod, s.ShoreLongestPeriod, s.ShoreTimeScale, s.ShoreTrainCycles,
-		s.ShoreSetMin, s.ShoreSetMax, s.ShoreCrestWobble, s.ShoreSplitWaves, s.ShoreCurl, s.SwashLinger, s.FetchScale,
+	return { s.EnableShoreWaves ? 1.0f : 0.0f, s.ShoreShortestPeriod, s.ShoreLongestPeriod, 0.0f, s.ShoreTrainCycles,
+		s.ShoreWaveVariation, s.DirectionalSpread, s.ShoreCrestWobble, s.ShoreBoreWhelps, s.ShoreCurl, s.SwashLinger, s.FetchScale,
 		s.SwellHeight, s.SwellPeriod, s.SwellDirection, s.SwellSpread, s.SwellPeakedness, s.WaveHeight, s.WindSpeedCalm,
 		s.WindSpeedStorm, s.ShoreResidualFoam, s.ShoreCurlDetail, s.ShoreFoamLifetime, 0.0f };
 }

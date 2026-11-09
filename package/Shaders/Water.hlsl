@@ -1241,6 +1241,14 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 
 	float3 refractionDiffuseColor;
 
+#				if defined(PBR_WATER) && !defined(UNDERWATER)
+	// PBR Water: the body colour is the light an optically deep column scatters back, the water form's deep colour.
+	// Its shallow colour is the column's transmission tint (Beer-Lambert in the water column, Water.hlsl), not a colour
+	// of its own. Vanilla's blend by distanceMul left the body at the shallow colour wherever its refraction-plane test
+	// failed (water at the eye seen edge-on, anything just under the surface): an olive line along the horizon and
+	// olive shapes around everything in the water, the underwater fog's colour.
+	refractionDiffuseColor = DeepColor.xyz;
+#				else
 	if (SharedData::enbSettings.EnableWater) {
 		float3 shallowColor = ShallowColor.xyz;
 		float maxValue = max(shallowColor.x, max(shallowColor.y, shallowColor.z));
@@ -1255,6 +1263,7 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	} else {
 		refractionDiffuseColor = lerp(ShallowColor.xyz, DeepColor.xyz, distanceMul.y);
 	}
+#				endif
 
 	DiffuseOutput output;
 	output.refractionColor = refractionColor;
@@ -1681,6 +1690,7 @@ PS_OUTPUT main(PS_INPUT input)
 	// part of the water's background: the ray refracted into the wave bends down into the sea and never reaches it, and
 	// the scene behind showed through every crest standing above the horizon. Only the bed under the water is seen.
 	// (One depth-tested layer of water: the nearest wave already hides the ones behind it.)
+	float pbrReachable = 1.0;
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
 	if (pbrPathLength < 1e6) {
 		float pbrBehind = input.WPosition.z + viewDirection.z * pbrPathLength - input.WaveParam.z;
@@ -1689,7 +1699,9 @@ PS_OUTPUT main(PS_INPUT input)
 		float pbrBeyond = pbrPathLength * length(viewDirection.xy);
 		float pbrUnreachable = max(saturate(pbrBehind / (0.25 * PBRWater::UnitsPerMetre)), saturate((pbrBeyond - 5.0 * PBRWater::UnitsPerMetre) / (5.0 * PBRWater::UnitsPerMetre))) *
 		                       saturate(pbrSurface.height / (0.05 * PBRWater::UnitsPerMetre));
-		pbrWaterPath = lerp(pbrWaterPath, 1e7, pbrUnreachable);
+		// Blended as a share of the light, not of the path: lerp(path, 1e7, w) is ~1e5 units for even w = 0.01, and
+		// everything just under a raised surface (a body floating in it, a leg) turned opaque body colour.
+		pbrReachable = 1.0 - pbrUnreachable;
 	}
 #							endif
 
@@ -1713,7 +1725,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 pbrWaveSunShare = lerp(1.0, pbrWaveSunLight, pbrSunShare);
 	pbrBodyLinear *= pbrWaveSunShare;
 #							if defined(REFRACTIONS)
-	float3 pbrTransmittance = exp(-pbrOptics.extinction * pbrWaterPath);
+	float3 pbrTransmittance = exp(-pbrOptics.extinction * pbrWaterPath) * pbrReachable;
 	float3 pbrBottomLight = PBRWater::DownwellingTransmittance(pbrOptics, pbrBottomDepth, PBRWater::RefractedSunDirection(SunDir.xyz).z, pbrSunShare);
 #							else
 	float3 pbrTransmittance = 0.0;
@@ -1764,29 +1776,28 @@ PS_OUTPUT main(PS_INPUT input)
 	// Antialiased over the pixel: a hard step drew the uprush's edge in stairs.
 	float pbrSheet = saturate(pbrTipGap / max(fwidth(pbrTipGap), 0.01) + 0.5) * smoothstep(-0.15 * PBRWater::UnitsPerMetre, 0.0, pbrBed);
 	// What the breakers left on the water rides the water under the waves (ShoreFoamCS); the swash's is its own.
-	float2 pbrSimFoam = PBRWater::ShoreFoamBoth(input.WaveParam.xy + FrameBuffer::CameraPosAdjust.xy);
-	float pbrShoreCoverage = max(max(pbrSurface.foam, pbrSimFoam.x), pbrSimFoam.y * pbrSheet);
-	// The pattern holds still where the surface is: the foam moves over it, as its coverage. Fixed to the rest position the
-	// waves' horizontal displacement drew it out across every breaker's face, and carried along with the swash it tore
-	// wherever neighbouring water belonged to different uprushes. Projected from the side too where the surface turns
-	// steep (triplanar, by the waves' own normal): from above alone it ran down a rising face in streaks. On a breaker's
-	// face the side projections climb with the water, at one speed per wave (ShoreFaceRise, two flow phases): held still
-	// there, the face swept up through a pattern that stood in the air.
+	float2 pbrSimFoam = pbrSurface.simFoam;
+	// Two foams. The breaking wave's own white water (pbrSurface.breakerFoam: the folding of its surface and the profile's
+	// foam, BreakerFoam) is drawn the way the open sea's is, as a raw coverage with no texture, so there is nothing on the
+	// face, crest, lip and tumbling white water to stretch. The foam texture is kept for the flat white water: the bore once
+	// it has formed and lies near horizontal, what the surf left on the water where it lies flat (on a rising face that
+	// joins the breaker's, drawn with the sea's foam), and the swash sheet's. The two cross-fade by
+	// how flat the surface is, and for the wave itself by its stage (bore), so the pattern takes over as the wave rolls flat.
+	// The pattern holds still where the surface is, projected from above: the foam moves over it, as its coverage.
 	// SurfaceFoam takes screen derivatives and skips the pattern where it gets no foam, so it is called unconditionally.
 	float3 pbrFoamPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
-	float3 pbrFoamAxes = pow(abs(pbrSurface.waveNormal), 4.0);
-	pbrFoamAxes /= max(dot(pbrFoamAxes, 1.0.xxx), 1e-4);
-	PBRWater::FlowBlend pbrFaceFlow = PBRWater::ShoreFaceFoamPhases(pbrSurface.faceRise);
-	float pbrSideCoverage = max(pbrFoamAxes.x, pbrFoamAxes.y) > 0.01 ? pbrShoreCoverage : 0.0;
-	float pbrFoamPattern = pbrFoamAxes.z * PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrFoamAxes.z > 0.01 ? pbrShoreCoverage : 0.0, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler);
-	[unroll] for (uint pbrAxis = 0; pbrAxis < 2; pbrAxis++)
-	{
-		float2 pbrFoamUV = pbrAxis == 0 ? pbrFoamPosition.yz : pbrFoamPosition.xz;
-		float pbrAxisWeight = pbrAxis == 0 ? pbrFoamAxes.x : pbrFoamAxes.y;
-		float pbrAxisCoverage = pbrAxisWeight > 0.01 ? pbrSideCoverage : 0.0;
-		pbrFoamPattern += pbrAxisWeight * (pbrFaceFlow.weight0 * PBRWaterFoam::SurfaceFoam(pbrFoamUV - pbrFaceFlow.offset0, pbrAxisCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) +
-											  pbrFaceFlow.weight1 * PBRWaterFoam::SurfaceFoam(pbrFoamUV - pbrFaceFlow.offset1, pbrAxisCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler));
-	}
+	// Near the waterline the mesh lies on the sand above the water (DisplaceSurface) and climbs every ledge in the bed;
+	// the water seen there is further along the view ray, where it reaches the water's surface. Projected from the mesh,
+	// the pattern ran down the steep faces over the ledges in vertical streaks, a step along each one.
+	float pbrMeshAbove = (input.WPosition.z - input.WaveParam.z) - max(pbrSurface.height, PBRWater::SwashSurface(pbrBed, pbrSurface.swashSurface, pbrSurface.swashDepth));
+	if (pbrMeshAbove > 0.0 && viewDirection.z < -0.01)
+		pbrFoamPosition += viewDirection * min(pbrMeshAbove / -viewDirection.z, pbrPathLength);
+	float pbrFlat = smoothstep(0.80, 0.95, pbrSurface.waveNormal.z);
+	float pbrBoreFlat = pbrSurface.bore * pbrFlat;
+	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSimFoam.x * pbrFlat), pbrSimFoam.y * pbrSheet);
+	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
+	float pbrRawCoverage = pbrSurface.breakerFoam;
+	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);
 	// Whitewater is a layer of bubbles light scatters through, not a surface: it is lit about the normal bent halfway up,
 	// with the sun wrapping around it. Lit about the water's own normal, the foam on the underside of a curling lip (facing
 	// down, seeing neither the sun nor the sky) drew a dark line along every curling crest.

@@ -40,8 +40,12 @@ RWTexture2D<float4> State : register(u0);
 static const float G = PBRWater::GravityMetres;
 /// Shallower than this (m) the water has no velocity of its own.
 static const float DryDepth = 0.001;
-/// Foam stranded on dry sand drains into it within about a second (s).
-static const float StrandedLifetime = 1.0;
+/// How fast the sand above the still water soaks up the sheet over it (m/s). Without it, friction stopped the last
+/// millimetres on flat ground and they stayed there: the water's edge stood still on the beach long after the backwash.
+static const float Infiltration = 0.003;
+/// Foam stranded on dry sand drains into it within a few seconds (s): long enough for the swash mark to show where the
+/// uprush reached and thin out as the sand soaks it up.
+static const float StrandedLifetime = 2.5;
 /// How quickly the surf hands its water to the simulation (s).
 static const float HandOver = 0.05;
 
@@ -73,7 +77,7 @@ float2 Velocity(float4 s)
 		return 0.0;
 	float2 v = s.yz / s.x;
 	float speed = length(v);
-	return speed > 10.0 ? v * (10.0 / speed) : v;
+	return speed > 9.0 ? v * (9.0 / speed) : v;
 }
 
 /**
@@ -118,6 +122,14 @@ float4 FluxY(float4 L, float zL, float4 R, float zR, out float hL, out float hR)
 	float zE = LoadPrep(c + int2(1, 0)).x, zW = LoadPrep(c - int2(1, 0)).x;
 	float zN = LoadPrep(c + int2(0, 1)).x, zS = LoadPrep(c - int2(0, 1)).x;
 
+	// Dry ground above the still water with dry neighbours, no hand-over and no foam left on it: nothing flows in or out. Most of the
+	// grid's beach is this, and the grid is four times as large as it was.
+	[branch] if (z >= 0.0 && prep.y <= 0.0 && u.w < 0.01 && max(max(u.x, east.x), max(max(west.x, north.x), south.x)) < 1e-5)
+	{
+		State[id.xy] = 0.0;
+		return;
+	}
+
 	float dx = TexelSize * PBRWater::MetresPerUnit;
 	float dt = Dt;
 	float hl, hr;
@@ -139,6 +151,14 @@ float4 FluxY(float4 L, float zL, float4 R, float zR, out float hL, out float hR)
 	float cf = 0.006 * max(PBRWater::Shore3.x, 1.0);
 	float2 v = Velocity(next);
 	next.yz /= 1.0 + dt * cf * length(v) / max(next.x, 0.005);
+	// The sand soaks it up where it lies above the still water (below it, the ground is saturated by the sea). The
+	// discharge goes with the water, so what remains keeps its velocity.
+	[branch] if (z > 0.0 && next.x > 0.0)
+	{
+		float soaked = max(next.x - Infiltration * dt, 0.0);
+		next.yz *= soaked / next.x;
+		next.x = soaked;
+	}
 	if (next.x < DryDepth)
 		next.yz = 0.0;
 
@@ -146,6 +166,14 @@ float4 FluxY(float4 L, float zL, float4 R, float zR, out float hL, out float hR)
 	float wet = smoothstep(DryDepth, 0.01, next.x);
 	float convergence = -((Velocity(east).x - Velocity(west).x) + (Velocity(north).y - Velocity(south).y)) / (2.0 * dx);
 	next.w = max(next.w, wet * saturate(0.25 * convergence - 0.5));
+
+	// White water piles up at the uprush's front: where the depth falls away ahead of fast water (a blunt wedge running
+	// over the sand, its leading edge tumbling), and it is left behind as the front moves on, the swash mark.
+	float2 frontVelocity = Velocity(next);
+	float frontSpeed = length(frontVelocity);
+	float2 depthGradient = float2(east.x - west.x, north.x - south.x) / (2.0 * dx);
+	float fallsAhead = frontSpeed > 0.3 ? -dot(frontVelocity / frontSpeed, depthGradient) : 0.0;
+	next.w = max(next.w, smoothstep(0.01, 0.03, next.x) * saturate(fallsAhead / 0.15) * saturate((frontSpeed - 0.8) / 2.0) * 0.9);
 
 	// The foam decays: its bubbles burst on the water, the sand drains it.
 	next.w *= exp(-dt / (next.x < 0.003 ? StrandedLifetime : max(PBRWater::Tune5.w, 0.1)));

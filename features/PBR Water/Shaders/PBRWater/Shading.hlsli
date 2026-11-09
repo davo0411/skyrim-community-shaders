@@ -220,7 +220,9 @@ namespace PBRWater
 		float swashDepth;    // its depth (units; 0 where dry)
 		float3 waveInfo;     // the shore wave here, for the debug view
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
-		float faceRise;      // units/s the water climbs a breaker's front face here (ShoreFaceRise)
+		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat: drawn raw, like fftFoam
+		float2 simFoam;      // ShoreFoamBoth here: x the foam the surf left on the water, y the swash's
+		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
 		float surf;          // 0..1 real breakers run onto this shore: the water's edge carries foam
 		float beach;         // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
@@ -265,12 +267,13 @@ namespace PBRWater
 		float2 dpdy = ddy_fine(waveParam.xy);
 		float footprint = max(length(dpdx), length(dpdy));
 
+		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
+		o.simFoam = ShoreFoamBoth(absXY);
+
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
 		ctx.flow = flowVelocity;
-		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx);
+		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.simFoam.x);
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
-
-		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
 		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
 		// River currents and rain ripple it whatever the wind.
@@ -356,7 +359,8 @@ namespace PBRWater
 		o.footprint = footprint;
 		o.turbidity = 0.0;
 		o.waveNormal = waves.normal;
-		o.faceRise = waves.rise;
+		o.breakerFoam = waves.breakerFoam;
+		o.bore = waves.bore;
 		o.crest = waves.crest;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
@@ -373,8 +377,8 @@ namespace PBRWater
 			// Depth (red, 10 m), beach where waves break and run up (green), break stage of the shore waves (blue).
 			return float3(saturate(s.depth / (10.0 * UnitsPerMetre)), s.beach, s.breakStage);
 		case 4:
-			// Cascade foam: the open sea's (red), the shore waves' (green) and the shore waves' break stage (blue).
-			return float3(s.fftFoam, s.foam, s.breakStage);
+			// Cascade foam: the open sea's (red), the shore breakers' (green; BreakerFoam) and the shore waves' break stage (blue).
+			return float3(s.fftFoam, s.breakerFoam, s.breakStage);
 		case 5:
 			return s.roughness.xxx;
 		case 6:

@@ -13,8 +13,8 @@
 namespace
 {
 	constexpr float CellSize = static_cast<float>(PBRWaterModel::CellSize);
-	constexpr float MaxFetchCells = 160.0f;  // ~9.6 km marched; a ray that gets this far reaches the open sea
-	constexpr float OpenSeaKm = 500.0f;      // fully developed: no fetch limit for any wind
+	constexpr float MaxFetchCells = 160.0f;  // ~9.6 km marched (144 km at the default Fetch Scale): about fully developed
+	constexpr float OpenSeaKm = 500.0f;      // outside the baked field: fully developed, no fetch limit for any wind
 	constexpr float StepCells = 0.5f;
 
 	/// The worldspace whose LAND records are this one's terrain: child worldspaces can share their parent's.
@@ -100,49 +100,49 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 				float px = x + 0.5f;
 				float py = y + 0.5f;
 				float travelled = 0.0f;
-				bool openSea = true;
+				// Past the edge of the map is open ocean (isWater): the ray runs on over it up to its full length.
 				while (travelled < MaxFetchCells) {
 					px += upwindX;
 					py += upwindY;
-					travelled += StepCells;
 					const int32_t cx = static_cast<int32_t>(std::floor(px));
 					const int32_t cy = static_cast<int32_t>(std::floor(py));
-					if (!isWater(cx, cy)) {
-						openSea = false;
+					if (!isWater(cx, cy))
 						break;
-					}
-					// Past the edge of the map is the open ocean.
-					if (cx < 0 || cy < 0 || cx >= static_cast<int32_t>(coverage.width) || cy >= static_cast<int32_t>(coverage.height))
-						break;
+					travelled += StepCells;
 				}
-				// A ray that reaches the open sea has unlimited fetch; half a cell of open water exists even in a
-				// single water cell.
-				slice[static_cast<size_t>(y) * coverage.width + x] = openSea ? OpenSeaKm : std::max(travelled, 0.5f) * kmPerCell;
+				// The open water the ray crossed, so the fetch grows with the distance from the upwind shore all the way
+				// out. A ray that got to the open sea used to count as unlimited (OpenSeaKm): through the log mean below,
+				// the one radial that escaped turned a cell from a bay's fetch into the open ocean's, a cliff from green
+				// to red in the Fetch view, with no fetch-limited sea in between. Half a cell of open water exists even
+				// in a single water cell.
+				slice[static_cast<size_t>(y) * coverage.width + x] = std::max(travelled, 0.5f) * kmPerCell;
 			}
 		}
 	}
 
-	// A single upwind ray is far too sensitive: one headland or an offshore wind zeroes the sea. Waves
-	// arrive from a spread of directions around the wind (the Shore Protection Manual's effective fetch,
-	// USACE 1984, weights the radials within 45 degrees of upwind by cos a). The radials are averaged in log
-	// space: a linear mean lets the one radial that sees the open sea dominate a sheltered harbour, while the
-	// geometric mean grows with how much of the upwind sector is open (all open: the open sea; three of five:
-	// tens of km; a harbour mouth: a few km).
+	// A single upwind ray is far too sensitive: one headland or an offshore wind zeroes the sea. Waves arrive from a
+	// spread of directions around the wind: the Shore Protection Manual's effective fetch (USACE 1984, eq. 3-36),
+	// F = sum(x_i cos^2 a_i) / sum(cos a_i) over the radials within 45 degrees of upwind. The fetch then grows with
+	// how much open water the whole upwind sector holds, so it rises steadily away from a lee shore and stays short
+	// beside a coast or among islands. A log-space mean was used while an escaped ray counted as unlimited, to keep that
+	// one radial from lifting a harbour to the open sea; it let the shortest radials (the shores beside a channel) hold
+	// the fetch down across most of the sea. The radials are now bounded by the march (MaxFetchCells), so the SPM's
+	// own mean is safe.
 	constexpr int SpreadSteps = 2;  // 2 x 22.5 degrees each side
 	const float stepAngle = static_cast<float>(PBRWaterModel::TwoPi) / FetchField::Directions;
 	for (size_t c = 0; c < cells; ++c) {
 		if (!coverage.water[c])
 			continue;
 		for (uint32_t d = 0; d < FetchField::Directions; ++d) {
-			float logSum = 0.0f;
+			float sum = 0.0f;
 			float weights = 0.0f;
 			for (int k = -SpreadSteps; k <= SpreadSteps; ++k) {
 				const uint32_t dk = (d + FetchField::Directions + k) % FetchField::Directions;
-				const float w = std::cos(k * stepAngle);
-				logSum += std::log(std::max(radial[dk * cells + c], 1e-3f)) * w;
-				weights += w;
+				const float cosine = std::cos(k * stepAngle);
+				sum += radial[dk * cells + c] * cosine * cosine;
+				weights += cosine;
 			}
-			field->kilometres[d * cells + c] = std::exp(logSum / weights);
+			field->kilometres[d * cells + c] = sum / weights;
 		}
 	}
 	return field;

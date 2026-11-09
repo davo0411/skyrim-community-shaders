@@ -12,7 +12,7 @@
 
 namespace PBRWaterShore
 {
-	Texture2D<float4> SwashWetTexture : register(t123);  // x wet level, yz unused, w water surface (units above the still water)
+	Texture2D<float4> SwashWetTexture : register(t123);  // x wet level, y reach, z unused, w water surface (units above the still water)
 
 	struct Shore
 	{

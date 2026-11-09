@@ -153,6 +153,10 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 		const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		for (auto& texture : foam)
 			context->ClearUnorderedAccessViewFloat(texture->uav.get(), clear);
+		// The swash scrolls in with the water at rest (the first step shifts it out of the grid), but the foam pass reads the
+		// last state at its own coordinates: cleared, so the old place's sheet and velocities are not carried to the new one.
+		for (auto& texture : swe)
+			context->ClearUnorderedAccessViewFloat(texture->uav.get(), clear);
 		foamOriginX = newOriginX;
 		foamOriginY = newOriginY;
 		foamHasOrigin = true;
@@ -188,12 +192,13 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 		context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
 	}
 
-	// The swash: explicit steps within the shallow water's stability limit (bores of a few metres a second over 35 cm
-	// cells). The first step of the frame takes the grid's scroll; a fresh grid starts with the water at rest.
+	// The swash: explicit steps within the shallow water's stability limit (CFL: uprushes of up to 9 m/s over water 2 m
+	// deep, 9 + 4.4 m/s, across 17 cm cells, with the four faces' fluxes adding up, takes 3.5 ms at a Courant number of 0.25
+	// per axis). The first step of the frame takes the grid's scroll; a fresh grid starts with the water at rest.
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::SwashStep");
-		constexpr float maxStep = 0.007f;  // s
-		const float stepDt = std::clamp(dt, 0.0f, 8.0f * maxStep);
+		constexpr float maxStep = 0.0035f;  // s
+		const float stepDt = std::clamp(dt, 0.0f, 10.0f * maxStep);
 		const uint32_t steps = std::max(1u, static_cast<uint32_t>(std::ceil(stepDt / maxStep)));
 		context->CSSetShader(stepCS.get(), nullptr, 0);
 		for (uint32_t i = 0; i < steps; ++i) {

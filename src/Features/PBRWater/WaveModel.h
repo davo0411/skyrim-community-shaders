@@ -145,19 +145,32 @@ namespace PBRWaterModel
 	{
 		float shortestPeriod = 2.5f;  ///< s: the shore train's periods, within which it follows the sea
 		float longestPeriod = 3.5f;
-		/// The shore waves' clock runs this much slower than their frequency: they keep their spacing and heights (the
-		/// coastline map is traced at the frequency) but roll in slower, at a pace that reads on Skyrim's compressed coast.
-		float timeScale = 0.7f;
 		float trainCycles = 7.0f;  ///< how many waves out from the shore the train reaches, fading in over the outer half
-		float setMin = 0.45f;      ///< wave sets: the factor on one wave's height runs from setMin to setMax
-		float setMax = 1.55f;
+		float setVariation = 1.0f;  ///< how much one wave's height varies from the next: ShoreSet (0 all alike, 1 Rayleigh in groups)
+		float crestLength = 5.0f;   ///< mean crest length in deep wavelengths: ShoreCrestLength
 		float crestWobble = 0.35f;  ///< how far the crests bend and drift along the coast (waves): ShoreWobble
-		float splitWaves = 0.6f;    ///< height of the surf's split waves relative to the main train: ShoreSplitTrains
+		float whelps = 0.6f;        ///< height of an undular bore's trailing crests relative to the bore: ShoreWhelps
 	};
 	/// No wave is steeper than this height over wavelength (Miche 1944). Mirrored by PBRWater::ShoreSteepestWave.
 	inline constexpr float ShoreSteepestWave = 0.142f;
 	/// The wave clock wraps after this many waves: the number of a wave picks its height, so it must outlast a set.
 	inline constexpr double ShoreClockCycles = 1024.0;
+	/// No wave is higher than this multiple of the sea's height (ShoreSet). Mirrored by PBRWater::ShoreSetCeiling.
+	inline constexpr float ShoreSetCeiling = 2.5f;
+	/// How far a full onshore (+1) or offshore (-1) wind moves the breaker index. Mirrored by PBRWater::ShoreWindBreaking.
+	inline constexpr float ShoreWindBreaking = 0.12f;
+	/// How far a full onshore (+1) or offshore (-1) wind moves the breaker type (surf similarity share). Mirrored by PBRWater::ShoreWindPlunge.
+	inline constexpr float ShoreWindPlunge = 0.3f;
+
+	/**
+	 * @brief Mean breaking-crest length in deep wavelengths for a directional spread 0..1 (Wind Turbulence): crests get
+	 * shorter as the sea gets more multidirectional (Baker et al. 2023; Nuss et al. 2023), from 20 wavelengths in a
+	 * unidirectional swell to 2 in a confused sea.
+	 */
+	inline float ShoreCrestLength(float spread)
+	{
+		return 20.0f * std::pow(0.1f, std::clamp(spread, 0.0f, 1.0f));
+	}
 
 	/**
 	 * @brief Shoreline waves: the wave train that runs up the coastline map (ShoreField) and the swash it throws up the
@@ -168,16 +181,16 @@ namespace PBRWaterModel
 	struct ShoreParams
 	{
 		float omega = 1.0f;           ///< angular frequency of the dominant waves (rad/s), eased
-		float rate = 0.7f;            ///< the clock's rate (rad/s): omega times ShoreTimeScale
+		float rate = 0.7f;            ///< the clock's rate (rad/s): omega, so crests travel at the waves' own celerity
 		float swellDirection = 0.0f;  ///< direction the swell travels towards (rad): sets which shores it reaches
 		float swellHeight = 0.0f;     ///< significant height of the swell arriving from the open sea (units)
 		float windSeaHeight = 0.0f;   ///< significant height of the open-sea wind sea (units), before the local fetch limit
 		float period = 10.0f;         ///< peak period 2 pi / omega (s)
 		float trainCycles = 7.0f;     ///< ShoreTuning::trainCycles
-		float setMin = 0.45f;         ///< ShoreTuning::setMin
-		float setMax = 1.55f;         ///< ShoreTuning::setMax
+		float setVariation = 1.0f;    ///< ShoreTuning::setVariation
+		float crestLength = 5.0f;     ///< ShoreTuning::crestLength
 		float crestWobble = 0.35f;    ///< ShoreTuning::crestWobble
-		float splitWaves = 0.6f;      ///< ShoreTuning::splitWaves
+		float whelps = 0.6f;          ///< ShoreTuning::whelps
 		float deepLength = 1.0f;      ///< deep-water wavelength g T^2 / (2 pi) (units)
 		float seaOmega = 1.0f;        ///< angular frequency of the dominant sea itself (rad/s), eased: the shore periods are held short, the run-up is not
 		float seaLength = 1.0f;       ///< the dominant sea's deep-water wavelength (units), for the run-up
@@ -363,6 +376,10 @@ namespace PBRWaterModel
 		float depth = 0.0f;       ///< still water depth (m)
 		float waterZ = 0.0f;      ///< still water here (absolute z, units)
 		float beach = 0.0f;       ///< 0..1 the waves break on this shore rather than surge against it
+		float iribarren = 1.0f;   ///< surf similarity of the beach here (Battjes 1974): spilling < 0.5, plunging to 3.3
+		float windX = 1.0f;       ///< unit direction the wind blows towards (ShoreOnshoreWind)
+		float windY = 0.0f;
+		float windStrength = 0.0f;  ///< 0..1 the wind's strength: a breeze below 2 m/s 0, 12 m/s and over 1
 	};
 
 	/**

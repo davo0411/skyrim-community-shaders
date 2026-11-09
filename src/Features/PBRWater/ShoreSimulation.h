@@ -15,8 +15,8 @@ class ShoreSimulation
 public:
 	static constexpr uint32_t GridSize = 512;
 	/// The surf's foam (ShoreFoamCS): a finer grid around the camera, where the foam's pattern shows.
-	static constexpr uint32_t FoamGridSize = 512;
-	static constexpr float FoamTexelSize = 24.0f;  ///< units (35 cm): 175 m across
+	static constexpr uint32_t FoamGridSize = 1024;
+	static constexpr float FoamTexelSize = 12.0f;  ///< units (17 cm): 175 m across
 
 	struct Settings
 	{

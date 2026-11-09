@@ -70,14 +70,12 @@ struct PBRWater : Feature
 		bool WetShores = true;             ///< the swash wets the sand and whatever it reaches (Wetness Effects)
 		float ShoreShortestPeriod = 2.5f;  ///< s: the periods within which the shore train follows the sea
 		float ShoreLongestPeriod = 3.5f;
-		float ShoreTimeScale = 0.7f;      ///< the shore clock runs this much slower than the waves' frequency
 		float ShoreTrainCycles = 7.0f;    ///< how many waves out from the shore the train reaches
-		float ShoreSetMin = 0.45f;        ///< wave sets: one wave's height runs from this factor
-		float ShoreSetMax = 1.55f;        ///< to this one
+		float ShoreWaveVariation = 1.0f;  ///< how much one wave's height varies from the next (0 all alike, 1 as random waves do)
 		float ShoreResidualFoam = 0.5f;   ///< share of the breakers' white water they leave behind on the water (ShoreFoamCS)
 		float ShoreFoamLifetime = 12.0f;  ///< s: how long the foam the surf leaves on the water takes to fade (e-folding)
 		float ShoreCrestWobble = 0.35f;   ///< how far the crests bend and drift along the coast (waves)
-		float ShoreSplitWaves = 0.6f;     ///< height of the shorter waves the breakers split into in the surf, relative to the main train
+		float ShoreBoreWhelps = 0.6f;     ///< height of the trailing crests (whelps) of weak bores, relative to the bore
 		float ShoreCurl = 1.0f;           ///< how far plunging breakers curl over (0: lip only)
 		float ShoreCurlDetail = 2.0f;     ///< tessellation multiplier where shore waves can curl
 		float SwashLinger = 2.0f;         ///< backwash duration over the uprush's
@@ -234,7 +232,7 @@ struct PBRWater : Feature
 		float4 Tune1;                                 // foam offset of each cascade
 		float4 Tune2;                                 // x foam cascade weight, y foam distance falloff exponent, z foam fade distance (m), w foam roughness modifier
 		float4 Tune3;                                 // x ripple horizontal displacement, y its clamp (texels), z shore train reach (waves), w surf residual foam
-		float4 Tune4;                                 // x shore set min, y shore set max, z detail normal strength calm, w gale
+		float4 Tune4;                                 // x shore wave height variation, y mean crest length (deep wavelengths), z detail normal strength calm, w gale
 		float4 Tune5;                                 // x point light emitter radius (units), y foam feather, z foam bubble size (m), w shore foam lifetime (s)
 		float4 Foam2;                                 // xy shore foam grid corner (absolute units), z 1 / extent, w enabled
 		float4 SunMap0;                               // xy wave heightfield centre (absolute units), z 1 / extent, w drawn this frame

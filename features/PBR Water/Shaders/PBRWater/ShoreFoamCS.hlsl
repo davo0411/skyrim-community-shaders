@@ -44,7 +44,7 @@ RWTexture2D<float4> Foam : register(u0);
 RWTexture2D<float4> Prep : register(u1);
 
 /// Deepest water the swash simulation holds (m): its waves need nothing deeper, and the time step shrinks with the depth.
-static const float SwashDepthCap = 2.5;
+static const float SwashDepthCap = 2.0;
 /// No ground: a wall (m).
 static const float SwashWall = 1000.0;
 
@@ -133,10 +133,12 @@ float4 SampleFoam(float2 q)
 			stranded = true;
 	}
 
-	// For the swash: in the surf the analytic waves are the water. They hand it over to the simulation in the shallows,
-	// from about a third of the waves' height deep up to the waterline, where the bores reach the beach.
-	float waveHeight = clamp(ctx.shoreHeight * PBRWater::MetresPerUnit * ctx.damping, 0.2, 3.0);
-	float forcing = ctx.train > 0.0 ? smoothstep(0.05, max(0.3 * waveHeight, 0.15), depthMetres) : (depthMetres > 0.05 ? 1.0 : 0.0);
+	// For the swash: in the surf the analytic waves are the water. They hand it over to the simulation while the bore is
+	// still a bore (PBRWater::SwashHandOver; a breaker's bore stands about 0.8 of the depth high, so it carries a good part
+	// of the wave's water and momentum), and the drawn waves give way to it in the same measure (DrawnShoreWaves). Held to
+	// the waves down to 8 cm, the simulation was pulled down with the collapsing front, lost the bore's water and launched
+	// a few centimetres of it at the waterline, which crawled there until the water behind caught up and tipped it over.
+	float forcing = PBRWater::SwashHandOver(ctx);
 	float eta = 0.0;
 	float2 waterVelocity = 0.0;
 	float boreFoam = 0.0;
@@ -154,6 +156,17 @@ float4 SampleFoam(float2 q)
 		eta = train.displacement.z * PBRWater::MetresPerUnit;
 		float columnDepth = max(max(depthMetres, 0.0) + eta, 0.05);
 		float speed = clamp(eta * sqrt(PBRWater::GravityMetres / columnDepth), -6.0, 6.0);
+		// Under a crest the water is a bore's (Rankine-Hugoniot, Stoker 1957): a bore of depth h2 running into water h1 moves at
+		// C = sqrt(g h2 (h1 + h2) / (2 h1)) and drives the water behind it at u2 = C (1 - h1 / h2), which runs to
+		// sqrt(g eta) for small eta/h like the linear long wave above but much higher for a bore on shallow water (Hughes
+		// 1992: the collapsing bores' uprush starts at up to 5 m/s; Shen & Meyer 1963: twice sqrt(g h) at the tip). Over
+		// ground at or above the still water the bore runs into a film: h1 is held at a fifth of h2.
+		[branch] if (eta > 0.02)
+		{
+			float h1 = max(max(depthMetres, 0.0), 0.2 * columnDepth);
+			float bore = sqrt(PBRWater::GravityMetres * columnDepth * (h1 + columnDepth) / (2.0 * h1));
+			speed = clamp(bore * saturate(1.0 - h1 / columnDepth), 0.0, 6.0);
+		}
 		float2 coast = PBRWater::CoastPoint(absXY, ctx.shore);
 		float cycles = PBRWater::ShorePhase(ctx.shore, coast, PBRWater::Shore2.x, 0) / Math::TAU - PBRWater::ShoreBoreFront;
 		float turn = 0.35 * (frac(sin(floor(cycles) * 12.9898 + dot(floor(coast / 2048.0), float2(4.1, 7.3))) * 43758.5453) - 0.5);
