@@ -1092,20 +1092,22 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 		workingSpecularIrradiance = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
 
 	float3 workingSpecularIrradianceReflections = 0.0;
-	if (skylightingSpecular > 0.0)
+	if (skylightingSpecular > 0.0) {
 		workingSpecularIrradianceReflections = DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
-
-	float3 dynamicCubemap = ColorManagement::SceneColor::LerpInLinear(workingSpecularIrradiance, workingSpecularIrradianceReflections, skylightingSpecular);
-
-	float3 reflectionColor = dynamicCubemap;
 #				if !defined(PBR_WATER)
-	// PBR water keeps one environment at every distance: switching to the vanilla reflection cubemap (much darker)
-	// past 1024 units made the whole water change brightness as the camera rose above it.
-	if ((Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections) && !SharedData::HideSky) {
-		float reflectionAmount = saturate(length(input.WPosition.xyz) / 1024.0);
-		reflectionColor = lerp(dynamicCubemap, CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz, reflectionAmount);
-	}
+		// PBR water keeps one environment at every distance: switching to the vanilla reflection cubemap (much darker)
+		// past 1024 units made the whole water change brightness as the camera rose above it.
+		if ((Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections) && !SharedData::HideSky) {
+			// Only the sky-visible lobe, without the specular floor, fades to the engine cube
+			float minVisibility = SharedData::skylightingSettings.MinSpecularVisibility;
+			float skyVisibility = minVisibility < 1.0 ? saturate((skylightingSpecular - minVisibility) / (1.0 - minVisibility)) : 1.0;
+			float reflectionAmount = saturate(length(input.WPosition.xyz) / 1024.0) * skyVisibility;
+			workingSpecularIrradianceReflections = lerp(workingSpecularIrradianceReflections, CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz, reflectionAmount);
+		}
 #				endif
+	}
+
+	float3 reflectionColor = ColorManagement::SceneColor::LerpInLinear(workingSpecularIrradiance, workingSpecularIrradianceReflections, skylightingSpecular);
 #			else
 	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, pbrCubeLevel).xyz;
 #			endif
@@ -1397,11 +1399,13 @@ PS_OUTPUT main(PS_INPUT input)
 
 #				if defined(PBR_WATER)
 	// The waves are in Skylighting's occlusion maps (PBR Water): read the sky just above this point of the surface,
-	// where a trough sees less of it past the crests around than a crest does.
+	// where a trough sees less of it past the crests around than a crest does. The water surface itself is never lifted
+	// out of the water (Skylighting::SampleNoBias).
 	positionMSSkylight.z += Skylighting::CELL_SIZE.z;
-#				endif
-	// The water surface itself is never lifted out of the water (Skylighting::SampleNoBias).
 	sh2 skylightingSH = Skylighting::SampleNoBias(positionMSSkylight, false);
+#				else
+	sh2 skylightingSH = Skylighting::Sample(positionMSSkylight, float3(0, 0, 1));
+#				endif
 	float skylighting = SphericalHarmonics::Unproject(skylightingSH, float3(0, 0, 1));
 
 	float skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, float3(0, 0, 1), Skylighting::GetFadeOutFactor(input.WPosition.xyz));
