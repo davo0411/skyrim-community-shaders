@@ -341,20 +341,20 @@ void VolumetricShadows::DrawDebugSection()
 		static float debugRescale = .3f;
 		ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
 
-	auto DisplayRT = [&](const char* label, ID3D11Texture2D* tex, ID3D11ShaderResourceView* srv, uint32_t mip) {
-		if (srv && tex) {
-			D3D11_TEXTURE2D_DESC desc;
-			tex->GetDesc(&desc);
-			const uint32_t width = std::max(desc.Width >> mip, 1u);
-			const uint32_t height = std::max(desc.Height >> mip, 1u);
-			char buf[128];
-			snprintf(buf, sizeof(buf), "%s (%ux%u)", label, width, height);
-			if (ImGui::TreeNode(buf)) {
-				ImGui::Image(srv, { width * debugRescale, height * debugRescale });
-				ImGui::TreePop();
+		auto DisplayRT = [&](const char* label, ID3D11Texture2D* tex, ID3D11ShaderResourceView* srv, uint32_t mip) {
+			if (srv && tex) {
+				D3D11_TEXTURE2D_DESC desc;
+				tex->GetDesc(&desc);
+				const uint32_t width = std::max(desc.Width >> mip, 1u);
+				const uint32_t height = std::max(desc.Height >> mip, 1u);
+				char buf[128];
+				snprintf(buf, sizeof(buf), "%s (%ux%u)", label, width, height);
+				if (ImGui::TreeNode(buf)) {
+					ImGui::Image(srv, { width * debugRescale, height * debugRescale });
+					ImGui::TreePop();
+				}
 			}
-		}
-	};
+		};
 
 		// Mip 0 holds cascade 1, mip 1 holds cascade 0.
 		DisplayRT(T(TKEY("buffer_cascade_0"), "VSM Cascade 0"), shadowCopyTexture, shadowCopyMip1SRV, 1);

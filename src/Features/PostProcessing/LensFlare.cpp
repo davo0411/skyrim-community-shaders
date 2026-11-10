@@ -67,8 +67,6 @@ void LensFlare::DrawSettings()
 
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.intensity", "Intensity"), &settings.Intensity, 0.0f, 1.0f, "%.3f");
 	tooltip(T("feature.post_processing.lens_flare.tooltip_intensity", "Master intensity for the entire lens flare effect"));
-	ImGui::ColorEdit3(T("feature.post_processing.lens_flare.tint", "Tint"), settings.Tint.data());
-	tooltip(T("feature.post_processing.lens_flare.tooltip_tint", "Radial color gradient applied to the flare effect"));
 
 	// Threshold
 	ImGui::SeparatorText(T("feature.post_processing.lens_flare.threshold", "Threshold"));
@@ -219,7 +217,7 @@ void LensFlare::DrawSettings()
 	tooltip(T("feature.post_processing.lens_flare.tooltip_tint", "Radial color gradient applied to the flare effect"));
 
 	// Debug
-	if (Util::ShowDebugSections() && ImGui::CollapsingHeader(T("feature.post_processing.lens_flare.debug", "Debug"))) {
+	if (Util::DebugSection section; section) {
 		ImGui::Checkbox(T("feature.post_processing.lens_flare.disable_threshold", "Disable Threshold"), &debugsettings.disableThreshold);
 		ImGui::Checkbox(T("feature.post_processing.lens_flare.disable_ghosts", "Disable Ghosts"), &debugsettings.disableGhosts);
 		ImGui::Checkbox(T("feature.post_processing.lens_flare.disable_blur", "Disable Blur"), &debugsettings.disableBlur);

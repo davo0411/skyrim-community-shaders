@@ -574,37 +574,6 @@ namespace CinematicCamera
 				false);
 		}
 
-		ImGui::SeparatorText(T("feature.post_processing.cinematic_camera.exposure", "Exposure"));
-		const char* exposureModes[] = {
-			T("feature.post_processing.cinematic_camera.exposure_auto_iso", "Auto ISO"),
-			T("feature.post_processing.cinematic_camera.exposure_manual", "Manual"),
-		};
-		ImGui::Combo(T("feature.post_processing.cinematic_camera.exposure_mode", "Exposure Mode"), &exp.Mode, exposureModes, (int)std::size(exposureModes));
-		const bool autoISO = (ExposureMode)exp.Mode == ExposureMode::AutoISO;
-		if (autoISO) {
-			ImGui::SliderFloat(T("feature.post_processing.cinematic_camera.iso_min", "Minimum ISO"), &exp.MinISO, 25.0f, exp.MaxISO, "%.0f", logSliderFlags);
-			ImGui::SliderFloat(T("feature.post_processing.cinematic_camera.iso_max", "Maximum ISO"), &exp.MaxISO, exp.MinISO, 12800.0f, "%.0f", logSliderFlags);
-		} else {
-			ImGui::SliderFloat(T("feature.post_processing.cinematic_camera.iso", "ISO"), &exp.ISO, 25.0f, 12800.0f, "%.0f", logSliderFlags);
-		}
-		ImGui::SliderFloat(T("feature.post_processing.cinematic_camera.frame_rate", "Frame Rate"), &exp.FrameRate, 1.0f, 240.0f, "%.2f fps", ImGuiSliderFlags_AlwaysClamp);
-		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T("feature.post_processing.cinematic_camera.frame_rate_desc", "Virtual camera frame rate used with the shutter angle to calculate exposure time. Does not change or limit the game's frame rate."));
-		ImGui::SliderFloat(T("feature.post_processing.cinematic_camera.shutter_angle", "Shutter Angle"), &exp.ShutterAngleDeg, 1.0f, 360.0f, "%.0f°", ImGuiSliderFlags_AlwaysClamp);
-		if (autoISO)
-			ImGui::SliderFloat(T("feature.post_processing.cinematic_camera.exposure_compensation", "Exposure Compensation"), &exp.ExposureCompensationEV, -5.0f, 5.0f, "%+.2f EV", ImGuiSliderFlags_AlwaysClamp);
-
-		if (const auto* state = GetState()) {
-			ImGui::Text(T("feature.post_processing.cinematic_camera.shutter_readout", "Shutter: 1/%.2f s"), 1.0f / std::max(state->ShutterTimeS, 1e-6f));
-		}
-		ImGui::PushTextWrapPos(0.0f);
-		ImGui::TextDisabled("%s", autoISO ?
-									  T("feature.post_processing.cinematic_camera.auto_iso_desc", "Aperture and shutter stay fixed. Metering adjusts ISO within the selected limits; exposure compensation shifts the metering target. At the limits, the image may remain too dark or too bright.") :
-									  T("feature.post_processing.cinematic_camera.manual_exposure_desc", "Aperture, shutter and ISO determine exposure. Scene brightness does not change it automatically; exposure compensation is only used in Auto ISO mode."));
-		ImGui::TextDisabled("%s", T("feature.post_processing.cinematic_camera.exposure_note",
-									  "Exposure processing is active while Cinematic Camera is active. Metering area and adaptation speed are configured in Histogram Auto Exposure. Motion Blur follows the shutter angle."));
-		ImGui::PopTextWrapPos();
-
 		// FOV ownership status.
 		ImGui::Spacing();
 		ImGui::TextDisabled(T("feature.post_processing.cinematic_camera.fov_status", "Camera FOV: %s"), GetFovStateText());
