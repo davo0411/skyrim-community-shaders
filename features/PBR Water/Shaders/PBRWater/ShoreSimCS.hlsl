@@ -1,12 +1,11 @@
 // ============================================================================
 // PBR Water - how far the water reaches up the shore, for the lit terrain and objects.
 //
-// The swash itself is simulated near the camera and analytic beyond (PBRWater::SwashSheet). What else needs history is kept here,
-// on a camera-centred grid (scrolled in whole texels, like the ripple simulation): the wet level follows the highest
-// water (the swash on beaches, the waves on rocks and piers) and sinks slowly as it drains and dries; the reach follows
-// the same water but drains with it, for the water's mesh (PBRWater::SwashReach).
+// The surf and the swash are simulated (SwashStepCS, drawn through PBRWater::ComposeSurf). What needs history is kept
+// here, on a camera-centred grid (scrolled in whole texels, like the ripple simulation): the wet level follows the highest
+// water (the swash on beaches, the waves on rocks and piers) and sinks slowly as it drains and dries.
 //
-// Output: Wet (x wet level, y reach, z unused, w water surface height), in units above the still water level, read by the lit
+// Output: Wet (x wet level, yz unused, w water surface height), in units above the still water level, read by the lit
 // terrain and objects (wetness, and the water height their caustics and shore wetness follow).
 // ============================================================================
 
@@ -41,26 +40,19 @@ RWTexture2D<float4> Wet : register(u0);
 	}
 	float3 positionWS = float3(absXY, level) - FrameBuffer::CameraPosAdjust.xyz;
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS));
-	float elevation = ctx.elevation;
 
-	float2 sheet = PBRWater::SwashSheet(positionWS, ctx);
-	float swashTop = PBRWater::SwashSurface(elevation, sheet.x, sheet.y);
-
-	// The water surface here, for the lit objects (caustics, wetness): waves, swash and ripples.
-	float surface = PBRWater::EvaluateWaves(positionWS, ctx, TexelSize, false).displacement.z;
-	surface += PBRWater::RippleHeight(positionWS, false) * PBRWater::RippleDepthFade(ctx.depth) * ctx.damping;
-	surface = max(surface, swashTop);
+	// The water surface here, for the lit objects (caustics, wetness): waves, surf, swash and ripples. Where the surf
+	// simulation is dry there is no water (the geometry's surface lies on the bed there).
 	float limit = PBRWater::DisplacementLimit();
+	PBRWater::WaveResult waves = PBRWater::EvaluateWaves(positionWS, ctx, TexelSize, false);
+	float surface = waves.displacement.z;
+	if (waves.sheetDepth <= PBRWater::SwashMinDepth)
+		surface = lerp(waves.heightRaw, -limit, waves.surf);
+	surface += PBRWater::RippleHeight(positionWS, false) * PBRWater::RippleDepthFade(ctx.depth) * ctx.damping;
 	surface = clamp(surface, -limit, limit);
 
 	// Wet: whatever the water reached lately - the swash up the beach, the waves against rocks, piers and hulls.
 	// It sinks slowly as the water drains and the surface dries.
-	float reached = surface;
-	float wetLevel = clamp(max(wet.x - DryRate * Dt, reached), -limit, limit);
-	// The reach: the same, but sinking about as fast as a backwash drains down the beach. It holds the water's mesh on the
-	// sand only until the swash has passed; held at the slow-drying wet level, the mesh stayed draped over the sand for
-	// seconds after the water left and stood in steps along the grid's texels.
-	float reach = clamp(max(wet.y - PBRWater::ReachDrainRate * Dt, reached), -limit, limit);
-
-	Wet[id.xy] = float4(wetLevel, reach, 0.0, surface);
+	float wetLevel = clamp(max(wet.x - DryRate * Dt, surface), -limit, limit);
+	Wet[id.xy] = float4(wetLevel, 0.0, 0.0, surface);
 }

@@ -601,7 +601,7 @@ namespace PBRWaterModel
 		// Bound of the run-up: Stockdon et al. (2006), 2 % exceedance, R = 1.1 (<eta> + S / 2) with set-up
 		// <eta> = 0.35 b sqrt(H0 L0) and swash S = sqrt(H0 L0 (0.563 b^2 + 0.004)), for the highest wave of the biggest set
 		// (ShoreSet at most ShoreSetCeiling) of the full open sea (its significant height, as Stockdon fit it) on a steep (b = 0.2)
-		// beach, with a margin. Mirrors PBRWater::SwashTip.
+		// beach, with a margin: a bound for the mesh and the swash simulation's sheet (Shore0.w).
 		constexpr float Slope = 0.2f;
 		const float highest = ShoreSetCeiling * p.MaxDeepHeight() / units;
 		const float hl = std::sqrt(highest * seaL0);
@@ -1045,6 +1045,22 @@ namespace PBRWaterModel
 		return out;
 	}
 
+	float ShoreField::CrestDepthAt(float x, float y, float fallback) const
+	{
+		const float fx = (x - minX) / step;
+		const float fy = (y - minY) / step;
+		if (!Valid() || crestDepth.size() != level.size() || fx < 0.0f || fy < 0.0f || fx > static_cast<float>(width - 1) || fy > static_cast<float>(height - 1))
+			return fallback;
+		const uint32_t x0 = std::min(static_cast<uint32_t>(fx), width - 2);
+		const uint32_t y0 = std::min(static_cast<uint32_t>(fy), height - 2);
+		const float tx = fx - static_cast<float>(x0);
+		const float ty = fy - static_cast<float>(y0);
+		const size_t i = static_cast<size_t>(y0) * width + x0;
+		const float a = crestDepth[i] + (crestDepth[i + 1] - crestDepth[i]) * tx;
+		const float b = crestDepth[i + width] + (crestDepth[i + width + 1] - crestDepth[i + width]) * tx;
+		return a + (b - a) * ty;
+	}
+
 	namespace
 	{
 		/**
@@ -1292,6 +1308,61 @@ namespace PBRWaterModel
 				}
 			}
 		}
+
+		// The depth a wave answers to as its crest passes (m). Two things make it differ from the depth under the point:
+		//  - A wave feels the bottom over a stretch of its crest, not at one point: the depth is averaged along the crest
+		//    (across the ray), a LAND quad at least and a quarter wave at most either way. Read at a point, breaking
+		//    followed every crease of the terrain's facets, and neighbouring stretches of one crest stood at different
+		//    stages of it a few units apart.
+		//  - Breaking is not undone. A wave that has broken over a shoal or a bar crosses the deeper water behind it as a
+		//    bore: it does not rear up again, pull its lip back in and run on unbroken. So the depth is the least the wave
+		//    has crossed on its way in, carried shorewards along the ray. With the depth under the crest alone, a wave's
+		//    stage followed every dip of the bed, backwards as well as forwards, and its whole shape trembled with the
+		//    terrain as it came in.
+		field->crestDepth.assign(n, 0.0f);
+		// Water the rays did not reach (far from any shore) answers to its own depth.
+		for (size_t i = 0; i < n; ++i)
+			field->crestDepth[i] = std::max(depth[i], 0.0f) * metresPerUnit;
+		{
+			auto depthAt = [&](float fx, float fy) {
+				fx = std::clamp(fx, 0.0f, static_cast<float>(w - 1));
+				fy = std::clamp(fy, 0.0f, static_cast<float>(h - 1));
+				const uint32_t x0 = std::min(static_cast<uint32_t>(fx), w - 2);
+				const uint32_t y0 = std::min(static_cast<uint32_t>(fy), h - 2);
+				const float tx = fx - static_cast<float>(x0);
+				const float ty = fy - static_cast<float>(y0);
+				const size_t i = static_cast<size_t>(y0) * w + x0;
+				const float a = depth[i] + (depth[i + 1] - depth[i]) * tx;
+				const float b = depth[i + w] + (depth[i + w + 1] - depth[i + w]) * tx;
+				return a + (b - a) * ty;
+			};
+			constexpr float offsets[5] = { -1.0f, -0.5f, 0.0f, 0.5f, 1.0f };
+			constexpr float weights[5] = { 1.0f, 2.0f, 3.0f, 2.0f, 1.0f };
+			std::vector<float> alongCrest(n, 0.0f);
+			for (const uint32_t i : seaward) {
+				const float x = static_cast<float>(i % w);
+				const float y = static_cast<float>(i / w);
+				const float wavelength = speed[i] * static_cast<float>(TwoPi) / omega * static_cast<float>(UnitsPerMetre);
+				const float half = std::max(128.0f, 0.25f * wavelength) / in.step;
+				float sum = 0.0f;
+				for (int k = 0; k < 5; ++k)
+					sum += weights[k] * depthAt(x - rayY[i] * offsets[k] * half, y + rayX[i] * offsets[k] * half);
+				alongCrest[i] = std::max(sum / 9.0f, 0.0f) * metresPerUnit;
+			}
+			// From the open water in: each texel after the ones seaward of it.
+			std::vector<uint8_t> done(n, 0);
+			for (auto it = seaward.rbegin(); it != seaward.rend(); ++it) {
+				const uint32_t i = *it;
+				float crossed = 0.0f;
+				float value = alongCrest[i];
+				if (InterpolateDone(field->crestDepth, done, w, h, static_cast<float>(i % w) - rayX[i], static_cast<float>(i / w) - rayY[i], crossed))
+					value = std::min(value, crossed);
+				field->crestDepth[i] = value;
+				done[i] = 1;
+			}
+		}
+		if (cancelled())
+			return nullptr;
 
 		// Signed distance to the waterline (Fluid Flux's coastline distance): it finds the nearest point of the coast, where
 		// the shaders read the variation along it and the swash its timing.
@@ -1622,6 +1693,13 @@ namespace PBRWaterModel
 			return t.iribarren * (1.0f - ShoreWindPlunge * ShoreOnshoreWind(t, dirX, dirY));
 		}
 
+		/// The phase of a wave's crest at stage `stage`: it moves to the front of the wave as it shoals and runs ahead into the
+		/// bore's front (0.16) as it breaks. Mirrors PBRWater::ShoreCrestPhase and Evaluate in ShoreProfile.cpp.
+		float ShoreCrestPhase(float stage)
+		{
+			return 0.5f - 0.18f * Smoothstep(0.0f, 0.5f, stage) - 0.16f * Smoothstep(0.50f, 0.72f, stage);
+		}
+
 		/// The height (m) of the first whelp behind a wave's front: a weak bore (Froude number below 1.3) or the lee of a bar.
 		/// Mirrors PBRWater::ShoreWhelpAmplitude.
 		float ShoreWhelpAmplitude(const ShoreParams& p, float height, float stage, float depthA, float crestDepth)
@@ -1635,7 +1713,7 @@ namespace PBRWaterModel
 		/// The whelps' height above the wave's profile and its rate of change with the phase. Mirrors PBRWater::ShoreWhelps.
 		std::array<float, 2> ShoreWhelps(float x, float stage, float amplitude, float lambda, float spacing)
 		{
-			const float anchor = 0.5f + (0.16f - 0.5f) * Smoothstep(0.5f, 0.8f, stage);  // 0.16: BoreFront
+			const float anchor = ShoreCrestPhase(stage);
 			if (amplitude <= 0.0f || x <= anchor)
 				return { 0.0f, 0.0f };
 			const float c = lambda / spacing;
@@ -1655,8 +1733,9 @@ namespace PBRWaterModel
 		 * wave's height and stage from the depth under its own crest, its shape from the profile table (uncurled: the curl
 		 * is the shaders' alone). The velocity is the displacement's rate of change as the wave passes.
 		 */
-		WaveSnapshot::Displacement ShoreTrain(const ShoreParams& p, float tracedOmega, const ShoreTrainContext& t, const ShoreField::Sample& ray, const Bathymetry& bed, float x, float y)
+		WaveSnapshot::Displacement ShoreTrain(const ShoreParams& p, const ShoreField& field, const ShoreTrainContext& t, const ShoreField::Sample& ray, const Bathymetry& bed, float x, float y)
 		{
+			const float tracedOmega = field.omega;
 			WaveSnapshot::Displacement out;
 			const float slowness = std::sqrt(ray.slownessX * ray.slownessX + ray.slownessY * ray.slownessY);
 			if (slowness <= 1e-9f || t.deepHeight <= 0.0f)
@@ -1676,27 +1755,10 @@ namespace PBRWaterModel
 				const float phase = static_cast<float>(cycles - index);
 				const float wavelength = static_cast<float>(TwoPi) / (omega * slowness);  // m
 
-				const float crestX = x + dirX * (phase - 0.5f) * wavelength * units;
-				const float crestY = y + dirY * (phase - 0.5f) * wavelength * units;
-				// The bed averaged along the crest (PBRWater::ShoreCrestBed): a LAND quad at least, a quarter wave at most.
-				const float halfWidth = std::max(128.0f, 0.25f * wavelength * units);
-				float crestBed = -1.0e9f;
-				{
-					constexpr float offsets[5] = { -1.0f, -0.5f, 0.0f, 0.5f, 1.0f };
-					constexpr float weights[5] = { 1.0f, 2.0f, 3.0f, 2.0f, 1.0f };
-					float sum = 0.0f, weight = 0.0f;
-					for (int k = 0; k < 5; ++k) {
-						const float sx = crestX - dirY * offsets[k] * halfWidth;
-						const float sy = crestY + dirX * offsets[k] * halfWidth;
-						if (bed.Contains(sx, sy)) {
-							sum += bed.Sample(sx, sy) * weights[k];
-							weight += weights[k];
-						}
-					}
-					if (weight > 0.0f)
-						crestBed = sum / weight;
-				}
-				const float crestDepth = std::max((t.waterZ - crestBed) / units, 0.05f);
+				// The depth the wave answers to, read where its breaking crest stands (ShoreField::crestDepth).
+				const float crestX = x + dirX * (phase - ShoreCrestReference) * wavelength * units;
+				const float crestY = y + dirY * (phase - ShoreCrestReference) * wavelength * units;
+				const float crestDepth = std::max(field.CrestDepthAt(crestX, crestY, t.depth), 0.05f);
 				const float deep = ShoreHeightRatio * t.deepHeight;
 				const float shoaled = deep * ShoreSet(p, coastX, coastY, static_cast<float>(index)) * ShoalingCoefficient(omega, crestDepth);
 				// An onshore wind makes the wave break earlier, an offshore wind later (ShoreWindBreaking).
@@ -1709,7 +1771,7 @@ namespace PBRWaterModel
 				// The whelps trail the front (or, before the wave breaks, the crest): see PBRWater::ShoreWaveAt.
 				float whelpUp = 0.0f, whelpDUp = 0.0f;
 				if (p.whelps > 0.0f && stage > 0.25f) {
-					const float anchor = 0.5f + (0.16f - 0.5f) * Smoothstep(0.5f, 0.8f, stage);
+					const float anchor = ShoreCrestPhase(stage);
 					const float anchorX = x + dirX * (phase - anchor) * wavelength * units;
 					const float anchorY = y + dirY * (phase - anchor) * wavelength * units;
 					const float anchorDepth = std::max((t.waterZ - (bed.Contains(anchorX, anchorY) ? bed.Sample(anchorX, anchorY) : -1.0e9f)) / units, 0.05f);
@@ -1879,7 +1941,7 @@ namespace PBRWaterModel
 		}
 		if (ctx.train.weight > 0.0f && shoreField && bathymetry) {
 			// The phase varies over a hull: travel times and directions are read at each point, the amplitude is the context's.
-			const Displacement train = ShoreTrain(shore, shoreField->omega, ctx.train, ShoreAt(static_cast<float>(x), static_cast<float>(y)), *bathymetry, static_cast<float>(x), static_cast<float>(y));
+			const Displacement train = ShoreTrain(shore, *shoreField, ctx.train, ShoreAt(static_cast<float>(x), static_cast<float>(y)), *bathymetry, static_cast<float>(x), static_cast<float>(y));
 			out.dx += train.dx;
 			out.dy += train.dy;
 			out.dz += train.dz;

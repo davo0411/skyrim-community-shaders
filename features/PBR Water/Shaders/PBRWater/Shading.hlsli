@@ -216,12 +216,14 @@ namespace PBRWater
 		float roughness;
 		float fftFoam;       // 0..1 the open sea's foam here (FftFoam): drawn raw, never through the shore foam's pattern
 		float foam;          // 0..1 the shore waves' white water at this pixel
-		float swashSurface;  // the swash's surface at this pixel (units above the still water; SwashSheet)
+		float swashSurface;  // the surf simulation's surface at this pixel (units above the still water; SurfSheet)
 		float swashDepth;    // its depth (units; 0 where dry)
+		float swashFoam;     // 0..1 the white water it carries
+		float simShare;      // 0..1 share of the surf simulation in the surface here (ComposeSurf)
 		float3 waveInfo;     // the shore wave here, for the debug view
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
 		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat: drawn raw, like fftFoam
-		float2 simFoam;      // ShoreFoamBoth here: x the foam the surf left on the water, y the swash's
+		float surfFoam;      // 0..1 the foam the surf left on the water here (ShoreFoamAt)
 		float clearFace;     // 0..1 a breaker's face about to plunge: clear water, no leftover foam (ShoreClearFace)
 		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
@@ -233,7 +235,7 @@ namespace PBRWater
 		float levelError;    // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
 		float breakStage;    // 0..1 how far the shore waves here have got with breaking (stirs up the bottom)
 		float depth;
-		float height;     // water surface above the still water at this pixel (units): waves, without the swash
+		float height;     // water surface above the still water at this pixel (units): the waves or the surf simulation (far below the ground where that is dry)
 		float elevation;  // bed above the still water at this pixel (units, -1e6 unknown)
 		float bedSlope;   // |grad| of the bed
 		float fetchMetres;
@@ -254,13 +256,12 @@ namespace PBRWater
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
 	 * @param waveParam  xyz undisplaced camera-relative position, w flow damping
 	 * @param flowVelocity the river current here (units/s, interpolated from the vertices; FlowVelocity)
-	 * @param shoreState the vertex shader's swash (SurfaceDisplacement::shore): x tip, y swash mark
 	 * @param gust       wind gust factor (WindGust, interpolated from the vertices)
 	 * @param detailNormal vanilla normal-map normal (z up)
 	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
 	 *                       blended amplitude
 	 */
-	SurfaceShading ShadeSurface(float4 waveParam, float2 flowVelocity, float4 shoreState, float gust, float3 detailNormal, float detailVariance)
+	SurfaceShading ShadeSurface(float4 waveParam, float2 flowVelocity, float gust, float3 detailNormal, float detailVariance)
 	{
 		SurfaceShading o;
 
@@ -269,11 +270,11 @@ namespace PBRWater
 		float footprint = max(length(dpdx), length(dpdy));
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
-		o.simFoam = ShoreFoamBoth(absXY);
+		o.surfFoam = ShoreFoamAt(absXY);
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
 		ctx.flow = flowVelocity;
-		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.simFoam.x);
+		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam);
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
 		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
@@ -330,16 +331,12 @@ namespace PBRWater
 		// lip's stretch, from when its pattern was drawn at the rest position and drawn out along the lip, cut a dark line
 		// along every curling crest.)
 		o.foam = waves.shoreFoam;
-		// The swash per pixel: interpolated from the vertices it is linear across each triangle, so the sheet ended in
-		// straight lines along the triangle edges.
-		o.swashSurface = shoreState.x;
-		o.swashDepth = shoreState.y;
-		[branch] if (ctx.beach > 0.0 || shoreState.y > 0.0)
-		{
-			float2 sheet = SwashSheet(waveParam.xyz, ctx);
-			o.swashSurface = sheet.x;
-			o.swashDepth = sheet.y;
-		}
+		// The surf simulation per pixel (ComposeSurf): interpolated from the vertices it is linear across each triangle, so
+		// the sheet ended in straight lines along the triangle edges.
+		o.swashSurface = waves.sheetSurface;
+		o.swashDepth = waves.sheetDepth;
+		o.swashFoam = waves.sheetFoam;
+		o.simShare = waves.surf;
 		o.beach = ctx.beach;
 		o.surf = ctx.beach * BreakerStrength(ctx);
 		o.train = ctx.train;
@@ -348,7 +345,7 @@ namespace PBRWater
 		o.waveInfo = 0.0;
 		[branch] if ((uint)Draw0.z == DebugShoreWave && ctx.train > 0.0)
 		{
-			ShoreWave wave = ShoreWaveAt(absXY, CoastPoint(absXY, ctx.shore), ctx, Shore2.x, 0);
+			ShoreWave wave = ShoreWaveAt(absXY, CoastPoint(absXY, ctx.shore), ctx, Shore2.x);
 			o.waveInfo = float3(wave.phase, wave.stage, wave.height / 4.0) * ctx.train;
 		}
 		o.levelError = 0.0;

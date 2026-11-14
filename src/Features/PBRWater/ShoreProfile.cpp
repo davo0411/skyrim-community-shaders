@@ -15,7 +15,7 @@ namespace
 		return t * t * (3.0f - 2.0f * t);
 	}
 
-	/// Where the bore's front stands in the wave, in phase.
+	/// Where the bore's front stands in the wave, in phase. Mirrored by PBRWater::ShoreBoreFront.
 	constexpr float BoreFront = 0.16f;
 	/// The least the surface may be stretched along a wave by its forward motion (1 = unchanged, 0 = folded over).
 	constexpr float MinStretch = 0.35f;
@@ -26,47 +26,54 @@ namespace
 	};
 
 	/**
-	 * The wave at phase x and stage v, as three overlapping phases of its life:
-	 *  - shoaling (to 0.5): a sinusoid narrows into a peaked crest over long flat troughs, with the crest moving towards the
+	 * The wave at phase x and stage v: one hump throughout its life, whose crest, faces and height change with the stage
+	 * (the same family as PBRWater::ShoreShapeAt and ShoreHump, which the breaker's curl is drawn over).
+	 *  - shoaling (to 0.5): a sinusoid narrows into a peaked crest over long flat troughs, the crest moving towards the
 	 *    front of the wave as its front face steepens (cnoidal, then solitary, as Ursell's number grows);
-	 *  - plunging (0.4 to 0.74): the water at the crest outruns the wave and is thrown ahead of its front, so past 0.45 the
-	 *    surface folds over itself into a lip, which then falls;
-	 *  - the bore (from 0.58): what is left is a turbulent front with a long sloping back (Svendsen 2006), a good deal lower
-	 *    than the wave that broke, rolling white water along its front.
+	 *  - breaking (0.5 to 0.72): the crest runs ahead of the wave, to where a plunger's lip comes down and the splash-up
+	 *    rises (Galvin 1969; Peregrine 1983), and loses height;
+	 *  - the bore (from 0.58, formed by 0.80): the hump turns into a turbulent front with a long sloping back (Svendsen
+	 *    1984's roller, about a wave height long), a good deal lower than the wave that broke.
+	 * The crest only ever moves forward. (The bore used to be a second hump faded in ahead of the sinking crest, while the
+	 * forward displacement that had carried the crest towards it was taken back: the crest stood still, sank, and a new
+	 * one rose 0.16 of a wavelength ahead.) The overturning lip itself is no part of the table: a surface drawn from a
+	 * vertex every metre cannot hold it. Where the mesh can, the shaders turn the crest over (PBRWater::ShoreCurlShape).
 	 */
 	Shape Evaluate(float x, float v)
 	{
+		const float pi = std::numbers::pi_v<float>;
 		const float s = Smoothstep(0.0f, 0.5f, v);
-		const float crest = 0.5f - 0.18f * s;
-		const float front = 0.5f * (1.0f - s) + 0.075f * s;
-		const float back = 0.5f * (1.0f - s) + 0.30f * s;
-		const float xi = x - crest;
-		const float a = xi < 0.0f ? std::clamp(-xi / front, 0.0f, 1.0f) : std::clamp(xi / back, 0.0f, 1.0f);
-		// Raised cosine on either side of the crest, narrowed towards it as the wave peaks.
-		const float wave = std::pow(0.5f * (1.0f + std::cos(std::numbers::pi_v<float> * a)), 1.0f + 1.2f * s);
-
-		const float lip = Smoothstep(0.40f, 0.60f, v) * (1.0f - Smoothstep(0.60f, 0.74f, v));
-		const float lipWidth = 0.11f + 0.05f * lip;
-		const float thrown = std::exp(-(xi / lipWidth) * (xi / lipWidth));
-		const float waveForward = 0.10f * Smoothstep(0.25f, 0.55f, v) * wave + 0.26f * lip * thrown;
-		const float crown = std::exp(-(xi / 0.06f) * (xi / 0.06f));
-		const float waveFoam = Smoothstep(0.46f, 0.56f, v) * crown;
-
 		const float b = Smoothstep(0.58f, 0.80f, v);
-		// The bore's front is its roller, a slope of about 30 degrees, not a step (Svendsen 1984's roller is about a wave
-		// height long).
-		const float frontWidth = 0.035f + 0.02f * (1.0f - b);
-		const float bore = x < BoreFront ? Smoothstep(BoreFront - 3.0f * frontWidth, BoreFront, x) :
-		                                   std::exp(-(x - BoreFront) / 0.34f) * (1.0f - Smoothstep(0.82f, 1.0f, x));
-		// A thin line of white water riding the front, trailing off quickly along the back; the rest of the wave stays clear.
-		const float boreFoam = x < BoreFront ? Smoothstep(BoreFront - 2.0f * frontWidth, BoreFront, x) : std::exp(-(x - BoreFront) / 0.09f);
-		const float collapse = 1.0f - 0.42f * Smoothstep(0.58f, 0.72f, v);
+		const float crest = 0.5f - 0.18f * s - (0.32f - BoreFront) * Smoothstep(0.50f, 0.72f, v);
+		const float front = (0.5f * (1.0f - s) + 0.075f * s) * (1.0f - b) + 0.105f * b;
+		const float back = 0.5f * (1.0f - s) + 0.30f * s;
+		const float power = 1.0f + 1.2f * s;
+		const float xi = x - crest;
+
+		// Either face falls from the crest: a raised cosine narrowed towards it while the wave is whole; as a bore a
+		// smooth ramp ahead (a slope of about 30 degrees, not a step) and a long back that has gone by the next wave.
+		float hump;
+		if (xi < 0.0f) {
+			const float a = std::clamp(-xi / front, 0.0f, 1.0f);
+			const float wave = std::pow(0.5f * (1.0f + std::cos(pi * a)), power);
+			const float bore = 1.0f - a * a * (3.0f - 2.0f * a);
+			hump = wave + (bore - wave) * b;
+		} else {
+			const float wave = std::pow(0.5f * (1.0f + std::cos(pi * std::clamp(xi / back, 0.0f, 1.0f))), power);
+			const float bore = std::exp(-xi / 0.34f) * (1.0f - Smoothstep(0.82f, 1.0f, x));
+			hump = wave + (bore - wave) * b;
+		}
+
+		// White water: the crown of the crest as it breaks, then a line riding the bore's front and trailing off quickly
+		// along its back. The bore keeps it to the waterline, where the surf simulation carries its water on.
+		const float crown = Smoothstep(0.46f, 0.56f, v) * std::exp(-(xi / 0.06f) * (xi / 0.06f));
+		const float line = xi < 0.0f ? Smoothstep(-(2.0f / 3.0f) * front, 0.0f, xi) : std::exp(-xi / 0.09f);
 
 		Shape o;
-		o.up = (1.0f - b) * wave + b * bore * collapse;
-		o.forward = (1.0f - b) * waveForward + b * 0.05f * bore;
-		// The bore keeps its white water to the waterline, where it collapses into the swash and the uprush carries it on.
-		o.foam = std::max((1.0f - b) * waveFoam, b * boreFoam);
+		o.up = (1.0f - 0.42f * Smoothstep(0.58f, 0.72f, v)) * hump;
+		// The crest leans forward as it steepens; the bore carries a little of its water with it.
+		o.forward = (0.10f * Smoothstep(0.25f, 0.55f, v) * (1.0f - b) + 0.05f * b) * hump;
+		o.foam = std::max((1.0f - b) * crown, b * line);
 		return o;
 	}
 
@@ -87,16 +94,18 @@ namespace
 				mean += row[i].up;
 			}
 			mean /= static_cast<float>(W);
-			// The plunging lip carries the crest forward faster than the surface around it moves, and past a point the
-			// surface folds over itself. The mesh carries the wave at a vertex every metre or so, so a fold draws as a flat
-			// top over a vertical wall (a step with right-angled edges) that jumps between vertices as it moves. The
+			// The steep front face carries its water forward faster than the surface ahead of it moves, and past a point
+			// the surface folds over itself. The mesh carries the wave at a vertex every metre or so, so a fold draws as a
+			// flat top over a vertical wall (a step with right-angled edges) that jumps between vertices as it moves. The
 			// forward displacement is at most a wavelength (ShoreWaves), so 1 + d(forward)/d(phase) bounds the surface's
-			// stretch along the wave: each stage is scaled so it never falls below MinStretch.
+			// stretch along the wave: each stage is scaled so it never falls below MinStretch. The shaders' own copy of
+			// the shape (PBRWater::ShoreCurlBackground) takes the same scale from the table.
 			float steepest = 0.0f;
 			for (uint32_t i = 1; i < W; ++i)
 				steepest = std::min(steepest, (row[i].forward - row[i - 1].forward) / dx);
+			float scale = 1.0f;
 			if (1.0f + steepest < MinStretch) {
-				const float scale = (1.0f - MinStretch) / -steepest;
+				scale = (1.0f - MinStretch) / -steepest;
 				for (auto& point : row)
 					point.forward *= scale;
 			}
@@ -112,6 +121,7 @@ namespace
 				s0[3] = (b.up - a.up) / span;
 				s1[0] = row[i].foam;
 				s1[1] = mean;
+				s1[2] = scale;
 			}
 		}
 		return t;

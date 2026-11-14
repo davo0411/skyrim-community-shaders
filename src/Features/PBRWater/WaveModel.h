@@ -145,7 +145,7 @@ namespace PBRWaterModel
 	{
 		float shortestPeriod = 2.5f;  ///< s: the shore train's periods, within which it follows the sea
 		float longestPeriod = 3.5f;
-		float trainCycles = 7.0f;  ///< how many waves out from the shore the train reaches, fading in over the outer half
+		float trainCycles = 7.0f;   ///< how many waves out from the shore the train reaches, fading in over the outer half
 		float setVariation = 1.0f;  ///< how much one wave's height varies from the next: ShoreSet (0 all alike, 1 Rayleigh in groups)
 		float crestLength = 5.0f;   ///< mean crest length in deep wavelengths: ShoreCrestLength
 		float crestWobble = 0.35f;  ///< how far the crests bend and drift along the coast (waves): ShoreWobble
@@ -155,6 +155,8 @@ namespace PBRWaterModel
 	inline constexpr float ShoreSteepestWave = 0.142f;
 	/// The wave clock wraps after this many waves: the number of a wave picks its height, so it must outlast a set.
 	inline constexpr double ShoreClockCycles = 1024.0;
+	/// The phase of a wave at which the depth it answers to is read: where its crest stands as it breaks. Mirrored by PBRWater::ShoreCrestReference.
+	inline constexpr float ShoreCrestReference = 0.32f;
 	/// No wave is higher than this multiple of the sea's height (ShoreSet). Mirrored by PBRWater::ShoreSetCeiling.
 	inline constexpr float ShoreSetCeiling = 2.5f;
 	/// How far a full onshore (+1) or offshore (-1) wind moves the breaker index. Mirrored by PBRWater::ShoreWindBreaking.
@@ -292,7 +294,10 @@ namespace PBRWaterModel
 		std::vector<float> slope;     ///< beach slope (tan) at the waterline, carried out along the rays and up the beach
 		std::vector<float> exposure;  ///< 0..1 how open the water is to the swell (open water upwind along its direction)
 		std::vector<float> room;      ///< 0..1 room for the wave train: the water's width against the wavelength, and coherent fronts
-		std::vector<float> level;     ///< absolute still water z (NaN: no water in reach)
+		/// The depth a wave whose crest stands here answers to (m): averaged along the crest, and never more than the
+		/// least it crossed on its way in from the sea, so a wave that has broken stays broken (0 up the beach).
+		std::vector<float> crestDepth;
+		std::vector<float> level;  ///< absolute still water z (NaN: no water in reach)
 
 		bool Valid() const { return width > 1 && height > 1 && level.size() == static_cast<size_t>(width) * height && travelTime.size() == level.size(); }
 
@@ -311,6 +316,8 @@ namespace PBRWaterModel
 		};
 		/** @brief Bilinear sample at absolute (x, y). */
 		Sample At(float x, float y) const;
+		/** @brief The crest depth (m) at absolute (x, y), or `fallback` outside the field. Mirrors PBRWater::ShoreCrestDepth. */
+		float CrestDepthAt(float x, float y, float fallback) const;
 	};
 
 	/** @brief Builds the shore field. `cancel` (optional) aborts the build when set. */

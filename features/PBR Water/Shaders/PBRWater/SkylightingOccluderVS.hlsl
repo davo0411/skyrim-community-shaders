@@ -8,7 +8,7 @@
 // (Skylighting::LiftOutOfWater), as its sky light comes in through the water.
 //
 // A camera-centred grid over the still water level of the cells around the eye, displaced like the water mesh
-// (waves, swash), drawn depth-only with Skylighting's occlusion transform. Grid points in cells without water go
+// (waves, surf), drawn depth-only with Skylighting's occlusion transform. Grid points in cells without water go
 // far below everything, so they occlude nothing.
 // ============================================================================
 
@@ -55,11 +55,11 @@ VS_OUTPUT main(uint id : SV_VertexID)
 	float3 positionWS = absPos - FrameBuffer::CameraPosAdjust.xyz;
 	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * PBRWater::LoadedGridFade(absXY) * FlowDamping(absXY);
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping);
-	float3 displacement = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false).displacement;
-	if (ctx.beach > 0.0) {
-		float2 tip = PBRWater::SwashTip(positionWS, ctx, false);
-		displacement.z = max(displacement.z, PBRWater::SwashTop(ctx.elevation, tip.x, tip.y));
-	}
+	PBRWater::WaveResult waves = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false);
+	float3 displacement = waves.displacement;
+	// Where the surf simulation is dry the geometry's surface lies on the bed: no water, nothing to occlude with.
+	if (waves.sheetDepth <= PBRWater::SwashMinDepth)
+		displacement.z = lerp(waves.heightRaw, min(waves.heightRaw, 0.0), waves.surf);
 	float limit = PBRWater::DisplacementLimit();
 	displacement = clamp(displacement, -limit, limit);
 

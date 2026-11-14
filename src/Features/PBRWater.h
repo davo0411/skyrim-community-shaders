@@ -345,7 +345,7 @@ private:
 		std::shared_ptr<const PBRWaterModel::ShoreField> field;
 		std::unique_ptr<Texture2D> times;  ///< travel time to the waterline, signed distance to it, still water level
 		std::unique_ptr<Texture2D> rays;   ///< grad of the travel time, beach slope, exposure to the swell
-		std::unique_ptr<Texture2D> room;   ///< room for the wave train (width of the water against the wavelength, coherent fronts)
+		std::unique_ptr<Texture2D> room;   ///< x room for the wave train (width of the water against the wavelength, coherent fronts), y the depth a wave's crest answers to (m; ShoreField::crestDepth)
 	};
 	/** @brief Render thread: uploads the shore fields the snapshot blends between, when they change. */
 	void UpdateShoreTextures();

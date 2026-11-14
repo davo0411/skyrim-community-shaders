@@ -1156,7 +1156,7 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 	// nearest point of the coast, where half floats would step them visibly. The slownesses (0.05-1 s/m) and the rest
 	// are fine as halves.
 	std::vector<float> times(count * 4);
-	std::vector<uint16_t> rays(count * 4), room(count);
+	std::vector<uint16_t> rays(count * 4), room(count * 2);
 	auto half = [](float v) { return DirectX::PackedVector::XMConvertFloatToHalf(v); };
 	for (size_t i = 0; i < count; ++i) {
 		times[i * 4 + 0] = field->travelTime[i];
@@ -1168,7 +1168,8 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 		rays[i * 4 + 1] = half(field->slownessY[i]);
 		rays[i * 4 + 2] = half(field->slope[i]);
 		rays[i * 4 + 3] = half(field->exposure[i]);
-		room[i] = half(field->room[i]);
+		room[i * 2 + 0] = half(field->room[i]);
+		room[i * 2 + 1] = half(field->crestDepth.size() == count ? field->crestDepth[i] : 0.0f);
 	}
 
 	auto create = [&](DXGI_FORMAT format, const void* data, UINT pitch, const char* name) -> std::unique_ptr<Texture2D> {
@@ -1197,7 +1198,7 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 	};
 	result.times = create(DXGI_FORMAT_R32G32B32A32_FLOAT, times.data(), static_cast<UINT>(field->width * 4 * sizeof(float)), "PBRWater::ShoreTimes");
 	result.rays = create(DXGI_FORMAT_R16G16B16A16_FLOAT, rays.data(), static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreRays");
-	result.room = create(DXGI_FORMAT_R16_FLOAT, room.data(), static_cast<UINT>(field->width * sizeof(uint16_t)), "PBRWater::ShoreRoom");
+	result.room = create(DXGI_FORMAT_R16G16_FLOAT, room.data(), static_cast<UINT>(field->width * 2 * sizeof(uint16_t)), "PBRWater::ShoreRoom");
 	if (result.times && result.rays && result.room)
 		result.field = std::move(field);
 	else
