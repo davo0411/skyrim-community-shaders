@@ -5,7 +5,6 @@
 #include "Feature.h"
 #include "I18n/I18n.h"
 #include "IconsTabler.h"
-#include "Presets/UnifiedPresetCatalog.h"
 #include "SceneSettingsManager.h"
 #include "Utils/SettingsCatalog.h"
 #include "Utils/UI.h"
@@ -20,8 +19,8 @@
 
 namespace
 {
-	constexpr int kColumnCount = 5;
-	constexpr int kActionButtonCount = 2;
+	constexpr int kColumnCount = 4;
+	constexpr int kActionButtonCount = 1;
 
 	/** @brief One Baseline file as the table shows it, copied so actions that rediscover mid-frame are safe. */
 	struct OverwriteRow
@@ -36,7 +35,6 @@ namespace
 	};
 
 	SceneSettingsManager::RevisionCache<std::vector<OverwriteRow>> rowCache;
-	bool notAppliedOnly = false;
 
 	std::vector<OverwriteRow> BuildRows()
 	{
@@ -66,35 +64,6 @@ namespace
 		return rows;
 	}
 
-	/** @brief Export button, and a chip narrowing the table to files that are not applied. */
-	void DrawToolbar(const std::vector<OverwriteRow>& rows)
-	{
-		if (Util::LabeledButton("##export", Icons::TI(ICON_TI_FILE_EXPORT), T(TKEY("export.button"), "Export Settings")))
-			FeatureOverwritesPanel::BeginExport();
-		Util::AddTooltip(T(TKEY("export.toolbar_tooltip"),
-			"Writes settings of one or more features to a Baseline preset pack, applied from the Presets page. "
-			"Scene layers are left out.\n"
-			"For a full preset with scene layers, use Export Preset in the CS Editor (Ctrl+Shift+S)."));
-
-		auto count = static_cast<size_t>(std::ranges::count_if(rows, [](const OverwriteRow& row) { return !row.unknownKeys.empty(); }));
-		notAppliedOnly &= count != 0;
-		if (count == 0)
-			return;
-		const auto label = std::vformat(T(TKEY("not_applied_count"), "{} not applied"), std::make_format_args(count));
-		const ImVec4 warning = Util::Colors::GetWarning();
-		BrowserUI::RightAlign(BrowserUI::MeasureChip(label.c_str(), true));
-		if (BrowserUI::Chip("##notApplied", label.c_str(), Icons::TI(ICON_TI_X), &warning, notAppliedOnly ? &warning : nullptr))
-			notAppliedOnly = !notAppliedOnly;
-		Util::AddTooltip(notAppliedOnly ? T("cs_editor.scene_copy_filter_clear_tooltip", "Click to list every setting again.") :
-										  T(TKEY("not_applied_tooltip"), "These name settings their feature does not have, so they are skipped. Click to list only them."));
-	}
-
-	void DrawSource(const OverwriteRow& row)
-	{
-		ImGui::TextUnformatted(row.packId.c_str());
-		Util::AddTooltip(row.filePath.c_str());
-	}
-
 	void DrawStatus(const OverwriteRow& row)
 	{
 		if (!row.unknownKeys.empty()) {
@@ -107,20 +76,13 @@ namespace
 		}
 	}
 
-	/** @brief Edit, then Open folder; the Presets page owns the pack itself. */
+	/** @brief Edit; the pack itself is managed above, in the Presets page's pack actions. */
 	void DrawActions(const OverwriteRow& row)
 	{
 		auto* feature = Feature::FindFeatureByShortName(row.featureName);
-		const bool editable = feature && FeatureOverwritesPanel::HasExportableSettings(feature);
-		{
-			const Util::DisableGuard notEditable(!editable);
-			if (Util::IconButton("##edit", Icons::TI(ICON_TI_PENCIL), T(TKEY("edit_tooltip"), "Edit: opens the export on this file with its settings ticked.")))
-				FeatureOverwritesPanel::BeginExportInto(feature, row.packId);
-		}
-		ImGui::SameLine();
-		if (Util::IconButton("##folder", Icons::TI(ICON_TI_FOLDER_OPEN),
-				T(TKEY("open_pack_tooltip"), "Open the pack folder. Remove the pack from the Presets page.")))
-			UnifiedPresetCatalog::GetSingleton().OpenPackFolder(row.packId);
+		const Util::DisableGuard notEditable(!feature || !FeatureOverwritesPanel::HasExportableSettings(feature));
+		if (Util::IconButton("##edit", Icons::TI(ICON_TI_PENCIL), T(TKEY("edit_tooltip"), "Edit: opens the export on this file with its settings ticked.")))
+			FeatureOverwritesPanel::BeginExportInto(feature, row.packId);
 	}
 
 	void DrawRow(const OverwriteRow& row)
@@ -132,10 +94,7 @@ namespace
 		BrowserUI::RowStripe(ImGui::GetColorU32(row.unknownKeys.empty() ? Util::Colors::GetSuccess() : Util::Colors::GetWarning()), rowHeight);
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted(row.feature.c_str());
-
-		ImGui::TableNextColumn();
-		ImGui::AlignTextToFramePadding();
-		DrawSource(row);
+		Util::AddTooltip(row.filePath.c_str());
 
 		ImGui::TableNextColumn();
 		ImGui::AlignTextToFramePadding();
@@ -150,20 +109,19 @@ namespace
 		ImGui::PopID();
 	}
 
-	void DrawTable(const std::vector<OverwriteRow>& rows)
+	void DrawTable(const std::vector<OverwriteRow>& rows, const std::string& packId)
 	{
 		BrowserUI::RowShadeScope shade;
 		if (!ImGui::BeginTable("##OverwriteFiles", kColumnCount, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_SizingStretchProp))
 			return;
 		const float actionsWidth = Util::IconButtonSize() * kActionButtonCount + ImGui::GetStyle().ItemSpacing.x * (kActionButtonCount - 1);
 		ImGui::TableSetupColumn(T(TKEY("feature"), "Feature"), ImGuiTableColumnFlags_WidthStretch);
-		ImGui::TableSetupColumn(T(TKEY("pack"), "Pack"), ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn(T(TKEY("settings"), "Settings"), ImGuiTableColumnFlags_WidthFixed);
 		ImGui::TableSetupColumn(T(TKEY("status"), "Status"), ImGuiTableColumnFlags_WidthFixed);
 		ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, actionsWidth);
 		ImGui::TableHeadersRow();
 		for (const auto& row : rows)
-			if (!notAppliedOnly || !row.unknownKeys.empty())
+			if (row.packId == packId)
 				DrawRow(row);
 		ImGui::EndTable();
 	}
@@ -183,20 +141,15 @@ bool FeatureOverwritesPanel::HasExportableSettings(Feature* feature)
 	return it->second;
 }
 
-void FeatureOverwritesPanel::Draw()
+bool FeatureOverwritesPanel::DrawPackFiles(const std::string& packId)
 {
-	auto* manager = BaselineManager::GetSingleton();
-	const auto& rows = rowCache.Get(manager->GetRevision(), BuildRows);
+	const auto& rows = rowCache.Get(BaselineManager::GetSingleton()->GetRevision(), BuildRows);
+	if (std::ranges::none_of(rows, [&packId](const OverwriteRow& row) { return row.packId == packId; }))
+		return false;
 
-	DrawToolbar(rows);
-
-	if (rows.empty())
-		BrowserUI::EmptyState(T(TKEY("empty_baseline"), "No Baseline preset files in use."),
-			T(TKEY("empty_baseline_hint"), "Export settings to create a pack, or enable one on the Presets page."));
-	else
-		DrawTable(rows);
-
-	DrawExport();
+	ImGui::SeparatorText(T(TKEY("pack_files"), "Baseline files"));
+	DrawTable(rows, packId);
+	return true;
 }
 
 #undef I18N_KEY_PREFIX

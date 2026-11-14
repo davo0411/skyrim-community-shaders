@@ -822,30 +822,6 @@ public:
 
 	// --- Debug Inspection ---
 
-	/// One stored entry, flattened for the debug UI.
-	struct DebugEntry
-	{
-		std::string feature;
-		std::string path;
-		std::string key;
-		std::string value;
-		std::string period;                      // Empty when the entry is not per-period
-		std::optional<float> transitionSeconds;  // Only set when the entry overrides the global duration
-		bool overwrite = false;
-		bool paused = false;
-		bool active = false;
-		bool resolvable = false;
-	};
-
-	/// A group of entries the resolver treats as one layer (scene type, weather, or location).
-	struct DebugLayer
-	{
-		std::string name;
-		std::string detail;
-		bool matchesCurrentScene = false;
-		std::vector<DebugEntry> entries;
-	};
-
 	/// One address the resolver currently drives, with the inputs that produced its value.
 	struct DebugResolvedSetting
 	{
@@ -885,13 +861,10 @@ public:
 		std::string cellEditorId;
 		RE::FormID locationId = 0;
 		std::string locationName;
-		std::vector<LocationTarget> locationTargets;
 		float gameHour = 0.0f;
 		TimeOfDayPeriod period = TimeOfDayPeriod::Count;
 		std::array<float, kPeriodCount> timeOfDayFactors{};
 		WeatherBlend weather;
-		std::string currentWeatherName;
-		std::string previousWeatherName;
 
 		// Load and resolver state
 		bool dataLoaded = false;
@@ -922,9 +895,6 @@ public:
 		std::vector<DebugLocationTransition> locationTransitions;
 		std::vector<std::string> transitionApplyFailures;
 
-		std::vector<DebugLayer> sceneLayers;
-		std::vector<DebugLayer> weatherLayers;
-		std::vector<DebugLayer> locationLayers;
 		std::vector<DebugResolvedSetting> resolvedSettings;
 		std::vector<std::string> applyFailures;
 		std::vector<std::string> restoreFailures;

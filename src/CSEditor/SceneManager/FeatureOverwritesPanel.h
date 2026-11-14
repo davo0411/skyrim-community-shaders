@@ -4,11 +4,15 @@
 
 struct Feature;
 
-/// Scene Manager section listing the Baseline preset files in use and exporting settings into a pack.
+/// Baseline preset files: the per-pack file table on the Presets page, and the export that writes feature settings into a pack.
 namespace FeatureOverwritesPanel
 {
-	/** @brief Draws the overwrite table, the export button, and their popups. */
-	void Draw();
+	/**
+	 * @brief Draws the Baseline files a pack has in use, with whether each applies and a button to edit it.
+	 * @param packId The pack whose files to list.
+	 * @return False, drawing nothing, when the pack has no files in use.
+	 */
+	bool DrawPackFiles(const std::string& packId);
 
 	/** @brief Opens the export popup on the next DrawExport; a non-null feature is preselected with every setting ticked and the feature list hidden. */
 	void BeginExport(Feature* feature = nullptr);

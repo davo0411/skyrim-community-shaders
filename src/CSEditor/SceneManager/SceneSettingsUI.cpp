@@ -24,6 +24,7 @@
 #include "SceneLayerHeader.h"
 #include "ScenePageToolbar.h"
 #include "SceneSettingsManager.h"
+#include "SceneTransitionControls.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
 
@@ -402,6 +403,16 @@ namespace
 			});
 	}
 
+	/// How long time of day, location and weather changes take, collapsed since it is set once and left.
+	void DrawTransitionsSection()
+	{
+		const bool open = ImGui::CollapsingHeader(T(TKEY("scene_transitions"), "Transitions"));
+		Util::AddTooltip(T(TKEY("scene_transitions_tooltip"),
+			"How long scene changes take to blend: time of day periods, locations and weathers, and how they ease."));
+		if (open)
+			SceneTransitionControls::Draw();
+	}
+
 	/// Period bar and actions, the layer header, and the replicated feature UI bound to one scene context.
 	void DrawPanel(const std::string& selectedFeature, const SceneSettingsManager::SceneContextId& baseContext,
 		bool withPeriodBar = true, bool sceneManagerPanel = false)
@@ -412,6 +423,8 @@ namespace
 			if (sceneManagerPanel)
 				EditorWindow::GetSingleton()->DrawActiveWeatherIndicator(false);
 			context = DrawPeriodAndActionsRow(baseContext, sceneManagerPanel);
+			if (sceneManagerPanel)
+				DrawTransitionsSection();
 		} else {
 			// A page without the bar has no toggle row to share, so the actions get a row of their own.
 			ScenePageToolbar::Draw(context);

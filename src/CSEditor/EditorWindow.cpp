@@ -19,6 +19,7 @@
 #include "Menu/MenuIcons.h"
 #include "PaletteWindow.h"
 #include "SaveManager.h"
+#include "SceneManager/SceneDebugWindow.h"
 #include "SceneManager/ScenePresetExport.h"
 #include "SceneManager/SceneSettingsManager.h"
 #include "SceneManager/SceneSettingsUI.h"
@@ -783,6 +784,9 @@ void EditorWindow::DrawEditorWindows(float scale, float actionBarBottom)
 	// Optional weather debug window
 	CSEditor::DrawWeatherDebugWindow(&showWeatherDebug);
 
+	// Optional scene debug window
+	SceneDebugWindow::Draw(&showSceneDebug);
+
 	// OverlayRenderer draws Effects11Editor only while the CS Editor is closed, so the editor hosts it.
 	Effects11Editor::GetSingleton().Draw();
 
@@ -970,6 +974,8 @@ void EditorWindow::RenderUI()
 				ImGui::Checkbox(T(TKEY("weather_picker"), "Weather Picker"), &WeatherPickerWindow::GetSingleton()->open);
 				ImGui::Checkbox(T(TKEY("weather_debug"), "Weather Debug"), &showWeatherDebug);
 				Util::AddTooltip(T(TKEY("weather_debug_tooltip"), "Current and last weather details, plus rain & wetness analysis from other features"));
+				ImGui::Checkbox(T(TKEY("scene_debug"), "Scene Debug"), &showSceneDebug);
+				Util::AddTooltip(T(TKEY("scene_debug_tooltip"), "Live scene resolver state: context, time of day blend, applied settings and transitions"));
 				if (ImGui::Checkbox(T(TKEY("base_settings_window"), "Base Settings"), &settings.showFeaturesWindow))
 					Save();
 				Util::AddTooltip(T(TKEY("base_settings_window_tooltip"),

@@ -24,7 +24,9 @@ Everything belonging to the system lives under `src/CSEditor/SceneManager/`.
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | `SceneSettingsManager.h`                         | The public interface: storage, persistence, resolver, apply/restore, blending.                                                  |
 | `SceneSettingsPolicy.h`                          | Hand-maintained allow/deny lists consumed by the manager.                                                                       |
-| `SceneManager.{h,cpp}`                           | The `Feature` that _is_ the manager: it inherits `SceneSettingsManager`, forwards the lifecycle hooks and draws the debug view. |
+| `SceneManager.{h,cpp}`                           | The `Feature` that _is_ the manager: it inherits `SceneSettingsManager` and forwards the lifecycle hooks. It has no page (`IsInMenu()` is false). |
+| `SceneDebugWindow.{h,cpp}`                       | The CS Editor's floating Scene Debug window (Window menu): the resolver's live state.                                           |
+| `SceneTransitionControls.{h,cpp}`                | The four global transition sliders, drawn in the Scene Manager page's Transitions section.                                      |
 | `cmake/generate_scene_settings_catalog.py`       | Build-time generator; parses `src/**/*.{h,hpp,cpp,cxx}`.                                                                        |
 | `features/Scene Manager/`                        | `CORE` marker + `SceneManager.ini` (version `1-0-0`).                                                                           |
 | `tests/test_scene_settings_catalog_generator.py` | Generator unit tests (hermetic + catalog assertions).                                                                           |
@@ -50,7 +52,7 @@ translation units so no single file stays unreadable. Find a member by what it d
 | `SceneSettingsContext.cpp`                               | Context add / update / remove.                                                                                                         |
 | `SceneSettingsCopy.cpp`                                  | The [generic copy API](#generic-scene-copy-api).                                                                                       |
 | `SceneSettingsWeather.cpp` / `SceneSettingsLocation.cpp` | The weather and location layers.                                                                                                       |
-| `SceneSettingsDebug.cpp`                                 | The resolver-state debug view.                                                                                                         |
+| `SceneSettingsDebug.cpp`                                 | `GetDebugSnapshot()`, the resolver state the Scene Debug window samples.                                                               |
 
 Helpers that more than one of those needs are not file-local. They live in four internal namespaces with
 their own headers, and every consumer opens them with a file-scope `using namespace`:
@@ -428,8 +430,8 @@ someone asks for the UI layer.
 | `src/Features/SceneManagerUI.{h,cpp}` | ~34   | `SceneManager::DrawSettings()` body.                                                                                                                                                                     |
 
 Correspondingly, `SceneManager` here has **no** `PostPostLoad()` (upstream's called
-`SceneSettingsUIHooks::Install()`), and its `DrawSettings()` is a debug view of the resolver's live state
-rather than an authoring panel.
+`SceneSettingsUIHooks::Install()`), and it draws no page. The resolver's live state is the CS Editor's Scene Debug window, and the global
+transition sliders sit in the editor's Scene Manager page.
 
 ### Removed from this fork
 

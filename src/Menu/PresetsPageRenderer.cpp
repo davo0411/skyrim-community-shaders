@@ -3,6 +3,7 @@
 
 #include "CSEditor/Browser/BrowserWidgets.h"
 #include "CSEditor/EditorWindow.h"
+#include "CSEditor/SceneManager/FeatureOverwritesPanel.h"
 #include "Feature.h"
 #include "Features/CSEditor.h"
 #include "Features/Effects11/Editor/Effects11Editor.h"
@@ -192,7 +193,8 @@ namespace
 		ImGui::TextDisabled("%s", T("menu.presets.baseline_layer_note",
 									  "Baseline settings are feature defaults applied beneath the Scene Manager, independent of the active pack. "
 									  "They win over saved settings until you change a value yourself."));
-		if (!pack.baselineFeatures.empty()) {
+		// A pack in use lists its files with their status; one that is not has only its feature names to show.
+		if (!FeatureOverwritesPanel::DrawPackFiles(pack.id) && !pack.baselineFeatures.empty()) {
 			ImGui::SeparatorText(T("menu.presets.baseline_features", "Baseline feature settings"));
 			for (const auto& featureName : pack.baselineFeatures) {
 				auto* feature = Feature::FindFeatureByShortName(featureName);
@@ -376,6 +378,12 @@ void PresetsPageRenderer::RenderToolbar()
 	ImGui::SameLine();
 	if (Util::IconButton("##PresetsOpenFolder", Icons::TI(ICON_TI_FOLDER_OPEN), T("menu.presets.open_folder_tooltip", "Open the unified Presets library folder in Explorer.")))
 		catalog.OpenPresetsFolder();
+	ImGui::SameLine();
+	if (Util::IconButton("##PresetsExportBaseline", Icons::TI(ICON_TI_FILE_EXPORT),
+			T("menu.presets.export_baseline_tooltip",
+				"Export feature settings to a Baseline preset pack. Scene layers are left out.\n"
+				"For a full preset with scene layers, use Export Preset in the CS Editor (Ctrl+Shift+S).")))
+		FeatureOverwritesPanel::BeginExport();
 
 	DrawOpenCSEditorButton("##PresetsOpenCSEditor");
 }
@@ -1036,6 +1044,9 @@ void PresetsPageRenderer::Render()
 	ImGui::EndChild();
 
 	RenderScreenshotLightbox();
+
+	// Drawn outside the page's child so the popup opens under the main window.
+	FeatureOverwritesPanel::DrawExport();
 
 	if (applyConfirmation.Draw()) {
 		if (const auto* pack = catalog.FindPack(pendingApplyPackId))

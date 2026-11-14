@@ -6,7 +6,6 @@
 #include "Utils/Game.h"
 
 #include <algorithm>
-#include <set>
 
 using namespace SceneSettingsInternal;
 
@@ -57,8 +56,6 @@ SceneSettingsManager::DebugSnapshot SceneSettingsManager::GetDebugSnapshot() con
 	const auto trackedPreviousWeatherId = cachedPreviousWeatherId;
 	snapshot.weather = GetWeatherBlend();
 	cachedPreviousWeatherId = trackedPreviousWeatherId;
-	snapshot.currentWeatherName = FormatDebugFormName(snapshot.weather.currentWeatherId);
-	snapshot.previousWeatherName = FormatDebugFormName(snapshot.weather.previousWeatherId);
 
 	auto* player = RE::PlayerCharacter::GetSingleton();
 	auto* cell = player ? player->GetParentCell() : nullptr;
@@ -74,57 +71,6 @@ SceneSettingsManager::DebugSnapshot SceneSettingsManager::GetDebugSnapshot() con
 	if (location) {
 		snapshot.locationId = location->GetFormID();
 		snapshot.locationName = FormatDebugFormName(snapshot.locationId);
-	}
-	snapshot.locationTargets = GetCurrentLocationTargets();
-
-	const auto buildEntries = [&](const std::vector<SettingEntry>& sourceEntries, SceneType type) {
-		std::vector<DebugEntry> debugEntries;
-		debugEntries.reserve(sourceEntries.size());
-		for (const auto& entry : sourceEntries) {
-			debugEntries.push_back({
-				.feature = entry.featureShortName,
-				.path = JoinDisplayParts(entry.settingPath, {}),
-				.key = entry.settingKey,
-				.value = FormatDebugValue(entry.value),
-				.period = entry.period == TimeOfDayPeriod::Count ? std::string() : GetPeriodName(entry.period),
-				.transitionSeconds = entry.transitionSeconds,
-				.overwrite = entry.source == EntrySource::Overwrite,
-				.paused = entry.paused,
-				.active = IsEntryActive(entry),
-				.resolvable = IsResolvableEntry(entry, type),
-			});
-		}
-		return debugEntries;
-	};
-
-	for (auto type : { SceneType::InteriorOnly, SceneType::TimeOfDay }) {
-		snapshot.sceneLayers.push_back({
-			.name = GetSceneTypeName(type),
-			.matchesCurrentScene = type == (snapshot.interior ? SceneType::InteriorOnly : SceneType::TimeOfDay),
-			.entries = buildEntries(GetEntries(type), type),
-		});
-	}
-
-	for (const auto& [weatherId, config] : weatherSceneConfigs) {
-		snapshot.weatherLayers.push_back({
-			.name = FormatDebugFormName(weatherId),
-			.detail = std::format("{:08X}", weatherId),
-			.matchesCurrentScene = weatherId == snapshot.weather.currentWeatherId ||
-			                       weatherId == snapshot.weather.previousWeatherId,
-			.entries = buildEntries(config.entries, SceneType::TimeOfDay),
-		});
-	}
-
-	std::set<std::string> activeLocationKeys;
-	for (const auto& target : snapshot.locationTargets)
-		activeLocationKeys.insert(GetLocationConfigKey(target.type, target.formKey));
-	for (const auto& [configKey, config] : locationSceneConfigs) {
-		snapshot.locationLayers.push_back({
-			.name = config.name.empty() ? configKey : config.name,
-			.detail = configKey,
-			.matchesCurrentScene = activeLocationKeys.contains(configKey),
-			.entries = buildEntries(config.entries, SceneType::Location),
-		});
 	}
 
 	const auto periodValuesFor = [](const PeriodSettingMap& values, const SettingAddress& address) {

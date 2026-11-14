@@ -41,6 +41,7 @@ public:
 
 	bool open = false;
 	bool showWeatherDebug = false;  // optional Weather Debug window, off by default (not persisted)
+	bool showSceneDebug = false;    // optional Scene Debug window (scene resolver state), off by default (not persisted)
 	bool widgetsHidden = false;     // action bar toggle: hides every window except the bar (not persisted)
 	float widgetsFade = 1.0f;       // 1 = widgets shown, 0 = hidden; eased toward widgetsHidden each frame
 	PreviewMode previewMode = PreviewMode::None;
