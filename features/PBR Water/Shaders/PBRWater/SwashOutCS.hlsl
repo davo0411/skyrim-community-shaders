@@ -34,7 +34,39 @@ RWTexture2D<float4> Output : register(u0);
 	float4 prep = Prep.Load(c);
 	// No ground (a wall): no water, and a surface that pulls no neighbour's up.
 	bool wall = prep.x > 100.0;
-	float depth = wall ? 0.0 : swash.x * PBRWater::UnitsPerMetre;
+	float waterDepth = swash.x;
+	// Holes: where an uprush and a backwash meet or part, the simulation's cells drain to nothing for a moment between
+	// them, and the ground showed through the middle of the swash. Real water there stays one sheet. A dry cell with water
+	// on both sides of it along any of four directions, within HoleReach cells, is drawn as a film at its neighbours'
+	// level where that stands above its bed. The water's own edge, wet on one side only, stays where the simulation puts it.
+	static const int HoleReach = 6;  // cells (about a metre)
+	static const float Wet = 0.005;  // m
+	[branch] if (!wall && waterDepth < Wet && prep.x > -1.0)
+	{
+		static const int2 Directions[4] = { int2(1, 0), int2(0, 1), int2(1, 1), int2(1, -1) };
+		float level = -1e6;
+		[unroll] for (uint d = 0; d < 4; d++)
+		{
+			float levelA = -1e6, levelB = -1e6;
+			[loop] for (int r = 1; r <= HoleReach; r++)
+			{
+				int2 a = clamp(int2(id.xy) + Directions[d] * r, 0, (int)GridSize - 1);
+				int2 b = clamp(int2(id.xy) - Directions[d] * r, 0, (int)GridSize - 1);
+				float2 sa = float2(Swash.Load(int3(a, 0)).x, Prep.Load(int3(a, 0)).x);
+				float2 sb = float2(Swash.Load(int3(b, 0)).x, Prep.Load(int3(b, 0)).x);
+				if (levelA < -1e5 && sa.x >= Wet && sa.y < 100.0)
+					levelA = sa.x + sa.y;
+				if (levelB < -1e5 && sb.x >= Wet && sb.y < 100.0)
+					levelB = sb.x + sb.y;
+			}
+			if (levelA > -1e5 && levelB > -1e5)
+				level = max(level, min(levelA, levelB));
+		}
+		// Only below the water around it: a ridge or a rock standing above that level is dry ground in the swash.
+		if (level > prep.x)
+			waterDepth = max(waterDepth, max(level - prep.x, Wet));
+	}
+	float depth = wall ? 0.0 : waterDepth * PBRWater::UnitsPerMetre;
 	float surface = wall ? 0.0 : prep.x * PBRWater::UnitsPerMetre + depth;
 	// The foam per area thins with the sheet: the last millimetres of a front or a draining film carry little of it.
 	float foam = swash.w * smoothstep(0.003, 0.03, swash.x);

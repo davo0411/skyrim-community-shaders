@@ -5,6 +5,7 @@
 #include "Common/Game.hlsli"
 #include "Common/Math.hlsli"
 #include "PBRWater/Noise.hlsli"
+#include "PBRWater/Foam.hlsli"  // Terrain Variation's lattice, when it is installed
 
 // ============================================================================
 // PBR Water - shared constants, resources and the wave model.
@@ -67,7 +68,7 @@ namespace PBRWater
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y unused, z refraction distortion scale, w point light specular intensity
-		float4 Foam1;                    // xyz unused, w flow wave damping
+		float4 Foam1;                    // x the open sea's foam bias (Jacobian), y its threshold, z unused, w flow wave damping
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
@@ -93,6 +94,7 @@ namespace PBRWater
 		float4 Foam2;                    // xy shore foam grid corner (absolute units), z 1 / its extent (units), w enabled (ShoreFoamCS)
 		float4 SunMap0;                  // xy wave heightfield centre (absolute units), z 1 / its extent (units), w drawn this frame
 		float4 SunMap1;                  // x its reference level (absolute z), y height range either side of it (units), zw unused
+		float4 Swash1;                   // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
 	}
 
 	Texture2D<float4> RippleTexture : register(t110);                   // x height, y height one step earlier, w silt
@@ -1313,8 +1315,11 @@ namespace PBRWater
 	float ShoreClearFace(float x, float v)
 	{
 		float window = ShoreSmooth(0.38, 0.46, v) * (1.0 - ShoreSmooth(0.64, 0.72, v));
-		float crest = ShoreCrestPhase(v);
-		return window * (1.0 - ShoreSmooth(crest + 0.04, crest + 0.12, x));
+		// From the foot of the front face, not from the trough ahead: counted from there, the flat water in front of every
+		// plunger lost its foam as the wave rolled in.
+		ShoreShape shape = ShoreShapeAt(v, 1.0);
+		float foot = shape.crest - shape.front;
+		return window * ShoreSmooth(foot - 0.02, foot + 0.3 * shape.front, x) * (1.0 - ShoreSmooth(shape.crest + 0.04, shape.crest + 0.12, x));
 	}
 
 	/**
@@ -1596,8 +1601,9 @@ namespace PBRWater
 	 * @param pixel   shading: the surface's gradient is read too, and where the simulation is dry the surface is far below
 	 *                the ground (the pixel is not water). For geometry the dry surface is the bed, so the mesh lies on it.
 	 * @param spacing vertex spacing of the geometry (units; 0 for shading): SampleSurf
+	 * @param scale   vertex spacing or pixel footprint (units): the swash's churn shorter than it fades out
 	 */
-	void ComposeSurf(inout ShoreTrain train, float3 positionWS, WaveContext ctx, bool pixel, float spacing)
+	void ComposeSurf(inout ShoreTrain train, float3 positionWS, WaveContext ctx, bool pixel, float spacing, float scale)
 	{
 		train.rawHeight = train.displacement.z;
 		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
@@ -1609,11 +1615,18 @@ namespace PBRWater
 			{
 				SurfSheet sheet = SampleSurf(absXY + (1.0 - drawn) * train.displacement.xy, pixel, spacing);
 				drawn *= sheet.share;
+				// Where the simulation has drained a cell whose bed lies below the still water (a hard backwash, uprush and
+				// backwash parting), the sea is still there: the train's surface is drawn instead. Taken as dry, the bed
+				// showed through a hole in the water with straight edges along the hand-over band. Only the beach above
+				// the still water is ever dry ground.
+				float belowSea = 1.0 - smoothstep(-0.05 * UnitsPerMetre, 0.0, ctx.elevation);
+				drawn *= lerp(1.0, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth), belowSea);
 				float keep = 1.0 - drawn;
 				// Dry: no water for the pixels; the geometry keeps the train's own height there and is laid on the bed by
 				// DisplaceSurface, up to where water can reach (set on the simulation's bed outright, it climbed every cliff
 				// in the grid).
-				float surface = pixel ? (sheet.depth > SwashMinDepth ? sheet.surface : -1e6) : lerp(train.displacement.z, sheet.surface, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth));
+				float surface = pixel ? (sheet.depth > SwashMinDepth ? sheet.surface : (belowSea > 0.0 ? train.displacement.z : -1e6)) :
+				                        lerp(train.displacement.z, sheet.surface, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth));
 				train.displacement = float3(train.displacement.xy * keep, lerp(train.displacement.z, surface, drawn));
 				train.previousDisplacement = float3(train.previousDisplacement.xy * keep, lerp(train.previousDisplacement.z, surface, drawn));
 				train.slope = lerp(train.slope, sheet.slope, drawn);
@@ -1629,6 +1642,28 @@ namespace PBRWater
 				train.sheetSurface = sheet.surface;
 				train.sheetDepth = sheet.depth;
 				train.sheetFoam = sheet.foam * drawn;
+
+				// The swash is no smooth sheet: thousands of small waves run through it, meet, heap up and break, and the
+				// water boils with the air the bores drove in. The simulation's 17 cm cells carry none of that, so the sheet
+				// is churned like the bore's roller (ShoreRollerChurn): lumps of Swash1.z, as high as a share of the water
+				// there is up to Swash1.x (none on a film, a few centimetres on a deep, foaming uprush), held off the bed so
+				// the water's edge stays where the simulation puts it. Lumps shorter than the vertex spacing or the pixel
+				// fade out: the mesh carries the larger, the shading the finer.
+				[branch] if (sheet.depth > SwashMinDepth)
+				{
+					float SwashLumpLength = max(Swash1.z, 1.0);
+					float churnAmount = min(Swash1.y * sheet.depth, Swash1.x) * lerp(0.4, 1.0, saturate(sheet.foam)) * drawn;
+					float lumps = churnAmount * smoothstep(Math::PI, 0.5 * Math::PI, Math::TAU / SwashLumpLength * scale);
+					[branch] if (lumps > 0.0)
+					{
+						float2 q = absXY / SwashLumpLength;
+						float3 churn = ShoreRollerChurn(q, Swash1.w * Shore2.x);
+						float floorZ = sheet.surface - 0.7 * sheet.depth;
+						train.displacement.z = max(train.displacement.z + lumps * churn.x, lerp(train.displacement.z, floorZ, drawn));
+						train.previousDisplacement.z = max(train.previousDisplacement.z + lumps * ShoreRollerChurn(q, Swash1.w * Shore2.y).x, lerp(train.previousDisplacement.z, floorZ, drawn));
+						train.slope += (lumps / SwashLumpLength) * churn.yz;
+					}
+				}
 			}
 		}
 	}
@@ -1848,7 +1883,7 @@ namespace PBRWater
 			}
 		}
 		ShoreTrain train = ShoreWaves(positionWS, ctx, spacing, previous, false);
-		ComposeSurf(train, positionWS, ctx, false, spacing);
+		ComposeSurf(train, positionWS, ctx, false, spacing, spacing);
 		AddShoreTrain(sums, o, train);
 		return FinishWaves(sums, o);
 	}
@@ -1916,7 +1951,23 @@ namespace PBRWater
 					AddCascade(sums, c, vertical, horizontal, d, g);
 					sums.foam += saturate(vertical / max(Tune2.x, 0.01)) * (foam + Tune1[c]);
 					float seaShare = saturate(ctx.sea[c] / max(Tune2.x, 0.01));
-					sums.seaFoam += seaShare * (foam + Tune1[c]);
+					// The breakers' white water is drawn with this foam (BreakerFoamDrawn), thickened until whole stretches of
+					// the tile pass: there its repeats showed along every beach. In the shore train's water it is read with
+					// Terrain Variation's two-tap stochastic lattice instead, when it is installed (a random offset per cell a tile
+					// across), the blend's contrast kept (variance-preserving about no foam). The open sea's own foam is left as it is.
+					float shoreFoam = foam;
+#if defined(TERRAIN_VARIATION)
+					[branch] if (ctx.train > 0.0 && !any(ctx.flow))
+					{
+						float2 cell1, cell2;
+						StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv.xy, 1.0, 0.0, cell1, cell2);
+						float a = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset1, c), gx, gy);
+						float b = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset2, c), gx, gy);
+						float w = taps.tap1Weight;
+						shoreFoam = lerp(b, a, w) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5));
+					}
+#endif
+					sums.seaFoam += seaShare * (shoreFoam + Tune1[c]);
 					sums.seaFoamWeight += seaShare;
 					float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
 					float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
@@ -1926,10 +1977,20 @@ namespace PBRWater
 			}
 		}
 		ShoreTrain train = ShoreWaves(positionWS, ctx, footprint, false, true);
-		ComposeSurf(train, positionWS, ctx, true, 0.0);
+		ComposeSurf(train, positionWS, ctx, true, 0.0, footprint);
 		AddShoreTrain(sums, o, train);
 		o = FinishWaves(sums, o);
-		// A face about to plunge is clear water: the sea's foam and what the surf left on it are drawn off it (ShoreClearFace).
+		// A shore wave steepening before it breaks whitecaps as the open sea does: the sea's own foam test (OceanAssembleCS:
+		// foam where bias - Jacobian passes the threshold) on the whole surface, its cascades and the shore wave together.
+		// The sea's foam is accumulated in its cascades' tiles, which the shore wave is no part of, so this is the test's
+		// coverage now, drawn with the sea's foam below. Only in the shore train's water, where the cascades' own foam does
+		// not see the train's crests; off a plunger's clear face, and given over to the breaker's own white water once the
+		// jet lands.
+		float jacobian = (1.0 + sums.dxdx) * (1.0 + sums.dydy) - sums.dxdy * sums.dxdy;
+		float biased = max(Foam1.x - jacobian, 0.0);
+		float crestFoam = saturate((biased - Foam1.y) / 0.3) * ctx.train * (1.0 - o.clearFace) * (1.0 - o.bore);
+		// A face about to plunge is clear water: the sea's foam is drawn off it (ShoreClearFace). What the surf left on the
+		// water stays: it lies on the surface and rides up the face (cleared too, it left a bare band ahead of every plunger).
 		float clear = 1.0 - o.clearFace;
 		o.fftFoam = FftFoam(sums.foam, length(positionWS)) * clear;
 		// The breaker's own white water, drawn with the sea's foam; once the bore lies flat the foam texture takes over.
@@ -1937,11 +1998,10 @@ namespace PBRWater
 		// thickened lace. Added raw, as a coverage with no pattern, it laid a flat grey veil over every breaker's face.
 		float flatness = smoothstep(0.80, 0.95, o.normal.z);
 		float boreFlat = o.bore * flatness;
-		o.breakerFoam = BreakerFoamDrawn(max(o.breakerFoam * (1.0 - boreFlat), saturate(surfFoam) * clear * (1.0 - flatness)), sums, length(positionWS));
-		// Where the water is churned through (the crushed tube, the splash-up, the roller) and at the lip's crown it is
-		// opaque white, with no pattern: drawn as the sea's lace thickened, the impact showed the foam texture's holes. The lace
-		// stays where the aeration thins, behind the roller and around it.
-		o.breakerFoam = max(o.breakerFoam, smoothstep(0.40, 0.80, max(o.aeration, o.shoreFoam * (1.0 - boreFlat))));
+		o.breakerFoam = BreakerFoamDrawn(max(max(o.breakerFoam * (1.0 - boreFlat), crestFoam), saturate(surfFoam) * (1.0 - flatness)), sums, length(positionWS));
+		// The churned water (the crushed tube, the splash-up, the roller) is in BreakerFoam's coverage and drawn with the sea's
+		// foam, thickened to solid where it is densest. Drawn opaque on top with no pattern, it laid a smooth white band along
+		// every breaking crest that cut off hard against the lace around it.
 		return o;
 	}
 
@@ -2175,7 +2235,10 @@ namespace PBRWater
 		[branch] if (shoreState.x > 0.0)
 		{
 			SurfSheet sheet = SampleSurf(absXY, false, 0.0);
-			water = lerp(water, sheet.depth > SwashMinDepth ? sheet.surface : -1e6, shoreState.x * sheet.share);
+			// A drained cell below the still water is still sea (ComposeSurf): the waves' surface stands there.
+			float belowSea = 1.0 - smoothstep(-0.05 * UnitsPerMetre, 0.0, bed);
+			float share = shoreState.x * sheet.share * lerp(1.0, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth), belowSea);
+			water = lerp(water, sheet.depth > SwashMinDepth ? sheet.surface : -1e6, share);
 		}
 		return bed > water + 0.05 * UnitsPerMetre;
 	}

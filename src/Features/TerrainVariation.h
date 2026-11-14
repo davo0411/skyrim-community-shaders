@@ -27,7 +27,8 @@ public:
 	 */
 	virtual inline bool HasShaderDefine(RE::BSShader::Type shaderType) override
 	{
-		return loaded && shaderType == RE::BSShader::Type::Lighting;
+		// Water: PBR Water's shore foam reads its textures with the stochastic lattice (PBRWater/Foam.hlsli).
+		return loaded && (shaderType == RE::BSShader::Type::Lighting || shaderType == RE::BSShader::Type::Water);
 	}
 	virtual bool IsCore() const override { return false; };
 	virtual std::string_view GetCategory() const override { return FeatureCategories::kLandscapeAndTextures; }

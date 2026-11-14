@@ -1795,7 +1795,7 @@ PS_OUTPUT main(PS_INPUT input)
 		pbrFoamPosition += viewDirection * min(pbrMeshAbove / -viewDirection.z, pbrPathLength);
 	float pbrFlat = smoothstep(0.80, 0.95, pbrSurface.waveNormal.z);
 	float pbrBoreFlat = pbrSurface.bore * pbrFlat;
-	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.clearFace) * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet);
+	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet);
 	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
 	float pbrRawCoverage = pbrSurface.breakerFoam;
 	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);
@@ -1949,8 +1949,13 @@ PS_OUTPUT main(PS_INPUT input)
 	// mesh: temporal AA and the upscalers reprojected it from where the mesh was and smeared it.
 	float pbrMotionFoam = PBRWater::ShoreFoamAt(input.WorldPosition.xy + FrameBuffer::CameraPosAdjust.xy);
 	// Last frame's position is relative to last frame's camera.
-	float2 pbrFoamPrevious = input.WorldPosition.xy + (FrameBuffer::CameraPosAdjust.xy - FrameBuffer::CameraPreviousPosAdjust.xy);
-	previousPosition.xy = lerp(previousPosition.xy, pbrFoamPrevious, saturate(2.0 * pbrMotionFoam));
+	float3 pbrFoamPrevious = input.WorldPosition.xyz + (FrameBuffer::CameraPosAdjust.xyz - FrameBuffer::CameraPreviousPosAdjust.xyz);
+	// Only where the water barely moves: the leftover foam lies thickest just behind a breaker, and a crest running in at
+	// metres a second, its white water moving with it, was given the still foam's motion. TAA reprojected it from the wrong
+	// place and smeared it along the break.
+	float pbrSurfaceMotion = length(previousPosition.xyz - pbrFoamPrevious);
+	float pbrStill = 1.0 - smoothstep(2.0, 6.0, pbrSurfaceMotion);
+	previousPosition.xy = lerp(previousPosition.xy, pbrFoamPrevious.xy, saturate(2.0 * pbrMotionFoam) * pbrStill);
 #			endif
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, previousPosition);
 #		endif

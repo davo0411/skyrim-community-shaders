@@ -13,6 +13,12 @@
 // drew it out into streaks over every breaker's face, and from above alone it ran down a rising face.
 // ============================================================================
 
+// The shore foam's anti-tiling is Terrain Variation's (it defines TERRAIN_VARIATION for the water shaders when it is
+// installed); without it the foam is read plainly.
+#if defined(TERRAIN_VARIATION)
+#	include "TerrainVariation/TerrainVariation.hlsli"
+#endif
+
 namespace PBRWaterFoam
 {
 	Texture2D<float> FoamTexture : register(t125);
@@ -62,9 +68,27 @@ namespace PBRWaterFoam
 			float bubblePixels = tile / BubblesPerTile / footprint;
 			float3 scales = tile * float3(1.0, 3.0, 9.0);
 			float3 shown = saturate((bubblePixels * float3(1.0, 3.0, 9.0) - 2.0) / 4.0);
+			// Anti-tiling, with Terrain Variation installed: its two-tap stochastic lattice. Each read is shifted by a random
+			// offset per cell of a skewed triangle grid a tile across, and the two blend by the cells' weights. The blend keeps
+			// a single read's contrast (variance-preserving, Heitz & Neyret 2018), or the foam would thin out between the
+			// cells' centres.
 			float3 values;
 			[unroll] for (uint i = 0; i < 3; i++)
-				values[i] = FoamTexture.SampleGrad(s, p / scales[i] + i * float2(0.41, 0.17), gx / scales[i], gy / scales[i]);
+			{
+				float2 uv = p / scales[i] + i * float2(0.41, 0.17);
+				float2 du = gx / scales[i];
+				float2 dv = gy / scales[i];
+#if defined(TERRAIN_VARIATION)
+				float2 cell1, cell2;
+				StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv, 1.0, 0.0, cell1, cell2);
+				float a = FoamTexture.SampleGrad(s, uv + taps.offset1, du, dv);
+				float b = FoamTexture.SampleGrad(s, uv + taps.offset2, du, dv);
+				float w = taps.tap1Weight;
+				values[i] = saturate(0.5 + (lerp(b, a, w) - 0.5) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5)));
+#else
+				values[i] = FoamTexture.SampleGrad(s, uv, du, dv);
+#endif
+			}
 			// The mix of uniform values is narrower than any of them: back to their contrast, or the foam would thin out.
 			float total = dot(shown, 1.0.xxx);
 			float value = saturate(0.5 + dot(values - 0.5, shown) * rsqrt(max(dot(shown, shown), 1e-4)));

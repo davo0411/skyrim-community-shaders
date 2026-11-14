@@ -79,6 +79,10 @@ struct PBRWater : Feature
 		float ShoreCurl = 1.0f;           ///< how far plunging breakers curl over (0: lip only)
 		float ShoreCurlDetail = 2.0f;     ///< tessellation multiplier where shore waves can curl
 		float SwashLinger = 2.0f;         ///< backwash duration over the uprush's
+		float SwashChurnHeight = 0.05f;   ///< m: the tallest the swash's churning lumps stand
+		float SwashChurnDepth = 0.35f;    ///< the lumps' height as a share of the water's depth
+		float SwashChurnSize = 0.35f;     ///< m: the lumps' size
+		float SwashChurnSpeed = 1.7f;     ///< how fast the lumps boil, relative to the waves' clock
 
 		// Surface and light
 		float Roughness = 0.06f;
@@ -237,6 +241,7 @@ struct PBRWater : Feature
 		float4 Foam2;                                 // xy shore foam grid corner (absolute units), z 1 / extent, w enabled
 		float4 SunMap0;                               // xy wave heightfield centre (absolute units), z 1 / extent, w drawn this frame
 		float4 SunMap1;                               // x its reference level (absolute z), y height range either side (units), zw unused
+		float4 Swash1;                                // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 

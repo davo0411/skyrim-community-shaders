@@ -48,6 +48,10 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		ShoreCurl,
 		ShoreCurlDetail,
 		SwashLinger,
+		SwashChurnHeight,
+		SwashChurnDepth,
+		SwashChurnSize,
+		SwashChurnSpeed,
 		Roughness,
 		SunSpecular,
 		PointLightSpecular,
@@ -152,6 +156,10 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		ShoreCurl,
 		ShoreCurlDetail,
 		SwashLinger,
+		SwashChurnHeight,
+		SwashChurnDepth,
+		SwashChurnSize,
+		SwashChurnSpeed,
 		Roughness,
 		SunSpecular,
 		PointLightSpecular,
@@ -326,6 +334,10 @@ void PBRWater::SanitizeSettings()
 	clamp(s.ShoreCurl, 0.0f, 2.0f, d.ShoreCurl);
 	clamp(s.ShoreCurlDetail, 1.0f, 4.0f, d.ShoreCurlDetail);
 	clamp(s.SwashLinger, 1.0f, 8.0f, d.SwashLinger);
+	clamp(s.SwashChurnHeight, 0.0f, 0.5f, d.SwashChurnHeight);
+	clamp(s.SwashChurnDepth, 0.0f, 1.0f, d.SwashChurnDepth);
+	clamp(s.SwashChurnSize, 0.05f, 3.0f, d.SwashChurnSize);
+	clamp(s.SwashChurnSpeed, 0.0f, 10.0f, d.SwashChurnSpeed);
 	clamp(s.Roughness, 0.001f, 1.0f, d.Roughness);
 	clamp(s.SunSpecular, 0.0f, Huge, d.SunSpecular);
 	clamp(s.PointLightSpecular, 0.0f, Huge, d.PointLightSpecular);
@@ -477,6 +489,14 @@ void PBRWater::DrawSettings()
 			T(TKEY("shore_curl_tooltip"), "How far plunging breakers curl over: the crest is thrown ahead of the wave and falls into the trough in front. 0 keeps the lip without the curl. Needs tessellation. Default 1."));
 		Util::SliderFloatTip(T(TKEY("swash_linger"), "Swash Linger"), &s.SwashLinger, 1.0f, 5.0f, "%.1fx",
 			T(TKEY("swash_linger_tooltip"), "How strongly the sand drags on each sheet of swash: higher, the water runs up less far and drains back down the beach more slowly, and its foam lingers on the sand. Default 2."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_height"), "Swash Churn Height"), &s.SwashChurnHeight, 0.0f, 0.2f, "%.3f m",
+			T(TKEY("swash_churn_height_tooltip"), "The tallest the swash's churning lumps stand: the small waves that run through it, meet and heap up. 0 leaves the swash a smooth sheet. Default 0.05 m."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_depth"), "Swash Churn Depth Share"), &s.SwashChurnDepth, 0.0f, 1.0f, "%.2f",
+			T(TKEY("swash_churn_depth_tooltip"), "How high the lumps stand as a share of the water's depth, up to Swash Churn Height: a deep, foaming uprush churns, a thin film barely moves. Default 0.35."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_size"), "Swash Churn Size"), &s.SwashChurnSize, 0.1f, 1.5f, "%.2f m",
+			T(TKEY("swash_churn_size_tooltip"), "How large the churning lumps are. Smaller is choppier; lumps finer than the mesh show only in the shading. Default 0.35 m."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_speed"), "Swash Churn Speed"), &s.SwashChurnSpeed, 0.0f, 5.0f, "%.1fx",
+			T(TKEY("swash_churn_speed_tooltip"), "How fast the lumps boil and drift, relative to the waves. Default 1.7."));
 
 		if (ImGui::CollapsingHeader(T(TKEY("advanced"), "Advanced"))) {
 			Util::SliderFloatTip(T(TKEY("shore_shortest_period"), "Shortest Shore Period"), &s.ShoreShortestPeriod, 1.0f, 6.0f, "%.1f s",
@@ -1687,7 +1707,8 @@ void PBRWater::UpdateFrameConstants()
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, 0.0f, settings.RefractionDistortion, settings.PointLightSpecular };
 	// Where the waves break.
-	d.Foam1 = { 0.0f, 0.0f, 0.0f, settings.RiverWaveDamping };
+	// The open sea's foam test, for the shore waves' crests (PBRWater::ShoreCrestFoam).
+	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, 0.0f, settings.RiverWaveDamping };
 
 	// Water clarity and the light in the water.
 	d.Clarity0 = { settings.SedimentDensity / UnitsPerMetre, settings.Turbidity, settings.TurbidityPatchiness, settings.TurbidityPatchSize * UnitsPerMetre };
@@ -1721,6 +1742,7 @@ void PBRWater::UpdateFrameConstants()
 	d.Tune3 = { settings.RippleHorizDisplace, settings.RippleDisplaceClamp, settings.ShoreTrainCycles, settings.ShoreResidualFoam };
 	d.Tune4 = { settings.ShoreWaveVariation, PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread), settings.DetailNormalCalm, settings.DetailNormalGale };
 	d.Tune5 = { settings.PointLightEmitterRadius, settings.FoamFeather, settings.FoamBubbleSize, settings.ShoreFoamLifetime };
+	d.Swash1 = { settings.SwashChurnHeight * UnitsPerMetre, settings.SwashChurnDepth, settings.SwashChurnSize * UnitsPerMetre, settings.SwashChurnSpeed };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
 	worldFlowmap = nullptr;
