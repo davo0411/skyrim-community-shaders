@@ -123,11 +123,25 @@ float SampleFoam(float2 q)
 		// is the part of the water's motion the drawn surface already carries.
 		PBRWater::ShoreTrain train = PBRWater::ShoreWaves(positionWS, ctx, TexelSize, dt > 0.0, true);
 		source = train.foam;
-		// What the surf simulation takes: the train's level where its water rests (a height field: the crest's forward
-		// lean is left out, and a breaker's lip, which is drawn over the simulation's water), and the white water its
-		// breakers carry (the profile's line of it: with the whole churned roller, the inner surf stayed white all over).
-		trainLevel = train.displacement.z * PBRWater::MetresPerUnit;
-		trainFoam = train.foam;
+		// What the surf simulation takes: the train's surface where it is drawn over this texel, and the white water its
+		// breakers carry there (the profile's line of it: with the whole churned roller, the inner surf stayed white all
+		// over). The simulation is a height field on the ground, the train a surface displaced from its rest position: the
+		// water drawn over this texel rests behind it by the crest's forward lean, x + D(x) = X, solved by fixed-point
+		// steps x = X - D(x). Read at the texel's own rest position instead, the simulation's bore ran a lean behind the
+		// train's crest, and the crest stepped back as the draws passed from the train to the simulation. (A breaker's lip
+		// is drawn over the simulation's water and stays out.)
+		PBRWater::ShoreTrain drawnHere = train;
+		[branch] if (any(abs(train.displacement.xy) > 0.01 * PBRWater::UnitsPerMetre))
+		{
+			float2 lean = train.displacement.xy;
+			[unroll] for (uint i = 0; i < 2; i++)
+			{
+				drawnHere = PBRWater::ShoreWaves(float3(positionWS.xy - lean, positionWS.z), ctx, TexelSize, false, true);
+				lean = drawnHere.displacement.xy;
+			}
+		}
+		trainLevel = drawnHere.displacement.z * PBRWater::MetresPerUnit;
+		trainFoam = drawnHere.foam;
 
 		// Shallow water: the water under a wave moves with it at u = c eta / (h + eta) along the travel.
 		float depth = max(ctx.depth, 0.05 * PBRWater::UnitsPerMetre);
