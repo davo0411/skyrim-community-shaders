@@ -11,14 +11,13 @@
 //
 // What a particle is and does comes from its emitter, a setting edited in game (SprayParticles.h), in the vocabulary of
 // the vanilla particle NIFs - NiPSysEmitter's speed, declination and planar angle, lifespan and radius with their
-// variations, NiPSysGravityModifier, NiPSysDragModifier, NiPSysGrowFadeModifier, NiPSysRotationModifier,
-// BSPSysSubTexModifier and BSEffectShaderProperty's base colour, soft falloff depth and lighting influence - and it is
-// drawn with one of the game's own effect textures.
+// variations, NiPSysGravityModifier, NiPSysDragModifier, NiPSysGrowFadeModifier, NiPSysRotationModifier and
+// BSEffectShaderProperty's base colour, soft falloff depth and lighting influence. Their shapes are procedural: droplets
+// as motion streaks, the spray sheet and mist as noise-torn puffs (SprayDraw.hlsl).
 // ============================================================================
 
 namespace PBRWaterSpray
 {
-	static const uint MaxTextures = 4;
 
 	/// What makes an emitter's particles (Emitter::Source.x).
 	static const uint SourcePlunge = 0;     // a plunging breaker's splash-up: the jet lands and throws the water up (shore train)
@@ -36,7 +35,7 @@ namespace PBRWaterSpray
 		float radius;         // units, at birth
 		float rotation;       // rad, at birth
 		float rotationSpeed;  // rad/s
-		uint packed;          // bits 0-3 emitter, 4-11 atlas frame, 12-31 random bits
+		uint packed;          // bits 0-3 emitter, 4-11 unused, 12-31 random bits
 		float floorZ;         // absolute z of the water it was thrown from: falling back below it, it is gone (units)
 		float3 pad;
 	};
@@ -52,8 +51,8 @@ namespace PBRWaterSpray
 		float4 Motion;  // x gravity multiplier, y air drag (1/unit: a(v) = -k |v - wind| (v - wind)), z rotation speed (rad/s), w its variation (share)
 		float4 Color;   // rgb base colour (linear), a alpha
 		float4 Shade;   // x fade-in share of life, y lighting influence (0 unlit .. 1 lit), z forward scattering (Henyey-Greenstein g), w additive share (0 alpha blended .. 1 additive)
-		float4 Atlas;   // x columns, y rows, z frames used, w 1: frames play over life, 0: one random frame each
-		float4 Render;  // x soft falloff depth (units), y motion stretch (s of travel), z texture index, w unused
+		float4 Shape;   // x 0 droplet streaks, 1 puffs; y a puff's edge softness, z how much noise tears it apart, w unused
+		float4 Render;  // x soft falloff depth (units), y motion stretch (s of travel), zw unused
 	};
 
 	uint Hash(uint x)
@@ -78,7 +77,6 @@ namespace PBRWaterSpray
 	}
 
 	uint EmitterIndex(Particle p) { return p.packed & 0xFu; }  // up to 16 emitters
-	uint AtlasFrame(Particle p) { return (p.packed >> 4u) & 0xFFu; }
 	uint ParticleBits(Particle p) { return p.packed >> 12u; }
 }
 

@@ -17,6 +17,9 @@
 
 #define I18N_KEY_PREFIX "feature.pbr_water."
 
+/// The layout of the saved spray emitters: 2 = procedural shapes.
+static constexpr int SprayEmittersVersion = 2;
+
 // NLOHMANN_JSON_PASTE takes at most 63 arguments: the fields go in runs.
 void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann_json_t)
 {
@@ -128,6 +131,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		WireframeMode,
 		DebugView))
 	nlohmann_json_j["SprayEmitters"] = nlohmann_json_t.SprayEmitters;
+	nlohmann_json_j["SprayEmittersVersion"] = SprayEmittersVersion;
 }
 
 void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohmann_json_t)
@@ -240,9 +244,12 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		SprayQuality,
 		WireframeMode,
 		DebugView))
-	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest.
+	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest. Emitters saved for
+	// another layout (the textured sprites before version 2) start over from the defaults.
 	nlohmann_json_t.SprayEmitters = SprayParticles::DefaultEmitters();
-	if (const auto it = nlohmann_json_j.find("SprayEmitters"); it != nlohmann_json_j.end() && it->is_array()) {
+	const auto version = nlohmann_json_j.find("SprayEmittersVersion");
+	const bool current = version != nlohmann_json_j.end() && version->is_number_integer() && version->get<int>() == SprayEmittersVersion;
+	if (const auto it = nlohmann_json_j.find("SprayEmitters"); current && it != nlohmann_json_j.end() && it->is_array()) {
 		for (size_t i = 0; i < std::min<size_t>(it->size(), SprayParticles::EmitterCount); ++i)
 			from_json((*it)[i], nlohmann_json_t.SprayEmitters[i]);
 	}
@@ -452,8 +459,6 @@ void PBRWater::DrawSpraySettings()
 		ImGui::Combo(T(TKEY("spray_quality"), "Spray Particles"), &s.SprayQuality, qualities, IM_ARRAYSIZE(qualities));
 		Util::HoverTip(T(TKEY("spray_quality_tooltip"), "The most spray particles alive at once. When a storm asks for more, the oldest go first."));
 	}
-	if (const auto status = spray.GetStatus(); !status.empty())
-		ImGui::TextWrapped("%s", status.c_str());
 	if (Util::Button(T(TKEY("spray_reset_all"), "Reset All Emitters")))
 		s.SprayEmitters = SprayParticles::DefaultEmitters();
 
@@ -465,19 +470,17 @@ void PBRWater::DrawSpraySettings()
 		T(TKEY("spray_source_whitecap"), "Open sea whitecaps"),
 		T(TKEY("spray_source_spindrift"), "Spindrift (strong wind)"),
 	};
-	const char* textures[] = {
-		T(TKEY("spray_texture_splash"), "Splash (fxsplash01sub)"),
-		T(TKEY("spray_texture_splash_white"), "White splash (fxsplash02sub)"),
-		T(TKEY("spray_texture_mist"), "Mist (fxsmokesoftsub)"),
-		T(TKEY("spray_texture_drops"), "Droplets (fluiddrops)"),
+	const char* shapes[] = {
+		T(TKEY("spray_shape_droplets"), "Droplets (motion streaks)"),
+		T(TKEY("spray_shape_puffs"), "Puffs (spray and mist)"),
 	};
 	const char* names[SprayParticles::EmitterCount] = {
-		T(TKEY("spray_emitter_breaker_splash"), "Breaker Splash"),
+		T(TKEY("spray_emitter_breaker_sheet"), "Breaker Sheet"),
 		T(TKEY("spray_emitter_breaker_droplets"), "Breaker Droplets"),
 		T(TKEY("spray_emitter_breaker_mist"), "Breaker Mist"),
 		T(TKEY("spray_emitter_roller_spray"), "Roller Spray"),
 		T(TKEY("spray_emitter_roller_mist"), "Roller Mist"),
-		T(TKEY("spray_emitter_surf_spray"), "Surf Spray"),
+		T(TKEY("spray_emitter_surf_droplets"), "Surf Droplets"),
 		T(TKEY("spray_emitter_whitecap_spray"), "Whitecap Spray"),
 		T(TKEY("spray_emitter_spindrift"), "Spindrift"),
 	};
@@ -490,12 +493,17 @@ void PBRWater::DrawSpraySettings()
 		if (ImGui::CollapsingHeader(names[i])) {
 			ImGui::Combo(T(TKEY("spray_source"), "Source"), &e.SourceKind, sources, IM_ARRAYSIZE(sources));
 			Util::HoverTip(T(TKEY("spray_source_tooltip"), "What makes this emitter's particles: the splash-up where a plunging breaker's lip lands, the churning front of a broken wave, the white water running up the beach, the open sea's breaking crests, or the spray a gale tears off them (from 9 m/s of wind)."));
-			ImGui::Combo(T(TKEY("spray_texture"), "Texture"), &e.Texture, textures, IM_ARRAYSIZE(textures));
-			Util::CheckboxTip(T(TKEY("spray_animate"), "Animate Frames"), &e.Animate,
-				T(TKEY("spray_animate_tooltip"), "Plays the texture's frames over each particle's life, as a splash breaking up. Off: each particle shows one random frame."));
+			ImGui::Combo(T(TKEY("spray_shape"), "Shape"), &e.ShapeKind, shapes, IM_ARRAYSIZE(shapes));
+			Util::HoverTip(T(TKEY("spray_shape_tooltip"), "Droplets are drawn as the streak each one makes while it flies, at least a pixel wide. Puffs are soft blobs broken up by noise that tears them apart as they age: the spray sheet, fine spray and mist."));
+			if (e.ShapeKind == SprayParticles::Puffs) {
+				Util::SliderFloatTip(T(TKEY("spray_softness"), "Softness"), &e.Softness, 0.02f, 1.0f, "%.2f",
+					T(TKEY("spray_softness_tooltip"), "How soft a puff's edges are: low for torn sheets of spray, high for mist."));
+				Util::SliderFloatTip(T(TKEY("spray_detail"), "Break-up"), &e.Detail, 0.0f, 1.0f, "%.2f",
+					T(TKEY("spray_detail_tooltip"), "How much noise breaks a puff up, and how far it tears apart as it ages."));
+			}
 
 			ImGui::SeparatorText(T(TKEY("spray_emission"), "Emission"));
-			Util::SliderFloatTip(T(TKEY("spray_rate"), "Rate"), &e.Rate, 0.0f, 20.0f, "%.2f /m2/s",
+			Util::SliderFloatTip(T(TKEY("spray_rate"), "Rate"), &e.Rate, 0.0f, 200.0f, "%.2f /m2/s",
 				T(TKEY("spray_rate_tooltip"), "Particles per square metre per second where the source is at full strength."), ImGuiSliderFlags_Logarithmic);
 			Util::SliderFloatTip(T(TKEY("spray_strength_min"), "Threshold"), &e.StrengthMin, 0.0f, 1.0f, "%.2f",
 				T(TKEY("spray_strength_min_tooltip"), "Source strength below which the emitter makes nothing."));
@@ -527,7 +535,7 @@ void PBRWater::DrawSpraySettings()
 				T(TKEY("spray_life_tooltip"), "How long a particle lives, unless it falls back into the water first."), ImGuiSliderFlags_Logarithmic);
 			Util::SliderFloatTip(T(TKEY("spray_life_variation"), "Lifespan Variation"), &e.LifeVariation, 0.0f, 1.0f, "%.2f",
 				T(TKEY("spray_life_variation_tooltip"), "Random share of the lifespan, either way."));
-			Util::SliderFloatTip(T(TKEY("spray_radius"), "Radius"), &e.Radius, 0.01f, 5.0f, "%.2f m",
+			Util::SliderFloatTip(T(TKEY("spray_radius"), "Radius"), &e.Radius, 0.002f, 5.0f, "%.3f m",
 				T(TKEY("spray_radius_tooltip"), "Half the width of a particle at birth."), ImGuiSliderFlags_Logarithmic);
 			Util::SliderFloatTip(T(TKEY("spray_radius_variation"), "Radius Variation"), &e.RadiusVariation, 0.0f, 1.0f, "%.2f",
 				T(TKEY("spray_radius_variation_tooltip"), "Random share of the radius, either way."));
@@ -2393,9 +2401,6 @@ void PBRWater::MainThreadUpdate()
 	rainIntensity.store(smoothedRain, std::memory_order_release);
 
 	GatherInteractions(*published, dt);
-
-	if (settings.EnableSpray)
-		spray.LoadTextures();
 
 	FloatingObjects::Settings floatingSettings;
 	floatingSettings.enabled = settings.EnableFloatingObjects && globals::shaderCache->IsEnabled();

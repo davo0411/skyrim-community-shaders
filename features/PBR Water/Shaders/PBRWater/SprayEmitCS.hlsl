@@ -147,7 +147,6 @@ float SeaJacobian(float3 positionWS, PBRWater::WaveContext ctx)
 		float3 side = cross(up, forward);
 		float celerity = shore ? shoreCelerity : seaCelerity;
 		float speedScale = shore ? sqrt(max(crestMetres, 0.05)) : 1.0;
-		uint frames = max((uint)em.Atlas.z, 1u);
 
 		for (uint i = 0; i < count; i++) {
 			float declination = max(em.Angles.x + em.Angles.y * PBRWaterSpray::RandomSigned(seed), 0.0);
@@ -165,8 +164,7 @@ float SeaJacobian(float3 positionWS, PBRWater::WaveContext ctx)
 			p.radius = max(em.Size.x * (1.0 + em.Size.y * PBRWaterSpray::RandomSigned(seed)), 0.1);
 			p.rotation = PBRWaterSpray::Random(seed) * Math::TAU;
 			p.rotationSpeed = em.Motion.z * (1.0 + em.Motion.w * PBRWaterSpray::RandomSigned(seed)) * (PBRWaterSpray::Random(seed) < 0.5 ? -1.0 : 1.0);
-			uint frame = em.Atlas.w > 0.5 ? 0u : min((uint)(PBRWaterSpray::Random(seed) * frames), frames - 1u);
-			p.packed = (e & 0xFu) | ((frame & 0xFFu) << 4u) | (PBRWaterSpray::Hash(seed) << 12u);
+			p.packed = (e & 0xFu) | (PBRWaterSpray::Hash(seed) << 12u);
 			// The water it falls back into: the still level, or the trough it was thrown from (a crest's spray lands lower down).
 			p.floorZ = min(surface.z, level) - 0.1 * PBRWater::UnitsPerMetre;
 			p.pad = 0.0;

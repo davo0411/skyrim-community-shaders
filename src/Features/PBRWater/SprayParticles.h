@@ -13,13 +13,13 @@
  * SprayEmitCS lays particles out where the waves break this frame, SpraySimCS flies them (gravity, air drag towards the
  * wind) and lists the living, SprayDraw.hlsl draws them after the water (see Spray.hlsli). Each emitter is a setting,
  * edited in game, in the vocabulary of the vanilla particle NIFs (NiPSysEmitter, its modifiers and
- * BSEffectShaderProperty), and drawn with one of the game's own effect textures.
+ * BSEffectShaderProperty). The particles are drawn procedurally: droplets as motion streaks, the spray sheet and the mist
+ * as soft puffs that noise tears apart as they age.
  */
 class SprayParticles
 {
 public:
 	static constexpr uint32_t EmitterCount = 8;
-	static constexpr uint32_t TextureCount = 4;
 	static constexpr uint32_t EmitGridSize = 256;  ///< emission cells per side
 
 	/// What makes an emitter's particles (Spray.hlsli Source*).
@@ -33,26 +33,22 @@ public:
 		SourceCount
 	};
 
-	/// The vanilla effect textures an emitter can draw with, and their atlases (BSPSysSubTexModifier).
-	struct TextureInfo
+	/// How an emitter's particles are drawn (SprayDraw.hlsl).
+	enum Shape : int
 	{
-		const char* path;
-		uint32_t columns, rows;
+		Droplets = 0,  ///< motion streaks
+		Puffs = 1,     ///< soft blobs the noise tears apart: the spray sheet and the mist
+		ShapeCount
 	};
-	static constexpr std::array<TextureInfo, TextureCount> Textures = { {
-		{ "textures\\effects\\fxsplash01sub.dds", 4, 4 },
-		{ "textures\\effects\\fxsplash02sub_whiteralpha.dds", 4, 4 },
-		{ "textures\\effects\\fxsmokesoftsub.dds", 4, 4 },
-		{ "textures\\effects\\fluiddrops.dds", 4, 2 },
-	} };
 
 	/// One emitter (metres, seconds, degrees). Plain data: it lives in PBR Water's settings.
 	struct Emitter
 	{
 		bool Enabled = true;
 		int SourceKind = Plunge;
-		int Texture = 0;              ///< Textures index
-		bool Animate = false;         ///< the atlas frames play over the life; otherwise one random frame each
+		int ShapeKind = Puffs;
+		float Softness = 0.35f;       ///< a puff's edge: 0 hard .. 1 soft
+		float Detail = 0.6f;          ///< how much noise breaks a puff up (and tears it apart as it ages)
 		float Rate = 1.0f;            ///< particles per m^2 per s at full strength
 		float StrengthMin = 0.05f;    ///< source strength below which it makes none
 		float StrengthFull = 1.0f;    ///< source strength at which it makes Rate
@@ -108,9 +104,6 @@ public:
 	/** @brief Render thread: kills every particle. */
 	void Reset();
 
-	/** @brief Main thread: loads the effect textures through the game's loader (BSAs and loose files), once. */
-	void LoadTextures();
-
 	/** @brief What the emit pass needs beyond PBR Water's own bindings (b7, b12, t110-t127, s12-s13), which the caller makes. */
 	struct FrameInput
 	{
@@ -133,14 +126,12 @@ public:
 	void Draw(ID3D11ShaderResourceView* sceneDepth);
 
 	bool IsReady() const { return ready; }
-	/** @brief Textures that failed to load, or empty. */
-	std::string GetStatus() const;
 
 private:
 	/// Matches Spray.hlsli Emitter.
 	struct EmitterGpu
 	{
-		float4 source, launch, angles, life, size, motion, color, shade, atlas, render;
+		float4 source, launch, angles, life, size, motion, color, shade, shape, render;
 	};
 	static_assert(sizeof(EmitterGpu) == 160);
 
@@ -164,11 +155,6 @@ private:
 	static EmitterGpu ToGpu(const Emitter& e, float amount);
 	void CreatePool(uint32_t size);
 	void CompileShaders();
-
-	/// The effect textures, loaded on the main thread and read by the render thread once texturesLoaded is set.
-	std::array<RE::NiPointer<RE::NiSourceTexture>, TextureCount> textures{};
-	std::atomic<bool> texturesLoaded{ false };
-	std::string status;  ///< written before texturesLoaded
 
 	// Render thread
 	std::unique_ptr<Buffer> particles;  ///< the pool (Spray.hlsli Particle)

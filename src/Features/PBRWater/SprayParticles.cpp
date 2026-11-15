@@ -47,7 +47,7 @@ namespace
 void to_json(nlohmann::json& j, const SprayParticles::Emitter& e)
 {
 	j = nlohmann::json{
-		{ "Enabled", e.Enabled }, { "Source", e.SourceKind }, { "Texture", e.Texture }, { "Animate", e.Animate },
+		{ "Enabled", e.Enabled }, { "Source", e.SourceKind }, { "Shape", e.ShapeKind }, { "Softness", e.Softness }, { "Detail", e.Detail },
 		{ "Rate", e.Rate }, { "StrengthMin", e.StrengthMin }, { "StrengthFull", e.StrengthFull }, { "MaxDistance", e.MaxDistance },
 		{ "Speed", e.Speed }, { "SpeedVariation", e.SpeedVariation }, { "Declination", e.Declination }, { "DeclinationVariation", e.DeclinationVariation },
 		{ "PlanarSpread", e.PlanarSpread }, { "InheritWave", e.InheritWave }, { "InheritWind", e.InheritWind }, { "StartHeight", e.StartHeight },
@@ -79,8 +79,9 @@ void from_json(const nlohmann::json& j, SprayParticles::Emitter& e)
 	};
 	read("Enabled", e.Enabled);
 	read("Source", e.SourceKind);
-	read("Texture", e.Texture);
-	read("Animate", e.Animate);
+	read("Shape", e.ShapeKind);
+	read("Softness", e.Softness);
+	read("Detail", e.Detail);
 	read("Rate", e.Rate);
 	read("StrengthMin", e.StrengthMin);
 	read("StrengthFull", e.StrengthFull);
@@ -122,209 +123,233 @@ void from_json(const nlohmann::json& j, SprayParticles::Emitter& e)
 
 SprayParticles::Emitters SprayParticles::DefaultEmitters()
 {
+	// Many small particles rather than a few large ones: the sheet a breaker throws tears into ligaments and droplets
+	// (droplet streaks), with a cloud of fine spray (small puffs) and mist that drifts downwind (large, faint puffs).
 	// Shore speeds are for a 1 m wave and grow with the square root of its height. Drag k: about 0.0002 / radius (m) for
-	// one droplet, far more for mist, whose terminal speed sqrt(g / k) is then a few centimetres a second.
-	Emitters e{};
-
-	auto& splash = e[0];  // the splash-up's sheets and clumps of water
-	splash.SourceKind = Plunge;
-	splash.Texture = 0;
-	splash.Animate = true;
-	splash.Rate = 3.0f;
-	splash.StrengthMin = 0.05f;
-	splash.StrengthFull = 0.7f;
-	splash.MaxDistance = 250.0f;
-	splash.Speed = 4.5f;
-	splash.SpeedVariation = 0.35f;
-	splash.Declination = 30.0f;
-	splash.DeclinationVariation = 20.0f;
-	splash.PlanarSpread = 50.0f;
-	splash.InheritWave = 0.5f;
-	splash.StartHeight = 0.1f;
-	splash.LifeSpan = 1.3f;
-	splash.Radius = 0.7f;
-	splash.RadiusVariation = 0.4f;
-	splash.EndSize = 2.2f;
-	splash.GrowTime = 0.15f;
-	splash.FadeTime = 0.5f;
-	splash.Drag = 0.05f;
-	splash.RotationSpeed = 30.0f;
-	splash.RotationVariation = 0.6f;
-	splash.Alpha = 0.9f;
-	splash.SoftDepth = 0.4f;
-
-	auto& droplets = e[1];
-	droplets.SourceKind = Plunge;
-	droplets.Texture = 3;
-	droplets.Rate = 8.0f;
-	droplets.StrengthMin = 0.1f;
-	droplets.StrengthFull = 0.8f;
-	droplets.MaxDistance = 80.0f;
-	droplets.Speed = 5.5f;
-	droplets.SpeedVariation = 0.4f;
-	droplets.Declination = 25.0f;
-	droplets.DeclinationVariation = 20.0f;
-	droplets.PlanarSpread = 60.0f;
-	droplets.InheritWave = 0.5f;
-	droplets.StartHeight = 0.2f;
-	droplets.LifeSpan = 1.4f;
-	droplets.Radius = 0.05f;
-	droplets.RadiusVariation = 0.5f;
-	droplets.GrowTime = 0.0f;
-	droplets.FadeTime = 0.2f;
-	droplets.Drag = 0.004f;
-	droplets.Alpha = 0.85f;
-	droplets.ForwardScattering = 0.7f;
-	droplets.SoftDepth = 0.1f;
-	droplets.MotionStretch = 0.03f;
-
-	auto& mist = e[2];
-	mist.SourceKind = Plunge;
-	mist.Texture = 2;
-	mist.Rate = 1.0f;
-	mist.StrengthMin = 0.1f;
-	mist.StrengthFull = 0.8f;
-	mist.MaxDistance = 300.0f;
-	mist.Speed = 2.5f;
-	mist.SpeedVariation = 0.4f;
-	mist.Declination = 20.0f;
-	mist.DeclinationVariation = 20.0f;
-	mist.PlanarSpread = 70.0f;
-	mist.InheritWave = 0.4f;
-	mist.InheritWind = 0.6f;
-	mist.StartHeight = 0.3f;
-	mist.LifeSpan = 3.0f;
-	mist.Radius = 1.2f;
-	mist.RadiusVariation = 0.4f;
-	mist.EndSize = 3.0f;
-	mist.GrowTime = 0.4f;
-	mist.FadeTime = 1.8f;
-	mist.FadeIn = 0.1f;
-	mist.Gravity = 0.05f;
-	mist.Drag = 2.0f;
-	mist.RotationSpeed = 10.0f;
-	mist.RotationVariation = 0.8f;
-	mist.Color = { 0.95f, 0.97f, 1.0f };
-	mist.Alpha = 0.22f;
-	mist.ForwardScattering = 0.6f;
-	mist.SoftDepth = 1.5f;
-
-	auto& roller = e[3];
-	roller.SourceKind = Roller;
-	roller.Texture = 1;
-	roller.Rate = 2.0f;
-	roller.StrengthMin = 0.1f;
-	roller.StrengthFull = 0.8f;
-	roller.MaxDistance = 200.0f;
-	roller.Speed = 1.8f;
-	roller.SpeedVariation = 0.4f;
-	roller.Declination = 35.0f;
-	roller.DeclinationVariation = 20.0f;
-	roller.PlanarSpread = 60.0f;
-	roller.InheritWave = 0.8f;
-	roller.StartHeight = 0.05f;
-	roller.LifeSpan = 0.8f;
-	roller.Radius = 0.4f;
-	roller.RadiusVariation = 0.4f;
-	roller.EndSize = 2.0f;
-	roller.FadeTime = 0.4f;
-	roller.Drag = 0.1f;
-	roller.RotationSpeed = 40.0f;
-	roller.RotationVariation = 0.6f;
-	roller.Alpha = 0.6f;
-	roller.SoftDepth = 0.3f;
-
-	auto& rollerMist = e[4];
-	rollerMist = mist;
-	rollerMist.SourceKind = Roller;
-	rollerMist.Rate = 0.4f;
-	rollerMist.StrengthMin = 0.2f;
-	rollerMist.StrengthFull = 1.0f;
-	rollerMist.MaxDistance = 250.0f;
-	rollerMist.Speed = 1.0f;
-	rollerMist.Declination = 15.0f;
-	rollerMist.DeclinationVariation = 15.0f;
-	rollerMist.PlanarSpread = 90.0f;
-	rollerMist.InheritWave = 0.6f;
-	rollerMist.InheritWind = 0.7f;
-	rollerMist.LifeSpan = 2.5f;
-	rollerMist.Radius = 1.0f;
-	rollerMist.EndSize = 2.5f;
-	rollerMist.FadeTime = 1.5f;
-	rollerMist.Gravity = 0.03f;
-	rollerMist.Alpha = 0.15f;
-
-	auto& surf = e[5];
-	surf.SourceKind = Surf;
-	surf.Texture = 1;
-	surf.Rate = 0.6f;
-	surf.StrengthMin = 0.2f;
-	surf.StrengthFull = 1.0f;
-	surf.MaxDistance = 120.0f;
-	surf.Speed = 1.2f;
-	surf.SpeedVariation = 0.4f;
-	surf.Declination = 30.0f;
-	surf.DeclinationVariation = 20.0f;
-	surf.PlanarSpread = 70.0f;
-	surf.InheritWave = 0.3f;
-	surf.StartHeight = 0.02f;
-	surf.LifeSpan = 0.6f;
-	surf.Radius = 0.25f;
-	surf.RadiusVariation = 0.4f;
-	surf.EndSize = 1.8f;
-	surf.FadeTime = 0.3f;
-	surf.Drag = 0.1f;
-	surf.Alpha = 0.5f;
-	surf.SoftDepth = 0.2f;
-
-	auto& whitecap = e[6];
-	whitecap.SourceKind = Whitecap;
-	whitecap.Texture = 1;
-	whitecap.Animate = true;
-	whitecap.Rate = 1.2f;
-	whitecap.StrengthMin = 0.15f;
-	whitecap.StrengthFull = 1.0f;
-	whitecap.MaxDistance = 300.0f;
-	whitecap.Speed = 1.5f;
-	whitecap.SpeedVariation = 0.4f;
-	whitecap.Declination = 45.0f;
-	whitecap.DeclinationVariation = 20.0f;
-	whitecap.PlanarSpread = 40.0f;
-	whitecap.InheritWave = 0.4f;
-	whitecap.InheritWind = 0.3f;
-	whitecap.StartHeight = 0.05f;
-	whitecap.LifeSpan = 1.0f;
-	whitecap.Radius = 0.6f;
-	whitecap.RadiusVariation = 0.4f;
-	whitecap.EndSize = 2.0f;
-	whitecap.GrowTime = 0.15f;
-	whitecap.FadeTime = 0.5f;
-	whitecap.Drag = 0.1f;
-	whitecap.RotationSpeed = 20.0f;
-	whitecap.RotationVariation = 0.6f;
-	whitecap.Alpha = 0.5f;
-	whitecap.SoftDepth = 0.4f;
-
-	auto& spindrift = e[7];
-	spindrift = mist;
-	spindrift.SourceKind = Spindrift;
-	spindrift.Rate = 1.5f;
-	spindrift.StrengthFull = 1.0f;
-	spindrift.MaxDistance = 400.0f;
-	spindrift.Speed = 1.0f;
-	spindrift.Declination = 70.0f;
-	spindrift.DeclinationVariation = 15.0f;
-	spindrift.PlanarSpread = 25.0f;
-	spindrift.InheritWave = 0.3f;
-	spindrift.InheritWind = 0.8f;
-	spindrift.StartHeight = 0.2f;
-	spindrift.LifeSpan = 2.5f;
-	spindrift.Radius = 1.0f;
-	spindrift.GrowTime = 0.3f;
-	spindrift.FadeTime = 1.5f;
-	spindrift.Drag = 1.5f;
-	spindrift.Alpha = 0.2f;
-	return e;
+	// one droplet; a puff stands for a cloud of them and slows faster; mist, k of a few, hangs and drifts with the wind.
+	const float3 mistColor{ 0.95f, 0.97f, 1.0f };
+	return { {
+		{ .SourceKind = Plunge, .ShapeKind = Puffs, .Softness = 0.3f, .Detail = 0.75f,  // Breaker Sheet
+			.Rate = 20.0f,
+			.StrengthMin = 0.05f,
+			.StrengthFull = 0.7f,
+			.MaxDistance = 250.0f,
+			.Speed = 4.0f,
+			.SpeedVariation = 0.35f,
+			.Declination = 30.0f,
+			.DeclinationVariation = 20.0f,
+			.PlanarSpread = 50.0f,
+			.InheritWave = 0.5f,
+			.InheritWind = 0.0f,
+			.StartHeight = 0.1f,
+			.LifeSpan = 0.9f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.18f,
+			.RadiusVariation = 0.4f,
+			.EndSize = 3.0f,
+			.GrowTime = 0.05f,
+			.FadeTime = 0.4f,
+			.FadeIn = 0.0f,
+			.Gravity = 1.0f,
+			.Drag = 0.3f,
+			.RotationSpeed = 20.0f,
+			.RotationVariation = 0.6f,
+			.Alpha = 0.55f,
+			.ForwardScattering = 0.55f,
+			.SoftDepth = 0.3f },
+		{ .SourceKind = Plunge, .ShapeKind = Droplets,  // Breaker Droplets
+			.Rate = 80.0f,
+			.StrengthMin = 0.1f,
+			.StrengthFull = 0.8f,
+			.MaxDistance = 120.0f,
+			.Speed = 5.5f,
+			.SpeedVariation = 0.45f,
+			.Declination = 25.0f,
+			.DeclinationVariation = 20.0f,
+			.PlanarSpread = 60.0f,
+			.InheritWave = 0.5f,
+			.StartHeight = 0.2f,
+			.LifeSpan = 1.3f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.012f,
+			.RadiusVariation = 0.5f,
+			.EndSize = 1.0f,
+			.GrowTime = 0.0f,
+			.FadeTime = 0.15f,
+			.Gravity = 1.0f,
+			.Drag = 0.02f,
+			.RotationSpeed = 0.0f,
+			.Alpha = 0.9f,
+			.ForwardScattering = 0.75f,
+			.SoftDepth = 0.05f,
+			.MotionStretch = 0.035f },
+		{ .SourceKind = Plunge, .ShapeKind = Puffs, .Softness = 0.8f, .Detail = 0.55f,  // Breaker Mist
+			.Rate = 3.0f,
+			.StrengthMin = 0.1f,
+			.StrengthFull = 0.8f,
+			.MaxDistance = 300.0f,
+			.Speed = 2.0f,
+			.SpeedVariation = 0.4f,
+			.Declination = 20.0f,
+			.DeclinationVariation = 20.0f,
+			.PlanarSpread = 80.0f,
+			.InheritWave = 0.4f,
+			.InheritWind = 0.8f,
+			.StartHeight = 0.4f,
+			.LifeSpan = 4.5f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.5f,
+			.RadiusVariation = 0.4f,
+			.EndSize = 5.0f,
+			.GrowTime = 0.5f,
+			.FadeTime = 2.5f,
+			.FadeIn = 0.15f,
+			.Gravity = 0.02f,
+			.Drag = 3.0f,
+			.RotationSpeed = 8.0f,
+			.RotationVariation = 0.8f,
+			.Color = mistColor,
+			.Alpha = 0.12f,
+			.ForwardScattering = 0.65f,
+			.SoftDepth = 2.0f },
+		{ .SourceKind = Roller, .ShapeKind = Puffs, .Softness = 0.3f, .Detail = 0.75f,  // Roller Spray
+			.Rate = 12.0f,
+			.StrengthMin = 0.1f,
+			.StrengthFull = 0.8f,
+			.MaxDistance = 200.0f,
+			.Speed = 1.8f,
+			.SpeedVariation = 0.4f,
+			.Declination = 35.0f,
+			.DeclinationVariation = 20.0f,
+			.PlanarSpread = 60.0f,
+			.InheritWave = 0.8f,
+			.StartHeight = 0.05f,
+			.LifeSpan = 0.7f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.15f,
+			.RadiusVariation = 0.4f,
+			.EndSize = 2.5f,
+			.GrowTime = 0.05f,
+			.FadeTime = 0.3f,
+			.Gravity = 1.0f,
+			.Drag = 0.3f,
+			.RotationSpeed = 30.0f,
+			.RotationVariation = 0.6f,
+			.Alpha = 0.45f,
+			.ForwardScattering = 0.55f,
+			.SoftDepth = 0.25f },
+		{ .SourceKind = Roller, .ShapeKind = Puffs, .Softness = 0.8f, .Detail = 0.55f,  // Roller Mist
+			.Rate = 1.2f,
+			.StrengthMin = 0.2f,
+			.StrengthFull = 1.0f,
+			.MaxDistance = 250.0f,
+			.Speed = 1.0f,
+			.SpeedVariation = 0.4f,
+			.Declination = 15.0f,
+			.DeclinationVariation = 15.0f,
+			.PlanarSpread = 90.0f,
+			.InheritWave = 0.6f,
+			.InheritWind = 0.8f,
+			.StartHeight = 0.3f,
+			.LifeSpan = 3.5f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.4f,
+			.RadiusVariation = 0.4f,
+			.EndSize = 4.0f,
+			.GrowTime = 0.5f,
+			.FadeTime = 2.0f,
+			.FadeIn = 0.15f,
+			.Gravity = 0.02f,
+			.Drag = 3.0f,
+			.RotationSpeed = 8.0f,
+			.RotationVariation = 0.8f,
+			.Color = mistColor,
+			.Alpha = 0.08f,
+			.ForwardScattering = 0.65f,
+			.SoftDepth = 2.0f },
+		{ .SourceKind = Surf, .ShapeKind = Droplets,  // Surf Droplets
+			.Rate = 15.0f,
+			.StrengthMin = 0.2f,
+			.StrengthFull = 1.0f,
+			.MaxDistance = 80.0f,
+			.Speed = 1.6f,
+			.SpeedVariation = 0.4f,
+			.Declination = 30.0f,
+			.DeclinationVariation = 20.0f,
+			.PlanarSpread = 70.0f,
+			.InheritWave = 0.3f,
+			.StartHeight = 0.02f,
+			.LifeSpan = 0.6f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.008f,
+			.RadiusVariation = 0.5f,
+			.EndSize = 1.0f,
+			.GrowTime = 0.0f,
+			.FadeTime = 0.1f,
+			.Gravity = 1.0f,
+			.Drag = 0.02f,
+			.RotationSpeed = 0.0f,
+			.Alpha = 0.8f,
+			.ForwardScattering = 0.75f,
+			.SoftDepth = 0.03f,
+			.MotionStretch = 0.03f },
+		{ .SourceKind = Whitecap, .ShapeKind = Puffs, .Softness = 0.35f, .Detail = 0.75f,  // Whitecap Spray
+			.Rate = 8.0f,
+			.StrengthMin = 0.15f,
+			.StrengthFull = 1.0f,
+			.MaxDistance = 300.0f,
+			.Speed = 1.5f,
+			.SpeedVariation = 0.4f,
+			.Declination = 45.0f,
+			.DeclinationVariation = 20.0f,
+			.PlanarSpread = 40.0f,
+			.InheritWave = 0.4f,
+			.InheritWind = 0.3f,
+			.StartHeight = 0.05f,
+			.LifeSpan = 0.9f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.2f,
+			.RadiusVariation = 0.4f,
+			.EndSize = 3.0f,
+			.GrowTime = 0.1f,
+			.FadeTime = 0.4f,
+			.Gravity = 1.0f,
+			.Drag = 0.3f,
+			.RotationSpeed = 20.0f,
+			.RotationVariation = 0.6f,
+			.Alpha = 0.4f,
+			.ForwardScattering = 0.55f,
+			.SoftDepth = 0.3f },
+		{ .SourceKind = Spindrift, .ShapeKind = Puffs, .Softness = 0.7f, .Detail = 0.6f,  // Spindrift
+			.Rate = 6.0f,
+			.StrengthMin = 0.1f,
+			.StrengthFull = 1.0f,
+			.MaxDistance = 400.0f,
+			.Speed = 1.0f,
+			.SpeedVariation = 0.4f,
+			.Declination = 70.0f,
+			.DeclinationVariation = 15.0f,
+			.PlanarSpread = 25.0f,
+			.InheritWave = 0.3f,
+			.InheritWind = 0.9f,
+			.StartHeight = 0.2f,
+			.LifeSpan = 3.0f,
+			.LifeVariation = 0.3f,
+			.Radius = 0.3f,
+			.RadiusVariation = 0.4f,
+			.EndSize = 4.0f,
+			.GrowTime = 0.3f,
+			.FadeTime = 1.5f,
+			.FadeIn = 0.1f,
+			.Gravity = 0.03f,
+			.Drag = 2.0f,
+			.RotationSpeed = 8.0f,
+			.RotationVariation = 0.8f,
+			.Color = mistColor,
+			.Alpha = 0.14f,
+			.ForwardScattering = 0.65f,
+			.SoftDepth = 1.5f },
+	} };
 }
 
 void SprayParticles::Sanitize(Emitter& e)
@@ -332,7 +357,9 @@ void SprayParticles::Sanitize(Emitter& e)
 	const Emitter d{};
 	auto clamp = [](float& v, float lo, float hi, float fallback) { v = std::isfinite(v) ? std::clamp(v, lo, hi) : fallback; };
 	e.SourceKind = std::clamp(e.SourceKind, 0, static_cast<int>(SourceCount) - 1);
-	e.Texture = std::clamp(e.Texture, 0, static_cast<int>(TextureCount) - 1);
+	e.ShapeKind = std::clamp(e.ShapeKind, 0, static_cast<int>(ShapeCount) - 1);
+	clamp(e.Softness, 0.0f, 1.0f, d.Softness);
+	clamp(e.Detail, 0.0f, 1.0f, d.Detail);
 	clamp(e.Rate, 0.0f, 10000.0f, d.Rate);
 	clamp(e.StrengthMin, 0.0f, 1.0f, d.StrengthMin);
 	clamp(e.StrengthFull, 0.0f, 1.0f, d.StrengthFull);
@@ -370,7 +397,6 @@ void SprayParticles::Sanitize(Emitter& e)
 
 SprayParticles::EmitterGpu SprayParticles::ToGpu(const Emitter& e, float amount)
 {
-	const auto& texture = Textures[std::clamp(e.Texture, 0, static_cast<int>(TextureCount) - 1)];
 	EmitterGpu g{};
 	g.source = { static_cast<float>(e.SourceKind), e.Enabled ? e.Rate * std::max(amount, 0.0f) : 0.0f, e.StrengthMin, std::max(e.StrengthFull, e.StrengthMin + 1e-3f) };
 	g.launch = { e.Speed * UnitsPerMetre, e.SpeedVariation, e.InheritWave, e.InheritWind };
@@ -381,37 +407,9 @@ SprayParticles::EmitterGpu SprayParticles::ToGpu(const Emitter& e, float amount)
 	g.motion = { e.Gravity, e.Drag / UnitsPerMetre, e.RotationSpeed * DegreesToRadians, e.RotationVariation };
 	g.color = { e.Color.x, e.Color.y, e.Color.z, e.Alpha };
 	g.shade = { e.FadeIn, e.LightingInfluence, e.ForwardScattering, e.Additive };
-	g.atlas = { static_cast<float>(texture.columns), static_cast<float>(texture.rows), static_cast<float>(texture.columns * texture.rows), e.Animate ? 1.0f : 0.0f };
-	g.render = { e.SoftDepth * UnitsPerMetre, e.MotionStretch, static_cast<float>(e.Texture), 0.0f };
+	g.shape = { static_cast<float>(e.ShapeKind), e.Softness, e.Detail, 0.0f };
+	g.render = { e.SoftDepth * UnitsPerMetre, e.MotionStretch, 0.0f, 0.0f };
 	return g;
-}
-
-void SprayParticles::LoadTextures()
-{
-	if (texturesLoaded.load(std::memory_order_acquire))
-		return;
-	std::string report;
-	for (uint32_t i = 0; i < TextureCount; ++i) {
-		RE::NiPointer<RE::NiTexture> texture;
-		RE::BSShaderManager::GetTexture(Textures[i].path, true, texture, false);
-		if (texture && texture->GetRTTI() == globals::rtti::NiSourceTextureRTTI.get()) {
-			auto* source = static_cast<RE::NiSourceTexture*>(texture.get());
-			if (source->rendererTexture && source->rendererTexture->resourceView) {
-				textures[i] = RE::NiPointer<RE::NiSourceTexture>(source);
-				continue;
-			}
-		}
-		report += std::format("Texture not found: {}\n", Textures[i].path);
-	}
-	if (!report.empty())
-		logger::warn("[PBR Water] Spray: {}", report);
-	status = std::move(report);
-	texturesLoaded.store(true, std::memory_order_release);
-}
-
-std::string SprayParticles::GetStatus() const
-{
-	return texturesLoaded.load(std::memory_order_acquire) ? status : std::string();
 }
 
 // ============================================================================
@@ -572,14 +570,10 @@ void SprayParticles::Update(const FrameInput& input, const Settings& settings)
 
 	// The emitters are live settings: uploaded every frame (8 of 160 bytes).
 	bool anyEmitter = false;
-	const bool texturesReady = texturesLoaded.load(std::memory_order_acquire);
-	if (settings.emitters && texturesReady) {
+	if (settings.emitters) {
 		std::array<EmitterGpu, EmitterCount> data{};
 		for (uint32_t i = 0; i < EmitterCount; ++i) {
 			data[i] = ToGpu((*settings.emitters)[i], settings.amount);
-			// No texture, no particles.
-			if (!textures[std::clamp((*settings.emitters)[i].Texture, 0, static_cast<int>(TextureCount) - 1)])
-				data[i].source.y = 0.0f;
 			anyEmitter = anyEmitter || data[i].source.y > 0.0f;
 		}
 		D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -660,7 +654,7 @@ void SprayParticles::Update(const FrameInput& input, const Settings& settings)
 
 void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 {
-	if (!ready || !hasParticles || !sceneDepth || !texturesLoaded.load(std::memory_order_acquire))
+	if (!ready || !hasParticles || !sceneDepth)
 		return;
 	auto context = globals::d3d::context;
 	PBRWaterProfiling::Scope pass("PBRWater::SprayDraw");
@@ -674,9 +668,10 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 	winrt::com_ptr<ID3D11HullShader> savedHS;
 	winrt::com_ptr<ID3D11DomainShader> savedDS;
 	ID3D11ShaderResourceView* savedVSSrvs[3] = {};
-	ID3D11ShaderResourceView* savedPSSrvs[10] = {};
+	ID3D11ShaderResourceView* savedPSSrvs[4] = {};
 	ID3D11SamplerState* savedSampler = nullptr;
 	ID3D11Buffer* savedVSCb = nullptr;
+	ID3D11Buffer* savedVSShared = nullptr;
 	ID3D11Buffer* savedPSCbs[3] = {};
 	winrt::com_ptr<ID3D11BlendState> savedBlend;
 	FLOAT savedBlendFactor[4]{};
@@ -694,9 +689,10 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 	context->HSGetShader(savedHS.put(), nullptr, nullptr);
 	context->DSGetShader(savedDS.put(), nullptr, nullptr);
 	context->VSGetShaderResources(0, 3, savedVSSrvs);
-	context->PSGetShaderResources(0, 10, savedPSSrvs);
+	context->PSGetShaderResources(0, 4, savedPSSrvs);
 	context->PSGetSamplers(0, 1, &savedSampler);
 	context->VSGetConstantBuffers(12, 1, &savedVSCb);
+	context->VSGetConstantBuffers(5, 1, &savedVSShared);
 	context->PSGetConstantBuffers(4, 3, savedPSCbs);
 	context->OMGetBlendState(savedBlend.put(), savedBlendFactor, &savedSampleMask);
 	context->OMGetDepthStencilState(savedDepth.put(), &savedStencilRef);
@@ -708,10 +704,8 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 		ID3D11Buffer* perFrame = *globals::game::perFrame.get();
 		ID3D11Buffer* psCbs[3] = { state->permutationCB->CB(), state->sharedDataCB->CB(), state->featureDataCB->CB() };
 		ID3D11ShaderResourceView* vsSrvs[3] = { emitters->srv.get(), particles->srv.get(), alive->srv.get() };
-		ID3D11ShaderResourceView* psSrvs[10] = { emitters->srv.get(), nullptr, nullptr };
-		for (uint32_t i = 0; i < TextureCount; ++i)
-			psSrvs[3 + i] = textures[i] ? textures[i]->rendererTexture->resourceView : nullptr;
-		psSrvs[7] = sceneDepth;
+		ID3D11ShaderResourceView* psSrvs[4] = { emitters->srv.get(), nullptr, nullptr, sceneDepth };
+		ID3D11Buffer* shared = state->sharedDataCB->CB();
 		ID3D11SamplerState* samplerState = sampler.get();
 
 		// Only the colour target: the depth is read, not tested.
@@ -727,18 +721,19 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 		context->GSSetShader(nullptr, nullptr, 0);
 		context->PSSetShader(drawPS.get(), nullptr, 0);
 		context->VSSetShaderResources(0, 3, vsSrvs);
-		context->PSSetShaderResources(0, 10, psSrvs);
+		context->PSSetShaderResources(0, 4, psSrvs);
 		context->PSSetSamplers(0, 1, &samplerState);
 		context->VSSetConstantBuffers(12, 1, &perFrame);
+		context->VSSetConstantBuffers(5, 1, &shared);
 		context->PSSetConstantBuffers(12, 1, &perFrame);
 		context->PSSetConstantBuffers(4, 3, psCbs);
 		context->DrawInstancedIndirect(drawArgs->resource.get(), 0);
 	}
 
 	// Restore.
-	ID3D11ShaderResourceView* nullSrvs[10] = {};
+	ID3D11ShaderResourceView* nullSrvs[4] = {};
 	context->VSSetShaderResources(0, 3, nullSrvs);
-	context->PSSetShaderResources(0, 10, nullSrvs);
+	context->PSSetShaderResources(0, 4, nullSrvs);
 	context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
 	context->IASetInputLayout(savedLayout.get());
 	context->IASetPrimitiveTopology(savedTopology);
@@ -748,9 +743,10 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 	context->HSSetShader(savedHS.get(), nullptr, 0);
 	context->DSSetShader(savedDS.get(), nullptr, 0);
 	context->VSSetShaderResources(0, 3, savedVSSrvs);
-	context->PSSetShaderResources(0, 10, savedPSSrvs);
+	context->PSSetShaderResources(0, 4, savedPSSrvs);
 	context->PSSetSamplers(0, 1, &savedSampler);
 	context->VSSetConstantBuffers(12, 1, &savedVSCb);
+	context->VSSetConstantBuffers(5, 1, &savedVSShared);
 	context->PSSetConstantBuffers(4, 3, savedPSCbs);
 	context->OMSetBlendState(savedBlend.get(), savedBlendFactor, savedSampleMask);
 	context->OMSetDepthStencilState(savedDepth.get(), savedStencilRef);
@@ -766,6 +762,8 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 		savedSampler->Release();
 	if (savedVSCb)
 		savedVSCb->Release();
+	if (savedVSShared)
+		savedVSShared->Release();
 	for (auto*& b : savedPSCbs)
 		if (b)
 			b->Release();

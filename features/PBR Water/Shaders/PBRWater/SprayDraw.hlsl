@@ -1,11 +1,21 @@
 // ============================================================================
-// PBR Water - sea spray, pass 3: the living particles as billboards, drawn after the water.
+// PBR Water - sea spray, pass 3: the living particles, drawn after the water. Procedural: no textures.
 //
-// Shaded as the vanilla particles are (Particle.hlsl): the texture times the base colour, lit by the sun after its shadows and by the ambient light, with the lighting influence of
-// BSEffectShaderProperty mixing lit and unlit. Spray scatters light forward (water droplets are Mie scatterers), so the
-// sun's share is weighted by a Henyey-Greenstein phase function normalised to the isotropic one: spray seen against the
-// sun glows. Soft against the scene's depth, and premultiplied, so an emitter can be anywhere between alpha blended and
-// additive.
+// Spray is two things to the eye (Wretborn et al. and the film pipelines split whitewater the same way: spray, mist,
+// foam, bubbles):
+//   droplets  water thrown clear, millimetres to centimetres across. Far below a pixel at any distance, they show as the
+//             streak a droplet draws over the shutter: a capsule along its velocity on screen, at least a pixel wide,
+//             its coverage scaled down with its width below that (a thin line's energy is kept instead of its size).
+//   puffs     the sheet breaking into ligaments and the cloud of fine spray and mist around it: a soft blob whose
+//             density is a Gaussian broken up by value noise, the noise eating into it as it ages, so a puff tears
+//             apart and thins instead of fading as a disc. Each puff has its own noise (its random bits) that drifts
+//             as it lives.
+// Both are lit as the vanilla particles are (Particle.hlsl): the sun after its shadows and the ambient light, with a
+// lighting influence mixing lit and unlit. Water droplets are Mie scatterers: the sun's share is weighted by a
+// Henyey-Greenstein phase function (normalised to the isotropic one), so spray against the sun glows; a puff also takes
+// wrapped diffuse light on a normal bulging towards the eye, so its sunlit side reads as a volume. Soft against the
+// scene's depth (read here: no depth buffer is bound), premultiplied, so an emitter sits anywhere between alpha blended
+// and additive.
 // ============================================================================
 
 #include "Common/Color.hlsli"
@@ -22,9 +32,11 @@ StructuredBuffer<uint> Alive : register(t2);
 struct VS_OUTPUT
 {
 	float4 position: SV_POSITION;
-	float3 positionWS: TEXCOORD0;  // camera-relative
-	float2 uv: TEXCOORD1;
-	nointerpolation float4 info: TEXCOORD2;  // x alpha, y emitter, z view depth of the centre (units), w radius (units)
+	float3 positionWS: TEXCOORD0;             // camera-relative
+	float3 normalWS: TEXCOORD1;               // a puff's bulging normal
+	float2 uv: TEXCOORD2;                     // -1..1 across the quad (droplets: x across, y along the streak)
+	nointerpolation float4 info: TEXCOORD3;   // x alpha, y emitter, z view depth of the centre (units), w radius (units)
+	nointerpolation float4 shape: TEXCOORD4;  // droplets: x streak length over width; puffs: x life (0..1), yz noise offset
 };
 
 #if defined(VSHADER)
@@ -34,6 +46,7 @@ VS_OUTPUT VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 	PBRWaterSpray::Particle p = Particles[Alive[instanceID]];
 	uint emitterIndex = PBRWaterSpray::EmitterIndex(p);
 	PBRWaterSpray::Emitter em = Emitters[emitterIndex];
+	bool droplet = em.Shape.x < 0.5;
 
 	float t = saturate(p.age / max(p.life, 1e-3));
 	float grow = em.Life.z > 0.0 ? saturate(p.age / em.Life.z) : 1.0;
@@ -59,51 +72,57 @@ VS_OUTPUT VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 		up = cross(right, view);
 	}
 
+	// The size of a pixel at the particle (units): the render height and the projection's vertical scale.
+	float viewDepth = mul(FrameBuffer::CameraViewProj, float4(centre, 1.0)).w;
+	float screenHeight = SharedData::BufferDim.y * FrameBuffer::DynamicResolutionParams1.y;
+	float pixel = 2.0 * max(viewDepth, 1.0) / max(abs(FrameBuffer::CameraProj[1][1]) * screenHeight, 1.0);
+
 	float2 extent = radius.xx;
 	float3 axisX = right, axisY = up;
-	// Motion stretch: drawn out along its velocity across the view, as a streak of falling water is.
-	float3 across = p.velocity - view * dot(p.velocity, view);
-	float acrossSpeed = length(across);
-	float stretch = acrossSpeed * em.Render.y;
-	if (stretch > 0.05 * radius) {
-		axisY = across / acrossSpeed;
-		axisX = cross(view, axisY);
-		extent.y += 0.5 * stretch;
+	uint bits = PBRWaterSpray::ParticleBits(p);
+	if (droplet) {
+		// The streak the droplet draws over the shutter, along its velocity across the view.
+		float3 across = p.velocity - view * dot(p.velocity, view);
+		float acrossSpeed = length(across);
+		float halfWidth = max(radius, 0.75 * pixel);
+		float halfLength = halfWidth + 0.5 * acrossSpeed * em.Render.y;
+		if (acrossSpeed > 1e-3) {
+			axisY = across / acrossSpeed;
+			axisX = cross(view, axisY);
+		}
+		extent = float2(halfWidth, halfLength);
+		// Thinner than a pixel: the coverage it has. Drawn out into a streak: its light spread along it (square root:
+		// a streak stays visible where a single droplet would be).
+		alpha *= saturate(radius / (0.75 * pixel)) * sqrt(saturate(halfWidth / halfLength));
+		o.shape = float4(halfLength / halfWidth, 0.0, 0.0, 0.0);
 	} else {
 		float angle = p.rotation + p.rotationSpeed * p.age;
 		float s, c;
 		sincos(angle, s, c);
 		axisX = right * c + up * s;
 		axisY = up * c - right * s;
+		// A puff smaller than a few pixels is only its colour: kept at two pixels, its density spread over them.
+		float shown = max(radius, 2.0 * pixel);
+		alpha *= saturate(radius / shown) * saturate(radius / shown);
+		extent = shown.xx;
+		o.shape = float4(t, float(bits & 0x3FFu) * 0.731, float((bits >> 10) & 0x3FFu) * 0.517, 0.0);
 	}
 
 	float2 corner = float2(vertexID & 1u ? 1.0 : -1.0, vertexID & 2u ? 1.0 : -1.0);
 	float3 positionWS = centre + axisX * corner.x * extent.x + axisY * corner.y * extent.y;
 	o.position = mul(FrameBuffer::CameraViewProj, float4(positionWS, 1.0));
 	o.positionWS = positionWS;
-
-	// The atlas frame (BSPSysSubTexModifier): played over the life, or one picked at birth.
-	uint columns = max((uint)em.Atlas.x, 1u);
-	uint rows = max((uint)em.Atlas.y, 1u);
-	uint frames = max(min((uint)em.Atlas.z, columns * rows), 1u);
-	uint frame = em.Atlas.w > 0.5 ? min((uint)(t * frames), frames - 1u) : min(PBRWaterSpray::AtlasFrame(p), frames - 1u);
-	float2 cell = float2(frame % columns, frame / columns);
-	o.uv = (cell + float2(corner.x * 0.5 + 0.5, 0.5 - corner.y * 0.5)) / float2(columns, rows);
-
-	float viewDepth = mul(FrameBuffer::CameraViewProj, float4(centre, 1.0)).w;
+	o.normalWS = normalize(axisX * corner.x + axisY * corner.y - view * 0.8);
+	o.uv = corner;
 	o.info = float4(alpha, emitterIndex, viewDepth, radius);
-	if (alpha <= 0.0 || radius <= 0.0)
+	if (alpha <= 1e-4 || radius <= 0.0)
 		o.position = float4(0.0, 0.0, -1.0, 1.0);  // culled
 	return o;
 }
 #endif
 
 #if defined(PSHADER)
-Texture2D<float4> SprayTexture0 : register(t3);
-Texture2D<float4> SprayTexture1 : register(t4);
-Texture2D<float4> SprayTexture2 : register(t5);
-Texture2D<float4> SprayTexture3 : register(t6);
-Texture2D<float> SceneDepth : register(t7);
+Texture2D<float> SceneDepth : register(t3);
 SamplerState SpraySampler : register(s0);
 
 #	define LinearSampler SpraySampler
@@ -113,19 +132,25 @@ SamplerState SpraySampler : register(s0);
 #		include "IBL/IBL.hlsli"
 #	endif
 
-float4 SampleSprayTexture(uint index, float2 uv)
+float Hash2(float2 p)
 {
-	[branch] switch (index)
-	{
-	case 1:
-		return SprayTexture1.Sample(SpraySampler, uv);
-	case 2:
-		return SprayTexture2.Sample(SpraySampler, uv);
-	case 3:
-		return SprayTexture3.Sample(SpraySampler, uv);
-	default:
-		return SprayTexture0.Sample(SpraySampler, uv);
-	}
+	p = frac(p * float2(0.1031, 0.1030));
+	p += dot(p, p.yx + 33.33);
+	return frac((p.x + p.y) * p.x);
+}
+
+float ValueNoise(float2 p)
+{
+	float2 i = floor(p);
+	float2 f = p - i;
+	float2 u = f * f * (3.0 - 2.0 * f);
+	return lerp(lerp(Hash2(i), Hash2(i + float2(1.0, 0.0)), u.x), lerp(Hash2(i + float2(0.0, 1.0)), Hash2(i + 1.0), u.x), u.y);
+}
+
+/// Three octaves of value noise, 0..1.
+float Fbm(float2 p)
+{
+	return 0.5333 * ValueNoise(p) + 0.2667 * ValueNoise(p * 2.03 + 17.1) + 0.2 * ValueNoise(p * 4.07 + 41.7);
 }
 
 /// Henyey-Greenstein phase function over the isotropic one (1 / 4 pi): 1 for g = 0.
@@ -147,21 +172,46 @@ float4 PSMain(VS_OUTPUT input) : SV_Target0
 {
 	PBRWaterSpray::Emitter em = Emitters[(uint)input.info.y];
 	float alpha = input.info.x;
+	bool droplet = em.Shape.x < 0.5;
 
-	// Soft against the scene, and gone behind it (the depth buffer is not bound: it is read here).
+	// Soft against the scene, and gone behind it.
 	float sceneDepth = SharedData::GetScreenDepth(SceneDepth.Load(int3(input.position.xy, 0)));
 	float depth = input.info.z;
 	float soft = saturate((sceneDepth - depth) / max(em.Render.x, 1.0));
 	// Close to the eye a particle fills the view: faded out over its own size.
 	float near = saturate((depth - 0.5 * input.info.w) / max(2.0 * input.info.w, 1.0));
 	alpha *= soft * near;
-	if (alpha <= 1e-3)
+	if (alpha <= 1e-4)
 		discard;
 
-	float4 source = SampleSprayTexture((uint)em.Render.z, input.uv);
-	float3 baseColor = em.Color.rgb * Color::Albedo(ColorManagement::TextureToWorking(source.rgb));
-	alpha *= source.a;
-	if (alpha <= 1e-3)
+	float density;
+	float sunWrap = 1.0;
+	[branch] if (droplet)
+	{
+		// A capsule along y: its round ends a width across, antialiased over the pixels it spans.
+		float aspect = max(input.shape.x, 1.0);
+		float2 q = float2(input.uv.x, max(abs(input.uv.y) * aspect - (aspect - 1.0), 0.0));
+		float d = length(q);
+		density = saturate((1.0 - d) / max(fwidth(d), 1e-3));
+	}
+	else
+	{
+		// A soft blob broken up by noise, which eats into it as it ages: it tears apart and thins.
+		float r2 = dot(input.uv, input.uv);
+		float base = exp(-2.5 * r2) * (1.0 - smoothstep(0.7, 1.0, r2));
+		float life = input.shape.x;
+		float2 q = input.uv * (1.2 + 1.6 * em.Shape.z) + input.shape.yz + life * float2(0.6, -0.9);
+		float noise = Fbm(q);
+		float detail = saturate(em.Shape.z);
+		float shaped = base * lerp(1.0, 1.7 * noise, detail);
+		float erosion = detail * (0.15 + 0.55 * life * life);
+		float softness = max(em.Shape.y, 0.02);
+		density = saturate((shaped - erosion) / softness);
+		density *= density * (3.0 - 2.0 * density);
+		sunWrap = saturate((dot(normalize(input.normalWS), SharedData::DirLightDirection.xyz) + 0.5) / 1.5);
+	}
+	alpha *= density;
+	if (alpha <= 1e-4)
 		discard;
 
 	float3 view = normalize(input.positionWS);
@@ -171,8 +221,10 @@ float4 PSMain(VS_OUTPUT input) : SV_Target0
 	if (SharedData::iblSettings.EnableIBL)
 		ambient = ImageBasedLighting::GetDiffuseIBL(ambient, float3(0.0, 0.0, -1.0));
 #	endif
-	float3 lit = SunColor(input.positionWS) * phase + ambient;
-	float3 color = baseColor * lerp(1.0.xxx, lit, saturate(em.Shade.y));
+	// Droplets take the sun through their phase alone; a puff half through it and half as wrapped diffuse light.
+	float sunShare = droplet ? phase : 0.5 * phase + sunWrap;
+	float3 lit = SunColor(input.positionWS) * sunShare + ambient;
+	float3 color = em.Color.rgb * lerp(1.0.xxx, lit, saturate(em.Shade.y));
 
 #	if defined(ENABLE_LL)
 	// Linear Lighting blends in linear space: the vanilla particles' alpha is gamma-shaped for it (Particle.hlsl).
