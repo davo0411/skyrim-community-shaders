@@ -6,6 +6,7 @@
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
+#include "PBRWater/SprayParticles.h"
 #include "PBRWater/WaterEnvironment.h"
 #include "PBRWater/WaveModel.h"
 
@@ -129,6 +130,13 @@ struct PBRWater : Feature
 		float FoamFeather = 0.12f;           ///< how soft the edge of the foam pattern is
 		float FoamBubbleSize = 0.03f;        ///< m: the bubbles of the foam pattern (surf foam is a microfoam of centimetre bubbles)
 
+		// Spray (SprayParticles)
+		bool EnableSpray = true;
+		float SprayAmount = 1.0f;   ///< multiplier on every emitter's rate
+		float SprayRange = 128.0f;  ///< m around the camera in which the waves throw spray
+		int SprayQuality = 1;       ///< particles alive at most: 0 = 16384, 1 = 65536, 2 = 131072
+		SprayParticles::Emitters SprayEmitters = SprayParticles::DefaultEmitters();
+
 		// Ripples and rivers
 		bool EnableRipples = true;
 		float RippleExtent = 64.0f;  ///< m covered around the camera
@@ -168,6 +176,8 @@ struct PBRWater : Feature
 	Settings settings;
 
 	virtual void DrawSettings() override;
+	/** @brief The Spray tab: the spray's switches and every emitter's parameters. */
+	void DrawSpraySettings();
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
@@ -321,6 +331,13 @@ struct PBRWater : Feature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/// The world's effects pass (vanilla particles and effect shaders), after the water: the sea spray draws first.
+	struct BSShaderAccumulator_RenderEffects
+	{
+		static void thunk(RE::BSShaderAccumulator* accumulator, uint32_t renderFlags);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 private:
 	static constexpr uint32_t WaterSRVCount = 18;        ///< t110-t127
 	static constexpr uint32_t WaveHeightfieldSlot = 27;  ///< t27, pixel stage: the waves' heightfield (sunMapTexture)
@@ -366,6 +383,12 @@ private:
 	bool UpdateShoreReset(float dt);
 	/** @brief Render thread: steps the swash history: how wet the shore is (needs this frame's constants). */
 	void UpdateSwash(float dt);
+	/** @brief Render thread: emits and flies the sea spray (needs this frame's constants and the surf's state). */
+	void UpdateSpray(float dt);
+	/** @brief Render thread, the world's effects pass: draws the sea spray once a frame, after the water. */
+	void DrawSpray();
+	/** @brief Particles alive at most for the SprayQuality setting. */
+	uint32_t SprayPoolSize() const;
 	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
 	void UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior);
 	/** @brief Render thread, before the world is drawn: applies the main thread's camera-under-water state again. */
@@ -410,10 +433,12 @@ private:
 	winrt::com_ptr<ID3D11SamplerState> oceanSampler;
 
 	RippleSimulation ripples;
-	ShoreSimulation swash;                ///< render thread
-	ShoreTextures shoreTextures;          ///< render thread: the current shore field
-	ShoreTextures previousShoreTextures;  ///< render thread: the one it replaces, while they blend
-	OceanSimulation ocean;                ///< render thread
+	ShoreSimulation swash;                 ///< render thread
+	SprayParticles spray;                  ///< render thread (its definitions load on the main thread)
+	uint32_t sprayDrawFrame = UINT32_MAX;  ///< State frame the spray was last drawn in
+	ShoreTextures shoreTextures;           ///< render thread: the current shore field
+	ShoreTextures previousShoreTextures;   ///< render thread: the one it replaces, while they blend
+	OceanSimulation ocean;                 ///< render thread
 
 	// Skylighting occluder (render thread)
 	static constexpr uint32_t OccluderQuads = 176;     ///< grid quads per side

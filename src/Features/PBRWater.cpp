@@ -121,8 +121,13 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		GameplayWaves,
 		EnableFloatingObjects,
 		CarryActors,
+		EnableSpray,
+		SprayAmount,
+		SprayRange,
+		SprayQuality,
 		WireframeMode,
 		DebugView))
+	nlohmann_json_j["SprayEmitters"] = nlohmann_json_t.SprayEmitters;
 }
 
 void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohmann_json_t)
@@ -229,8 +234,18 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		GameplayWaves,
 		EnableFloatingObjects,
 		CarryActors,
+		EnableSpray,
+		SprayAmount,
+		SprayRange,
+		SprayQuality,
 		WireframeMode,
 		DebugView))
+	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest.
+	nlohmann_json_t.SprayEmitters = SprayParticles::DefaultEmitters();
+	if (const auto it = nlohmann_json_j.find("SprayEmitters"); it != nlohmann_json_j.end() && it->is_array()) {
+		for (size_t i = 0; i < std::min<size_t>(it->size(), SprayParticles::EmitterCount); ++i)
+			from_json((*it)[i], nlohmann_json_t.SprayEmitters[i]);
+	}
 }
 
 namespace
@@ -376,6 +391,10 @@ void PBRWater::SanitizeSettings()
 	clamp(s.FoamRoughnessModifier, 0.0f, Huge, d.FoamRoughnessModifier);
 	clamp(s.FoamFeather, 0.001f, 0.5f, d.FoamFeather);
 	clamp(s.FoamBubbleSize, 0.01f, 100.0f, d.FoamBubbleSize);
+	clamp(s.SprayAmount, 0.0f, 100.0f, d.SprayAmount);
+	clamp(s.SprayRange, 16.0f, 2000.0f, d.SprayRange);
+	for (auto& emitter : s.SprayEmitters)
+		SprayParticles::Sanitize(emitter);
 	clamp(s.RippleExtent, 4.0f, 2000.0f, d.RippleExtent);
 	clamp(s.RippleHeight, 0.0f, 5.0f, d.RippleHeight);
 	clamp(s.RippleNormalStrength, 0.0f, 100.0f, d.RippleNormalStrength);
@@ -402,6 +421,7 @@ void PBRWater::SanitizeSettings()
 	s.FlowPeriodMax = std::max(s.FlowPeriodMax, s.FlowPeriodMin);
 	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
+	s.SprayQuality = std::clamp(s.SprayQuality, 0, 2);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
 	s.DebugView = std::clamp(s.DebugView, 0, 14);
 }
@@ -414,6 +434,141 @@ void PBRWater::SaveSettings(json& o_json)
 void PBRWater::RestoreDefaultSettings()
 {
 	settings = {};
+}
+
+void PBRWater::DrawSpraySettings()
+{
+	auto& s = settings;
+	Util::CheckboxTip(T(TKEY("enable_spray"), "Sea Spray"), &s.EnableSpray,
+		T(TKEY("enable_spray_tooltip"), "Breakers throw splashes, droplets and mist into the air, and the open sea's whitecaps throw spray that a strong wind tears off the crests. Drawn with the game's own effect textures."));
+	if (!s.EnableSpray)
+		return;
+	Util::SliderFloatTip(T(TKEY("spray_amount"), "Spray Amount"), &s.SprayAmount, 0.0f, 3.0f, "%.2f",
+		T(TKEY("spray_amount_tooltip"), "Scales how many particles every emitter makes. Default 1."));
+	Util::SliderFloatTip(T(TKEY("spray_range"), "Spray Range"), &s.SprayRange, 32.0f, 512.0f, "%.0f m",
+		T(TKEY("spray_range_tooltip"), "Distance from the camera within which the waves throw spray. A larger range samples the waves more coarsely. Default 128 m."), ImGuiSliderFlags_Logarithmic);
+	{
+		const char* qualities[] = { T(TKEY("spray_quality_low"), "Low (16k particles)"), T(TKEY("spray_quality_medium"), "Medium (64k particles)"), T(TKEY("spray_quality_high"), "High (128k particles)") };
+		ImGui::Combo(T(TKEY("spray_quality"), "Spray Particles"), &s.SprayQuality, qualities, IM_ARRAYSIZE(qualities));
+		Util::HoverTip(T(TKEY("spray_quality_tooltip"), "The most spray particles alive at once. When a storm asks for more, the oldest go first."));
+	}
+	if (const auto status = spray.GetStatus(); !status.empty())
+		ImGui::TextWrapped("%s", status.c_str());
+	if (Util::Button(T(TKEY("spray_reset_all"), "Reset All Emitters")))
+		s.SprayEmitters = SprayParticles::DefaultEmitters();
+
+	ImGui::SeparatorText(T(TKEY("spray_emitters"), "Emitters"));
+	const char* sources[] = {
+		T(TKEY("spray_source_plunge"), "Plunging breaker"),
+		T(TKEY("spray_source_roller"), "Broken wave's roller"),
+		T(TKEY("spray_source_surf"), "Surf on the beach"),
+		T(TKEY("spray_source_whitecap"), "Open sea whitecaps"),
+		T(TKEY("spray_source_spindrift"), "Spindrift (strong wind)"),
+	};
+	const char* textures[] = {
+		T(TKEY("spray_texture_splash"), "Splash (fxsplash01sub)"),
+		T(TKEY("spray_texture_splash_white"), "White splash (fxsplash02sub)"),
+		T(TKEY("spray_texture_mist"), "Mist (fxsmokesoftsub)"),
+		T(TKEY("spray_texture_drops"), "Droplets (fluiddrops)"),
+	};
+	const char* names[SprayParticles::EmitterCount] = {
+		T(TKEY("spray_emitter_breaker_splash"), "Breaker Splash"),
+		T(TKEY("spray_emitter_breaker_droplets"), "Breaker Droplets"),
+		T(TKEY("spray_emitter_breaker_mist"), "Breaker Mist"),
+		T(TKEY("spray_emitter_roller_spray"), "Roller Spray"),
+		T(TKEY("spray_emitter_roller_mist"), "Roller Mist"),
+		T(TKEY("spray_emitter_surf_spray"), "Surf Spray"),
+		T(TKEY("spray_emitter_whitecap_spray"), "Whitecap Spray"),
+		T(TKEY("spray_emitter_spindrift"), "Spindrift"),
+	};
+	const auto defaults = SprayParticles::DefaultEmitters();
+	for (uint32_t i = 0; i < SprayParticles::EmitterCount; ++i) {
+		auto& e = s.SprayEmitters[i];
+		ImGui::PushID(static_cast<int>(i));
+		ImGui::Checkbox("##enabled", &e.Enabled);
+		ImGui::SameLine();
+		if (ImGui::CollapsingHeader(names[i])) {
+			ImGui::Combo(T(TKEY("spray_source"), "Source"), &e.SourceKind, sources, IM_ARRAYSIZE(sources));
+			Util::HoverTip(T(TKEY("spray_source_tooltip"), "What makes this emitter's particles: the splash-up where a plunging breaker's lip lands, the churning front of a broken wave, the white water running up the beach, the open sea's breaking crests, or the spray a gale tears off them (from 9 m/s of wind)."));
+			ImGui::Combo(T(TKEY("spray_texture"), "Texture"), &e.Texture, textures, IM_ARRAYSIZE(textures));
+			Util::CheckboxTip(T(TKEY("spray_animate"), "Animate Frames"), &e.Animate,
+				T(TKEY("spray_animate_tooltip"), "Plays the texture's frames over each particle's life, as a splash breaking up. Off: each particle shows one random frame."));
+
+			ImGui::SeparatorText(T(TKEY("spray_emission"), "Emission"));
+			Util::SliderFloatTip(T(TKEY("spray_rate"), "Rate"), &e.Rate, 0.0f, 20.0f, "%.2f /m2/s",
+				T(TKEY("spray_rate_tooltip"), "Particles per square metre per second where the source is at full strength."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_strength_min"), "Threshold"), &e.StrengthMin, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_strength_min_tooltip"), "Source strength below which the emitter makes nothing."));
+			Util::SliderFloatTip(T(TKEY("spray_strength_full"), "Full Strength"), &e.StrengthFull, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_strength_full_tooltip"), "Source strength at which the emitter makes its full rate."));
+			Util::SliderFloatTip(T(TKEY("spray_max_distance"), "Max Distance"), &e.MaxDistance, 10.0f, 1000.0f, "%.0f m",
+				T(TKEY("spray_max_distance_tooltip"), "The farthest from the camera these particles are made and drawn."), ImGuiSliderFlags_Logarithmic);
+
+			ImGui::SeparatorText(T(TKEY("spray_launch"), "Launch"));
+			Util::SliderFloatTip(T(TKEY("spray_speed"), "Speed"), &e.Speed, 0.0f, 15.0f, "%.2f m/s",
+				T(TKEY("spray_speed_tooltip"), "Launch speed. For shore sources this is for a 1 m wave; it grows with the square root of the wave's height."));
+			Util::SliderFloatTip(T(TKEY("spray_speed_variation"), "Speed Variation"), &e.SpeedVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_speed_variation_tooltip"), "Random share of the speed, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_declination"), "Declination"), &e.Declination, 0.0f, 120.0f, "%.0f deg",
+				T(TKEY("spray_declination_tooltip"), "Angle from straight up, tilted towards the waves' travel (out at sea, the wind)."));
+			Util::SliderFloatTip(T(TKEY("spray_declination_variation"), "Declination Variation"), &e.DeclinationVariation, 0.0f, 90.0f, "%.0f deg",
+				T(TKEY("spray_declination_variation_tooltip"), "Random spread of the declination, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_planar_spread"), "Sideways Spread"), &e.PlanarSpread, 0.0f, 180.0f, "%.0f deg",
+				T(TKEY("spray_planar_spread_tooltip"), "How far either side of the waves' travel the particles may fly."));
+			Util::SliderFloatTip(T(TKEY("spray_inherit_wave"), "Wave Speed Carried"), &e.InheritWave, 0.0f, 1.5f, "%.2f",
+				T(TKEY("spray_inherit_wave_tooltip"), "Share of the wave's own speed the particles keep along its travel."));
+			Util::SliderFloatTip(T(TKEY("spray_inherit_wind"), "Wind Carried"), &e.InheritWind, 0.0f, 1.5f, "%.2f",
+				T(TKEY("spray_inherit_wind_tooltip"), "Share of the wind's speed the particles start with."));
+			Util::SliderFloatTip(T(TKEY("spray_start_height"), "Start Height"), &e.StartHeight, -0.5f, 2.0f, "%.2f m",
+				T(TKEY("spray_start_height_tooltip"), "Height above the water the particles start at."));
+
+			ImGui::SeparatorText(T(TKEY("spray_life_size"), "Life and Size"));
+			Util::SliderFloatTip(T(TKEY("spray_life"), "Lifespan"), &e.LifeSpan, 0.1f, 10.0f, "%.2f s",
+				T(TKEY("spray_life_tooltip"), "How long a particle lives, unless it falls back into the water first."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_life_variation"), "Lifespan Variation"), &e.LifeVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_life_variation_tooltip"), "Random share of the lifespan, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_radius"), "Radius"), &e.Radius, 0.01f, 5.0f, "%.2f m",
+				T(TKEY("spray_radius_tooltip"), "Half the width of a particle at birth."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_radius_variation"), "Radius Variation"), &e.RadiusVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_radius_variation_tooltip"), "Random share of the radius, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_end_size"), "End Size"), &e.EndSize, 0.0f, 6.0f, "%.2f x",
+				T(TKEY("spray_end_size_tooltip"), "Size at the end of life, relative to the start: spray spreads as it flies."));
+			Util::SliderFloatTip(T(TKEY("spray_grow_time"), "Grow Time"), &e.GrowTime, 0.0f, 2.0f, "%.2f s",
+				T(TKEY("spray_grow_time_tooltip"), "Time a particle takes to grow from nothing."));
+			Util::SliderFloatTip(T(TKEY("spray_fade_time"), "Fade Time"), &e.FadeTime, 0.0f, 5.0f, "%.2f s",
+				T(TKEY("spray_fade_time_tooltip"), "Time a particle takes to fade out at the end of its life."));
+			Util::SliderFloatTip(T(TKEY("spray_fade_in"), "Fade In"), &e.FadeIn, 0.0f, 0.5f, "%.2f",
+				T(TKEY("spray_fade_in_tooltip"), "Share of its life a particle takes to fade in."));
+
+			ImGui::SeparatorText(T(TKEY("spray_motion"), "Motion"));
+			Util::SliderFloatTip(T(TKEY("spray_gravity"), "Gravity"), &e.Gravity, 0.0f, 2.0f, "%.2f g",
+				T(TKEY("spray_gravity_tooltip"), "Gravity on the particles. Mist hangs in the air (near 0)."));
+			Util::SliderFloatTip(T(TKEY("spray_drag"), "Air Drag"), &e.Drag, 0.0f, 5.0f, "%.3f /m",
+				T(TKEY("spray_drag_tooltip"), "Quadratic air drag towards the wind. Droplets fly almost freely (about 0.0002 / radius); mist is held in the air and drifts with the wind (1 and more)."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_rotation_speed"), "Spin"), &e.RotationSpeed, 0.0f, 180.0f, "%.0f deg/s",
+				T(TKEY("spray_rotation_speed_tooltip"), "How fast the particles turn, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_rotation_variation"), "Spin Variation"), &e.RotationVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_rotation_variation_tooltip"), "Random share of the spin, either way."));
+
+			ImGui::SeparatorText(T(TKEY("spray_look"), "Look"));
+			ImGui::ColorEdit3(T(TKEY("spray_color"), "Colour"), reinterpret_cast<float*>(&e.Color));
+			Util::SliderFloatTip(T(TKEY("spray_alpha"), "Opacity"), &e.Alpha, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_alpha_tooltip"), "Opacity of a particle at full strength."));
+			Util::SliderFloatTip(T(TKEY("spray_lighting"), "Lighting Influence"), &e.LightingInfluence, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_lighting_tooltip"), "1 lights the particles by the sun and sky like the vanilla particles; 0 draws them unlit."));
+			Util::SliderFloatTip(T(TKEY("spray_forward_scattering"), "Sun Glow"), &e.ForwardScattering, 0.0f, 0.9f, "%.2f",
+				T(TKEY("spray_forward_scattering_tooltip"), "How much brighter spray seen against the sun glows (forward scattering of the droplets)."));
+			Util::SliderFloatTip(T(TKEY("spray_additive"), "Additive"), &e.Additive, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_additive_tooltip"), "0 blends the particles over the scene, 1 adds their light to it."));
+			Util::SliderFloatTip(T(TKEY("spray_soft_depth"), "Soft Edge Depth"), &e.SoftDepth, 0.0f, 5.0f, "%.2f m",
+				T(TKEY("spray_soft_depth_tooltip"), "Depth over which a particle fades where it meets the water or the ground."));
+			Util::SliderFloatTip(T(TKEY("spray_motion_stretch"), "Motion Stretch"), &e.MotionStretch, 0.0f, 0.1f, "%.3f s",
+				T(TKEY("spray_motion_stretch_tooltip"), "Draws each particle out along its motion over this much time, like a streak of falling water."));
+			if (Util::Button(T(TKEY("spray_reset_emitter"), "Reset Emitter")))
+				e = defaults[i];
+		}
+		ImGui::PopID();
+	}
 }
 
 void PBRWater::DrawSettings()
@@ -622,6 +777,12 @@ void PBRWater::DrawSettings()
 		ImGui::EndTabItem();
 	}
 
+	if (ImGui::BeginTabItem(T(TKEY("tab_spray"), "Spray"))) {
+		IdScope id("spray");
+		DrawSpraySettings();
+		ImGui::EndTabItem();
+	}
+
 	if (ImGui::BeginTabItem(T(TKEY("tab_ripples"), "Ripples & Rivers"))) {
 		IdScope id("ripples");
 		Util::CheckboxTip(T(TKEY("enable_ripples"), "Interactive Ripples"), &s.EnableRipples,
@@ -810,6 +971,7 @@ void PBRWater::SetupResources()
 
 	ripples.SetupResources();
 	swash.SetupResources();
+	spray.SetupResources();
 
 	// The Skylighting occluder: a camera-centred grid of (OccluderQuads + 1)^2 vertices made by the vertex shader.
 	{
@@ -929,6 +1091,7 @@ void PBRWater::ClearShaderCache()
 {
 	ripples.ClearShaderCache();
 	swash.ClearShaderCache();
+	spray.ClearShaderCache();
 	CompileOccluder();
 	CompileSurfaceNoise();
 	ocean.ClearShaderCache();
@@ -1148,6 +1311,7 @@ void PBRWater::Prepass()
 	UpdateFrameConstants();
 	UpdateSurfaceNoise();
 	UpdateSwash(dt);
+	UpdateSpray(dt);
 	ApplyCameraWater();
 }
 
@@ -1285,6 +1449,86 @@ void PBRWater::UpdateSwash(float dt)
 	// Lit terrain and objects read the wet sand, the foam on it and the water height from it.
 	ID3D11ShaderResourceView* wetSrv = swash.IsReady() ? swash.GetWetSRV() : nullptr;
 	context->PSSetShaderResources(123, 1, &wetSrv);
+}
+
+uint32_t PBRWater::SprayPoolSize() const
+{
+	constexpr uint32_t sizes[3] = { 16384, 65536, 131072 };
+	return sizes[std::clamp(settings.SprayQuality, 0, 2)];
+}
+
+void PBRWater::UpdateSpray(float dt)
+{
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (!gpuBuffer || !settings.EnableSpray || !spray.IsReady() || !snap || !snap->exterior || !globals::shaderCache->IsEnabled()) {
+		PBRWaterProfiling::Skipped("PBRWater::SprayEmit");
+		PBRWaterProfiling::Skipped("PBRWater::SpraySim");
+		return;
+	}
+
+	// The emit pass evaluates the waves as the draws do: this frame's constants, textures and the surf's state.
+	auto context = globals::d3d::context;
+	GpuData d = frameData;
+	d.Tess0.x = 0.0f;
+	gpuBuffer->Update(d);
+	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
+	context->CSSetConstantBuffers(7, 1, cbs);
+	ID3D11Buffer* frameBuffers[1] = { *globals::game::perFrame.get() };
+	context->CSSetConstantBuffers(12, 1, frameBuffers);
+	ID3D11ShaderResourceView* srvs[WaterSRVCount];
+	GatherWaterSRVs(d, srvs);
+	context->CSSetShaderResources(110, WaterSRVCount, srvs);
+	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
+	context->CSSetSamplers(12, 2, samplers);
+
+	const auto& cameraPos = globals::game::frameBufferCached.GetCameraPosAdjust();
+	SprayParticles::FrameInput input;
+	input.dt = dt;
+	const float windSpeed = d.Params0.y;
+	input.windSpeed = windSpeed;
+	input.windVelocity = { d.Params1.x * windSpeed * UnitsPerMetre, d.Params1.y * windSpeed * UnitsPerMetre };
+	input.gravity = d.Params0.w;
+	input.cameraX = cameraPos.x;
+	input.cameraY = cameraPos.y;
+	input.cellSize = CellSize;
+	input.cellX = std::floor(cameraPos.x / CellSize);
+	input.cellY = std::floor(cameraPos.y / CellSize);
+	OccluderCB levels{};
+	FillOccluderLevels(levels, input.cellX, input.cellY);
+	for (size_t i = 0; i < input.cellLevels.size(); ++i)
+		input.cellLevels[i] = levels.cellLevels[i].x;
+
+	SprayParticles::Settings spraySettings;
+	spraySettings.emitters = &settings.SprayEmitters;
+	spraySettings.amount = settings.SprayAmount;
+	spraySettings.range = settings.SprayRange;
+	spraySettings.poolSize = SprayPoolSize();
+	spray.Update(input, spraySettings);
+
+	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
+	context->CSSetShaderResources(110, WaterSRVCount, nullSrvs);
+	ID3D11Buffer* nullCbs[1] = { nullptr };
+	context->CSSetConstantBuffers(7, 1, nullCbs);
+	ID3D11SamplerState* nullSamplers[2] = { nullptr, nullptr };
+	context->CSSetSamplers(12, 2, nullSamplers);
+}
+
+void PBRWater::DrawSpray()
+{
+	if (!loaded || !settings.EnableSpray || !spray.IsReady() || !globals::shaderCache->IsEnabled())
+		return;
+	auto* state = globals::state;
+	if (sprayDrawFrame == state->frameCount)
+		return;
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (!snap || !snap->exterior)
+		return;
+	// From under the water the surface hides it.
+	if (const auto* water = RE::TESWaterSystem::GetSingleton(); water && water->playerUnderwater)
+		return;
+	sprayDrawFrame = state->frameCount;
+	auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	spray.Draw(depth);
 }
 
 PBRWater::SharedSettings PBRWater::GetCommonBufferData() const
@@ -2150,6 +2394,9 @@ void PBRWater::MainThreadUpdate()
 
 	GatherInteractions(*published, dt);
 
+	if (settings.EnableSpray)
+		spray.LoadTextures();
+
 	FloatingObjects::Settings floatingSettings;
 	floatingSettings.enabled = settings.EnableFloatingObjects && globals::shaderCache->IsEnabled();
 	floatingSettings.range = settings.FloatingRange * UnitsPerMetre;
@@ -2565,6 +2812,9 @@ void PBRWater::PostPostLoad()
 	// Same Main::Update call site Grass Collision uses; write_thunk_call chains with it.
 	stl::write_thunk_call<MainUpdate>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
 
+	// The world's effects pass (Frame Annotations' "Effects"); Detours chains with its detour.
+	stl::detour_thunk<BSShaderAccumulator_RenderEffects>(REL::RelocationID(99940, 106585));
+
 	logger::info("[PBR Water] Installed hooks");
 }
 
@@ -2639,6 +2889,15 @@ void PBRWater::BSWaterShader_RestoreTechnique::thunk(RE::BSShader* waterShader, 
 {
 	func(waterShader, technique);
 	globals::features::pbrWater.EndDrawBatch();
+}
+
+void PBRWater::BSShaderAccumulator_RenderEffects::thunk(RE::BSShaderAccumulator* accumulator, uint32_t renderFlags)
+{
+	// The main view's world pass only: not the reflections, the cubemaps or the first person view.
+	const auto* state = globals::state;
+	if (state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections)))
+		globals::features::pbrWater.DrawSpray();
+	func(accumulator, renderFlags);
 }
 
 #undef I18N_KEY_PREFIX
