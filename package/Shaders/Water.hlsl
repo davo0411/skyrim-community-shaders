@@ -207,8 +207,7 @@ cbuffer PerGeometry : register(b2)
 };
 
 #		if defined(PBR_WATER)
-SamplerState FlowMapSamplerVS : register(s8);
-Texture2D<float4> FlowMapTexVS : register(t8);
+#			include "PBRWater/VertexWaves.hlsli"
 
 /// Inverse of the linear (rotation/scale) part of a world matrix: maps world offsets to model space.
 float3x3 InverseLinear(float4x4 m)
@@ -220,31 +219,18 @@ float3x3 InverseLinear(float4x4 m)
 	float det = dot(a[0], c0);
 	return transpose(float3x3(c0, c1, c2)) / det;
 }
-
-/**
- * River current flattens the open-water waves. The worldspace flowmap is looked up by world position,
- * not by mesh UVs: the stencil pass (depth and motion vectors) is compiled without FLOWMAP and must
- * displace the surface exactly like the colour pass, and neighbouring meshes must agree on shared edges.
- * The same sample gives the current the waves are carried along (PBRWater::FlowPhases).
- */
-float GetWaveFlowDamping(float3 positionWS, out float2 velocity)
-{
-	velocity = 0.0;
-	if (PBRWater::Flow0.x == 0.0)
-		return 1.0;
-	float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
-	float4 flow = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
-	velocity = PBRWater::FlowVelocity(flow);
-	return 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
-}
 #		endif
 
 /**
- * The complete water vertex program. Runs in the vertex shader for regular draws and in the
- * domain shader for every tessellated vertex, so both paths produce bit-identical attributes.
- * @param spacing local vertex spacing in world units (for wave Nyquist filtering)
+ * The water vertex program after the waves: everything but their evaluation. Runs in the vertex shader for regular
+ * draws, with the waves just evaluated (WaterVertex) or as the compute tessellator evaluated them for this frame
+ * (CachedWaterVertex), and in the hardware path's domain shader, so every path produces the same attributes.
  */
-VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
+#		if defined(PBR_WATER)
+VS_OUTPUT WaterVertexWith(VS_INPUT input, PBRWater::VertexWaves waves)
+#		else
+VS_OUTPUT WaterVertexWith(VS_INPUT input)
+#		endif
 {
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
 
@@ -256,20 +242,13 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 
 #		if defined(PBR_WATER)
 	{
-		float2 flowVelocity;
-		float flowDamping = GetWaveFlowDamping(scrollWorldPos.xyz, flowVelocity);
-#			if defined(STENCIL)
-		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, flowVelocity, spacing, true);
-#			else
-		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, flowVelocity, spacing, false);
-#			endif
 		float3x3 worldToModel = InverseLinear(World);
-		previousInputPosition.xyz += mul(worldToModel, surface.previous);
-		inputPosition.xyz += mul(worldToModel, surface.current);
-		vsout.ShoreState = surface.shore;
+		previousInputPosition.xyz += mul(worldToModel, waves.surface.previous);
+		inputPosition.xyz += mul(worldToModel, waves.surface.current);
+		vsout.ShoreState = waves.surface.shore;
 #			if !defined(STENCIL)
-		vsout.WaveParam = float4(scrollWorldPos.xyz, flowDamping);
-		vsout.FlowVelocity = flowVelocity;
+		vsout.WaveParam = float4(scrollWorldPos.xyz, waves.flowDamping);
+		vsout.FlowVelocity = waves.flowVelocity;
 		float2 absXY = scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy;
 		vsout.SurfaceNoise = PBRWater::SurfaceNoise(absXY);
 		vsout.Barycentric = 1.0 / 3.0;
@@ -407,6 +386,24 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 	return vsout;
 }
 
+/**
+ * The complete water vertex program: the waves at this vertex, then the rest (WaterVertexWith).
+ * @param spacing local vertex spacing in world units (for wave Nyquist filtering)
+ */
+VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
+{
+#		if defined(PBR_WATER)
+	PBRW_PRECISE float4 scrollWorldPos = mul(World, float4(input.Position.xyz, 1.0));
+#			if defined(STENCIL)
+	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, spacing, true));
+#			else
+	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, spacing, false));
+#			endif
+#		else
+	return WaterVertexWith(input);
+#		endif
+}
+
 #	endif  // VSHADER || HSHADER || DSHADER
 
 #	if defined(PBR_WATER) && defined(PBRW_TESSELLATION) && (defined(VSHADER) || defined(HSHADER) || defined(DSHADER))
@@ -455,14 +452,48 @@ struct HS_CONSTANT_OUTPUT
 #	endif
 
 #	if defined(VSHADER)
-VS_OUTPUT main(VS_INPUT input)
-{
 #		if defined(PBR_WATER) && defined(PBRW_TESSELLATION)
+#			include "PBRWater/ComputeTessellation.hlsli"
+
+// The compute tessellator's vertices this frame (WaterTessellator): read by SV_VertexID, the draw's own index buffer.
+StructuredBuffer<PBRWaterTess::Vertex> TessellatedVertices : register(t109);
+
+/// A vertex the compute tessellator made and evaluated the waves of this frame: only the cheap rest of the program runs.
+VS_OUTPUT CachedWaterVertex(uint vertexID)
+{
+	PBRWaterTess::Vertex t = TessellatedVertices[vertexID];
+	VS_INPUT v = (VS_INPUT)0;
+	v.Position = float4(t.position, 1.0);
+#			if defined(NORMAL_TEXCOORD)
+	v.TexCoord0 = float2(t.texCoordX, t.texCoordY);
+#			endif
+#			if defined(VC)
+	v.Color = float4(f16tof32(t.color.x), f16tof32(t.color.x >> 16), f16tof32(t.color.y), f16tof32(t.color.y >> 16));
+#			endif
+	PBRWater::VertexWaves waves;
+	waves.surface.current = t.current;
+	waves.surface.previous = t.previous;
+	waves.surface.shore = t.shore;
+	waves.flowDamping = t.flowDamping;
+	waves.flowVelocity = t.flowVelocity;
+	return WaterVertexWith(v, waves);
+}
+
+VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID)
+{
+	// Tess0.x: 0 untessellated, 1 hardware tessellation (control points), 2 the compute tessellator's vertices.
+	if (PBRWater::Tess0.x > 1.5)
+		return CachedWaterVertex(vertexID);
 	if (PBRWater::Tess0.x > 0.5)
 		return PackControlPoint(input);
-#		endif
 	return WaterVertex(input, PBR_WATER_SPACING);
 }
+#		else
+VS_OUTPUT main(VS_INPUT input)
+{
+	return WaterVertex(input, PBR_WATER_SPACING);
+}
+#		endif
 #	endif
 
 #	if defined(PBR_WATER) && defined(PBRW_TESSELLATION) && (defined(HSHADER) || defined(DSHADER))

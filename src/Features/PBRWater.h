@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "PBRWater/ComputeTessellation.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
 #include "PBRWater/OceanSimulation.h"
@@ -162,6 +163,7 @@ struct PBRWater : Feature
 
 		// Performance
 		bool EnableTessellation = true;
+		bool ComputeTessellation = true;         ///< subdivide on the CPU and evaluate once a frame (WaterTessellator) instead of in the hull/domain shaders
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
 		float TessellationMaxFactor = 32.0f;
 		float DisplacementFadeStart = 16384.0f;  ///< units
@@ -406,6 +408,10 @@ private:
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
 	std::unique_ptr<ConstantBuffer> drawBuffer;      ///< this frame's constants for the tessellated water draws
 	std::unique_ptr<ConstantBuffer> flatDrawBuffer;  ///< and for the rest
+	std::unique_ptr<ConstantBuffer> cachedDrawBuffer;  ///< and for the draws of the compute tessellator's mesh (Tess0.x = 2)
+	WaterTessellator tessellator;
+	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */
+	void UpdateTessellation();
 	GpuData frameData{};
 	ID3D11ShaderResourceView* worldFlowmap = nullptr;  ///< render thread: Unified Water's worldspace flowmap (not owned)
 	uint32_t frameDataFrame = UINT32_MAX;
@@ -508,12 +514,17 @@ private:
 	bool tessellationBound = false;
 	bool geometryShaderBound = false;
 	bool tessellationFailureLogged = false;
+	/// The compute tessellator's range for the current draw, issued in RestoreDraw once the engine's state is bound.
+	bool cachedDrawPending = false;
+	uint32_t cachedDrawStart = 0;
+	uint32_t cachedDrawCount = 0;
 	/// The water draws of one frame, for the Debug section.
 	struct DrawStats
 	{
 		uint32_t draws = 0;
 		uint32_t tessellated = 0;
-		uint32_t patches = 0;          ///< triangles of the tessellated draws: the tessellator's patches
+		uint32_t patches = 0;          ///< triangles of the hardware-tessellated draws: the tessellator's patches
+		uint32_t computeDraws = 0;     ///< tessellated draws of the compute tessellator's mesh
 		uint32_t byTechnique[6] = {};  ///< draws per technique (DrawPassIndex)
 	};
 	GpuData uploadedDrawData{};                              ///< what the draw buffers hold

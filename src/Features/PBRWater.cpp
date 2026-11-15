@@ -116,6 +116,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
+		ComputeTessellation,
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
@@ -230,6 +231,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
+		ComputeTessellation,
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
@@ -857,10 +859,18 @@ void PBRWater::DrawSettings()
 		}
 		Util::CheckboxTip(T(TKEY("enable_tessellation"), "Tessellation"), &s.EnableTessellation,
 			T(TKEY("enable_tessellation_tooltip"), "Subdivides the water mesh on the GPU so waves are real geometry. Without it, waves are limited by the mesh resolution."));
+		{
+			Util::DisableGuard disabled(!s.EnableTessellation);
+			Util::CheckboxTip(T(TKEY("compute_tessellation"), "Compute Tessellation"), &s.ComputeTessellation,
+				T(TKEY("compute_tessellation_tooltip"), "Subdivides the water adaptively once a frame and evaluates each vertex's waves once, for every pass that draws the water. Much faster than the hardware tessellator, which repeats the waves in every pass. Off: the hardware tessellator."));
+		}
 		Util::SliderFloatTip(T(TKEY("tessellation_triangle_size"), "Target Triangle Size"), &s.TessellationTriangleSize, 4.0f, 40.0f, "%.0f px",
 			T(TKEY("tessellation_triangle_size_tooltip"), "Smaller values give smoother waves at a higher GPU cost. Scales automatically with the render resolution. Default 10 px."));
-		Util::SliderFloatTip(T(TKEY("tessellation_max_factor"), "Maximum Tessellation"), &s.TessellationMaxFactor, 4.0f, 64.0f, "%.0f",
-			T(TKEY("tessellation_max_factor_tooltip"), "The most a single patch is subdivided. The hardware limit is 64. Default 32."));
+		{
+			Util::DisableGuard disabled(s.EnableTessellation && s.ComputeTessellation);
+			Util::SliderFloatTip(T(TKEY("tessellation_max_factor"), "Maximum Tessellation"), &s.TessellationMaxFactor, 4.0f, 64.0f, "%.0f",
+				T(TKEY("tessellation_max_factor_tooltip"), "The most a single patch is subdivided by the hardware tessellator. The hardware limit is 64. Default 32. The compute tessellator has no such limit."));
+		}
 		Util::SliderFloatTip(T(TKEY("displacement_fade_start"), "Wave Fade Start"), &s.DisplacementFadeStart, 2000.0f, 60000.0f, "%.0f units",
 			T(TKEY("displacement_fade_start_tooltip"), "Distance at which the waves start to flatten towards the game's flat distant water (70 units are a metre). Default 16384 units."));
 		Util::SliderFloatTip(T(TKEY("displacement_fade_end"), "Wave Fade End"), &s.DisplacementFadeEnd, 4000.0f, 120000.0f, "%.0f units",
@@ -897,7 +907,11 @@ void PBRWater::DrawSettings()
 			ImGui::Text("Mean square slope %.3f", o.meanSquareSlope);
 			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
-		ImGui::Text("Water draws last frame: %u, %u tessellated with %u patches", lastDrawStats.draws, lastDrawStats.tessellated, lastDrawStats.patches);
+		ImGui::Text("Water draws last frame: %u, %u tessellated (%u from the compute mesh, the rest with %u hardware patches)", lastDrawStats.draws, lastDrawStats.tessellated, lastDrawStats.computeDraws, lastDrawStats.patches);
+		{
+			const auto& t = tessellator.GetStats();
+			ImGui::Text("Compute tessellation: %u meshes, %u triangles in view, %u leaves, %u vertices, %u triangles (CPU %.3f ms)", t.meshes, t.baseTriangles, t.leaves, t.vertices, t.triangles, t.cpuMs);
+		}
 		{
 			const auto& n = lastDrawStats.byTechnique;
 			ImGui::Text("  surface %u, point lights %u, underwater %u, LOD %u, stencil %u, simple %u", n[0], n[1], n[2], n[3], n[4], n[5]);
@@ -958,6 +972,8 @@ void PBRWater::SetupResources()
 		}
 	}
 	flatDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::FlatDrawConstants");
+	cachedDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::CachedDrawConstants");
+	tessellator.SetupResources();
 
 	D3D11_SAMPLER_DESC samplerDesc{};
 	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1104,6 +1120,7 @@ void PBRWater::ClearShaderCache()
 	CompileSurfaceNoise();
 	ocean.ClearShaderCache();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
+	tessellator.CompileShaders();
 	tessellationFailureLogged = false;
 }
 
@@ -1320,7 +1337,82 @@ void PBRWater::Prepass()
 	UpdateSurfaceNoise();
 	UpdateSwash(dt);
 	UpdateSpray(dt);
+	UpdateTessellation();
 	ApplyCameraWater();
+}
+
+void PBRWater::UpdateTessellation()
+{
+	if (!gpuBuffer || !settings.EnableTessellation || !settings.ComputeTessellation || !tessellator.IsReady() || !globals::shaderCache->IsEnabled()) {
+		tessellator.Reset();
+		PBRWaterProfiling::Skipped("PBRWater::Tessellate");
+		return;
+	}
+
+	// The vertices are evaluated as the tessellated draws evaluate them: this frame's constants (tessellated: Tess0.x
+	// set, so the breakers curl), textures, the surf's state and the river flowmap.
+	auto context = globals::d3d::context;
+	GpuData d = frameData;
+	d.Tess0.x = 1.0f;
+	d.Draw0.x = 0.0f;
+	gpuBuffer->Update(d);
+	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
+	context->CSSetConstantBuffers(7, 1, cbs);
+	ID3D11Buffer* frameBuffers[1] = { *globals::game::perFrame.get() };
+	context->CSSetConstantBuffers(12, 1, frameBuffers);
+	ID3D11ShaderResourceView* srvs[WaterSRVCount];
+	GatherWaterSRVs(d, srvs);
+	context->CSSetShaderResources(110, WaterSRVCount, srvs);
+	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
+	context->CSSetShaderResources(8, 1, &flowmap);
+	ID3D11SamplerState* linearClamp = linearClampSampler.get();
+	ID3D11SamplerState* samplers[2] = { linearClamp, oceanSampler.get() };
+	context->CSSetSamplers(12, 2, samplers);
+	context->CSSetSamplers(8, 1, &linearClamp);
+
+	WaterTessellator::FrameParams p;
+	p.frame = globals::state->frameCount;
+	const auto& camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+	p.cameraX = camera.x;
+	p.cameraY = camera.y;
+	p.cameraZ = camera.z;
+	const auto& viewProj = globals::game::frameBufferCached.GetCameraViewProj();
+	for (int r = 0; r < 4; ++r)
+		for (int c = 0; c < 4; ++c)
+			p.viewProj[r][c] = viewProj.m[r][c];
+	p.pixelsPerUnit = d.Tess0.w;
+	p.targetSize = d.Tess0.y;
+	// The waves' reach (PBRWater::DisplacementLimit) and the hull shader's slack for the run-up and the ripples.
+	const float shoreWaves = 2.0f * (std::max(d.Shore1.z, 0.0f) + std::max(d.Shore1.w, 0.0f));
+	p.cullMargin = 2.0f * std::max(d.Params2.z, 0.0f) + shoreWaves * std::max(1.0f, d.Tune4.y / 1.55f) + std::max(d.Shore0.w, 0.0f) + 4.0f * std::max(d.Ripple1.x, 0.0f) + 65.0f;
+	p.fadeStart = d.Params1.z;
+	p.fadeEnd = d.Params1.w;
+	p.grid = d.Grid0;
+	p.ripples = d.Ripple0.w > 0.5f;
+	p.rippleX = d.Ripple0.x;
+	p.rippleY = d.Ripple0.y;
+	p.rippleInvExtent = d.Ripple0.z;
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (d.Shore0.x > 0.5f && snap && snap->shoreField) {
+		p.shore = snap->shoreField.get();
+		p.shoreMinX = d.ShoreMap.x;
+		p.shoreMinY = d.ShoreMap.y;
+		p.shoreInvX = d.ShoreMap.z;
+		p.shoreInvY = d.ShoreMap.w;
+	}
+	p.deepLength = d.Shore3.w;
+	p.curl = d.Shore3.z;
+	p.curlDetail = d.Shore1.y;
+	tessellator.Build(p);
+
+	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
+	context->CSSetShaderResources(110, WaterSRVCount, nullSrvs);
+	context->CSSetShaderResources(8, 1, nullSrvs);
+	ID3D11Buffer* nullCbs[1] = { nullptr };
+	context->CSSetConstantBuffers(7, 1, nullCbs);
+	ID3D11SamplerState* nullSamplers[2] = { nullptr, nullptr };
+	context->CSSetSamplers(12, 2, nullSamplers);
+	context->CSSetSamplers(8, 1, nullSamplers);
 }
 
 void PBRWater::UpdateShoreTextures()
@@ -2034,9 +2126,23 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		       shaderCache->GetPixelShader(*waterShader, state->modifiedPixelDescriptor);
 	};
 
+	// The compute tessellator's mesh is built for the main camera: every pass of the main view draws it (depth and
+	// motion, surface, point lights, underwater), each the same vertices. The other views (reflections, cubemaps, the
+	// map) see the water small or not at all, and draw it untessellated.
+	const bool computeTessellation = settings.ComputeTessellation && tessellator.IsReady();
+	const bool mainView = state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections));
+	bool cached = false;
+	uint32_t cachedStart = 0;
+	uint32_t cachedCount = 0;
+
 	ID3D11HullShader* hullShader = nullptr;
 	ID3D11DomainShader* domainShader = nullptr;
-	if (settings.EnableTessellation && hasWaves && IsTessellatedTechnique(technique) && customShadersLive()) {
+	if (settings.EnableTessellation && hasWaves && IsTessellatedTechnique(technique) && (mainView || !computeTessellation) && customShadersLive()) {
+		if (computeTessellation) {
+			// Next frame's mesh covers this draw; this frame's does if the draw was there last frame too.
+			tessellator.Register(*pass->geometry);
+			cached = tessellator.BuiltFor(state->frameCount, globals::game::frameBufferCached.GetCameraPosAdjust()) && tessellator.Lookup(*pass->geometry, cachedStart, cachedCount);
+		}
 		hullShader = shaderCache->GetHullShader(*waterShader, vertexDescriptor);
 		domainShader = shaderCache->GetDomainShader(*waterShader, vertexDescriptor);
 		// Async compiles are queued on first request, so only a shader still missing well after the
@@ -2051,6 +2157,9 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		}
 	}
 	const bool tessellate = hullShader && domainShader;
+	// The engine still issues its own draw of the mesh: bound with the hull shader in its cached mode it produces nothing,
+	// and the mesh is drawn from the tessellator's buffers in RestoreDraw, with everything the engine bound for it.
+	cached = cached && tessellate;
 
 	ID3D11GeometryShader* geometryShader = nullptr;
 	if (settings.WireframeMode > 0 && !IsStencilTechnique(technique) && customShadersLive())
@@ -2075,7 +2184,10 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	++drawStats.byTechnique[DrawPassIndex(technique)];
 	if (tessellate) {
 		++drawStats.tessellated;
-		drawStats.patches += triangleCount;
+		if (cached)
+			++drawStats.computeDraws;
+		else
+			drawStats.patches += triangleCount;
 	}
 
 	// Most water is flat distant tiles, hundreds of them: anything done per draw is paid hundreds of times per pass. The
@@ -2087,12 +2199,14 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		GpuData drawData = d;
 		drawData.Tess0.x = 1.0f;
 		drawBuffer->Update(drawData);
+		drawData.Tess0.x = 2.0f;
+		cachedDrawBuffer->Update(drawData);
 		drawData.Tess0.x = 0.0f;
 		flatDrawBuffer->Update(drawData);
 		GatherWaterSRVs(d, drawSRVs);
 		drawResourcesFrame = UINT32_MAX;
 	}
-	ID3D11Buffer* cb = tessellate ? drawBuffer->CB() : flatDrawBuffer->CB();
+	ID3D11Buffer* cb = cached ? cachedDrawBuffer->CB() : (tessellate ? drawBuffer->CB() : flatDrawBuffer->CB());
 	if (spacing > 0.0f) {
 		GpuData drawData = d;
 		drawData.Tess0.x = 0.0f;
@@ -2176,6 +2290,9 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		context->HSSetShader(hullShader, nullptr, 0);
 		context->DSSetShader(domainShader, nullptr, 0);
 		tessellationBound = true;
+		cachedDrawPending = cached;
+		cachedDrawStart = cachedStart;
+		cachedDrawCount = cachedCount;
 	}
 
 	if (geometryShader) {
@@ -2258,7 +2375,11 @@ void PBRWater::RestoreDraw()
 		context->DSSetShader(nullptr, nullptr, 0);
 		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		tessellationBound = false;
+		// The engine's draw produced nothing (the hull shader's cached mode): the mesh, with all of the draw's state.
+		if (cachedDrawPending)
+			tessellator.Draw(cachedDrawStart, cachedDrawCount);
 	}
+	cachedDrawPending = false;
 	if (geometryShaderBound) {
 		context->GSSetShader(nullptr, nullptr, 0);
 		geometryShaderBound = false;

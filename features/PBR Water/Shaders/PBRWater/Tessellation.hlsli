@@ -129,6 +129,12 @@ namespace PBRWater
 	HS_CONSTANT_OUTPUT PatchConstants(InputPatch<VS_OUTPUT, 3> patch)
 	{
 		HS_CONSTANT_OUTPUT o;
+		// The compute tessellator draws this mesh itself (WaterTessellator): the engine's own draw of it produces nothing.
+		if (Tess0.x > 1.5) {
+			o.Edge[0] = o.Edge[1] = o.Edge[2] = 0.0;
+			o.Inside = 0.0;
+			return o;
+		}
 		float3 p0 = ControlPointWorld(patch[0]);
 		float3 p1 = ControlPointWorld(patch[1]);
 		float3 p2 = ControlPointWorld(patch[2]);
