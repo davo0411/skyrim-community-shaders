@@ -4,8 +4,8 @@
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Game.hlsli"
 #include "Common/Math.hlsli"
-#include "PBRWater/Noise.hlsli"
 #include "PBRWater/Foam.hlsli"  // Terrain Variation's lattice, when it is installed
+#include "PBRWater/Noise.hlsli"
 
 // ============================================================================
 // PBR Water - shared constants, resources and the wave model.
@@ -14,9 +14,8 @@
 // 4.27 m, each carrying one band of a JONSWAP wind sea plus swell, synthesised every frame on the GPU
 // (OceanSpectrumCS / OceanFFTCS / OceanAssembleCS) into mip-mapped texture arrays. Every consumer samples
 // the same textures with the same per-location weights:
-//   - vertex / domain shader : displacement (current + previous frame for motion vectors), mip by vertex spacing
+//   - vertex shader and the tessellator's compute pass : displacement (current + previous frame for motion vectors), mip by vertex spacing
 //   - pixel shader           : normals and LEAN-filtered roughness, mip by pixel footprint
-//   - hull shader            : curvature for adaptive tessellation
 // The CPU re-synthesises the long-wave cascades from the same coefficients (WaveModel.cpp), so swimming,
 // buoyancy and floating objects follow the rendered surface without any GPU readback.
 //
@@ -53,10 +52,10 @@ namespace PBRWater
 		float4 Cascade1[PBRW_CASCADES];  // x energy-weighted angular frequency (rad/s), y 1 / its Pierson-Moskowitz weight at unlimited fetch, z energy-weighted wavenumber (rad/unit), w unused
 		float4 Params0;                  // x FFT ocean active, y wind speed (m/s), z peak omega at unlimited fetch, w gravity (units/s^2)
 		float4 Params1;                  // xy wind direction, z displacement fade start, w displacement fade end (units)
-		float4 Params2;                  // x choppiness, y unused, z displacement bound (units), w highest mip level
+		float4 Params2;                  // x choppiness, y Water Effects' parallax off (Wave Height above 0), z displacement bound (units), w highest mip level
 		float4 RefCamPos;                // xyz camera position the tile coordinates are relative to, w unused
 		float4 Tess0;                    // x tessellation active for this draw, y target triangle size (px), z max factor, w pixels per unit at distance 1
-		float4 Draw0;                    // x vertex spacing of this draw (units), y wireframe mode, z debug view, w unused
+		float4 Draw0;                    // x vertex spacing of this draw (units), y wireframe mode, z debug view, w the tessellator's budget coarsening of the target size
 		float4 Fetch0;                   // xy grid origin (absolute world units), zw 1 / grid extent (units)
 		float4 Fetch1;                   // x enabled, y direction count, z wind slice coordinate, w fetch outside the grid (m)
 		float4 Terrain0;                 // xy terrain uv scale, zw terrain uv offset
@@ -111,7 +110,7 @@ namespace PBRWater
 	Texture2D<float4> ShoreField1 : register(t120);                     // xy grad tau (s/m, seaward; up the beach: the waterline's), z beach slope (tan) at the waterline, w exposure to the swell
 	Texture2D<float4> ShoreFieldPrevious : register(t122);              // ShoreField0 of the field being replaced (Shore0.y < 1)
 	Texture2D<float2> ShoreRoomTexture : register(t124);                // x 0..1 room for the shore wave train: the width of the water against the wavelength, y the depth a wave's crest answers to (m; ShoreCrestDepth)
-	Texture2D<float2> SurfaceNoiseTexture : register(t126);              // x TurbidityPatches, y WindGust around the camera (SurfaceNoiseCS)
+	Texture2D<float2> SurfaceNoiseTexture : register(t126);             // x TurbidityPatches, y WindGust around the camera (SurfaceNoiseCS)
 	Texture2D<float4> ShoreFoamTexture : register(t127);                // SwashOutCS: x the foam the surf left on the water, y the surf simulation's surface (units above the still water; the bed where dry), z its depth (units), w its foam
 	SamplerState LinearClampSampler : register(s12);
 	SamplerState OceanSampler : register(s13);  // anisotropic, wrap
@@ -266,7 +265,7 @@ namespace PBRWater
 			// straight-edged, right-angled terraces along the LAND grid.
 			float twist = z00 + z11 - z10 - z01;
 			float2 g = float2(1.0 - f.x, f.y);
-			float alongMain = min(f.x, f.y) * (1.0 - max(f.x, f.y));  // split along 00-11
+			float alongMain = min(f.x, f.y) * (1.0 - max(f.x, f.y));   // split along 00-11
 			float alongCross = min(g.x, g.y) * (1.0 - max(g.x, g.y));  // split along 10-01
 			ceiling = lerp(Terrain1.x, Terrain1.y, bilinear + max(twist * alongMain, -twist * alongCross));
 		}
@@ -902,13 +901,13 @@ namespace PBRWater
 	/// One wave of a train, as a point on it sees it.
 	struct ShoreWave
 	{
-		float phase;       // where this point is on the wave: 0 the trough ahead of it, 1 the trough behind
-		float index;       // the wave's number
-		float stage;       // its life, 0 deep water, 0.5 reaching its limit, 1 the bore at the shore
-		float height;      // trough to crest (m)
-		float wavelength;  // here (units)
-		float whelp;       // height (m) of the crests trailing the wave's front (ShoreWhelps); 0 where it has none
-		float whelpLength; // their wavelength (units)
+		float phase;        // where this point is on the wave: 0 the trough ahead of it, 1 the trough behind
+		float index;        // the wave's number
+		float stage;        // its life, 0 deep water, 0.5 reaching its limit, 1 the bore at the shore
+		float height;       // trough to crest (m)
+		float wavelength;   // here (units)
+		float whelp;        // height (m) of the crests trailing the wave's front (ShoreWhelps); 0 where it has none
+		float whelpLength;  // their wavelength (units)
 	};
 
 	/// Height (m) the sea's dominant waves arrive with from deep water, before shoaling. Mirrors the CPU's ShoreDeepHeight.
@@ -1212,17 +1211,31 @@ namespace PBRWater
 		return float2(shape.x + x * lambda, shape.y);
 	}
 
+	/// The grazing angle's floor in the tessellator's density: the waves' slope (WaterTessellator GrazingFloor).
+	static const float TessellationGrazingFloor = 0.1;
+
+	/// The deepest water (m, under a crest) a shore wave can curl in: no curl detail further out. Mirrors PBRWaterModel::ShoreCurlDepth.
+	float ShoreCurlDepth()
+	{
+		float height = ShoreHeightRatio * max(Shore1.z, Shore1.w) * MetresPerUnit * 1.5 * 1.2;
+		return height / ((2.0 / 3.0) * ShoreBreakerLimit * (1.0 - ShoreWindBreaking));
+	}
+
 	/**
 	 * Mesh spacing (units) at camera-relative `positionWS` where the shore waves can curl, or 1e6 where the draw is not
-	 * tessellated (the curl needs the extra triangles the hull shader adds there, Shore1.y). A function of the position
-	 * and the draw only, so the vertices and the pixels of one draw agree on it.
+	 * tessellated (the curl needs the extra triangles the tessellator adds in the surf zone, Shore1.y). The compute
+	 * tessellator's rule (WaterTessellator Factor): the target size coarsened to its vertex budget (Draw0.w), sparser at
+	 * grazing angles, never finer than 128 / Maximum Tessellation. A function of the position and the draw only, so the
+	 * vertices and the pixels of one draw agree on it.
 	 */
 	float ShoreCurlSpacing(float3 positionWS)
 	{
 		if (Tess0.x < 0.5)
 			return 1e6;
-		float target = max(Tess0.y, 1.0) * max(length(positionWS), 1.0) / max(Tess0.w, 1e-3) / max(Shore1.y, 1.0);
-		return max(target, Draw0.x / max(Tess0.z, 1.0));
+		float distance = max(length(positionWS), 1.0);
+		float grazing = min(abs(positionWS.z) / distance + TessellationGrazingFloor, 1.0);
+		float target = max(Tess0.y, 1.0) * max(Draw0.w, 1.0) * distance / max(Tess0.w, 1e-3) / max(Shore1.y, 1.0) * rsqrt(grazing);
+		return max(target, 128.0 / max(Tess0.z, 1.0));
 	}
 
 	/**
@@ -1247,7 +1260,7 @@ namespace PBRWater
 			// The lip needs a few dozen vertices across its wave to hold its shape. Measured against the wave's deep-water
 			// length (Shore3.w), which does not change as it comes in, so a wave keeps its curl all the way to the shore;
 			// against its length here, which shrinks in the shallows, the curl unwound as the wave reached the beach.
-			// Tessellation.hlsli refines the mesh by the same length.
+			// The tessellator refines the mesh by the same length (WaterTessellator Factor).
 			float lipLength = max(wavelength, Shore3.w);
 			float spacing = ShoreCurlSpacing(positionWS);
 			amount = Shore3.z * smoothstep(0.0, 0.3, plunging) * smoothstep(lipLength / 25.0, lipLength / 50.0, spacing);
@@ -1711,7 +1724,7 @@ namespace PBRWater
 		float3 displacement;
 		float3 previous;
 		float dzdx, dzdy, dxdx, dydy, dxdy;
-		float foam;  // the cascades' foam so far, weighted and offset (FftFoam)
+		float foam;           // the cascades' foam so far, weighted and offset (FftFoam)
 		float seaFoam;        // the same with the sea's weights before the shore train's hand-over (BreakerFoamDrawn)
 		float seaFoamWeight;  // the sum of those weights
 		float slopeVariance;

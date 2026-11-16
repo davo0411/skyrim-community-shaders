@@ -22,13 +22,13 @@ namespace HorizonFix
 #	if defined(VSHADER)
 struct VS_INPUT
 {
-	float4 Position: POSITION0;
+	float4 Position : POSITION0;
 };
 #	endif
 
 struct VS_OUTPUT
 {
-	float4 Position: SV_POSITION0;
+	float4 Position : SV_POSITION0;
 };
 
 #	ifdef VSHADER
@@ -48,7 +48,7 @@ typedef VS_OUTPUT PS_INPUT;
 
 struct PS_OUTPUT
 {
-	float4 Color: SV_Target0;
+	float4 Color : SV_Target0;
 };
 
 #	ifdef PSHADER
@@ -83,23 +83,23 @@ PS_OUTPUT main(PS_INPUT input)
 
 #	include "Common/SharedData.hlsli"
 
-#	if defined(VSHADER) || defined(HSHADER) || defined(DSHADER)
+#	if defined(VSHADER)
 struct VS_INPUT
 {
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)
-	float4 Position: POSITION0;
+	float4 Position : POSITION0;
 #			if defined(NORMAL_TEXCOORD)
-	float2 TexCoord0: TEXCOORD0;
+	float2 TexCoord0 : TEXCOORD0;
 #			endif
 #			if defined(VC)
-	float4 Color: COLOR0;
+	float4 Color : COLOR0;
 #			endif
 #		endif
 
 #		if defined(LOD)
-	float4 Position: POSITION0;
+	float4 Position : POSITION0;
 #			if defined(VC)
-	float4 Color: COLOR0;
+	float4 Color : COLOR0;
 #			endif
 #		endif
 };
@@ -108,79 +108,74 @@ struct VS_INPUT
 struct VS_OUTPUT
 {
 #	if defined(SPECULAR) || defined(UNDERWATER)
-	float4 HPosition: SV_POSITION0;
+	float4 HPosition : SV_POSITION0;
 #		if !defined(UNIFIED_WATER)
-	float4 FogParam: COLOR0;
+	float4 FogParam : COLOR0;
 #		endif
-	float4 WPosition: TEXCOORD0;
-	float4 TexCoord1: TEXCOORD1;
-	float4 TexCoord2: TEXCOORD2;
+	float4 WPosition : TEXCOORD0;
+	float4 TexCoord1 : TEXCOORD1;
+	float4 TexCoord2 : TEXCOORD2;
 #		if defined(WADING_RT) || defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP) /*!defined(NORMAL_TEXCOORD) && !defined(BLEND_NORMALS) && !defined(VC)*/)
-	float4 TexCoord3: TEXCOORD3;
+	float4 TexCoord3 : TEXCOORD3;
 #		endif
 #		if defined(FLOWMAP)
-	nointerpolation float2 TexCoord4: TEXCOORD4;
+	nointerpolation float2 TexCoord4 : TEXCOORD4;
 #		endif
 #		if NUM_SPECULAR_LIGHTS == 0
-	float4 MPosition: TEXCOORD5;
+	float4 MPosition : TEXCOORD5;
 #		endif
 #	endif
 
 #	if defined(SIMPLE)
-	float4 HPosition: SV_POSITION0;
-	float4 FogParam: COLOR0;
-	float4 WPosition: TEXCOORD0;
-	float4 TexCoord1: TEXCOORD1;
-	float4 TexCoord2: TEXCOORD2;
-	float4 MPosition: TEXCOORD5;
+	float4 HPosition : SV_POSITION0;
+	float4 FogParam : COLOR0;
+	float4 WPosition : TEXCOORD0;
+	float4 TexCoord1 : TEXCOORD1;
+	float4 TexCoord2 : TEXCOORD2;
+	float4 MPosition : TEXCOORD5;
 #	endif
 
 #	if defined(LOD)
-	float4 HPosition: SV_POSITION0;
-	float4 FogParam: COLOR0;
-	float4 WPosition: TEXCOORD0;
-	float4 TexCoord1: TEXCOORD1;
+	float4 HPosition : SV_POSITION0;
+	float4 FogParam : COLOR0;
+	float4 WPosition : TEXCOORD0;
+	float4 TexCoord1 : TEXCOORD1;
 #	endif
 
 #	if defined(STENCIL)
-	float4 HPosition: SV_POSITION0;
-	float4 WorldPosition: POSITION1;
-	float4 PreviousWorldPosition: POSITION2;
+	float4 HPosition : SV_POSITION0;
+	float4 WorldPosition : POSITION1;
+	float4 PreviousWorldPosition : POSITION2;
 #	endif
 
-	float4 NormalsScale: TEXCOORD8;
+	float4 NormalsScale : TEXCOORD8;
 
 #	if defined(PBR_WATER) && !defined(STENCIL)
-	float4 WaveParam: TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
-	float2 SurfaceNoise: TEXCOORD10;  // x sediment patches (TurbidityPatches), y wind gust factor (WindGust)
-	float3 Barycentric: TEXCOORD11;
-	float2 FlowVelocity: TEXCOORD13;  // the river current (units/s, PBRWater::FlowVelocity), 0 on still water
+	float4 WaveParam : TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
+	float2 SurfaceNoise : TEXCOORD10;  // x sediment patches (TurbidityPatches), y wind gust factor (WindGust)
+	float3 Barycentric : TEXCOORD11;
+	float2 FlowVelocity : TEXCOORD13;  // the river current (units/s, PBRWater::FlowVelocity), 0 on still water
 #	endif
 #	if defined(PBR_WATER)
-	float4 ShoreState: TEXCOORD12;  // x share of the surf simulation, y unused, z the waves without it (units above the still water), w still water level (camera-relative z; DisplaceSurface)
+	float4 ShoreState : TEXCOORD12;  // x share of the surf simulation, y unused, z the waves without it (units above the still water), w still water level (camera-relative z; DisplaceSurface)
 #	endif
 };
 
 #	if defined(PBR_WATER)
 #		include "PBRWater/PBRWater.hlsli"
-// Draws that may be tessellated. LOD water is never tessellated (it is far away and flat).
+// Draws that may be tessellated (the compute tessellator's mesh, WaterTessellator). LOD water never is: it is far away and flat.
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(SIMPLE) || defined(STENCIL)
 #			define PBRW_TESSELLATION
 #		endif
-#		if defined(STENCIL)
-#			define PBRW_RAW_COLOR WorldPosition
-#		else
-#			define PBRW_RAW_COLOR WPosition
-#		endif
 #		define PBR_WATER_SPACING PBRWater::Draw0.x
-// Tessellated and stencil/colour passes must rasterise identical depth: forbid reassociation.
+// The stencil and colour passes must rasterise identical depth: forbid reassociation.
 #		define PBRW_PRECISE precise
 #	else
 #		define PBR_WATER_SPACING 0.0
 #		define PBRW_PRECISE
 #	endif
 
-#	if defined(VSHADER) || defined(HSHADER) || defined(DSHADER)
+#	if defined(VSHADER)
 
 cbuffer PerTechnique : register(b0)
 {
@@ -222,9 +217,9 @@ float3x3 InverseLinear(float4x4 m)
 #		endif
 
 /**
- * The water vertex program after the waves: everything but their evaluation. Runs in the vertex shader for regular
- * draws, with the waves just evaluated (WaterVertex) or as the compute tessellator evaluated them for this frame
- * (CachedWaterVertex), and in the hardware path's domain shader, so every path produces the same attributes.
+ * The water vertex program after the waves: everything but their evaluation. Runs with the waves just evaluated
+ * (WaterVertex) or as the compute tessellator evaluated them for this frame (CachedWaterVertex), so both produce the
+ * same attributes.
  */
 #		if defined(PBR_WATER)
 VS_OUTPUT WaterVertexWith(VS_INPUT input, PBRWater::VertexWaves waves)
@@ -404,52 +399,7 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 #		endif
 }
 
-#	endif  // VSHADER || HSHADER || DSHADER
-
-#	if defined(PBR_WATER) && defined(PBRW_TESSELLATION) && (defined(VSHADER) || defined(HSHADER) || defined(DSHADER))
-// ============================================================================
-// Tessellation (VS -> HS -> tessellator -> DS -> [GS] -> PS)
-//
-// While a draw is tessellated the vertex shader only forwards the raw vertex. The domain shader
-// re-runs WaterVertex() on each generated vertex, so every permutation (including STENCIL, which
-// writes the water mask and motion vectors) gets exactly the attributes a regular draw would.
-// The hull/domain/geometry shaders are compiled per descriptor alongside the vertex shader, which
-// keeps the stage signatures matched for every permutation.
-// ============================================================================
-
-/// Forwards the vertex inputs through VS_OUTPUT fields that exist in every tessellated permutation.
-VS_OUTPUT PackControlPoint(VS_INPUT input)
-{
-	VS_OUTPUT o = (VS_OUTPUT)0;
-	o.HPosition = float4(input.Position.xyz, 1.0);
-#		if defined(NORMAL_TEXCOORD)
-	o.NormalsScale.xy = input.TexCoord0.xy;
-#		endif
-#		if defined(VC)
-	o.PBRW_RAW_COLOR = input.Color;
-#		endif
-	return o;
-}
-
-VS_INPUT UnpackControlPoint(VS_OUTPUT cp)
-{
-	VS_INPUT v = (VS_INPUT)0;
-	v.Position = float4(cp.HPosition.xyz, 1.0);
-#		if defined(NORMAL_TEXCOORD)
-	v.TexCoord0 = cp.NormalsScale.xy;
-#		endif
-#		if defined(VC)
-	v.Color = cp.PBRW_RAW_COLOR;
-#		endif
-	return v;
-}
-
-struct HS_CONSTANT_OUTPUT
-{
-	float Edge[3] : SV_TessFactor;
-	float Inside: SV_InsideTessFactor;
-};
-#	endif
+#	endif  // VSHADER
 
 #	if defined(VSHADER)
 #		if defined(PBR_WATER) && defined(PBRW_TESSELLATION)
@@ -481,11 +431,15 @@ VS_OUTPUT CachedWaterVertex(uint vertexID)
 
 VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID)
 {
-	// Tess0.x: 0 untessellated, 1 hardware tessellation (control points), 2 the compute tessellator's vertices.
-	if (PBRWater::Tess0.x > 1.5)
-		return CachedWaterVertex(vertexID);
+	// Tess0.x: 0 an untessellated draw, 1 the compute tessellator's vertices (PBRWater::RestoreDraw), 2 the engine's own
+	// draw of a mesh the compute tessellator draws instead: every vertex outside the frustum, so it rasterises nothing.
+	if (PBRWater::Tess0.x > 1.5) {
+		VS_OUTPUT culled = (VS_OUTPUT)0;
+		culled.HPosition = float4(2.0, 2.0, 2.0, 1.0);
+		return culled;
+	}
 	if (PBRWater::Tess0.x > 0.5)
-		return PackControlPoint(input);
+		return CachedWaterVertex(vertexID);
 	return WaterVertex(input, PBR_WATER_SPACING);
 }
 #		else
@@ -496,22 +450,9 @@ VS_OUTPUT main(VS_INPUT input)
 #		endif
 #	endif
 
-#	if defined(PBR_WATER) && defined(PBRW_TESSELLATION) && (defined(HSHADER) || defined(DSHADER))
-#		include "PBRWater/Tessellation.hlsli"
-#	endif
-
-#	if defined(DSHADER) && defined(PBRW_TESSELLATION)
-[domain("tri")] VS_OUTPUT main(HS_CONSTANT_OUTPUT patchConstants, float3 barycentric : SV_DomainLocation, const OutputPatch<VS_OUTPUT, 3> patch) {
-	VS_INPUT corners[3] = { UnpackControlPoint(patch[0]), UnpackControlPoint(patch[1]), UnpackControlPoint(patch[2]) };
-	VS_INPUT v = PBRWater::InterpolateVertex(corners, barycentric);
-	return WaterVertex(v, PBRWater::TessellatedSpacing(mul(World, float4(v.Position.xyz, 1.0)).xyz));
-}
-#	endif
-
 #	if defined(GSHADER)
-	// Only bound for the wireframe debug view: tags each triangle corner with its barycentric.
-	[maxvertexcount(3)] void main(triangle VS_OUTPUT input[3], inout TriangleStream<VS_OUTPUT> stream)
-{
+// Only bound for the wireframe debug view: tags each triangle corner with its barycentric.
+[maxvertexcount(3)] void main(triangle VS_OUTPUT input[3], inout TriangleStream<VS_OUTPUT> stream) {
 	[unroll] for (uint i = 0; i < 3; i++)
 	{
 		VS_OUTPUT v = input[i];
@@ -529,12 +470,12 @@ typedef VS_OUTPUT PS_INPUT;
 struct PS_OUTPUT
 {
 #	if defined(UNDERWATER) || defined(SIMPLE) || defined(LOD) || defined(SPECULAR)
-	float4 Lighting: SV_Target0;
+	float4 Lighting : SV_Target0;
 #	endif
 
 #	if defined(STENCIL)
-	float4 WaterMask: SV_Target0;
-	float2 MotionVector: SV_Target1;
+	float4 WaterMask : SV_Target0;
+	float2 MotionVector : SV_Target1;
 #	endif
 };
 
@@ -894,7 +835,13 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	}
 
 #			if defined(WATER_PARALLAX)
-	float2 parallaxOffset = WaterEffects::GetParallaxOffset(input, normalsAmplitude.xyz, normalScalesRcp);
+	float2 parallaxOffset = 0.0;
+#				if defined(PBR_WATER)
+	// With waves the surface is real geometry: the parallax over the normal maps is skipped (PBRWater::Params2.y).
+	const bool parallax = PBRWater::Params2.y < 0.5;
+	[branch] if (parallax)
+#				endif
+		parallaxOffset = WaterEffects::GetParallaxOffset(input, normalsAmplitude.xyz, normalScalesRcp);
 #			endif
 
 #			if defined(FLOWMAP)
@@ -909,13 +856,18 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	PS_INPUT flowmapInput = input;
 	float2 flowmapParallaxOffset = float2(0, 0);
 #				if defined(WATER_PARALLAX) && !defined(LOD)
-	float parallaxAmount = WaterEffects::GetFlowmapParallaxAmount(input, flowmapDimensions, viewDirection);
-	float2 parallaxDir = viewDirection.xy / -viewDirection.z;
-	parallaxDir.y = -parallaxDir.y;
-	float viewDotUp = -viewDirection.z;
-	parallaxDir *= 0.008 * saturate(viewDotUp * 2.0);
-	flowmapInput.TexCoord3.xy = input.TexCoord3.xy + parallaxAmount * parallaxDir;
-	flowmapParallaxOffset = WaterEffects::GetFlowmapParallaxOffset(input, flowmapDimensions, viewDirection, normalsAmplitude.x, normalScalesRcp);
+#					if defined(PBR_WATER)
+	[branch] if (parallax)
+#					endif
+	{
+		float parallaxAmount = WaterEffects::GetFlowmapParallaxAmount(input, flowmapDimensions, viewDirection);
+		float2 parallaxDir = viewDirection.xy / -viewDirection.z;
+		parallaxDir.y = -parallaxDir.y;
+		float viewDotUp = -viewDirection.z;
+		parallaxDir *= 0.008 * saturate(viewDotUp * 2.0);
+		flowmapInput.TexCoord3.xy = input.TexCoord3.xy + parallaxAmount * parallaxDir;
+		flowmapParallaxOffset = WaterEffects::GetFlowmapParallaxOffset(input, flowmapDimensions, viewDirection, normalsAmplitude.x, normalScalesRcp);
+	}
 #				endif
 
 	// Calculate cell blend weights using parallaxed input

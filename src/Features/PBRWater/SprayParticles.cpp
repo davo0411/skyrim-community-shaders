@@ -47,7 +47,7 @@ namespace
 void to_json(nlohmann::json& j, const SprayParticles::Emitter& e)
 {
 	j = nlohmann::json{
-		{ "Enabled", e.Enabled }, { "Source", e.SourceKind }, { "Shape", e.ShapeKind }, { "Softness", e.Softness }, { "Detail", e.Detail },
+		{ "Version", SprayParticles::EmitterVersion }, { "Enabled", e.Enabled }, { "Source", e.SourceKind }, { "Shape", e.ShapeKind }, { "Softness", e.Softness }, { "Detail", e.Detail },
 		{ "Rate", e.Rate }, { "StrengthMin", e.StrengthMin }, { "StrengthFull", e.StrengthFull }, { "MaxDistance", e.MaxDistance },
 		{ "Speed", e.Speed }, { "SpeedVariation", e.SpeedVariation }, { "Declination", e.Declination }, { "DeclinationVariation", e.DeclinationVariation },
 		{ "PlanarSpread", e.PlanarSpread }, { "InheritWave", e.InheritWave }, { "InheritWind", e.InheritWind }, { "StartHeight", e.StartHeight },
@@ -129,45 +129,45 @@ SprayParticles::Emitters SprayParticles::DefaultEmitters()
 	// one droplet; a puff stands for a cloud of them and slows faster; mist, k of a few, hangs and drifts with the wind.
 	const float3 mistColor{ 0.95f, 0.97f, 1.0f };
 	return { {
-		{ .SourceKind = Plunge, .ShapeKind = Puffs, .Softness = 0.3f, .Detail = 0.75f,  // Breaker Sheet
-			.Rate = 20.0f,
+		{ .SourceKind = Plunge, .ShapeKind = Puffs, .Softness = 0.3f, .Detail = 0.5f,  // Breaker Sheet: the splash-up curtain
+			.Rate = 40.0f,
 			.StrengthMin = 0.05f,
-			.StrengthFull = 0.7f,
-			.MaxDistance = 250.0f,
-			.Speed = 4.0f,
+			.StrengthFull = 0.6f,
+			.MaxDistance = 400.0f,
+			.Speed = 5.0f,
 			.SpeedVariation = 0.35f,
-			.Declination = 30.0f,
-			.DeclinationVariation = 20.0f,
-			.PlanarSpread = 50.0f,
-			.InheritWave = 0.5f,
+			.Declination = 12.0f,
+			.DeclinationVariation = 10.0f,
+			.PlanarSpread = 40.0f,
+			.InheritWave = 1.0f,
 			.InheritWind = 0.0f,
-			.StartHeight = 0.1f,
-			.LifeSpan = 0.9f,
-			.LifeVariation = 0.3f,
-			.Radius = 0.18f,
+			.StartHeight = 0.0f,
+			.LifeSpan = 1.6f,
+			.LifeVariation = 0.25f,
+			.Radius = 0.35f,
 			.RadiusVariation = 0.4f,
 			.EndSize = 3.0f,
-			.GrowTime = 0.05f,
-			.FadeTime = 0.4f,
+			.GrowTime = 0.1f,
+			.FadeTime = 0.5f,
 			.FadeIn = 0.0f,
 			.Gravity = 1.0f,
-			.Drag = 0.3f,
+			.Drag = 0.02f,
 			.RotationSpeed = 20.0f,
 			.RotationVariation = 0.6f,
-			.Alpha = 0.55f,
-			.ForwardScattering = 0.55f,
-			.SoftDepth = 0.3f },
+			.Alpha = 0.9f,
+			.ForwardScattering = 0.5f,
+			.SoftDepth = 0.4f},
 		{ .SourceKind = Plunge, .ShapeKind = Droplets,  // Breaker Droplets
 			.Rate = 80.0f,
 			.StrengthMin = 0.1f,
 			.StrengthFull = 0.8f,
 			.MaxDistance = 120.0f,
-			.Speed = 5.5f,
+			.Speed = 6.0f,
 			.SpeedVariation = 0.45f,
-			.Declination = 25.0f,
-			.DeclinationVariation = 20.0f,
-			.PlanarSpread = 60.0f,
-			.InheritWave = 0.5f,
+			.Declination = 18.0f,
+			.DeclinationVariation = 15.0f,
+			.PlanarSpread = 50.0f,
+			.InheritWave = 1.0f,
 			.StartHeight = 0.2f,
 			.LifeSpan = 1.3f,
 			.LifeVariation = 0.3f,
@@ -188,28 +188,28 @@ SprayParticles::Emitters SprayParticles::DefaultEmitters()
 			.StrengthMin = 0.1f,
 			.StrengthFull = 0.8f,
 			.MaxDistance = 300.0f,
-			.Speed = 2.0f,
+			.Speed = 3.5f,
 			.SpeedVariation = 0.4f,
-			.Declination = 20.0f,
-			.DeclinationVariation = 20.0f,
-			.PlanarSpread = 80.0f,
-			.InheritWave = 0.4f,
-			.InheritWind = 0.8f,
-			.StartHeight = 0.4f,
-			.LifeSpan = 4.5f,
+			.Declination = 10.0f,
+			.DeclinationVariation = 10.0f,
+			.PlanarSpread = 60.0f,
+			.InheritWave = 0.7f,
+			.InheritWind = 0.2f,
+			.StartHeight = 0.5f,
+			.LifeSpan = 3.5f,
 			.LifeVariation = 0.3f,
-			.Radius = 0.5f,
+			.Radius = 0.6f,
 			.RadiusVariation = 0.4f,
-			.EndSize = 5.0f,
-			.GrowTime = 0.5f,
-			.FadeTime = 2.5f,
-			.FadeIn = 0.15f,
-			.Gravity = 0.02f,
-			.Drag = 3.0f,
+			.EndSize = 4.0f,
+			.GrowTime = 0.4f,
+			.FadeTime = 2.0f,
+			.FadeIn = 0.1f,
+			.Gravity = 0.15f,
+			.Drag = 0.6f,
 			.RotationSpeed = 8.0f,
 			.RotationVariation = 0.8f,
 			.Color = mistColor,
-			.Alpha = 0.12f,
+			.Alpha = 0.25f,
 			.ForwardScattering = 0.65f,
 			.SoftDepth = 2.0f },
 		{ .SourceKind = Roller, .ShapeKind = Puffs, .Softness = 0.3f, .Detail = 0.75f,  // Roller Spray
@@ -518,6 +518,7 @@ void SprayParticles::ClearShaderCache()
 void SprayParticles::CompileShaders()
 {
 	emitCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SprayEmitCS.hlsl", {}, "cs_5_0")));
+	shoreEmitCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SprayEmitCS.hlsl", { { "SPRAY_SHORE", "" } }, "cs_5_0")));
 	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SpraySimCS.hlsl", {}, "cs_5_0")));
 
 	// The draw shades as the vanilla particles do: the same features' shadows, IBL and Linear Lighting.
@@ -537,7 +538,7 @@ void SprayParticles::CompileShaders()
 	drawVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SprayDraw.hlsl", defines, "vs_5_0", "VSMain")));
 	drawPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SprayDraw.hlsl", defines, "ps_5_0", "PSMain")));
 
-	ready = emitCS && simCS && drawVS && drawPS && particles && alive && counters && drawArgs && emitters && emitCB && simCB;
+	ready = emitCS && shoreEmitCS && simCS && drawVS && drawPS && particles && alive && counters && drawArgs && emitters && emitCB && simCB;
 	if (!ready)
 		logger::warn("[PBR Water] Spray shaders failed to compile; the waves throw no spray");
 }
@@ -613,6 +614,18 @@ void SprayParticles::Update(const FrameInput& input, const Settings& settings)
 		context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
 		context->CSSetConstantBuffers(0, 1, cbs);
 		context->Dispatch(EmitGridSize / 8, EmitGridSize / 8, 1);
+
+		// The breakers: on the surf's own grid, where ShoreFoamCS laid their spray out.
+		if (input.shoreSource && input.shoreStage && input.shorePrep && input.shoreGridSize > 0) {
+			cb.grid = { input.shoreOriginX, input.shoreOriginY, input.shoreTexelSize, static_cast<float>(input.shoreGridSize) };
+			emitCB->Update(cb);
+			ID3D11ShaderResourceView* srvs[4] = { emitterSrv, input.shoreSource, input.shoreStage, input.shorePrep };
+			context->CSSetShader(shoreEmitCS.get(), nullptr, 0);
+			context->CSSetShaderResources(0, 4, srvs);
+			context->Dispatch((input.shoreGridSize + 7) / 8, (input.shoreGridSize + 7) / 8, 1);
+			ID3D11ShaderResourceView* nullSrvs[4] = {};
+			context->CSSetShaderResources(0, 4, nullSrvs);
+		}
 		hasParticles = true;
 	} else {
 		PBRWaterProfiling::Skipped("PBRWater::SprayEmit");

@@ -11,8 +11,8 @@
 /**
  * @brief PBR Water's compute tessellator: the water meshes subdivided once a frame and drawn by every tessellated pass.
  *
- * The hardware tessellator could not serve the water well. Its patches are the meshes' own triangles, and most water is
- * cell-sized quads of two triangles: a patch has one density for its whole 4096 units, the most the hull shader can ask
+ * It replaced a hull/domain shader path, which could not serve the water well. Its patches were the meshes' own triangles, and most water is
+ * cell-sized quads of two triangles: a patch had one density for its whole 4096 units, the most the hull shader could ask
  * for (64) left the water near the camera coarse while the rest of the cell was over-tessellated, and the domain shader
  * ran the whole wave program for every vertex of every patch in every pass (depth and motion, surface, each point light
  * pass, underwater), several times a frame for the same surface.
@@ -82,7 +82,10 @@ public:
 		float viewProj[4][4] = {};                           ///< camera-relative view-projection (row-major, mul(M, v))
 		float pixelsPerUnit = 1.0f;                          ///< Tess0.w: pixels per unit at distance 1
 		float targetSize = 10.0f;                            ///< Tess0.y: on-screen triangle size (px)
-		float cullMargin = 0.0f;                             ///< how far the waves can move the surface (units)
+		float minSpacing = 0.0f;                             ///< the finest triangle edge (units): 128 / Maximum Tessellation
+		float renderPixels = 2560.0f * 1440.0f;              ///< pixels the water is rendered at (the vertex budget)
+		float cullMarginXY = 0.0f;                           ///< how far the waves can move the surface sideways (units)
+		float cullMarginZ = 0.0f;                            ///< and up or down
 		float fadeStart = 0.0f, fadeEnd = 1.0f;              ///< Params1.zw: the waves' distance fade
 		float4 grid{};                                       ///< Grid0: the loaded cells (z <= x: none)
 		bool ripples = false;                                ///< Ripple0.w: the ripple simulation's area is detailed
@@ -92,6 +95,7 @@ public:
 		float deepLength = 0.0f;                                                       ///< Shore3.w: deep-water wavelength L0 (units)
 		float curl = 0.0f;                                                             ///< Shore3.z: breaker curl
 		float curlDetail = 1.0f;                                                       ///< Shore1.y: curl tessellation multiplier
+		float curlDepth = 0.0f;                                                        ///< the deepest water a wave curls in (m): PBRWaterModel::ShoreCurlDepth
 	};
 
 	struct Stats
@@ -102,6 +106,7 @@ public:
 		uint32_t vertices = 0;
 		uint32_t triangles = 0;
 		float cpuMs = 0.0f;
+		float detailScale = 1.0f;  ///< how many times the target triangle size the mesh was built at, to fit the vertex budget
 	};
 
 	void SetupResources();
@@ -116,7 +121,7 @@ public:
 
 	/**
 	 * @brief The range of this frame's index buffer that draws `geometry`, when this frame's mesh covers it.
-	 * @return false when the geometry was not drawn last frame or changed since (draw it the hardware way this frame)
+	 * @return false when the geometry was not drawn last frame or changed since (draw it untessellated this frame)
 	 */
 	bool Lookup(RE::BSGeometry& geometry, uint32_t& startIndex, uint32_t& indexCount) const;
 
@@ -126,7 +131,7 @@ public:
 	 */
 	void Build(const FrameParams& params);
 
-	/// Forgets this frame's mesh: every draw goes the hardware way.
+	/// Forgets this frame's mesh: every draw is untessellated.
 	void Clear();
 
 	/// Forgets this frame's mesh and the draws registered for the next (compute tessellation off).
@@ -142,6 +147,8 @@ public:
 	bool BuiltFor(uint32_t frameCount, const float4& cameraPosAdjust) const;
 
 	const Stats& GetStats() const { return stats; }
+	/// The budget's coarsening of the target size the next subdivision starts from.
+	float GetDetailScale() const { return detailScale; }
 
 private:
 	struct Corner
@@ -155,7 +162,7 @@ private:
 	struct Mesh
 	{
 		winrt::com_ptr<ID3D11Buffer> vertexBuffer;  ///< held so its address can never name another mesh
-		std::vector<Corner> corners;                ///< three per triangle
+		std::vector<Corner> corners;                ///< three per base triangle (two for a mesh merged into its rectangle)
 		uint32_t triangleCount = 0;
 		uint64_t vertexDesc = 0;
 		uint32_t lastUsed = 0;
@@ -181,6 +188,8 @@ private:
 
 	const Mesh* GetMesh(const Source& source);
 	void EnsureCapacity(uint32_t leaves, uint32_t baseTriangles, uint32_t vertices, uint32_t triangles);
+	/// Takes the oldest finished reach measurement (VertexCS), never waiting for the GPU.
+	void ReadReach();
 
 	static bool SameSource(const Source& a, const Source& b);
 	static bool MakeSource(RE::BSGeometry& geometry, Source& source);
@@ -210,6 +219,18 @@ private:
 	uint32_t vertexCapacity = 0;
 	uint32_t triangleCapacity = 0;
 	bool ready = false;
+	/// How far the waves moved this frame's vertices (VertexCS), read back a few frames later without a stall: the
+	/// frustum culling's margin. -1 until the first measurement arrives.
+	winrt::com_ptr<ID3D11Buffer> reachBuffer;
+	winrt::com_ptr<ID3D11UnorderedAccessView> reachUAV;
+	static constexpr uint32_t ReachLatency = 3;
+	std::array<winrt::com_ptr<ID3D11Buffer>, ReachLatency> reachStaging;
+	std::array<bool, ReachLatency> reachPending{};
+	uint32_t reachSlot = 0;
+	float reachXY = -1.0f;
+	float reachZ = -1.0f;
+
+	float detailScale = 1.0f;  ///< the last frame's coarsening (Build): the next starts from it
 
 	Stats stats;
 };

@@ -7,8 +7,7 @@
 //             displacement (geomorphing), so the detail fades in and out instead of popping;
 //   IndexCS   the leaves' triangles, with the vertices clamped onto their side's points.
 // Every tessellated pass of the frame (depth and motion, surface, point lights, underwater) then draws these with the
-// water vertex shader's cached path: the waves cost one evaluation per vertex per frame instead of one per hull and
-// domain shader invocation per pass.
+// water vertex shader's cached path: the waves cost one evaluation per vertex per frame, not one per vertex per pass.
 // ============================================================================
 
 #include "PBRWater/ComputeTessellation.hlsli"
@@ -17,7 +16,8 @@
 
 cbuffer TessellationCB : register(b0)
 {
-	uint4 Counts;  // x leaves, y vertices, z triangles, w unused
+	uint4 Counts;    // x leaves, y vertices, z triangles, w unused
+	float4 Spacing;  // x target triangle size (px, as the budget coarsened it), y grazing floor, z the finest spacing (units)
 };
 
 StructuredBuffer<PBRWaterTess::Leaf> Leaves : register(t0);
@@ -27,6 +27,10 @@ StructuredBuffer<PBRWaterTess::RawDisplacement> RawIn : register(t2);
 RWStructuredBuffer<PBRWaterTess::Vertex> Vertices : register(u0);
 RWStructuredBuffer<PBRWaterTess::RawDisplacement> RawOut : register(u1);
 RWByteAddressBuffer Indices : register(u2);
+// The largest displacement this frame's vertices reached (asuint of positive floats, which order as their bits): x
+// sideways, y up or down. The CPU reads it back a few frames later for its frustum culling's margin (WaterTessellator).
+RWByteAddressBuffer Reach : register(u3);
+groupshared uint GroupReach[2];
 
 /// The leaf whose range holds element `e` (vertex or triangle offsets, ascending).
 uint FindLeaf(uint e, bool triangles)
@@ -52,17 +56,16 @@ float3 Corner(PBRWaterTess::BaseTriangle t, uint c, uint which)
 	return c == 0 ? t.model0.xyz : (c == 1 ? t.model1.xyz : t.model2.xyz);
 }
 
-[numthreads(64, 1, 1)] void VertexCS(uint3 id : SV_DispatchThreadID) {
-	uint v = id.x;
-	if (v >= Counts.y)
-		return;
+/// Evaluates vertex v; returns how far its waves moved it (x sideways, y up or down), 0 for vertices nothing reads.
+float2 EvaluateVertex(uint v)
+{
 	PBRWaterTess::Leaf leaf = Leaves[FindLeaf(v, false)];
 	uint n = PBRWaterTess::LeafN(leaf);
 	uint2 g = PBRWaterTess::VertexCoords(v - leaf.vertexOffset, n);
 	// Clamped side vertices are drawn as the point they are clamped onto: nothing reads them.
 	uint2 rep = PBRWaterTess::Representative(leaf, g);
 	if (any(rep != g))
-		return;
+		return 0.0;
 
 	PBRWaterTess::BaseTriangle base = BaseTriangles[leaf.baseIndex];
 	float3 w = PBRWaterTess::LatticeWeights(leaf, g);
@@ -85,9 +88,12 @@ float3 Corner(PBRWaterTess::BaseTriangle t, uint c, uint which)
 		color += colors[c] * weights[c];
 	}
 
-	// Filtered to the on-screen target spacing at this point alone, as the hardware path's domain shader did: a vertex
-	// shared by two leaves gets the same waves from both.
-	float spacing = 2.0 * max(PBRWater::Tess0.y, 1.0) * max(length(world), 1.0) / max(PBRWater::Tess0.w, 1e-3);
+	// Filtered to the mesh's spacing at this point alone: a vertex shared by two
+	// leaves gets the same waves from both. The open water's target (twice the setting), sparser at grazing angles as the
+	// CPU made it (WaterTessellator Factor), never finer than the finest spacing.
+	float distance = max(length(world), 1.0);
+	float grazing = min(abs(world.z) / distance + Spacing.y, 1.0);
+	float spacing = max(2.0 * max(Spacing.x, 1.0) * distance / max(PBRWater::Tess0.w, 1e-3) * rsqrt(grazing), Spacing.z);
 	PBRWater::VertexWaves waves = PBRWater::EvaluateVertexWaves(world, spacing, true);
 
 	PBRWaterTess::Vertex o;
@@ -108,6 +114,24 @@ float3 Corner(PBRWaterTess::BaseTriangle t, uint c, uint which)
 	raw.shoreX = o.shore.x;
 	raw.shoreZ = o.shore.z;
 	RawOut[v] = raw;
+	return float2(length(o.current.xy), abs(o.current.z));
+}
+
+[numthreads(64, 1, 1)] void VertexCS(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+	if (gi == 0) {
+		GroupReach[0] = 0;
+		GroupReach[1] = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
+	float2 reach = id.x < Counts.y ? EvaluateVertex(id.x) : 0.0;
+	InterlockedMax(GroupReach[0], asuint(reach.x));
+	InterlockedMax(GroupReach[1], asuint(reach.y));
+	GroupMemoryBarrierWithGroupSync();
+	if (gi == 0) {
+		uint previous;
+		Reach.InterlockedMax(0, GroupReach[0], previous);
+		Reach.InterlockedMax(4, GroupReach[1], previous);
+	}
 }
 
 	[numthreads(64, 1, 1)] void MorphCS(uint3 id : SV_DispatchThreadID)

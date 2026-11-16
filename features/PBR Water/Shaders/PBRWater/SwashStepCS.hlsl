@@ -15,7 +15,8 @@
 // a wall: on a 1:10 beach it carried a dam-break uprush a third of the way up (the exact solution: Shen & Meyer).
 //
 // Two passes a step. The momentum pass moves the face velocities under the old depths; the continuity pass moves the
-// depths (and the foam) with the new velocities, soaks the sheet into the sand, and makes and decays the foam.
+// depths (and the foam) with the new velocities, soaks the sheet into the sand, and makes and decays the foam. A frame's
+// first step covers the whole grid; with SWASH_TILES the later ones cover only the tiles SwashTilesCS listed.
 //
 // The waves come in through the hand-over (PBRWater::SurfSharesAt, laid out by ShoreFoamCS): there the simulation takes
 // the train's incoming Riemann invariant, u + 2 sqrt(g h) along the waves' travel, and keeps its own outgoing one,
@@ -157,7 +158,8 @@ float FaceVelocity(float uP, float uBack, float uFore, float hBack, float hC, fl
 	return u / (1.0 + Dt * drag * length(float2(u, across)));
 }
 
-[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+void Step(uint3 id)
+{
 	if (any(id.xy >= GridSize))
 		return;
 	int2 c = int2(id.xy);
@@ -226,7 +228,8 @@ float FaceVelocity(float uP, float uBack, float uFore, float hBack, float hC, fl
 
 #else
 
-[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+void Step(uint3 id)
+{
 	if (any(id.xy >= GridSize))
 		return;
 	int2 c = int2(id.xy);
@@ -313,4 +316,18 @@ float FaceVelocity(float uP, float uBack, float uFore, float hBack, float hC, fl
 	Target[id.xy] = next;
 }
 
+#endif
+
+#if defined(SWASH_TILES)
+// The frame's later steps: only the tiles SwashTilesCS found anything to move in (x | y << 16), one group each.
+StructuredBuffer<uint> ActiveTiles : register(t3);
+
+[numthreads(8, 8, 1)] void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
+	uint tile = ActiveTiles[group.x];
+	Step(uint3(uint2(tile & 0xFFFF, tile >> 16) * 8 + thread.xy, 0));
+}
+#else
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	Step(id);
+}
 #endif

@@ -46,7 +46,9 @@ void ShoreSimulation::SetupResources()
 	prep = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashPrep", FoamGridSize);
 	surf = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Surf", FoamGridSize);
 	surfMoved = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SurfMoved", FoamGridSize);
+	spraySource = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SpraySource", FoamGridSize);
 	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::SwashCB");
+	SetupTileResources();
 	ClearShaderCache();
 	Reset();
 }
@@ -61,9 +63,127 @@ void ShoreSimulation::ClearShaderCache()
 	momentumCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashStepCS.hlsl", {}, "cs_5_0")));
 	continuityCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashStepCS.hlsl", { { "SWASH_CONTINUITY", "" } }, "cs_5_0")));
 	outCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashOutCS.hlsl", {}, "cs_5_0")));
-	foamReady = foamCS && momentumCS && continuityCS && outCS && foam[0] && foam[1] && stage && prep && surf && surfMoved && simCB;
+	foamReady = foamCS && momentumCS && continuityCS && outCS && foam[0] && foam[1] && stage && prep && surf && surfMoved && spraySource && simCB;
+	tilesMarkCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashTilesCS.hlsl", { { "SWASH_TILES_MARK", "" } }, "cs_5_0")));
+	tilesListCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashTilesCS.hlsl", { { "SWASH_TILES_LIST", "" } }, "cs_5_0")));
+	momentumTilesCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashStepCS.hlsl", { { "SWASH_TILES", "" } }, "cs_5_0")));
+	continuityTilesCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashStepCS.hlsl", { { "SWASH_CONTINUITY", "" }, { "SWASH_TILES", "" } }, "cs_5_0")));
+	// Without them every step covers the whole grid.
+	tilesReady = tilesMarkCS && tilesListCS && momentumTilesCS && continuityTilesCS && busyTiles && tileListSRV && tileListUAV && tileArgs && tilesCB;
 	if (!foamReady)
 		logger::warn("[PBR Water] Shore foam or surf simulation shaders failed to compile; the shore waves end at the waterline and leave no foam behind");
+}
+
+void ShoreSimulation::SetupTileResources()
+{
+	auto device = globals::d3d::device;
+
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = TileCount;
+	desc.Height = TileCount;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_R32_UINT;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+	busyTiles = std::make_unique<Texture2D>(desc, "PBRWater::SwashBusyTiles");
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	srvDesc.Format = desc.Format;
+	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+	busyTiles->CreateSRV(srvDesc);
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+	uavDesc.Format = desc.Format;
+	uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+	busyTiles->CreateUAV(uavDesc);
+
+	D3D11_BUFFER_DESC listDesc{};
+	listDesc.ByteWidth = TileCount * TileCount * sizeof(uint32_t);
+	listDesc.Usage = D3D11_USAGE_DEFAULT;
+	listDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+	listDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+	listDesc.StructureByteStride = sizeof(uint32_t);
+	if (FAILED(device->CreateBuffer(&listDesc, nullptr, tileList.put())))
+		return;
+	Util::SetResourceName(tileList.get(), "PBRWater::SwashTileList");
+	D3D11_SHADER_RESOURCE_VIEW_DESC listSrv{};
+	listSrv.Format = DXGI_FORMAT_UNKNOWN;
+	listSrv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+	listSrv.Buffer.NumElements = TileCount * TileCount;
+	if (FAILED(device->CreateShaderResourceView(tileList.get(), &listSrv, tileListSRV.put())))
+		return;
+	Util::SetResourceName(tileListSRV.get(), "PBRWater::SwashTileList SRV");
+	D3D11_UNORDERED_ACCESS_VIEW_DESC listUav{};
+	listUav.Format = DXGI_FORMAT_UNKNOWN;
+	listUav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+	listUav.Buffer.NumElements = TileCount * TileCount;
+	listUav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_APPEND;
+	if (FAILED(device->CreateUnorderedAccessView(tileList.get(), &listUav, tileListUAV.put())))
+		return;
+	Util::SetResourceName(tileListUAV.get(), "PBRWater::SwashTileList UAV");
+
+	// ThreadGroupCountX is the list's count (CopyStructureCount); Y and Z stay 1.
+	const uint32_t args[3] = { 0, 1, 1 };
+	D3D11_BUFFER_DESC argsDesc{};
+	argsDesc.ByteWidth = sizeof(args);
+	argsDesc.Usage = D3D11_USAGE_DEFAULT;
+	argsDesc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+	D3D11_SUBRESOURCE_DATA init{ args, 0, 0 };
+	if (FAILED(device->CreateBuffer(&argsDesc, &init, tileArgs.put())))
+		return;
+	Util::SetResourceName(tileArgs.get(), "PBRWater::SwashTileArgs");
+
+	tilesCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<TilesCB>(), "PBRWater::SwashTilesCB");
+}
+
+bool ShoreSimulation::ListActiveTiles(uint32_t steps)
+{
+	if (!tilesReady)
+		return false;
+	auto context = globals::d3d::context;
+	PBRWaterProfiling::Scope pass("PBRWater::SwashTiles");
+
+	TilesCB cb{};
+	cb.gridSize = FoamGridSize;
+	cb.tileCount = TileCount;
+	// Water moves a cell a step at most: the frame's remaining steps cannot carry it further than this from a busy tile.
+	cb.radius = static_cast<int32_t>((steps - 1 + 7) / 8);
+	tilesCB->Update(cb);
+	ID3D11Buffer* cbs[1] = { tilesCB->CB() };
+	context->CSSetConstantBuffers(0, 1, cbs);
+
+	const UINT zero[4] = { 0, 0, 0, 0 };
+	context->ClearUnorderedAccessViewUint(busyTiles->uav.get(), zero);
+	ID3D11ShaderResourceView* nullSrvs[2] = {};
+	ID3D11UnorderedAccessView* nullUav = nullptr;
+	{
+		ID3D11ShaderResourceView* srvs[2] = { surf->srv.get(), prep->srv.get() };
+		ID3D11UnorderedAccessView* uav = busyTiles->uav.get();
+		context->CSSetShader(tilesMarkCS.get(), nullptr, 0);
+		context->CSSetShaderResources(0, 2, srvs);
+		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		context->Dispatch(FoamGridSize / 8, FoamGridSize / 8, 1);
+		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+		context->CSSetShaderResources(0, 2, nullSrvs);
+	}
+	{
+		ID3D11ShaderResourceView* srv = busyTiles->srv.get();
+		ID3D11UnorderedAccessView* uav = tileListUAV.get();
+		const UINT reset = 0;
+		context->CSSetShader(tilesListCS.get(), nullptr, 0);
+		context->CSSetShaderResources(0, 1, &srv);
+		context->CSSetUnorderedAccessViews(0, 1, &uav, &reset);
+		context->Dispatch((TileCount + 7) / 8, (TileCount + 7) / 8, 1);
+		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+		context->CSSetShaderResources(0, 1, nullSrvs);
+	}
+	context->CopyStructureCount(tileArgs.get(), 0, tileListUAV.get());
+
+	// The steps' own constants again.
+	cbs[0] = simCB->CB();
+	context->CSSetConstantBuffers(0, 1, cbs);
+	return true;
 }
 
 void ShoreSimulation::Reset()
@@ -179,18 +299,18 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	context->CSSetConstantBuffers(0, 1, cbs);
 	const UINT groups = FoamGridSize / 8;
 	ID3D11ShaderResourceView* nullSrvs[3] = {};
-	ID3D11UnorderedAccessView* nullUavs[2] = {};
+	ID3D11UnorderedAccessView* nullUavs[3] = {};
 
 	// The surf's foam, and what the waves bring the surf simulation this frame.
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::ShoreFoam");
 		ID3D11ShaderResourceView* srv = foam[foamCurrent]->srv.get();
-		ID3D11UnorderedAccessView* uavs[2] = { stage->uav.get(), prep->uav.get() };
+		ID3D11UnorderedAccessView* uavs[3] = { stage->uav.get(), prep->uav.get(), spraySource->uav.get() };
 		context->CSSetShader(foamCS.get(), nullptr, 0);
 		context->CSSetShaderResources(0, 1, &srv);
-		context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
 		context->Dispatch(groups, groups, 1);
-		context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+		context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
 	}
 
 	// The surf simulation: explicit steps within the shallow water's stability limit. Each is two passes: the face
@@ -206,7 +326,11 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 		// the waves feeding it at low frame rates, and each uprush followed its bore late.
 		const float stepDt = std::clamp(dt, 0.0f, 0.1f);
 		const uint32_t steps = std::max(1u, static_cast<uint32_t>(std::ceil(stepDt / maxStep)));
+		// The first step covers the whole grid (it takes the scroll); the rest only the tiles with anything to move.
+		bool tiled = false;
 		for (uint32_t i = 0; i < steps; ++i) {
+			if (i == 1)
+				tiled = ListActiveTiles(steps);
 			SimCB stepCb = cb;
 			stepCb.dt = stepDt / static_cast<float>(steps);
 			if (i > 0)
@@ -214,13 +338,20 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 			else if (fresh)
 				stepCb.shiftX = static_cast<int32_t>(FoamGridSize) * 4;
 			simCB->Update(stepCb);
+			ID3D11ShaderResourceView* tiles = tiled ? tileListSRV.get() : nullptr;
+			auto dispatch = [&]() {
+				if (tiled)
+					context->DispatchIndirect(tileArgs.get(), 0);
+				else
+					context->Dispatch(groups, groups, 1);
+			};
 			{
-				ID3D11ShaderResourceView* srvs[3] = { surf->srv.get(), prep->srv.get(), stage->srv.get() };
+				ID3D11ShaderResourceView* srvs[4] = { surf->srv.get(), prep->srv.get(), stage->srv.get(), tiles };
 				ID3D11UnorderedAccessView* uav = surfMoved->uav.get();
-				context->CSSetShader(momentumCS.get(), nullptr, 0);
-				context->CSSetShaderResources(0, 3, srvs);
+				context->CSSetShader(tiled ? momentumTilesCS.get() : momentumCS.get(), nullptr, 0);
+				context->CSSetShaderResources(0, 4, srvs);
 				context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-				context->Dispatch(groups, groups, 1);
+				dispatch();
 				context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
 				context->CSSetShaderResources(0, 3, nullSrvs);
 			}
@@ -230,15 +361,19 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 				simCB->Update(stepCb);
 			}
 			{
-				ID3D11ShaderResourceView* srvs[3] = { surfMoved->srv.get(), prep->srv.get(), stage->srv.get() };
+				ID3D11ShaderResourceView* srvs[4] = { surfMoved->srv.get(), prep->srv.get(), stage->srv.get(), tiles };
 				ID3D11UnorderedAccessView* uav = surf->uav.get();
-				context->CSSetShader(continuityCS.get(), nullptr, 0);
-				context->CSSetShaderResources(0, 3, srvs);
+				context->CSSetShader(tiled ? continuityTilesCS.get() : continuityCS.get(), nullptr, 0);
+				context->CSSetShaderResources(0, 4, srvs);
 				context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-				context->Dispatch(groups, groups, 1);
+				dispatch();
 				context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
 				context->CSSetShaderResources(0, 3, nullSrvs);
 			}
+		}
+		if (tiled) {
+			ID3D11ShaderResourceView* nullSrv = nullptr;
+			context->CSSetShaderResources(3, 1, &nullSrv);
 		}
 		lastSwashSteps = steps;
 	}
@@ -258,7 +393,7 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 
 	ID3D11Buffer* nullCb = nullptr;
 	context->CSSetShaderResources(0, 3, nullSrvs);
-	context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+	context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
 	context->CSSetConstantBuffers(0, 1, &nullCb);
 	context->CSSetShader(nullptr, nullptr, 0);
 

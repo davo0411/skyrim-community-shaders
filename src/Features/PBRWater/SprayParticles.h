@@ -82,6 +82,9 @@ public:
 		float MotionStretch = 0.0f;      ///< s of travel the particle is drawn out over
 	};
 	using Emitters = std::array<Emitter, EmitterCount>;
+	/// The layout and emission saved emitters were tuned for: 3 = procedural shapes, the breakers' spray thrown from the
+	/// surf's grid. Saved emitters of another version start over from the defaults.
+	static constexpr int EmitterVersion = 3;
 
 	/** @brief The emitters the feature ships with. */
 	static Emitters DefaultEmitters();
@@ -115,6 +118,13 @@ public:
 		float cellX = 0.0f, cellY = 0.0f;  ///< the camera's exterior cell
 		float cellSize = 4096.0f;
 		std::array<float, 25> cellLevels{};  ///< still water of the 5 x 5 cells around it (< -1e8: none)
+		// The surf's grid (ShoreSimulation): where the breakers throw spray. Null: no shore this frame.
+		ID3D11ShaderResourceView* shoreSource = nullptr;  ///< GetSpraySourceSRV
+		ID3D11ShaderResourceView* shoreStage = nullptr;   ///< GetStageSRV
+		ID3D11ShaderResourceView* shorePrep = nullptr;    ///< GetPrepSRV
+		float shoreOriginX = 0.0f, shoreOriginY = 0.0f;   ///< absolute grid corner (units)
+		float shoreTexelSize = 0.0f;                      ///< units
+		uint32_t shoreGridSize = 0;
 	};
 	/** @brief Render thread: emits and flies the particles (compute). */
 	void Update(const FrameInput& input, const Settings& settings);
@@ -164,7 +174,8 @@ private:
 	std::unique_ptr<Buffer> emitters;   ///< EmitterGpu x EmitterCount
 	std::unique_ptr<ConstantBuffer> emitCB;
 	std::unique_ptr<ConstantBuffer> simCB;
-	winrt::com_ptr<ID3D11ComputeShader> emitCS;
+	winrt::com_ptr<ID3D11ComputeShader> emitCS;       ///< the open sea
+	winrt::com_ptr<ID3D11ComputeShader> shoreEmitCS;  ///< the breakers (SPRAY_SHORE)
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
 	winrt::com_ptr<ID3D11VertexShader> drawVS;
 	winrt::com_ptr<ID3D11PixelShader> drawPS;

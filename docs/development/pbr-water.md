@@ -53,7 +53,7 @@ wave train.
 
 | Consumer               | Code                                            | Purpose                                                         |
 | ---------------------- | ----------------------------------------------- | --------------------------------------------------------------- |
-| Vertex / domain shader | `PBRWater::DisplaceSurface`                     | displacement, current and previous frame, mip by vertex spacing |
+| Vertex program         | `PBRWater::DisplaceSurface`                     | displacement, current and previous frame, mip by vertex spacing |
 | Pixel shader           | `PBRWater::ShadeSurface`                        | filtered normals, LEAN roughness, breaking, aeration            |
 | CPU                    | `WaveSnapshot::SampleAt`, `ParcelDisplacements` | water height for swimming, buoyancy and floating objects        |
 
@@ -105,7 +105,7 @@ visibility, subsurface, roughness.
 ### Rivers
 
 Where Unified Water's worldspace flowmap shows a current, the waves are damped (`WaveParam.w`) and carried along it.
-The vertex/domain shader reads the flowmap once by position (`GetWaveFlowDamping`) and gets the current
+The vertex program reads the flowmap once by position (`GetWaveFlowDamping`) and gets the current
 (`PBRWater::FlowVelocity`: RG direction, B x A strength, the River Current Speed setting at full strength); the pixel shader gets it as
 a vertex interpolant (`FlowVelocity`). After Crest's `ShapeCombine` flow, `FlowPhases` gives each cascade two reads
 pushed back along the current by two phases of a sawtooth clock half a period apart (period from the cascade's texel, a
@@ -284,8 +284,9 @@ in the inner surf, and the drawn surface passes from the one to the other across
         endless there and only the bed shows through. The water is one depth-tested layer, so the nearest wave hides
         those behind it without any order-independent transparency. Foam is lit about the normal bent halfway up with the sun wrapped around it (whitewater scatters
         light through itself), so the foam on a lip's underside does not go dark.
-        The hull shader
-        divides the target triangle size by `ShoreCurlDetail` (default 2) on the shore wherever a curl can show.
+        The tessellator
+        divides the target triangle size by `ShoreCurlDetail` (default 2) in the surf zone, where a curl can show
+        (`ShoreCurlDepth`: deeper than a large wave of a set can curl in, no wave curls).
         Geometry only: the CPU mirror rides the table's uncurled wave.
 -   **Room for the train** (`ShoreField::room`, `t124`): a train of shoaling, breaking waves needs open water
     a few wavelengths across. Each water texel gets the width of the largest disc of water around it (twice
@@ -392,61 +393,67 @@ in the inner surf, and the drawn surface passes from the one to the other across
 
 ## Tessellation
 
-Hull, domain and geometry shaders are first-class `ShaderCache` classes (`ShaderClass::Hull/Domain/Geometry`,
-`GetHullShader()` etc.): compiled per descriptor, async, disk cached (`.hso/.dso/.gso`), hot-reloadable.
+The water is tessellated by a compute tessellator (`WaterTessellator`, `src/Features/PBRWater/ComputeTessellation.*`,
+`TessellationCS.hlsl`). It replaced a hull/domain shader path, which is gone: both need Direct3D 11 feature level 11.0,
+so no GPU could run one and not the other, and the compute path was faster on the CPU and the GPU alike.
 
-While a draw is tessellated the vertex shader only forwards the raw vertex (`PackControlPoint`); the domain
-shader re-runs the complete vertex program (`WaterVertex`) on every generated vertex. All per-vertex
-attributes (texcoords, fog, refraction coordinates, motion-vector positions) therefore come from the exact
-same code path for every permutation.
+Once a frame (`PBRWater::UpdateTessellation`, in the prepass) the CPU cuts the water meshes the main view drew last
+frame into an adaptive, 2:1 balanced quadtree of triangles (leaves) with the same on-screen size at every distance; each
+leaf is an N x N grid whose border is clamped onto its sides' points, so neighbouring leaves, triangles and meshes share
+their edges' points and never crack. `TessellationCS` then evaluates every vertex's waves once (`VertexCS`, the whole
+expensive part of the vertex program), geomorphs the vertices a coarser level lacks (`MorphCS`) and writes the indices
+(`IndexCS`). Every pass of the main view (stencil, surface, point lights, underwater) draws the same vertices: the water
+vertex shader reads them by `SV_VertexID` from t109 and runs only the cheap rest of its program
+(`CachedWaterVertex`). The engine still issues its own draw of each mesh; the vertex shader's culling mode (Tess0.x = 2)
+puts every vertex outside the frustum, and `RestoreDraw` draws the tessellated range with the engine's state. Reflections,
+cubemaps and draws the mesh does not cover yet (a mesh's first frame, meshes over 4096 triangles, a frame over budget)
+are drawn untessellated, their waves filtered to the mesh's spacing.
+
+What decides the cost, measured at 1440p over a stormy sea (PBRWaterTest; Nsight Perf and a leaf dump):
+
+-   **Base triangles.** The cells' water is a 32 x 32 grid of quads (2048 triangles each), and every one was a base
+    triangle the CPU visited every frame: 45 ms of the render thread. A mesh that is one flat rectangle with affine UVs
+    and colours is merged into its rectangle's two triangles (`MergeRectangle`), so the quadtree alone sets the detail:
+    about 0.6 ms. Leaves span 32 target-sized triangles.
+-   **Culling.** The frustum test's margin was the waves' hard clamp (`DisplacementLimit`, a storm's worst crest
+    everywhere: 112 m), which kept everything near the camera, behind it too: 71 % of the triangles never reached the
+    screen. `VertexCS` now records how far the waves moved this frame's vertices and the CPU reads it back a few frames
+    later without stalling; the margin is that reach with room to spare.
+-   **Density.** The pixel shader is some 6000 instructions per pixel, and triangles of a few pixels cost it whole 2 x 2
+    quads. The point count follows the screen area a segment covers (the grazing angle's sine from the camera's height,
+    floored at the waves' slope), no edge is finer than 128 units over Maximum Tessellation, the curl's extra detail is
+    limited to the surf zone (`ShoreCurlDepth`, from the shore field's crest depth), and a vertex budget of one vertex
+    per 7 render pixels coarsens the target size when a view needs more.
+
+With those the tessellated surface pass cost 6.4 ms against 3.6 ms untessellated and 13.5 ms for the old hull/domain
+path, and the frame 21 ms against 18 ms and 29 ms.
 
 ### Why the old branches broke on STENCIL and with DLSS / frame generation
 
-1. **One hull/domain shader for every permutation.** The old code compiled HS/DS once with a fixed
-   descriptor and bound them to all water passes. The STENCIL pass (water mask + motion vectors) has a
-   different `VS_OUTPUT` than the colour passes, so the stage signatures did not match. Now HS/DS/GS are
-   compiled with the draw's own vertex descriptor (`state->modifiedVertexDescriptor`).
-2. **Motion vectors described the flat plane.** The old domain shader interpolated `WorldPosition` /
-   `PreviousWorldPosition` without displacing them, so DLSS / FSR / frame generation reprojected waves as if
-   they were flat. Now both are displaced, the previous position with the previous frame's phases.
-3. **Vanilla shaders during async compilation.** Until our vertex/pixel shaders for a descriptor are
-   compiled the game binds its own, whose signatures do not match our HS/DS. Tessellation is only enabled
-   for a draw once our VS and PS for that descriptor are live.
-4. **Depth must match across passes.** The STENCIL and colour passes tessellate with identical inputs,
-   edge factors are computed from canonically ordered endpoints, the domain shader sums corners in a
-   canonical order, and the position chain is `precise`, so both passes rasterise the same depth and
-   shared edges never crack.
-5. **Topology.** The renderer only re-applies its cached topology when it changes, so the shadow state is
-   kept at "triangle list, not dirty" while the device is switched to a 3-control-point patch list;
-   `RestoreGeometry` switches it back before anything else draws.
-
-Edge factors target an on-screen triangle size in pixels using the _internal_ render height (so they scale
-with upscalers): the target size near the shore and in the ripple simulation (`EdgeTessFactor`: one shore-field lookup
-per edge), twice it on the open water. The hull shader reads no waves: it runs for every edge of every patch, and its
-old curvature term (the wave context and three cascades per edge) made it one of the most expensive stages. Edges
-drop to 1 where waves have faded out, and patches outside the (displacement-padded) frustum are culled. The domain
-shader reads each cascade from the mip whose texels match the vertex spacing the tessellation aims for at that
-distance (`TessellatedSpacing`, a function of position only, so neighbouring patches agree and shared edges never
-crack), so waves the mesh cannot carry are averaged out instead of aliasing. Only the stencil pass works out last
-frame's surface (motion vectors); the colour pass skips it.
+1. **Motion vectors described the flat plane.** An early domain shader interpolated `WorldPosition` /
+   `PreviousWorldPosition` without displacing them, so DLSS / FSR / frame generation reprojected waves as if they were
+   flat. Both are displaced now, the previous position with the previous frame's phases (`VertexCS` stores both).
+2. **Vanilla shaders during async compilation.** Until our vertex/pixel shaders for a descriptor are compiled the game
+   binds its own, which know nothing of the tessellated vertices: a draw uses the tessellated mesh only once our VS and
+   PS for its descriptor are live.
+3. **Depth must match across passes.** The STENCIL and colour passes draw the same vertices, and the position chain is
+   `precise`, so both passes rasterise the same depth.
 
 ### Draw cost
 
 Unified Water draws its distant water as hundreds of small tiles, each a draw call in both the stencil and the colour
 pass (836 at the Solitude docks), and nearly all of them flat. Setting each one up as a full PBR draw (the constants
-uploaded, 17 views bound on four stages, samplers saved and restored, tessellation bound and unbound) cost 8.6 ms of
-the water's 16.4 ms there while the GPU executed almost nothing. Now a tile wholly outside the waves' reach
-(`WavesReach`: outside the loaded cells or past the displacement fade) is drawn untessellated, the constants are
-uploaded once per frame into two buffers (with and without tessellation) that the draws swap between, and the views
-stay bound for the frame (only the pixel stage's t110-t111, which Landscape Seams shares, is checked per draw). The
-water's draws went from 16.4 to 10.9 ms there.
+uploaded, 17 views bound, samplers saved and restored) cost 8.6 ms of the water's 16.4 ms there while the GPU executed
+almost nothing. Now a tile wholly outside the waves' reach (`WavesReach`: outside the loaded cells or past the
+displacement fade) is drawn untessellated, the constants are uploaded once per frame into one buffer per vertex shader
+mode that the draws swap between, and the views stay bound for the frame (only the pixel stage's t110-t111, which
+Landscape Seams shares, is checked per draw). The water's draws went from 16.4 to 10.9 ms there.
 
-### Tessellation cost
+### Vertex program cost
 
-The domain shader runs the whole vertex program on every generated vertex, in both the stencil and the colour pass,
-so its cost is per generated vertex; the hull shader runs once per patch, and the patches are the water meshes' own
-triangles. Measured with `d3dcompiler_47` (static instruction slots of the domain shader, colour / stencil pass, and
-its texture operations):
+The vertex program's wave evaluation runs once per tessellated vertex per frame (`VertexCS`). Measured with
+`d3dcompiler_47` on the old domain shader, which ran the same program (static instruction slots, colour / stencil pass,
+and its texture operations):
 
 | Change                                                                                                                            | Colour    | Stencil   |
 | --------------------------------------------------------------------------------------------------------------------------------- | --------- | --------- |
@@ -456,47 +463,27 @@ its texture operations):
 | Surface noise baked once per frame (`SurfaceNoiseCS`, t126): one bilinear lookup instead of ~30 value noises (433 slots)          | (433)     | -         |
 | After                                                                                                                             | 2343 (39) | 2202 (43) |
 
-The noise's direct evaluation stays as the fallback beyond the bake, so it still counts statically; near the camera,
-where the tessellator puts its vertices, the colour pass runs 433 slots fewer than the table shows. The bake is a
+The noise's direct evaluation stays as the fallback beyond the bake, so it still counts statically. The bake is a
 128^2 grid around the camera with four texels across a cell of the noise's finest octave (the gusts' second octave,
 half Gust Size; the sediment patches' third, a quarter of Patch Size): 5 m texels at the defaults, so it covers 630 m,
 the tessellated water. Its bilinear lookup is within 0.7 % rms of the direct evaluation for the gusts and 0.2 % for
-the sediment patches (at most 4 % of their range). It costs what 16k vertices did, so it pays for itself whenever
-the tessellator generates more than that per frame. The terrain and swash changes give the same values as before (to
-rounding).
+the sediment patches (at most 4 % of their range).
 
 What the research says, and what it means here:
 
 -   **Small triangles are the expensive part.** Rasterizers walk 8 x 8 pixel tiles and shade 2 x 2 quads, so
     triangles much below 8 pixels a side waste both (Fatahalian et al., _Reducing Shading on GPUs using
-    Quad-Fragment Merging_, SIGGRAPH 2010). Hence the target triangle size.
--   **Moderate factors.** AMD's GCN guidance capped tessellation factors at 15 (Unity HDRP still applies it on GCN
-    consoles, `MAX_TESSELLATION_FACTORS 15`); NVIDIA and AMD's GDC 2010 "Tessellation Performance" talk advises
-    tessellating only where it improves the image, drawing untessellated where the factor would be ~1, and culling
-    patches outside the frustum by setting their factors to 0 (~30% in their example). PBR Water does all of these
-    except the cap.
--   **Per-vertex work belongs in the vertex shader.** Unity HDRP's tessellation computes every per-vertex attribute
-    in the vertex shader and only interpolates them in the domain shader, which re-evaluates displacement alone; the
-    vertex shader's results are shared through the post-transform cache, the hull shader's per-edge work is not.
+    Quad-Fragment Merging_, SIGGRAPH 2010). Hence the target triangle size and the vertex budget.
+-   **Per-vertex work belongs before the passes.** Unity HDRP's tessellation computes every per-vertex attribute in the
+    vertex shader and only interpolates them in the domain shader; here the waves are evaluated once a frame in
+    compute and every pass reuses them.
 -   **Shipped ocean renderers do not use hardware tessellation.** Crest renders a camera-centred LOD mesh
     (CDClipmaps: clipmaps with CDLOD's continuous morphing, Strugar 2010; Losasso & Hoppe 2004), GodotOceanWaves a
     camera-snapped clipmap mesh (329k vertices at high quality) whose vertex shader only samples the displacement
     cascades, the projected grid spaces vertices evenly on screen instead of in the world (Johanson 2004), and Unreal's
     water plugin draws instanced tiles from a quadtree with concentric LODs (`FWaterQuadTree`); Unreal 5 removed
-    hardware tessellation altogether.
-
-**The base meshes limit the tessellator.** The tessellator subdivides each mesh triangle uniformly at the density
-of its densest edge, and caps that at 64 segments. Unified Water's distant tiles are a single quad (`WaterMesh.nif`: 4
-vertices, scaled to 1-n cells); if the loaded cells' water is as coarse (Debug shows the tessellated draws' patch
-count and vertex spacing each frame), every patch is half a cell, 29 x 58 m: the half under the camera is subdivided
-as finely everywhere as its nearest edge needs, so most of its vertices land where they are not needed, and next to the
-camera 64 segments are still 0.9 m apart. The bigger saving from here is structural, not in the shaders:
-
-1. Give the tessellator small patches: a 16 x 16 grid per cell (3.6 m patches; the untessellated path gets waves too)
-   with the edge factors computed per vertex in the vertex shader (once per vertex instead of twice per edge) and
-   culled per patch, including patches under the terrain.
-2. Or follow Crest and GodotOceanWaves: replace the cells' water with one camera-centred CDLOD mesh with a cheap
-   vertex program, and no hardware tessellation.
+    hardware tessellation altogether. The compute tessellator is a CDLOD-like quadtree on the game's own water meshes,
+    after John Hable's "Compute Tessellation" posts.
 
 ## Shading
 
@@ -696,8 +683,8 @@ re-centres its grid when the texel size changes); all settings are clamped by `S
     depth/shore, cascade foam (red the open sea's foam, green the shore waves' foam, blue the shore waves' break stage),
     roughness, wave height, fetch), plus
     live sea-state values (mean square slope) and whether
-    the GPU ocean and the gameplay mirror are running, and last frame's water draws: how many were tessellated, with
-    how many patches (the meshes' triangles) and what vertex spacing.
+    the GPU ocean and the gameplay mirror are running, last frame's water draws and how many came from the
+    tessellated mesh, and the tessellator's meshes, leaves, vertices, budget coarsening and CPU time.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
 -   The GPU work is wrapped in perf events (`PBR Water - Simulation`, `- Ocean FFT`, `- Ripples`, `- Surface Noise`, `- Swash`, `- Foam`,
     `- Skylighting Occluder`, `- Draw` per water draw), so RenderDoc, Nsight and the devbench

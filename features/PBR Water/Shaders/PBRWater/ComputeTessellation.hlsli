@@ -209,46 +209,53 @@ namespace PBRWaterTess
 	 */
 	float MorphWeight(Leaf l, uint2 g, out uint2 parentA, out uint2 parentB)
 	{
+		// One exit: fxc reads the early returns of a function with out parameters as a maybe-uninitialised result (X4000).
 		uint n = LeafN(l);
 		parentA = g;
 		parentB = g;
+		float weight = 1.0;
 		uint s, p;
 		if (OnSide(g, n, s, p)) {
-			if (p == 0 || p == n)
-				return 1.0;
-			Segment seg = FindSegment(l.sides[s], n, p);
-			uint q = p - seg.start;
-			uint index = q / seg.stride;
-			uint points = seg.length / seg.stride;
-			if (index == 0 || index >= points)
-				return 1.0;
-			uint low = firstbitlow(index);
-			uint step = 1u << low;
-			parentA = SidePoint(s, n, seg.start + (index - step) * seg.stride);
-			parentB = SidePoint(s, n, seg.start + (index + step) * seg.stride);
-			float level = (float)seg.log2Points - (float)low;
-			return saturate(l.sideLog2[s][seg.index] - level + 1.0);
-		}
-		uint k = n - g.x - g.y;
-		uint low = min(firstbitlow(g.x), min(firstbitlow(g.y), firstbitlow(k)));
-		uint step = 1u << low;
-		bool oddI = ((g.x >> low) & 1) != 0;
-		bool oddJ = ((g.y >> low) & 1) != 0;
-		// Of i, j and k at this step exactly two are odd: the vertex is the midpoint of the edge along the third.
-		if (oddI && oddJ) {
-			parentA = uint2(g.x + step, g.y - step);
-			parentB = uint2(g.x - step, g.y + step);
-		} else if (oddI) {
-			parentA = uint2(g.x - step, g.y);
-			parentB = uint2(g.x + step, g.y);
+			if (p != 0 && p != n) {
+				Segment seg = FindSegment(l.sides[s], n, p);
+				uint q = p - seg.start;
+				uint index = q / seg.stride;
+				uint points = seg.length / seg.stride;
+				if (index != 0 && index < points) {
+					uint low = firstbitlow(index);
+					uint step = 1u << low;
+					parentA = SidePoint(s, n, seg.start + (index - step) * seg.stride);
+					parentB = SidePoint(s, n, seg.start + (index + step) * seg.stride);
+					float level = (float)seg.log2Points - (float)low;
+					// Selected rather than indexed: dynamic indexing copies the leaf into an indexable temporary.
+					float4 side = s == 0 ? l.sideLog2[0] : (s == 1 ? l.sideLog2[1] : l.sideLog2[2]);
+					float factorLog2 = dot(side, float4(seg.index == 0, seg.index == 1, seg.index == 2, seg.index == 3));
+					weight = saturate(factorLog2 - level + 1.0);
+				}
+			}
 		} else {
-			parentA = uint2(g.x, g.y - step);
-			parentB = uint2(g.x, g.y + step);
+			uint k = n - g.x - g.y;
+			uint low = min(firstbitlow(g.x), min(firstbitlow(g.y), firstbitlow(k)));
+			uint step = 1u << low;
+			bool oddI = ((g.x >> low) & 1) != 0;
+			bool oddJ = ((g.y >> low) & 1) != 0;
+			// Of i, j and k at this step exactly two are odd: the vertex is the midpoint of the edge along the third.
+			if (oddI && oddJ) {
+				parentA = uint2(g.x + step, g.y - step);
+				parentB = uint2(g.x - step, g.y + step);
+			} else if (oddI) {
+				parentA = uint2(g.x - step, g.y);
+				parentB = uint2(g.x + step, g.y);
+			} else {
+				parentA = uint2(g.x, g.y - step);
+				parentB = uint2(g.x, g.y + step);
+			}
+			parentA = Representative(l, parentA);
+			parentB = Representative(l, parentB);
+			float level = (float)LeafLog2N(l) - (float)low;
+			weight = saturate(l.interiorLog2 - level + 1.0);
 		}
-		parentA = Representative(l, parentA);
-		parentB = Representative(l, parentB);
-		float level = (float)LeafLog2N(l) - (float)low;
-		return saturate(l.interiorLog2 - level + 1.0);
+		return weight;
 	}
 
 	/// Exact barycentric weights of grid vertex g of a leaf: (base corner 0, 1, 2). Dyadic, so exact in float.

@@ -41,6 +41,9 @@ cbuffer ShoreFoamCB : register(b0)
 Texture2D<float4> PreviousFoam : register(t0);
 RWTexture2D<float4> Foam : register(u0);
 RWTexture2D<float4> Prep : register(u1);
+/// Where the breakers throw spray (SprayEmitCS), at the surface drawn over the texel: x a plunging breaker's splash-up, y a
+/// bore's roller (0..1 each), z the surface (units above the still water), w the crest's height (m).
+RWTexture2D<float4> SpraySource : register(u2);
 
 /// Deepest water the surf simulation holds (m): deeper, the train alone is the water in any sea, and the time step
 /// shrinks with the depth.
@@ -97,6 +100,7 @@ float SampleFoam(float2 q)
 	if (level < -1e6) {
 		Foam[id.xy] = 0.0;
 		Prep[id.xy] = float4(SwashWall, 0.0, 0.0, 0.0);
+		SpraySource[id.xy] = 0.0;
 		return;
 	}
 	float3 positionWS = float3(absXY, level) - FrameBuffer::CameraPosAdjust.xyz;
@@ -108,6 +112,7 @@ float SampleFoam(float2 q)
 		float held = bed < -0.05 ? 1.0 : 0.0;
 		Foam[id.xy] = float4(0.0, dir, 0.0);
 		Prep[id.xy] = float4(bed, held, held, 0.0);
+		SpraySource[id.xy] = 0.0;
 		return;
 	}
 
@@ -117,6 +122,7 @@ float SampleFoam(float2 q)
 	float source = 0.0;
 	float trainLevel = 0.0;
 	float trainFoam = 0.0;
+	float4 spray = 0.0;
 	[branch] if (ctx.train > 0.0)
 	{
 		// The shore waves here and as they were last frame: their white water is the source, their displacement's rate
@@ -142,6 +148,13 @@ float SampleFoam(float2 q)
 		}
 		trainLevel = drawnHere.displacement.z * PBRWater::MetresPerUnit;
 		trainFoam = drawnHere.foam;
+		// The spray the breaker throws here: the splash-up where its jet has landed, before the bore forms (the aerated,
+		// crushed water ahead of the old crest), and later the roller on the bore's front; both grow with the wave.
+		// Where the water is (the drawn surface over this texel), so the spray rides the crest that throws it.
+		float crestMetres = max(drawnHere.crest, 0.0) * PBRWater::MetresPerUnit;
+		bool wet = ctx.elevation < 0.0;
+		spray = float4(wet ? drawnHere.aeration * (1.0 - drawnHere.bore) : 0.0, wet ? drawnHere.aeration * drawnHere.bore : 0.0,
+			drawnHere.displacement.z, crestMetres);
 
 		// Shallow water: the water under a wave moves with it at u = c eta / (h + eta) along the travel.
 		float depth = max(ctx.depth, 0.05 * PBRWater::UnitsPerMetre);
@@ -175,4 +188,5 @@ float SampleFoam(float2 q)
 		trainLevel = 0.0;
 	Foam[id.xy] = float4(saturate(foam), travel, trainFoam);
 	Prep[id.xy] = float4(bed, shares.incoming, shares.outgoing, trainLevel);
+	SpraySource[id.xy] = all(abs(spray) < 1e30) ? spray : 0.0;
 }

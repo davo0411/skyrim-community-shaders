@@ -60,6 +60,16 @@ public:
 	float GetFoamOriginY() const { return static_cast<float>(foamOriginY) * FoamTexelSize; }
 	float GetFoamExtent() const { return FoamTexelSize * FoamGridSize; }
 	bool IsFoamReady() const { return foamReady && foamHasOrigin; }
+	/**
+	 * @brief Where the breakers throw spray this frame (ShoreFoamCS), at the drawn surface over each texel: x a plunging
+	 * breaker's splash-up, y a bore's roller (0..1 each), z the surface (units above the still water), w the crest's
+	 * height (m). Its grid is the foam's.
+	 */
+	ID3D11ShaderResourceView* GetSpraySourceSRV() const { return foamReady ? spraySource->srv.get() : nullptr; }
+	/** @brief yz the waves' direction of travel (ShoreFoamCS Stage). */
+	ID3D11ShaderResourceView* GetStageSRV() const { return foamReady ? stage->srv.get() : nullptr; }
+	/** @brief x the bed (m above the still water) (ShoreFoamCS Prep). */
+	ID3D11ShaderResourceView* GetPrepSRV() const { return foamReady ? prep->srv.get() : nullptr; }
 	/** @brief Surf simulation steps the last UpdateFoam took (Debug section). */
 	uint32_t GetLastSwashSteps() const { return lastSwashSteps; }
 
@@ -89,15 +99,43 @@ private:
 	bool hasOrigin = false;
 	bool ready = false;
 
-	std::unique_ptr<Texture2D> foam[2];    ///< ping-pong, read by the draws (layout owned by SwashOutCS)
-	std::unique_ptr<Texture2D> stage;      ///< ShoreFoamCS: its foam, the waves' direction and the white water they carry
-	std::unique_ptr<Texture2D> prep;       ///< ShoreFoamCS: the bed, the hand-over's shares and the train's level
-	std::unique_ptr<Texture2D> surf;       ///< the surf simulation's state (layout owned by SwashStepCS)
-	std::unique_ptr<Texture2D> surfMoved;  ///< the state between a step's two passes: new velocities, old depths
+	std::unique_ptr<Texture2D> foam[2];      ///< ping-pong, read by the draws (layout owned by SwashOutCS)
+	std::unique_ptr<Texture2D> stage;        ///< ShoreFoamCS: its foam, the waves' direction and the white water they carry
+	std::unique_ptr<Texture2D> prep;         ///< ShoreFoamCS: the bed, the hand-over's shares and the train's level
+	std::unique_ptr<Texture2D> surf;         ///< the surf simulation's state (layout owned by SwashStepCS)
+	std::unique_ptr<Texture2D> surfMoved;    ///< the state between a step's two passes: new velocities, old depths
+	std::unique_ptr<Texture2D> spraySource;  ///< ShoreFoamCS: where the breakers throw spray (GetSpraySourceSRV)
 	winrt::com_ptr<ID3D11ComputeShader> foamCS;
 	winrt::com_ptr<ID3D11ComputeShader> momentumCS;    ///< SwashStepCS, first pass
 	winrt::com_ptr<ID3D11ComputeShader> continuityCS;  ///< SwashStepCS with SWASH_CONTINUITY, second pass
 	winrt::com_ptr<ID3D11ComputeShader> outCS;
+
+	/// The steps after a frame's first run only where water can move (SwashTilesCS): the tiles, listed for DispatchIndirect.
+	static constexpr uint32_t TileCount = FoamGridSize / 8;
+	struct alignas(16) TilesCB
+	{
+		uint32_t gridSize;
+		uint32_t tileCount;
+		int32_t radius;
+		uint32_t pad;
+	};
+	STATIC_ASSERT_ALIGNAS_16(TilesCB);
+	std::unique_ptr<Texture2D> busyTiles;   ///< R32_UINT, a texel per tile: anything to move there
+	winrt::com_ptr<ID3D11Buffer> tileList;  ///< the active tiles (x | y << 16), appended
+	winrt::com_ptr<ID3D11ShaderResourceView> tileListSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> tileListUAV;
+	winrt::com_ptr<ID3D11Buffer> tileArgs;  ///< DispatchIndirect: the list's count, 1, 1
+	std::unique_ptr<ConstantBuffer> tilesCB;
+	winrt::com_ptr<ID3D11ComputeShader> tilesMarkCS;
+	winrt::com_ptr<ID3D11ComputeShader> tilesListCS;
+	winrt::com_ptr<ID3D11ComputeShader> momentumTilesCS;    ///< SwashStepCS on the listed tiles
+	winrt::com_ptr<ID3D11ComputeShader> continuityTilesCS;  ///< and its second pass
+	bool tilesReady = false;
+
+	void SetupTileResources();
+	/// After the first step: lists the tiles the frame's later steps run on. False: they run on the whole grid.
+	bool ListActiveTiles(uint32_t steps);
+
 	uint32_t foamCurrent = 0;
 	uint32_t lastSwashSteps = 0;
 	int64_t foamOriginX = 0;

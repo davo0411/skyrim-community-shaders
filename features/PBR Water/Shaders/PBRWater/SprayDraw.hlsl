@@ -96,15 +96,26 @@ VS_OUTPUT VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 		alpha *= saturate(radius / (0.75 * pixel)) * sqrt(saturate(halfWidth / halfLength));
 		o.shape = float4(halfLength / halfWidth, 0.0, 0.0, 0.0);
 	} else {
-		float angle = p.rotation + p.rotationSpeed * p.age;
-		float s, c;
-		sincos(angle, s, c);
-		axisX = right * c + up * s;
-		axisY = up * c - right * s;
 		// A puff smaller than a few pixels is only its colour: kept at two pixels, its density spread over them.
 		float shown = max(radius, 2.0 * pixel);
 		alpha *= saturate(radius / shown) * saturate(radius / shown);
 		extent = shown.xx;
+		// Drawn out along its motion across the view (the rising streaks of a splash), or turning as it drifts.
+		float3 across = p.velocity - view * dot(p.velocity, view);
+		float acrossSpeed = length(across);
+		float stretch = 0.5 * acrossSpeed * em.Render.y;
+		if (stretch > 0.05 * shown) {
+			axisY = across / acrossSpeed;
+			axisX = cross(view, axisY);
+			extent.y += stretch;
+			alpha *= sqrt(saturate(extent.x / extent.y));
+		} else {
+			float angle = p.rotation + p.rotationSpeed * p.age;
+			float s, c;
+			sincos(angle, s, c);
+			axisX = right * c + up * s;
+			axisY = up * c - right * s;
+		}
 		o.shape = float4(t, float(bits & 0x3FFu) * 0.731, float((bits >> 10) & 0x3FFu) * 0.517, 0.0);
 	}
 
@@ -186,6 +197,7 @@ float4 PSMain(VS_OUTPUT input) : SV_Target0
 
 	float density;
 	float sunWrap = 1.0;
+	float skyShade = 1.0;
 	[branch] if (droplet)
 	{
 		// A capsule along y: its round ends a width across, antialiased over the pixels it spans.
@@ -196,19 +208,26 @@ float4 PSMain(VS_OUTPUT input) : SV_Target0
 	}
 	else
 	{
-		// A soft blob broken up by noise, which eats into it as it ages: it tears apart and thins.
-		float r2 = dot(input.uv, input.uv);
-		float base = exp(-2.5 * r2) * (1.0 - smoothstep(0.7, 1.0, r2));
+		// A blob with a ragged edge: its outline pushed in and out by noise (domain warping), its inside broken up by the
+		// same noise, which eats into it as it ages, so it tears apart and thins instead of fading as a disc.
 		float life = input.shape.x;
-		float2 q = input.uv * (1.2 + 1.6 * em.Shape.z) + input.shape.yz + life * float2(0.6, -0.9);
-		float noise = Fbm(q);
 		float detail = saturate(em.Shape.z);
-		float shaped = base * lerp(1.0, 1.7 * noise, detail);
-		float erosion = detail * (0.15 + 0.55 * life * life);
+		float2 q = input.uv * (2.0 + 3.0 * detail) + input.shape.yz + life * float2(0.6, -0.9);
+		float n1 = Fbm(q);
+		float n2 = Fbm(q * 2.13 + 7.31);
+		// The outline frays at a finer scale than the body breaks up: wisps, not lumps.
+		float n3 = Fbm(q * 3.7 + 3.1);
+		float2 warped = input.uv + (float2(n1, n3) - 0.5) * (1.2 * detail);
+		float r = length(warped);
+		float body = (1.0 - smoothstep(0.25, 1.0, r)) * lerp(1.0, saturate(1.8 * n2 - 0.1), 0.6 * detail);
+		float erosion = detail * (0.08 + 0.6 * life * life);
 		float softness = max(em.Shape.y, 0.02);
-		density = saturate((shaped - erosion) / softness);
+		density = saturate((body - erosion) / softness);
 		density *= density * (3.0 - 2.0 * density);
-		sunWrap = saturate((dot(normalize(input.normalWS), SharedData::DirLightDirection.xyz) + 0.5) / 1.5);
+		float3 normal = normalize(input.normalWS);
+		sunWrap = saturate((dot(normal, SharedData::DirLightDirection.xyz) + 0.5) / 1.5);
+		// The sky lights a puff from above: its underside, facing the water, is darker.
+		skyShade = 0.75 + 0.25 * saturate(0.5 + 0.5 * normal.z);
 	}
 	alpha *= density;
 	if (alpha <= 1e-4)
@@ -223,7 +242,7 @@ float4 PSMain(VS_OUTPUT input) : SV_Target0
 #	endif
 	// Droplets take the sun through their phase alone; a puff half through it and half as wrapped diffuse light.
 	float sunShare = droplet ? phase : 0.5 * phase + sunWrap;
-	float3 lit = SunColor(input.positionWS) * sunShare + ambient;
+	float3 lit = SunColor(input.positionWS) * sunShare + ambient * skyShade;
 	float3 color = em.Color.rgb * lerp(1.0.xxx, lit, saturate(em.Shade.y));
 
 #	if defined(ENABLE_LL)
