@@ -419,6 +419,122 @@ namespace PBRWaterModel
 		return amplitude;
 	}
 
+	namespace
+	{
+		/**
+		 * The integrals of a sea state: the swell's level, each band's statistics and the wind sea's variance. A few
+		 * thousand exp and pow, and a function of the wind speed, the height scale, the swell's height, period and
+		 * peakedness and the FFT size alone, not of the directions: GenerateSpectrum runs every frame, while these change
+		 * only as the wind speed or the settings do.
+		 */
+		struct SpectrumIntegrals
+		{
+			bool valid = false;
+			// What they were integrated for (sanitised as GenerateSpectrum uses them).
+			float windSpeed = 0.0f;
+			float heightScale = 0.0f;
+			float swellHeight = 0.0f;
+			float swellPeriod = 0.0f;
+			float swellGamma = 0.0f;
+			uint32_t resolution = 0;
+
+			float swellAlpha = 0.0f;
+			std::array<CascadeBand, NumCascades> cascades{};
+			double totalVariance = 0.0;
+			double totalSlope = 0.0;
+			double windSeaVariance = 0.0;  ///< m0 of the wind sea at unit height scale (m^2)
+
+			bool Matches(float U, const OceanSpectrum& s, const SpectrumParams& params) const
+			{
+				return valid && windSpeed == U && heightScale == s.heightScale && swellHeight == params.swellHeight && swellPeriod == params.swellPeriod &&
+				       swellGamma == s.swellGamma && resolution == s.resolution;
+			}
+		};
+
+		/// Integrates `s` (wind, height scale, swell peak and peakedness, bands' ranges set) into `out`.
+		void IntegrateSpectrum(OceanSpectrum& s, const SpectrumParams& params, SpectrumIntegrals& out)
+		{
+			// Swell: a narrow JONSWAP from a distant storm, scaled to the requested significant height.
+			s.swellAlpha = 0.0f;
+			if (params.swellHeight > 0.01f && params.swellPeriod > 1.0f) {
+				double m0 = 0.0;
+				constexpr int Samples = 512;
+				const double lo = std::log(0.3 * s.swellPeak), hi = std::log(8.0 * s.swellPeak);
+				for (int i = 0; i < Samples; ++i) {
+					const double w0 = std::exp(lo + (hi - lo) * i / Samples);
+					const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
+					m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.swellPeak, 1.0f, s.swellGamma) * (w1 - w0);
+				}
+				const double target = params.swellHeight * 0.25;
+				s.swellAlpha = m0 > 0.0 ? static_cast<float>(target * target / m0) : 0.0f;
+			}
+
+			// Statistics per band (directions integrate to one).
+			double totalVariance = 0.0, totalSlope = 0.0;
+			for (uint32_t c = 0; c < NumCascades; ++c) {
+				CascadeBand& band = s.cascades[c];
+				const double dk = TwoPi / CascadeLength[c];
+				const double lo = std::log(std::max<double>(band.kLow, 0.5 * dk));
+				const double hi = std::log(band.kHigh);
+				double variance = 0.0, slope = 0.0, omegaSum = 0.0, kSum = 0.0;
+				constexpr int Samples = 256;
+				for (int i = 0; i < Samples; ++i) {
+					const double k0 = std::exp(lo + (hi - lo) * i / Samples);
+					const double k1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
+					const float k = static_cast<float>(0.5 * (k0 + k1));
+					double e = BandDensity(s, k) * (k1 - k0);
+					if (band.kFadeStart > 0.0f) {
+						const float fade = 1.0f - Smoothstep(band.kFadeStart, band.kHigh, k);
+						e *= fade * fade;
+					}
+					variance += e;
+					slope += e * k * k;
+					omegaSum += e * std::sqrt(G * k);
+					kSum += e * k;
+				}
+				band.variance = static_cast<float>(variance);
+				band.meanSquareSlope = static_cast<float>(slope);
+				if (variance > 1e-12) {
+					band.meanOmega = static_cast<float>(omegaSum / variance);
+					band.meanK = static_cast<float>(kSum / variance);
+				} else {
+					band.meanK = std::sqrt(std::max(band.kLow, static_cast<float>(dk)) * band.kHigh);
+					band.meanOmega = std::sqrt(G * band.meanK);
+				}
+				const float r = s.peakOmega / band.meanOmega;
+				band.pmWeightOpenSea = std::exp(-1.25f * r * r * r * r);
+				totalVariance += variance;
+				totalSlope += slope;
+			}
+
+			// The wind sea on its own (Hs = 4 sqrt(m0)), over the whole spectrum rather than the cascades' bands: the shore
+			// waves take their heights from it.
+			double m0 = 0.0;
+			{
+				constexpr int Samples = 512;
+				const double lo = std::log(0.3 * s.peakOmega), hi = std::log(20.0 * s.peakOmega);
+				for (int i = 0; i < Samples; ++i) {
+					const double w0 = std::exp(lo + (hi - lo) * i / Samples);
+					const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
+					m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.peakOmega, JonswapAlpha, JonswapGamma) * (w1 - w0);
+				}
+			}
+
+			out.valid = true;
+			out.windSpeed = s.windSpeed;
+			out.heightScale = s.heightScale;
+			out.swellHeight = params.swellHeight;
+			out.swellPeriod = params.swellPeriod;
+			out.swellGamma = s.swellGamma;
+			out.resolution = s.resolution;
+			out.swellAlpha = s.swellAlpha;
+			out.cascades = s.cascades;
+			out.totalVariance = totalVariance;
+			out.totalSlope = totalSlope;
+			out.windSeaVariance = m0;
+		}
+	}
+
 	OceanSpectrum GenerateSpectrum(const SpectrumParams& params)
 	{
 		OceanSpectrum s;
@@ -434,21 +550,11 @@ namespace PBRWaterModel
 		s.swellGamma = std::max(params.swellGamma, 1.0f);
 		s.swellSpread = std::clamp(params.swellSpread, 1.0f, 120.0f);
 
-		// Swell: a narrow JONSWAP from a distant storm, scaled to the requested significant height.
-		if (params.swellHeight > 0.01f && params.swellPeriod > 1.0f) {
+		const bool hasSwell = params.swellHeight > 0.01f && params.swellPeriod > 1.0f;
+		if (hasSwell) {
 			s.swellPeak = static_cast<float>(TwoPi) / params.swellPeriod;
 			s.swellDirX = std::cos(params.swellDirection);
 			s.swellDirY = std::sin(params.swellDirection);
-			double m0 = 0.0;
-			constexpr int Samples = 512;
-			const double lo = std::log(0.3 * s.swellPeak), hi = std::log(8.0 * s.swellPeak);
-			for (int i = 0; i < Samples; ++i) {
-				const double w0 = std::exp(lo + (hi - lo) * i / Samples);
-				const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
-				m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.swellPeak, 1.0f, s.swellGamma) * (w1 - w0);
-			}
-			const double target = params.swellHeight * 0.25;
-			s.swellAlpha = m0 > 0.0 ? static_cast<float>(target * target / m0) : 0.0f;
 		}
 
 		// Bands: each cascade from CascadeBandStart of its own lattice steps to the start of the next one;
@@ -467,43 +573,16 @@ namespace PBRWaterModel
 			}
 		}
 
-		// Statistics per band (directions integrate to one).
-		double totalVariance = 0.0, totalSlope = 0.0;
-		for (uint32_t c = 0; c < NumCascades; ++c) {
-			CascadeBand& band = s.cascades[c];
-			const double dk = TwoPi / CascadeLength[c];
-			const double lo = std::log(std::max<double>(band.kLow, 0.5 * dk));
-			const double hi = std::log(band.kHigh);
-			double variance = 0.0, slope = 0.0, omegaSum = 0.0, kSum = 0.0;
-			constexpr int Samples = 256;
-			for (int i = 0; i < Samples; ++i) {
-				const double k0 = std::exp(lo + (hi - lo) * i / Samples);
-				const double k1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
-				const float k = static_cast<float>(0.5 * (k0 + k1));
-				double e = BandDensity(s, k) * (k1 - k0);
-				if (band.kFadeStart > 0.0f) {
-					const float fade = 1.0f - Smoothstep(band.kFadeStart, band.kHigh, k);
-					e *= fade * fade;
-				}
-				variance += e;
-				slope += e * k * k;
-				omegaSum += e * std::sqrt(G * k);
-				kSum += e * k;
-			}
-			band.variance = static_cast<float>(variance);
-			band.meanSquareSlope = static_cast<float>(slope);
-			if (variance > 1e-12) {
-				band.meanOmega = static_cast<float>(omegaSum / variance);
-				band.meanK = static_cast<float>(kSum / variance);
-			} else {
-				band.meanK = std::sqrt(std::max(band.kLow, static_cast<float>(dk)) * band.kHigh);
-				band.meanOmega = std::sqrt(G * band.meanK);
-			}
-			const float r = s.peakOmega / band.meanOmega;
-			band.pmWeightOpenSea = std::exp(-1.25f * r * r * r * r);
-			totalVariance += variance;
-			totalSlope += slope;
+		// The integrals, again only when what they depend on has changed (the main thread is their only caller).
+		thread_local SpectrumIntegrals integrals;
+		if (integrals.Matches(U, s, params)) {
+			s.swellAlpha = integrals.swellAlpha;
+			s.cascades = integrals.cascades;
+		} else {
+			IntegrateSpectrum(s, params, integrals);
 		}
+		const double totalVariance = integrals.totalVariance;
+		const double totalSlope = integrals.totalSlope;
 
 		// Choppiness: keep the surface from folding over itself (Jacobian < 0) more than ~3 sigma out.
 		// The divergence of the horizontal displacement has a standard deviation of lambda * sqrt(mss).
@@ -513,20 +592,10 @@ namespace PBRWaterModel
 		const float sigma = static_cast<float>(std::sqrt(totalVariance));
 		s.meanSquareSlope = static_cast<float>(totalSlope);
 		s.significantHeight = 4.0f * sigma * static_cast<float>(UnitsPerMetre);
-		// The wind sea and the swell on their own (Hs = 4 sqrt(m0)), over the whole spectrum rather than the cascades'
-		// bands: the shore waves take their heights from these. The swell was normalised to its height above.
-		{
-			double m0 = 0.0;
-			constexpr int Samples = 512;
-			const double lo = std::log(0.3 * s.peakOmega), hi = std::log(20.0 * s.peakOmega);
-			for (int i = 0; i < Samples; ++i) {
-				const double w0 = std::exp(lo + (hi - lo) * i / Samples);
-				const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
-				m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.peakOmega, JonswapAlpha, JonswapGamma) * (w1 - w0);
-			}
-			s.windSeaHeight = 4.0f * static_cast<float>(std::sqrt(std::max(m0, 0.0))) * s.heightScale * static_cast<float>(UnitsPerMetre);
-			s.swellHeight = s.swellAlpha > 0.0f ? params.swellHeight * static_cast<float>(UnitsPerMetre) : 0.0f;
-		}
+		// The wind sea and the swell on their own: the shore waves take their heights from these. The swell was normalised
+		// to its height (IntegrateSpectrum).
+		s.windSeaHeight = 4.0f * static_cast<float>(std::sqrt(std::max(integrals.windSeaVariance, 0.0))) * s.heightScale * static_cast<float>(UnitsPerMetre);
+		s.swellHeight = s.swellAlpha > 0.0f ? params.swellHeight * static_cast<float>(UnitsPerMetre) : 0.0f;
 		s.displacementBound = 5.0f * sigma * std::max(1.0f, s.choppiness) * static_cast<float>(UnitsPerMetre) + 1.0f;
 		s.calm = 4.0f * sigma < 0.01f;
 		return s;
