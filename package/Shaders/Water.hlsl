@@ -2054,7 +2054,6 @@ PS_OUTPUT main(PS_INPUT input)
 	// coarser than the difference almost everywhere.
 	// The foam's pattern holds still where the surface is, so where it covers the water it does not move sideways with the
 	// mesh: temporal AA and the upscalers reprojected it from where the mesh was and smeared it.
-	float pbrMotionFoam = PBRWater::ShoreFoamAt(input.WorldPosition.xy + FrameBuffer::CameraPosAdjust.xy);
 	// Last frame's position is relative to last frame's camera.
 	float3 pbrFoamPrevious = input.WorldPosition.xyz + (FrameBuffer::CameraPosAdjust.xyz - FrameBuffer::CameraPreviousPosAdjust.xyz);
 	// Only where the water barely moves: the leftover foam lies thickest just behind a breaker, and a crest running in at
@@ -2062,7 +2061,11 @@ PS_OUTPUT main(PS_INPUT input)
 	// place and smeared it along the break.
 	float pbrSurfaceMotion = length(previousPosition.xyz - pbrFoamPrevious);
 	float pbrStill = 1.0 - smoothstep(2.0, 6.0, pbrSurfaceMotion);
-	previousPosition.xy = lerp(previousPosition.xy, pbrFoamPrevious.xy, saturate(2.0 * pbrMotionFoam) * pbrStill);
+	[branch] if (pbrStill > 0.0)
+	{
+		float pbrMotionFoam = PBRWater::ShoreFoamAt(input.WorldPosition.xy + FrameBuffer::CameraPosAdjust.xy);
+		previousPosition.xy = lerp(previousPosition.xy, pbrFoamPrevious.xy, saturate(2.0 * pbrMotionFoam) * pbrStill);
+	}
 #			endif
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, previousPosition);
 #			if defined(PBR_WATER)
