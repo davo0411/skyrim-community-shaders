@@ -224,10 +224,8 @@ namespace PBRWater
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
 		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat: drawn raw, like fftFoam
 		float surfFoam;      // 0..1 the foam the surf left on the water here (ShoreFoamAt)
-		float clearFace;     // 0..1 a breaker's face about to plunge: clear water, no leftover foam (ShoreClearFace)
 		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
-		float surf;          // 0..1 real breakers run onto this shore: the water's edge carries foam
 		float beach;         // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
 		float train;         // 0..1 share of the shore wave train (debug)
 		float room;          // 0..1 room the shore field gives the train here (debug)
@@ -237,9 +235,7 @@ namespace PBRWater
 		float depth;
 		float height;     // water surface above the still water at this pixel (units): the waves or the surf simulation (far below the ground where that is dry)
 		float elevation;  // bed above the still water at this pixel (units, -1e6 unknown)
-		float bedSlope;   // |grad| of the bed
 		float fetchMetres;
-		float footprint;
 		float turbidity;  // column sediment, filled in by the water column shading
 		float windSpeed;  // local wind at the surface (m/s)
 		float2 waveDir;   // the direction the waves travel in (wind, or towards the beach)
@@ -286,7 +282,6 @@ namespace PBRWater
 		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
 		// A breaker's face drawn up to plunge is stretched glassy: the wind's ripples on it are pulled out along the face.
 		detailScale *= 1.0 - 0.5 * waves.clearFace;
-		o.clearFace = waves.clearFace;
 
 		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
 		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05) + ripple;
@@ -336,7 +331,6 @@ namespace PBRWater
 		o.swashFoam = waves.sheetFoam;
 		o.simShare = waves.surf;
 		o.beach = ctx.beach;
-		o.surf = ctx.beach * BreakerStrength(ctx);
 		o.train = ctx.train;
 		o.room = ctx.shore.room;
 		o.exposure = ctx.shore.exposure;
@@ -353,9 +347,7 @@ namespace PBRWater
 		o.depth = ctx.depth;
 		o.height = waves.displacement.z;
 		o.elevation = ctx.hasTerrain > 0.5 ? ctx.elevation : -1e6;
-		o.bedSlope = length(ctx.terrainGrad);
 		o.fetchMetres = ctx.fetchMetres;
-		o.footprint = footprint;
 		o.turbidity = 0.0;
 		o.waveNormal = waves.normal;
 		o.breakerFoam = waves.breakerFoam;
