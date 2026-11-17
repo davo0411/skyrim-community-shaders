@@ -1661,6 +1661,9 @@ PS_OUTPUT main(PS_INPUT input)
 			float lightDist = length(lightDirection);
 
 			float intensityMultiplier = LightLimitFix::GetAttenuation(lightDist, light);
+			// Out of the light's reach here (the cluster holds it for its other pixels): no shadow lookup or lobe.
+			if (intensityMultiplier < 1e-5)
+				continue;
 
 			float3 normalizedLightDirection = normalize(lightDirection);
 

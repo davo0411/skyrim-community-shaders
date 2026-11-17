@@ -579,11 +579,14 @@ namespace PBRWater
 		// train's breakers take the energy from the random sea, longer and shorter, up to twice the train's frequency,
 		// and only the short chop rides on top (ShoreHandOver). Handing over wherever the train reached replaced a stormy
 		// FFT sea with the smooth train far out from the shore. Mirrors WaveModel's BuildContext.
-		float handOver = ctx.train * ShoreSurfShare(ctx.shoreHeight * MetresPerUnit, depthMetres);
-		[unroll] for (uint i = 0; i < PBRW_CASCADES; i++)
+		ctx.sea = shoaledWeight * ctx.saturation * ctx.damping;
+		ctx.cascade = ctx.sea;
+		// Away from the train (most water) there is nothing to hand over.
+		[branch] if (ctx.train > 0.0)
 		{
-			ctx.sea[i] = shoaledWeight[i] * ctx.saturation * ctx.damping;
-			ctx.cascade[i] = ctx.sea[i] * (1.0 - handOver * ShoreHandOver(Cascade1[i].x));
+			float handOver = ctx.train * ShoreSurfShare(ctx.shoreHeight * MetresPerUnit, depthMetres);
+			[unroll] for (uint i = 0; i < PBRW_CASCADES; i++)
+				ctx.cascade[i] *= 1.0 - handOver * ShoreHandOver(Cascade1[i].x);
 		}
 		return ctx;
 	}
