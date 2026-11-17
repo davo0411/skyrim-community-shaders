@@ -646,6 +646,26 @@ namespace PBRWater
 		return direction * (saturate(flowSample.z * flowSample.w) * Tune0.x * UnitsPerMetre);
 	}
 
+	/**
+	 * The river at absolute `absXY` from the worldspace flowmap `flowMap` (bound per stage: the vertex and pixel stages and
+	 * the occluder each have their own slot): returns how much the current calms the open-water waves (WaveParam.w), and
+	 * sets `velocity` to the current the waves are carried along (FlowVelocity). The flowmap is looked up by world
+	 * position, not by mesh UVs: the stencil pass is compiled without FLOWMAP and must displace the surface exactly like
+	 * the colour pass, and neighbouring meshes must agree on shared edges.
+	 */
+	float FlowDampingAt(Texture2D<float4> flowMap, SamplerState flowSampler, float2 absXY, out float2 velocity)
+	{
+		velocity = 0.0;
+		float damping = 1.0;
+		[branch] if (Flow0.x != 0.0)
+		{
+			float4 flow = flowMap.SampleLevel(flowSampler, absXY * Flow0.xz + Flow0.yw, 0);
+			velocity = FlowVelocity(flow);
+			damping = 1.0 - Foam1.w * saturate(flow.z * flow.w);
+		}
+		return damping;
+	}
+
 	/// The clock the flow phases run on (s, wraps at 86400; the game timer, so it stops with the game).
 	float FlowClock() { return Optics0.z; }
 

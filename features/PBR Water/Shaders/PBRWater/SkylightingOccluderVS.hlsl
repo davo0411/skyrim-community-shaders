@@ -24,15 +24,11 @@ cbuffer SkylightingOccluderCB : register(b0)
 
 Texture2D<float4> FlowMap : register(t8);  // Unified Water's worldspace flowmap (PBRWater::Flow0)
 
-/// River current calms the waves, as on the water mesh (VertexWaves.hlsli GetWaveFlowDamping).
+/// River current calms the waves, as on the water mesh (PBRWater::FlowDampingAt).
 float FlowDamping(float2 absXY)
 {
-	float damping = 1.0;
-	if (PBRWater::Flow0.x != 0.0) {
-		float4 flow = FlowMap.SampleLevel(PBRWater::LinearClampSampler, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
-		damping = 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
-	}
-	return damping;
+	float2 velocity;
+	return PBRWater::FlowDampingAt(FlowMap, PBRWater::LinearClampSampler, absXY, velocity);
 }
 
 struct VS_OUTPUT

@@ -105,7 +105,7 @@ visibility, subsurface, roughness.
 ### Rivers
 
 Where Unified Water's worldspace flowmap shows a current, the waves are damped (`WaveParam.w`) and carried along it.
-The vertex program reads the flowmap once by position (`GetWaveFlowDamping`) and gets the current
+The vertex program reads the flowmap once by position (`FlowDampingAt`) and gets the current
 (`PBRWater::FlowVelocity`: RG direction, B x A strength, the River Current Speed setting at full strength); the pixel shader gets it as
 a vertex interpolant (`FlowVelocity`). After Crest's `ShapeCombine` flow, `FlowPhases` gives each cascade two reads
 pushed back along the current by two phases of a sawtooth clock half a period apart (period from the cascade's texel, a

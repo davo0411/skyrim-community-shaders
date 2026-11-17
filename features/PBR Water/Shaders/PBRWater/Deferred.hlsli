@@ -85,18 +85,6 @@ namespace PBRWaterDeferred
 	Texture2D<float> SceneDepth : register(t42);
 	Texture2D<float4> WorldFlowMap : register(t43);  // the vertex stage's flowmap (VertexWaves.hlsli)
 
-	/// The river current at a camera-relative undisplaced position: GetWaveFlowDamping, per pixel.
-	float FlowAt(float3 positionWS, out float2 velocity)
-	{
-		velocity = 0.0;
-		if (PBRWater::Flow0.x == 0.0)
-			return 1.0;
-		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
-		float4 flow = WorldFlowMap.SampleLevel(PBRWater::LinearClampSampler, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
-		velocity = PBRWater::FlowVelocity(flow);
-		return 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
-	}
-
 	/// Whether a pixel holds a record, and its tag's fields: the record's waves and noise are loaded once a pixel is chosen.
 	struct Pixel
 	{
@@ -181,7 +169,8 @@ namespace PBRWaterDeferred
 		waves.surface.current = recordWaves.xyz;
 		waves.surface.previous = 0.0;
 		waves.surface.shore = float4(0.0, 0.0, recordWaves.w, undisplaced.z);
-		waves.flowDamping = FlowAt(undisplaced, waves.flowVelocity);
+		// The river current per pixel, as the vertex program reads it (EvaluateVertexWaves).
+		waves.flowDamping = PBRWater::FlowDampingAt(WorldFlowMap, PBRWater::LinearClampSampler, undisplaced.xy + FrameBuffer::CameraPosAdjust.xy, waves.flowVelocity);
 		VS_OUTPUT o = WaterVertexWith(v, waves);
 		o.SurfaceNoise = float2(recordNoise.x, 0.35 + 1.3 * recordNoise.y);
 		o.HPosition = float4(input.HPosition.xy, p.depth, input.HPosition.w);
