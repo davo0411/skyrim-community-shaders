@@ -460,10 +460,11 @@ namespace PBRWaterModel
 				double m0 = 0.0;
 				constexpr int Samples = 512;
 				const double lo = std::log(0.3 * s.swellPeak), hi = std::log(8.0 * s.swellPeak);
+				double w0 = std::exp(lo);  // each step's upper node is the next one's lower: exp'd once
 				for (int i = 0; i < Samples; ++i) {
-					const double w0 = std::exp(lo + (hi - lo) * i / Samples);
 					const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
 					m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.swellPeak, 1.0f, s.swellGamma) * (w1 - w0);
+					w0 = w1;
 				}
 				const double target = params.swellHeight * 0.25;
 				s.swellAlpha = m0 > 0.0 ? static_cast<float>(target * target / m0) : 0.0f;
@@ -478,8 +479,8 @@ namespace PBRWaterModel
 				const double hi = std::log(band.kHigh);
 				double variance = 0.0, slope = 0.0, omegaSum = 0.0, kSum = 0.0;
 				constexpr int Samples = 256;
+				double k0 = std::exp(lo);
 				for (int i = 0; i < Samples; ++i) {
-					const double k0 = std::exp(lo + (hi - lo) * i / Samples);
 					const double k1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
 					const float k = static_cast<float>(0.5 * (k0 + k1));
 					double e = BandDensity(s, k) * (k1 - k0);
@@ -491,6 +492,7 @@ namespace PBRWaterModel
 					slope += e * k * k;
 					omegaSum += e * std::sqrt(G * k);
 					kSum += e * k;
+					k0 = k1;
 				}
 				band.variance = static_cast<float>(variance);
 				band.meanSquareSlope = static_cast<float>(slope);
@@ -513,10 +515,11 @@ namespace PBRWaterModel
 			{
 				constexpr int Samples = 512;
 				const double lo = std::log(0.3 * s.peakOmega), hi = std::log(20.0 * s.peakOmega);
+				double w0 = std::exp(lo);
 				for (int i = 0; i < Samples; ++i) {
-					const double w0 = std::exp(lo + (hi - lo) * i / Samples);
 					const double w1 = std::exp(lo + (hi - lo) * (i + 1) / Samples);
 					m0 += Jonswap(static_cast<float>(0.5 * (w0 + w1)), s.peakOmega, JonswapAlpha, JonswapGamma) * (w1 - w0);
+					w0 = w1;
 				}
 			}
 
