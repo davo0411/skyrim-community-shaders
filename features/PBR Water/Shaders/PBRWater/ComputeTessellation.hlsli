@@ -77,9 +77,6 @@ namespace PBRWaterTess
 	uint LeafN(Leaf l) { return 1u << LeafLog2N(l); }
 	uint LeafDepth(Leaf l) { return (l.shape >> 8) & 0xFF; }
 
-	uint VertexCount(uint n) { return (n + 1) * (n + 2) / 2; }
-	uint TriangleCount(uint n) { return n * n; }
-
 	/// Grid vertex (i, j) of a leaf with n segments: rows of constant j, row j holding i = 0 .. n - j.
 	uint VertexIndex(uint i, uint j, uint n) { return j * (n + 1) - (j * (j - 1)) / 2 + i; }
 

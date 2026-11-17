@@ -12,7 +12,7 @@
  * idea, computed at start-up: a wave's whole shape comes from one lookup, so it can peak, run ahead of itself as it
  * breaks and collapse into a bore, which no sum of orbits does. Both the shaders and the CPU evaluator read this
  * table, so swimming and floating objects ride the same wave. (A plunger's overturning lip is drawn by the shaders
- * alone, over this shape: PBRWater::ShoreCurlShape.)
+ * alone, over this shape: PBRWater::ShoreCurlLip.)
  *
  * The phase runs over one wave: 0 at the trough ahead of it, 1 at the trough behind. The surface and its displacement
  * vanish at both, so consecutive waves in different stages of their lives meet without a step. The stage runs from

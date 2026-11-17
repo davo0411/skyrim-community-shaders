@@ -30,17 +30,7 @@
 
 namespace PBRWater
 {
-	Texture2D<float> WaveHeightfield : register(t27);  // the highest water surface around the eye, as depth against SunMap1 (PBRWater::UpdateSunMap)
-
-	/// Height (absolute z) of the highest water surface over an absolute point; far below anything off the heightfield.
-	float WaveHeightfieldTop(float2 absXY)
-	{
-		float2 uv = (absXY - SunMap0.xy) * SunMap0.z * float2(1.0, -1.0) + 0.5;
-		if (any(uv != saturate(uv)))
-			return -1e9;
-		float depth = WaveHeightfield.SampleLevel(LinearClampSampler, uv, 0);
-		return depth < 0.9999 ? SunMap1.x + (0.5 - depth) * 2.0 * SunMap1.y : -1e9;
-	}
+	Texture2D<float> WaveHeightfield : register(t27);  // the highest water surface around the eye, as depth against SunMap1 (PBRWater::UpdateSunMap): z = SunMap1.x + (0.5 - depth) 2 SunMap1.y, 1 where there is none
 
 	/// The sunlight's way to a point of the surface through the waves around it.
 	struct SunThroughWaves
@@ -79,19 +69,29 @@ namespace PBRWater
 		float3 dir = normalize(toSun);
 		float rise = stillLevel + FrameBuffer::CameraPosAdjust.z + DisplacementLimit() - absPos.z;
 		float reach = min(max(rise, 0.0) / dir.z, 20.0 * UnitsPerMetre);
+		// Nor does anything off the heightfield count: the march also ends where it leaves it (the point is on it, fade > 0),
+		// so every step reads it. (abs(uvDir) = 0 gives an exit at infinity.)
+		float2 uv0 = (absPos.xy - SunMap0.xy) * SunMap0.z * float2(1.0, -1.0) + 0.5;
+		float2 uvDir = dir.xy * SunMap0.z * float2(1.0, -1.0);
+		float2 toEdge = (uvDir > 0.0 ? 1.0 - uv0 : uv0) / abs(uvDir);
+		reach = min(reach, min(toEdge.x, toEdge.y));
 		static const uint Steps = 12;
 		float stepLength = reach / Steps;
 		// The heightfield's grid filters out waves shorter than its spacing, which the surface here still carries.
 		static const float Bias = 0.04 * UnitsPerMetre;
 		static const float Soft = 0.04 * UnitsPerMetre;
+		// saturate((top - z - Bias) / Soft) along the ray, top decoded from the heightfield's depth: linear in the depth and t.
+		float above = (SunMap1.x + SunMap1.y - absPos.z - Bias) / Soft;
+		float perDepth = -2.0 * SunMap1.y / Soft;
+		float perT = -dir.z / Soft;
 		float path = 0.0;
 		[loop] for (uint i = 0; i < Steps; i++)
 		{
 			float t = (i + jitter) * stepLength;
-			float3 p = absPos + dir * t;
-			path += saturate((WaveHeightfieldTop(p.xy) - p.z - Bias) / Soft) * stepLength;
+			float depth = WaveHeightfield.SampleLevel(LinearClampSampler, uv0 + uvDir * t, 0);
+			path += depth < 0.9999 ? saturate(above + perDepth * depth + perT * t) : 0.0;
 		}
-		o.path = path * fade;
+		o.path = path * stepLength * fade;
 		// Any water at all in the way refracts the sun's direct beam away: its glint is gone past a few centimetres.
 		o.visible = saturate(1.0 - o.path / (0.1 * UnitsPerMetre));
 		return o;

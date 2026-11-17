@@ -72,22 +72,26 @@ namespace PBRWaterFoam
 			// offset per cell of a skewed triangle grid a tile across, and the two blend by the cells' weights. The blend keeps
 			// a single read's contrast (variance-preserving, Heitz & Neyret 2018), or the foam would thin out between the
 			// cells' centres.
-			float3 values;
+			// A scale too fine to be shown (its bubbles under two pixels) has no weight: it is not read.
+			float3 values = 0.5;
 			[unroll] for (uint i = 0; i < 3; i++)
 			{
-				float2 uv = p / scales[i] + i * float2(0.41, 0.17);
-				float2 du = gx / scales[i];
-				float2 dv = gy / scales[i];
+				[branch] if (shown[i] > 0.0)
+				{
+					float2 uv = p / scales[i] + i * float2(0.41, 0.17);
+					float2 du = gx / scales[i];
+					float2 dv = gy / scales[i];
 #if defined(TERRAIN_VARIATION)
-				float2 cell1, cell2;
-				StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv, 1.0, 0.0, cell1, cell2);
-				float a = FoamTexture.SampleGrad(s, uv + taps.offset1, du, dv);
-				float b = FoamTexture.SampleGrad(s, uv + taps.offset2, du, dv);
-				float w = taps.tap1Weight;
-				values[i] = saturate(0.5 + (lerp(b, a, w) - 0.5) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5)));
+					float2 cell1, cell2;
+					StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv, 1.0, 0.0, cell1, cell2);
+					float a = FoamTexture.SampleGrad(s, uv + taps.offset1, du, dv);
+					float b = FoamTexture.SampleGrad(s, uv + taps.offset2, du, dv);
+					float w = taps.tap1Weight;
+					values[i] = saturate(0.5 + (lerp(b, a, w) - 0.5) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5)));
 #else
-				values[i] = FoamTexture.SampleGrad(s, uv, du, dv);
+					values[i] = FoamTexture.SampleGrad(s, uv, du, dv);
 #endif
+				}
 			}
 			// The mix of uniform values is narrower than any of them: back to their contrast, or the foam would thin out.
 			float total = dot(shown, 1.0.xxx);

@@ -97,13 +97,12 @@ namespace PBRWaterDeferred
 		return 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
 	}
 
+	/// Whether a pixel holds a record, and its tag's fields: the record's waves and noise are loaded once a pixel is chosen.
 	struct Pixel
 	{
 		bool water;  // the stencil pass's tessellated water is still the nearest here
 		uint tag;
 		float depth;
-		float4 waves;
-		float2 noise;
 		float alpha;
 	};
 
@@ -116,8 +115,6 @@ namespace PBRWaterDeferred
 		uint bits = (DepthBits(p.depth) - (tag >> 16) + 1) & 0xFFFF;
 		p.water = p.tag != 0 && bits <= 2;
 		p.alpha = ((tag >> 8) & 0xFF) / 255.0;
-		p.waves = Waves.Load(int3(px, 0));
-		p.noise = Noise.Load(int3(px, 0));
 		return p;
 	}
 
@@ -150,18 +147,23 @@ namespace PBRWaterDeferred
 			if (n.water)
 				p = n;
 			else {
-				p.waves = 0.0;
-				p.noise = float2(0.0, 0.5);
 				p.alpha = 1.0;
 				source = px;
 			}
+		}
+		float4 recordWaves = 0.0;
+		float2 recordNoise = float2(0.0, 0.5);
+		[branch] if (p.water)
+		{
+			recordWaves = Waves.Load(int3(source, 0));
+			recordNoise = Noise.Load(int3(source, 0));
 		}
 
 		// The displaced surface at this pixel, camera-relative, from its depth.
 		float2 screenUV = input.HPosition.xy * FrameBuffer::DynamicResolutionParams2.xy * VPOSOffset.xy;
 		float4 world = mul(FrameBuffer::CameraViewProjInverse, float4(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, p.depth, 1.0));
 		float3 displaced = world.xyz / world.w;
-		float3 undisplaced = displaced - p.waves.xyz;
+		float3 undisplaced = displaced - recordWaves.xyz;
 
 		VS_INPUT v = (VS_INPUT)0;
 		float3 worldOrigin = float3(World[0].w, World[1].w, World[2].w);
@@ -176,12 +178,12 @@ namespace PBRWaterDeferred
 		v.Color = float4(1.0, 1.0, 1.0, p.alpha);
 #	endif
 		PBRWater::VertexWaves waves;
-		waves.surface.current = p.waves.xyz;
+		waves.surface.current = recordWaves.xyz;
 		waves.surface.previous = 0.0;
-		waves.surface.shore = float4(0.0, 0.0, p.waves.w, undisplaced.z);
+		waves.surface.shore = float4(0.0, 0.0, recordWaves.w, undisplaced.z);
 		waves.flowDamping = FlowAt(undisplaced, waves.flowVelocity);
 		VS_OUTPUT o = WaterVertexWith(v, waves);
-		o.SurfaceNoise = float2(p.noise.x, 0.35 + 1.3 * p.noise.y);
+		o.SurfaceNoise = float2(recordNoise.x, 0.35 + 1.3 * recordNoise.y);
 		o.HPosition = float4(input.HPosition.xy, p.depth, input.HPosition.w);
 		input = o;
 		return owned;

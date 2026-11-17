@@ -249,7 +249,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
         and moves the breaker type towards spilling (`ShoreBreakerIribarren`, `ShoreWindPlunge`, 30 % of the surf
         similarity); an offshore wind holds the waves up into plungers that break later (Douglass 1990; King and Baker
         1996; Feddersen and Fincham 2023). Mirrored on the CPU.
-    -   _Curl_ (`ShoreCurlShape`, setting `ShoreCurl`, default 1): only plunging breakers curl, by the beach's surf
+    -   _Curl_ (`ShoreCurlLip`, setting `ShoreCurl`, default 1): only plunging breakers curl, by the beach's surf
         similarity `xi0 = tan(beta) / sqrt(H0 / L0)` with the sea's real peak period (Battjes 1974: spilling below 0.5,
         surging above 3.3; `ctx.iribarren`). Where the mesh is fine enough (`ShoreCurlWeight`:
         vertex spacing below 1/25 of the wavelength, full at 1/50; tessellated draws only) the plunging stages

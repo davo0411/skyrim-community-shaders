@@ -172,6 +172,39 @@ namespace PBRWater
 		float4 sea;          // the same before the hand-over: the sea here, whether the FFT or the shore train carries it
 	};
 
+	/// The 2 x 2 texels a bilinear lookup at `uv` reads, loaded and clamped to the edge (TexelQuadAt).
+	struct TexelQuad
+	{
+		float z00, z10, z01, z11;
+		float2 f;   // the lookup's position between them
+		int2 i0;    // the lower corner's texel, unclamped
+		int2 a, b;  // the clamped lower and upper texels
+		int2 hi;    // the last texel
+	};
+
+	TexelQuad TexelQuadAt(Texture2D<float> t, float2 uv)
+	{
+		TexelQuad q;
+		uint w, h;
+		t.GetDimensions(w, h);
+		float2 p = uv * float2(w, h) - 0.5;
+		q.i0 = int2(floor(p));
+		q.f = p - q.i0;
+		q.hi = int2(w, h) - 1;
+		q.a = clamp(q.i0, 0, q.hi);
+		q.b = clamp(q.i0 + 1, 0, q.hi);
+		q.z00 = t.Load(int3(q.a.x, q.a.y, 0));
+		q.z10 = t.Load(int3(q.b.x, q.a.y, 0));
+		q.z01 = t.Load(int3(q.a.x, q.b.y, 0));
+		q.z11 = t.Load(int3(q.b.x, q.b.y, 0));
+		return q;
+	}
+
+	float TexelQuadBilinear(TexelQuad q)
+	{
+		return lerp(lerp(q.z00, q.z10, q.f.x), lerp(q.z01, q.z11, q.f.x), q.f.y);
+	}
+
 	/**
 	 * Bilinear lookup from texel loads, clamped to the edge, and, when `withGradient`, its central differences one texel
 	 * either way, `diff` = (B(+x) - B(-x), B(+y) - B(-y)). The terrain heights must never depend on the sampler bound to the
@@ -181,31 +214,22 @@ namespace PBRWater
 	 */
 	float BilinearLoadGrad(Texture2D<float> t, float2 uv, bool withGradient, out float2 diff)
 	{
-		uint w, h;
-		t.GetDimensions(w, h);
-		float2 p = uv * float2(w, h) - 0.5;
-		int2 i0 = int2(floor(p));
-		float2 f = p - i0;
-		int2 hi = int2(w, h) - 1;
-		int2 a = clamp(i0, 0, hi);
-		int2 b = clamp(i0 + 1, 0, hi);
-		float z00 = t.Load(int3(a.x, a.y, 0));
-		float z10 = t.Load(int3(b.x, a.y, 0));
-		float z01 = t.Load(int3(a.x, b.y, 0));
-		float z11 = t.Load(int3(b.x, b.y, 0));
+		TexelQuad q = TexelQuadAt(t, uv);
 		diff = 0.0;
 		[branch] if (withGradient)
 		{
-			int2 m = clamp(i0 - 1, 0, hi);
-			int2 n = clamp(i0 + 2, 0, hi);
+			int2 a = q.a, b = q.b;
+			int2 m = clamp(q.i0 - 1, 0, q.hi);
+			int2 n = clamp(q.i0 + 2, 0, q.hi);
 			float zm0 = t.Load(int3(m.x, a.y, 0)), zm1 = t.Load(int3(m.x, b.y, 0));
 			float zn0 = t.Load(int3(n.x, a.y, 0)), zn1 = t.Load(int3(n.x, b.y, 0));
 			float z0m = t.Load(int3(a.x, m.y, 0)), z1m = t.Load(int3(b.x, m.y, 0));
 			float z0n = t.Load(int3(a.x, n.y, 0)), z1n = t.Load(int3(b.x, n.y, 0));
-			diff.x = lerp(lerp(z10, zn0, f.x), lerp(z11, zn1, f.x), f.y) - lerp(lerp(zm0, z00, f.x), lerp(zm1, z01, f.x), f.y);
-			diff.y = lerp(lerp(z01, z11, f.x), lerp(z0n, z1n, f.x), f.y) - lerp(lerp(z0m, z1m, f.x), lerp(z00, z10, f.x), f.y);
+			float2 f = q.f;
+			diff.x = lerp(lerp(q.z10, zn0, f.x), lerp(q.z11, zn1, f.x), f.y) - lerp(lerp(zm0, q.z00, f.x), lerp(zm1, q.z01, f.x), f.y);
+			diff.y = lerp(lerp(q.z01, q.z11, f.x), lerp(z0n, z1n, f.x), f.y) - lerp(lerp(z0m, z1m, f.x), lerp(q.z00, q.z10, f.x), f.y);
 		}
-		return lerp(lerp(z00, z10, f.x), lerp(z01, z11, f.x), f.y);
+		return TexelQuadBilinear(q);
 	}
 
 	/**
@@ -246,28 +270,17 @@ namespace PBRWater
 		float ceiling = -1e9;
 		[branch] if (Terrain1.z > 0.5 && all(uv > 0.0) && all(uv < 1.0))
 		{
-			uint w, h;
-			TerrainTexture.GetDimensions(w, h);
-			float2 p = uv * float2(w, h) - 0.5;
-			int2 i0 = int2(floor(p));
-			float2 f = p - i0;
-			int2 hi = int2(w, h) - 1;
-			int2 a = clamp(i0, 0, hi);
-			int2 b = clamp(i0 + 1, 0, hi);
-			float z00 = TerrainTexture.Load(int3(a.x, a.y, 0));
-			float z10 = TerrainTexture.Load(int3(b.x, a.y, 0));
-			float z01 = TerrainTexture.Load(int3(a.x, b.y, 0));
-			float z11 = TerrainTexture.Load(int3(b.x, b.y, 0));
-			float bilinear = lerp(lerp(z00, z10, f.x), lerp(z01, z11, f.x), f.y);
+			TexelQuad q = TexelQuadAt(TerrainTexture, uv);
 			// Each triangle stands off the bilinear surface by twist * min(u, v) * (1 - max(u, v)) (u, v measured from its
 			// diagonal's corner): nothing on the quad's edges, a quarter of the twist at its centre. The quarter taken over
 			// the whole quad stepped at every quad edge, where the twist changes, and stood the mesh held above the bed in
 			// straight-edged, right-angled terraces along the LAND grid.
-			float twist = z00 + z11 - z10 - z01;
+			float twist = q.z00 + q.z11 - q.z10 - q.z01;
+			float2 f = q.f;
 			float2 g = float2(1.0 - f.x, f.y);
 			float alongMain = min(f.x, f.y) * (1.0 - max(f.x, f.y));   // split along 00-11
 			float alongCross = min(g.x, g.y) * (1.0 - max(g.x, g.y));  // split along 10-01
-			ceiling = lerp(Terrain1.x, Terrain1.y, bilinear + max(twist * alongMain, -twist * alongCross));
+			ceiling = lerp(Terrain1.x, Terrain1.y, TexelQuadBilinear(q) + max(twist * alongMain, -twist * alongCross));
 		}
 		return ceiling;
 	}
@@ -321,13 +334,11 @@ namespace PBRWater
 
 	/// No wave is steeper than this height over wavelength (Miche 1944). Mirrors PBRWaterModel::ShoreSteepestWave.
 	static const float ShoreSteepestWave = 0.142;
-	/// How many waves out from the shore the train reaches, fading in over the outer half (Tune3.z). Mirrors PBRWaterModel::ShoreTuning::trainCycles.
 	/// Waves break when their height reaches this share of the depth under the crest (McCowan 1894). Mirrors
 	/// PBRWaterModel::ShoreBreakerLimit.
 	static const float ShoreBreakerLimit = 0.78;
 	/// Height of the regular waves that carry a random sea's energy: Hrms = Hs / sqrt(2). Mirrors PBRWaterModel::ShoreHeightRatio.
 	static const float ShoreHeightRatio = 0.7071;
-	/// Coverage of the foam that lingers in the surf between the breakers (lace, through the foam texture's black point): Tune3.w.
 
 	/// The share of a cascade of mean frequency `omega` that the shore train takes over: all of it up to twice the train's
 	/// frequency, none from four times it. Mirrors PBRWaterModel::ShoreHandOver.
@@ -415,13 +426,6 @@ namespace PBRWater
 	{
 		float k0 = omega * omega / GravityMetres;
 		return k0 * rsqrt(max(SafeTanh(k0 * max(depthMetres, 1e-3)), 1e-6));
-	}
-
-	/// Phase speed (m/s). Mirrors PBRWaterModel::PhaseSpeed.
-	float PhaseSpeed(float omega, float depthMetres)
-	{
-		omega = max(omega, 1e-3);
-		return omega / Wavenumber(omega, depthMetres);
 	}
 
 	/// Shoaling coefficient sqrt(cg0 / cg): energy flux is conserved as waves slow down over the shoaling bed
@@ -528,7 +532,11 @@ namespace PBRWater
 		{
 			float fetch = FetchWeight(c, ctx);
 			// Waves only feel a bottom shallower than about half their wavelength (k h < pi): deeper, Green's law leaves them be.
-			shoaledWeight[c] = fetch * (Cascade1[c].z * ctx.depth < Math::PI ? ShoalingCoefficient(Cascade1[c].x, depthMetres) : 1.0);
+			// A branch, not ?: (which evaluates both sides), so deep water skips the shoaling.
+			float shoaling = 1.0;
+			[branch] if (Cascade1[c].z * ctx.depth < Math::PI)
+				shoaling = ShoalingCoefficient(Cascade1[c].x, depthMetres);
+			shoaledWeight[c] = fetch * shoaling;
 			float deep = fetch * Cascade2[c].x;
 			float shoaled = shoaledWeight[c] * Cascade2[c].x;
 			deepVariance += deep * deep;
@@ -1134,7 +1142,7 @@ namespace PBRWater
 	}
 
 	/// What a curling wave's shape needs that is the same all along it: worked out once (ShoreCurlSetup) and passed to
-	/// every ShoreCurlShape of the wave.
+	/// every ShoreCurlLip of the wave.
 	struct ShoreCurlFrame
 	{
 		ShoreShape shape;  // the hump the lip is turned out of
@@ -1166,19 +1174,18 @@ namespace PBRWater
 	}
 
 	/**
-	 * The curled wave at phase `x`: x its displacement along the direction of travel, y its height above the trough
-	 * (units). Where the curl does not reach, exactly ShoreCurlBackground's surface.
+	 * The curl at phase `x`: how far the curled wave stands from ShoreCurlBackground's surface (units), x along the direction
+	 * of travel, y up. Zero where the curl does not reach.
 	 * @param f       ShoreCurlSetup of the wave
 	 * @param lambda  the wavelength (units)
 	 * @param height  trough to crest (units)
 	 * @param forward the table's forward reach (units)
 	 */
-	float2 ShoreCurlShape(float x, ShoreCurlFrame f, float lambda, float height, float forward)
+	float2 ShoreCurlLip(float x, ShoreCurlFrame f, float lambda, float height, float forward)
 	{
-		float2 shape = ShoreCurlBackground(x, f.shape, lambda, height, forward);
-
 		// How much of the turn this point takes: none below the pivot, rising to all of it at the crest, the lip's tip, and
 		// running out behind it over the top of the lip.
+		float2 lip = 0.0;
 		float g = 0.0;
 		if (x > f.shape.crest) {
 			float behind = (x - f.shape.crest) * lambda / max(ShoreCurlLipLength * height, 1e-3);
@@ -1189,6 +1196,7 @@ namespace PBRWater
 		}
 		[branch] if (g > 1e-3)
 		{
+			float2 shape = ShoreCurlBackground(x, f.shape, lambda, height, forward);
 			float t = f.turn * g;
 			float ct = cos(t);
 			float st = sin(t);
@@ -1206,9 +1214,9 @@ namespace PBRWater
 					under = saturate(under + (ShoreCurlBackground(under, f.shape, lambda, height, forward).x - curled.x) / max(lambda, 1e-3));
 				curled = lerp(curled, ShoreCurlBackground(lerp(under, x, f.settle), f.shape, lambda, height, forward), f.impact);
 			}
-			shape = curled;
+			lip = curled - shape;
 		}
-		return float2(shape.x + x * lambda, shape.y);
+		return lip;
 	}
 
 	/// The grazing angle's floor in the tessellator's density: the waves' slope (WaterTessellator GrazingFloor).
@@ -1260,7 +1268,7 @@ namespace PBRWater
 
 	/**
 	 * Where a wave of `wavelength` (units) at stage `stage` takes the curl's shape at camera-relative `positionWS` on a
-	 * beach of surf similarity `iribarren`. Returns the share of ShoreCurlShape over the table's shape (0..1), and sets
+	 * beach of surf similarity `iribarren`. Returns the share of the curl (ShoreCurlLip) over the table's shape (0..1), and sets
 	 * `amount` to the curl's strength to pass it (Shore3.z at most). A weaker plunger, or a mesh too coarse for the whole
 	 * lip, curls less: blending a share of the full curl into the table's wave instead moved the vertices little while the
 	 * curl's steep turn about the lip took over the normal, so a plain standing face was lit as an overhang. The share only
@@ -1407,19 +1415,20 @@ namespace PBRWater
 		float2 lastLip = 0.0;
 		float curlAmount;
 		float curl = ShoreCurlWeight(positionWS, wave.wavelength, wave.stage, ShoreBreakerIribarren(ctx), curlAmount);
+		// The profile's second slice: x the foam (shading), z the scale of this stage's forward displacement (the curl).
+		float4 profileFoam = 0.0;
+		[branch] if (shading || curl > 0.0)
+			profileFoam = ShoreProfileAt(wave.phase, wave.stage, 1.0);
 		[branch] if (curl > 0.0)
 		{
 			static const float e = 1.0 / 512.0;
-			float forwardScale = ShoreProfileAt(wave.phase, wave.stage, 1.0).z;
-			ShoreCurlFrame frame = ShoreCurlSetup(wave.stage, wave.wavelength, height, forward, forwardScale, curlAmount);
-			float2 rest = float2(wave.wavelength, 0.0);
-			float2 c = ShoreCurlShape(wave.phase, frame, wave.wavelength, height, forward) - ShoreCurlBackground(wave.phase, frame.shape, wave.wavelength, height, forward) - wave.phase * rest;
-			float2 cA = ShoreCurlShape(wave.phase + e, frame, wave.wavelength, height, forward) - ShoreCurlBackground(wave.phase + e, frame.shape, wave.wavelength, height, forward) - (wave.phase + e) * rest;
-			float2 cB = ShoreCurlShape(wave.phase - e, frame, wave.wavelength, height, forward) - ShoreCurlBackground(wave.phase - e, frame.shape, wave.wavelength, height, forward) - (wave.phase - e) * rest;
-			lip = curl * c;
+			ShoreCurlFrame frame = ShoreCurlSetup(wave.stage, wave.wavelength, height, forward, profileFoam.z, curlAmount);
+			lip = curl * ShoreCurlLip(wave.phase, frame, wave.wavelength, height, forward);
+			float2 cA = ShoreCurlLip(wave.phase + e, frame, wave.wavelength, height, forward);
+			float2 cB = ShoreCurlLip(wave.phase - e, frame, wave.wavelength, height, forward);
 			dLip = curl * (cA - cB) / (2.0 * e);
 			if (previous)
-				lastLip = curl * (ShoreCurlShape(lastPhase, frame, wave.wavelength, height, forward) - ShoreCurlBackground(lastPhase, frame.shape, wave.wavelength, height, forward) - lastPhase * rest);
+				lastLip = curl * ShoreCurlLip(lastPhase, frame, wave.wavelength, height, forward);
 			o.curl = curl * w;
 		}
 		// The undular bore's whelps ride on the profile; ones shorter than the vertex spacing or pixel fade out.
@@ -1465,7 +1474,7 @@ namespace PBRWater
 		o.lipCompression = stretch * (dLip.x * w);
 		o.breakStage = smoothstep(0.45, 0.6, wave.stage) * gate;
 		if (shading)
-			o.foam = ShoreProfileAt(wave.phase, wave.stage, 1.0).x * gate * BreakerStrength(ctx);
+			o.foam = profileFoam.x * gate * BreakerStrength(ctx);
 		if (previous) {
 			float4 last = ShoreProfileAt(lastPhase, wave.stage, 0.0);
 			float2 lastShape = float2(last.x * forward, last.y * height);
@@ -2095,28 +2104,6 @@ namespace PBRWater
 		return Ripple0.w > 0.5 && all(uv > 0.0) && all(uv < 1.0);
 	}
 
-	/// Displayed ripple height. The simulation runs at a fixed rate, so the two stored steps are
-	/// interpolated to the render time; `previous` samples last frame's copy for motion vectors.
-	float RippleHeight(float3 positionWS, bool previous)
-	{
-		float2 uv;
-		if (!RippleUV(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, previous ? Ripple2.xy : Ripple0.xy, uv))
-			return 0.0;
-		float2 steps = previous ? RipplePreviousTexture.SampleLevel(LinearClampSampler, uv, 0).xy :
-		                          RippleTexture.SampleLevel(LinearClampSampler, uv, 0).xy;
-		return lerp(steps.y, steps.x, previous ? Ripple2.w : Ripple2.z) * Ripple1.x * BorderFade(uv);
-	}
-
-	float RippleDisplayed(float2 uv)
-	{
-		float2 steps = RippleTexture.SampleLevel(LinearClampSampler, uv, 0).xy;
-		return lerp(steps.y, steps.x, Ripple2.z);
-	}
-
-	// Horizontal ripple displacement (Crest 4 ShapeCombine, _DYNAMIC_WAVE_SIM_ON): the surface points shift along the
-	// ripples' gradient like those of a Gerstner wave, which sharpens the crests.
-	// The strength (Tune3.x, Crest default 3) and the largest displacement in simulation texels (Tune3.y, Crest default 0.3) are settings.
-
 	/// The displayed state (height in simulation units) at `uv`, of this frame (or last frame's copy for motion vectors).
 	float RippleDisplayedAt(float2 uv, bool previous)
 	{
@@ -2124,6 +2111,20 @@ namespace PBRWater
 		                          RippleTexture.SampleLevel(LinearClampSampler, uv, 0).xy;
 		return lerp(steps.y, steps.x, previous ? Ripple2.w : Ripple2.z);
 	}
+
+	/// Displayed ripple height. The simulation runs at a fixed rate, so the two stored steps are
+	/// interpolated to the render time; `previous` samples last frame's copy for motion vectors.
+	float RippleHeight(float3 positionWS, bool previous)
+	{
+		float2 uv;
+		if (!RippleUV(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, previous ? Ripple2.xy : Ripple0.xy, uv))
+			return 0.0;
+		return RippleDisplayedAt(uv, previous) * Ripple1.x * BorderFade(uv);
+	}
+
+	// Horizontal ripple displacement (Crest 4 ShapeCombine, _DYNAMIC_WAVE_SIM_ON): the surface points shift along the
+	// ripples' gradient like those of a Gerstner wave, which sharpens the crests.
+	// The strength (Tune3.x, Crest default 3) and the largest displacement in simulation texels (Tune3.y, Crest default 0.3) are settings.
 
 	/**
 	 * How the ripples displace the surface at the undisplaced `positionWS`: xy horizontally, z the height (units).
@@ -2171,10 +2172,10 @@ namespace PBRWater
 		if (!RippleUV(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, Ripple0.xy, uv))
 			return 0.0;
 		float t = Ripple1.w;
-		float hL = RippleDisplayed(uv - float2(t, 0));
-		float hR = RippleDisplayed(uv + float2(t, 0));
-		float hD = RippleDisplayed(uv - float2(0, t));
-		float hU = RippleDisplayed(uv + float2(0, t));
+		float hL = RippleDisplayedAt(uv - float2(t, 0), false);
+		float hR = RippleDisplayedAt(uv + float2(t, 0), false);
+		float hD = RippleDisplayedAt(uv - float2(0, t), false);
+		float hU = RippleDisplayedAt(uv + float2(0, t), false);
 		float texelUnits = t / Ripple0.z;
 		float2 grad = float2(hR - hL, hU - hD) / (2.0 * texelUnits) * Ripple1.x * Ripple1.y * RippleDepthFade(depth);
 		return grad * BorderFade(uv);

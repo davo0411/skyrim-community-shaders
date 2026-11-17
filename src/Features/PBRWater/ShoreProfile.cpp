@@ -37,7 +37,7 @@ namespace
 	 * The crest only ever moves forward. (The bore used to be a second hump faded in ahead of the sinking crest, while the
 	 * forward displacement that had carried the crest towards it was taken back: the crest stood still, sank, and a new
 	 * one rose 0.16 of a wavelength ahead.) The overturning lip itself is no part of the table: a surface drawn from a
-	 * vertex every metre cannot hold it. Where the mesh can, the shaders turn the crest over (PBRWater::ShoreCurlShape).
+	 * vertex every metre cannot hold it. Where the mesh can, the shaders turn the crest over (PBRWater::ShoreCurlLip).
 	 */
 	Shape Evaluate(float x, float v)
 	{
