@@ -12,13 +12,11 @@ namespace
 	constexpr float FixedStep = 1.0f / 60.0f;
 	constexpr uint32_t MaxStepsPerFrame = 4;
 
-	constexpr float GravityMetres = 9.81f;        // m/s^2
-	constexpr float SurfaceTension = 0.074f;      // N/m, clean water against air at 20 C
-	constexpr float WaterDensity = 1000.0f;       // kg/m^3
-	constexpr float MaxCourantSquared = 0.45f;    // the leapfrog scheme is stable up to 0.5 in 2D; the viscous term needs the margin
-	constexpr float WavelengthTexels = 2.0f;      // the shortest wave the grid can hold (Crest: 2 * texel width)
-	constexpr float VanillaFlowScroll = 9.26f;    // mean of the four flow normal layers' multipliers (Water.hlsl GetFlowmapNormal)
-	constexpr float FlowNormalTileUnits = 64.0f;  // units one flow normal tile covers at full strength
+	constexpr float GravityMetres = 9.81f;      // m/s^2
+	constexpr float SurfaceTension = 0.074f;    // N/m, clean water against air at 20 C
+	constexpr float WaterDensity = 1000.0f;     // kg/m^3
+	constexpr float MaxCourantSquared = 0.45f;  // the leapfrog scheme is stable up to 0.5 in 2D; the viscous term needs the margin
+	constexpr float WavelengthTexels = 2.0f;    // the shortest wave the grid can hold (Crest: 2 * texel width)
 	constexpr float TwoPi = 6.28318530718f;
 }
 
