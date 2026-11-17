@@ -332,7 +332,7 @@ void PBRWater::SanitizeSettings()
 	auto clamp = [](float& value, float lo, float hi, float fallback) {
 		value = std::isfinite(value) ? std::clamp(value, lo, hi) : fallback;
 	};
-	const Settings d{};
+	static const Settings d{};  // the defaults, built once (this runs every frame)
 	clamp(s.TessellationTriangleSize, 1.0f, Huge, d.TessellationTriangleSize);
 	clamp(s.WindSpeedCalm, 0.0f, Huge, d.WindSpeedCalm);
 	clamp(s.WindSpeedStorm, 0.1f, Huge, d.WindSpeedStorm);
