@@ -152,10 +152,12 @@ bool OutsideFrustum(float3 p0, float3 p1, float3 p2)
 
 	// The grid carries GridN segments along each edge: split while they are longer than the spacing wanted where the
 	// triangle comes nearest the camera. A culled bisector splits only when a neighbour waits on it.
+	// (A branch: || does not short-circuit, and a forced bisector needs no spacing.)
 	bool want = (b.flags & PBRWaterBisection::FlagForced) != 0;
-	if (!culled && b.depth < (uint)Cull.z) {
+	[branch] if (!want && !culled && b.depth < (uint)Cull.z)
+	{
 		float edge = length(p2 - p0) / PBRWaterBisection::GridN;
-		want = want || edge > PBRWaterBisection::TessellationSpacing(ClosestToCamera(p0, p1, p2));
+		want = edge > PBRWaterBisection::TessellationSpacing(ClosestToCamera(p0, p1, p2));
 	}
 	if (!want || b.depth >= (uint)Cull.z)
 		return;

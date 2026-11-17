@@ -98,6 +98,7 @@ namespace PBRWaterBisection
 		float distance = max(length(positionWS), 1.0);
 		float size = max(PBRWater::Tess0.y, 1.0) * max(PBRWater::Draw0.w, 1.0) * distance / max(PBRWater::Tess0.w, 1e-3);
 		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+		float curlDetail = max(PBRWater::Shore1.y, 1.0);
 
 		float detail = 0.0;
 		float2 uv;
@@ -113,12 +114,10 @@ namespace PBRWaterBisection
 			{
 				float curlDepth = PBRWater::ShoreCurlDepth();
 				float crestDepth = PBRWater::ShoreCrestDepth(absXY, 1e6);
-				float curlDetail = max(PBRWater::Shore1.y, 1.0);
 				curl = shore * smoothstep(curlDepth, PBRWater::TessellationCurlDepthFade * curlDepth, crestDepth) *
 				       smoothstep(PBRWater::TessellationCurlLipFar * PBRWater::Shore3.w, PBRWater::TessellationCurlLipNear * PBRWater::Shore3.w, size / curlDetail);
 			}
 		}
-		float curlDetail = max(PBRWater::Shore1.y, 1.0);
 		float spacing = size * (2.0 - detail) / (1.0 + (curlDetail - 1.0) * curl) * PBRWater::TessellationGrazingScale(positionWS);
 		return max(spacing, 128.0 / max(PBRWater::Tess0.z, 1.0));
 	}
