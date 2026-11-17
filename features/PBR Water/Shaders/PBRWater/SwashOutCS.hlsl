@@ -58,15 +58,15 @@ groupshared uint AnyWet;
 	int3 c = int3(id.xy, 0);
 	float4 stage = Stage.Load(c);
 	float4 swash = Swash.Load(c);
-	float4 prep = Prep.Load(c);
+	int2 local = int2(gtid.xy) + HoleReach;
+	float bed = Cells[local.y * Apron + local.x].y;  // Prep.x
 	// No ground (a wall): no water, and a surface that pulls no neighbour's up.
-	bool wall = prep.x > 100.0;
+	bool wall = bed > 100.0;
 	float waterDepth = swash.x;
 	// No water anywhere within reach: no hole to fill.
-	[branch] if (AnyWet != 0 && !wall && waterDepth < Wet && prep.x > -1.0)
+	[branch] if (AnyWet != 0 && !wall && waterDepth < Wet && bed > -1.0)
 	{
 		static const int2 Directions[4] = { int2(1, 0), int2(0, 1), int2(1, 1), int2(1, -1) };
-		int2 local = int2(gtid.xy) + HoleReach;
 		float level = -1e6;
 		[unroll] for (uint d = 0; d < 4; d++)
 		{
@@ -86,11 +86,11 @@ groupshared uint AnyWet;
 				level = max(level, min(levelA, levelB));
 		}
 		// Only below the water around it: a ridge or a rock standing above that level is dry ground in the swash.
-		if (level > prep.x)
-			waterDepth = max(waterDepth, max(level - prep.x, Wet));
+		if (level > bed)
+			waterDepth = max(waterDepth, max(level - bed, Wet));
 	}
 	float depth = wall ? 0.0 : waterDepth * PBRWater::UnitsPerMetre;
-	float surface = wall ? 0.0 : prep.x * PBRWater::UnitsPerMetre + depth;
+	float surface = wall ? 0.0 : bed * PBRWater::UnitsPerMetre + depth;
 	// The foam per area thins with the sheet: the last millimetres of a front or a draining film carry little of it.
 	float foam = swash.w * smoothstep(0.003, 0.03, swash.x);
 	Output[id.xy] = float4(stage.x, surface, depth, foam);

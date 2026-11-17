@@ -85,14 +85,27 @@ bool IsFinite(float x)
 	return (asuint(x) & 0x7F800000u) != 0x7F800000u;
 }
 
-/// Bilinear read of the previous state at fractional texel `q` (texel centres at integers).
-float4 SampleState(float2 q)
+float4 Bilerp(float4 a, float4 b, float4 c, float4 d, float2 f)
+{
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+/**
+ * Bilinear reads of the previous state at fractional texel `q` (texel centres at integers) and one texel either way along
+ * each axis: `centre`, and the four neighbours' sum. The five reads share twelve texels, each loaded once.
+ */
+void SampleStateCross(float2 q, out float4 centre, out float4 neighbours)
 {
 	float2 base = floor(q);
 	float2 f = q - base;
 	int2 i = int2(base);
-	return lerp(lerp(LoadState(i), LoadState(i + int2(1, 0)), f.x),
-		lerp(LoadState(i + int2(0, 1)), LoadState(i + int2(1, 1)), f.x), f.y);
+	float4 s00 = LoadState(i), s10 = LoadState(i + int2(1, 0)), s01 = LoadState(i + int2(0, 1)), s11 = LoadState(i + int2(1, 1));
+	float4 s20 = LoadState(i + int2(2, 0)), s21 = LoadState(i + int2(2, 1));
+	float4 sm0 = LoadState(i + int2(-1, 0)), sm1 = LoadState(i + int2(-1, 1));
+	float4 s02 = LoadState(i + int2(0, 2)), s12 = LoadState(i + int2(1, 2));
+	float4 s0m = LoadState(i + int2(0, -1)), s1m = LoadState(i + int2(1, -1));
+	centre = Bilerp(s00, s10, s01, s11, f);
+	neighbours = Bilerp(s10, s20, s11, s21, f) + Bilerp(sm0, s00, sm1, s01, f) + Bilerp(s01, s11, s02, s12, f) + Bilerp(s0m, s1m, s00, s10, f);
 }
 
 /// Water depth (units) at absolute `absXY`: the cell's still water level above the terrain. 1e6: deep or unknown.
@@ -166,9 +179,7 @@ float2 FlowVelocity(float2 absXY)
 	float4 neighbours;
 	[branch] if (any(upstream != float2(p)))
 	{
-		centre = SampleState(upstream);
-		neighbours = SampleState(upstream + float2(1, 0)) + SampleState(upstream - float2(1, 0)) +
-		             SampleState(upstream + float2(0, 1)) + SampleState(upstream - float2(0, 1));
+		SampleStateCross(upstream, centre, neighbours);
 	}
 	else
 	{

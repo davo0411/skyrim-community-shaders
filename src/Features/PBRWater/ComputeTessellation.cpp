@@ -30,7 +30,6 @@ namespace
 	/// Meshes with more triangles are drawn untessellated (they already carry their own detail).
 	constexpr uint32_t MaxMeshTriangles = 4096;
 	constexpr uint32_t MaxVertices = 2u << 20;
-	/// The vertices a frame's mesh aims for: past it the target triangle size grows until the mesh fits (Build).
 	/// The vertices a frame's mesh aims for, one per this many render pixels: past it the target triangle size grows until
 	/// the mesh fits (Build). Every pass of the frame draws them, and past about one vertex per handful of pixels the
 	/// triangles only cost the pixel shader quads (measured at 1440p: twice the vertices, 1.5 times the surface pass, no
@@ -121,7 +120,6 @@ namespace
 		return t * t * (3.0f - 2.0f * t);
 	}
 
-	/// Smallest e with 2^e >= f (f >= 1).
 	/**
 	 * The points a segment of `factor` gets: the power of two nearest to it (log2 rounded). Rounded up, every segment
 	 * carried up to twice the points the target size asked for, and the triangles came out at half to all of it, with the

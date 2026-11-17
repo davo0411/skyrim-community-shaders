@@ -1948,15 +1948,15 @@ namespace PBRWater
 	 * (trilinear / anisotropic). The slope variance the filter removes is recovered from the mip-filtered
 	 * second moments (LEAN mapping) and returned for the roughness, as is the variance of the shore wave
 	 * train where the pixel cannot carry it.
-	 * @param surfFoam 0..1 the foam the surf left on the water here (ShoreFoamAt): on a face that is not flat it is
-	 *                 drawn with the breaker's white water, through the sea's foam
+	 * @param surfFoam  0..1 the foam the surf left on the water here (ShoreFoamAt): on a face that is not flat it is
+	 *                  drawn with the breaker's white water, through the sea's foam
+	 * @param footprint the pixel's footprint on the water (units): the longer of its screen derivatives
 	 */
-	WaveResult EvaluateWavesFiltered(float3 positionWS, WaveContext ctx, float surfFoam)
+	WaveResult EvaluateWavesFiltered(float3 positionWS, WaveContext ctx, float surfFoam, float footprint)
 	{
 		WaveResult o = (WaveResult)0;
 		WaveSums sums = EmptySums();
 		float steepnessScale = rcp(ctx.energyGain);
-		float footprint = max(length(ddx_fine(positionWS.xy)), length(ddy_fine(positionWS.xy)));
 		if (OceanActive()) {
 			[unroll] for (uint c = 0; c < PBRW_CASCADES; c++)
 			{
@@ -2034,13 +2034,14 @@ namespace PBRWater
 		// A face about to plunge is clear water: the sea's foam is drawn off it (ShoreClearFace). What the surf left on the
 		// water stays: it lies on the surface and rides up the face (cleared too, it left a bare band ahead of every plunger).
 		float clear = 1.0 - o.clearFace;
-		o.fftFoam = FftFoam(sums.foam, length(positionWS)) * clear;
+		float distance = length(positionWS);
+		o.fftFoam = FftFoam(sums.foam, distance) * clear;
 		// The breaker's own white water, drawn with the sea's foam; once the bore lies flat the foam texture takes over.
 		// The surf's leftover foam rides the water up every rising face: there it is drawn with the sea's foam too, as
 		// thickened lace. Added raw, as a coverage with no pattern, it laid a flat grey veil over every breaker's face.
 		float flatness = smoothstep(0.80, 0.95, o.normal.z);
 		float boreFlat = o.bore * flatness;
-		o.breakerFoam = BreakerFoamDrawn(max(max(o.breakerFoam * (1.0 - boreFlat), crestFoam), saturate(surfFoam) * (1.0 - flatness)), sums, length(positionWS));
+		o.breakerFoam = BreakerFoamDrawn(max(max(o.breakerFoam * (1.0 - boreFlat), crestFoam), saturate(surfFoam) * (1.0 - flatness)), sums, distance);
 		// The churned water (the crushed tube, the splash-up, the roller) is in BreakerFoam's coverage and drawn with the sea's
 		// foam, thickened to solid where it is densest. Drawn opaque on top with no pattern, it laid a smooth white band along
 		// every breaking crest that cut off hard against the lace around it.

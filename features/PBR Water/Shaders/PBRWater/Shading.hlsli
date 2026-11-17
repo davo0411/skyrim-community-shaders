@@ -265,16 +265,14 @@ namespace PBRWater
 	{
 		SurfaceShading o;
 
-		float2 dpdx = ddx_fine(waveParam.xy);
-		float2 dpdy = ddy_fine(waveParam.xy);
-		float footprint = max(length(dpdx), length(dpdy));
+		float footprint = max(length(ddx_fine(waveParam.xy)), length(ddy_fine(waveParam.xy)));
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
 		o.surfFoam = ShoreFoamAt(absXY);
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
 		ctx.flow = flowVelocity;
-		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam);
+		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam, footprint);
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
 		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.

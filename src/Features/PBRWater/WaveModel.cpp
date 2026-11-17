@@ -129,15 +129,6 @@ namespace PBRWaterModel
 
 		// ---- end of shared code ----
 
-		/// Standard normal quantile Phi^-1(p) (Abramowitz & Stegun 26.2.23, |error| < 4.5e-4).
-		double NormalQuantile(double p)
-		{
-			const double q = std::clamp(p < 0.5 ? p : 1.0 - p, 1e-12, 0.5);
-			const double t = std::sqrt(-2.0 * std::log(q));
-			const double z = t - (2.515517 + 0.802853 * t + 0.010328 * t * t) / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
-			return p < 0.5 ? -z : z;
-		}
-
 		/// Height spectrum along wavenumber magnitude k (rad/m), directions integrated: S(omega) d(omega)/dk.
 		float BandDensity(const OceanSpectrum& s, float k)
 		{

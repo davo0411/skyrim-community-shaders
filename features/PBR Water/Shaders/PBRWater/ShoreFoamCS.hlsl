@@ -78,16 +78,17 @@ float SampleFoam(float2 q)
 	int2 i = int2(base);
 	float4 wx = CatmullRom(f.x);
 	float4 wy = CatmullRom(f.y);
-	float result = 0.0;
+	float4 rows[4];
 	[unroll] for (int y = 0; y < 4; y++)
 	{
-		float row = 0.0;
 		[unroll] for (int x = 0; x < 4; x++)
-			row += wx[x] * LoadFoam(i + int2(x - 1, y - 1)).x;
-		result += wy[y] * row;
+			rows[y][x] = LoadFoam(i + int2(x - 1, y - 1)).x;
 	}
-	float a = LoadFoam(i).x, b = LoadFoam(i + int2(1, 0)).x, c = LoadFoam(i + int2(0, 1)).x, d = LoadFoam(i + int2(1, 1)).x;
-	return clamp(result, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
+	float result = dot(wy, float4(dot(wx, rows[0]), dot(wx, rows[1]), dot(wx, rows[2]), dot(wx, rows[3])));
+	// The four texels around q: the middle of the block.
+	float2 lo = min(rows[1].yz, rows[2].yz);
+	float2 hi = max(rows[1].yz, rows[2].yz);
+	return clamp(result, min(lo.x, lo.y), max(hi.x, hi.y));
 }
 
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
