@@ -158,10 +158,14 @@ namespace PBRWater
 		return row * breakup;
 	}
 
-	/// Slicks: in light winds (~2-7 m/s) the windrows hold surface films that damp the ripples (0..1).
-	float WindrowSlick(float pattern)
+	/// Slicks: in light winds (~2-7 m/s) the windrows (WindrowPattern) hold surface films that damp the ripples (0..1).
+	float WindrowSlick(float2 absXY, float peakOmega)
 	{
-		return pattern * saturate((Params0.y - 1.5) / 2.0) * saturate((7.0 - Params0.y) / 3.0) * saturate(Surface1.x);
+		float slick = 0.0;
+		// The pattern only where the wind can hold a slick.
+		[branch] if (Params0.y > 1.5 && Params0.y < 7.0 && Surface1.x > 0.0)
+			slick = WindrowPattern(absXY, peakOmega) * saturate((Params0.y - 1.5) / 2.0) * saturate((7.0 - Params0.y) / 3.0) * saturate(Surface1.x);
+		return slick;
 	}
 
 	/// Angular radius of the sun disc (rad).
@@ -274,8 +278,7 @@ namespace PBRWater
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
 		// River currents and rain ripple it whatever the wind.
 		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
-		float windrows = WindrowPattern(absXY, ctx.peakOmega);
-		float slick = WindrowSlick(windrows);
+		float slick = WindrowSlick(absXY, ctx.peakOmega);
 		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
 		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
 		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
