@@ -1848,12 +1848,16 @@ PS_OUTPUT main(PS_INPUT input)
 
 	// Sunlight transmitted through thin wave crests, coloured by the water it crosses.
 	float pbrCrest = saturate(input.ShoreState.z / max(PBRWater::Optics0.w * 0.5, 1.0));
-	float3 pbrSunLight, pbrSkyLight;
-	ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
-	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
-	// Through the crest's real thickness towards the sun where the heightfield reaches.
-	float pbrCrestSunPath = pbrWaveSun.valid ? pbrWaveSun.path : -1.0;
-	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness, pbrCrestSunPath) * PBRWater::Light0.y;
+	// Only crests glow (WaveTranslucency scales by the height within the crest): the troughs skip it.
+	[branch] if (pbrCrest > 0.0)
+	{
+		float3 pbrSunLight, pbrSkyLight;
+		ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
+		float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
+		// Through the crest's real thickness towards the sun where the heightfield reaches.
+		float pbrCrestSunPath = pbrWaveSun.valid ? pbrWaveSun.path : -1.0;
+		pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness, pbrCrestSunPath) * PBRWater::Light0.y;
+	}
 
 	// The waterline per pixel: the water's surface here (the waves at this pixel, or the surf simulation's sheet)
 	// against the ground seen through it, so the edge follows the true bed - and rocks, piles and legs standing in the
