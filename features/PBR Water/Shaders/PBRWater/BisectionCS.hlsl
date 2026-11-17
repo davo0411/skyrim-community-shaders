@@ -342,7 +342,10 @@ float2 EvaluateVertex(uint v)
 		GroupReach[1] = 0;
 	}
 	GroupMemoryBarrierWithGroupSync();
-	float2 reach = id.x < State.Load(StateListed) * PBRWaterBisection::GridVertices ? EvaluateVertex(id.x) : 0.0;
+	// A branch, not ?: (which may evaluate both sides): the group's threads past the last vertex run nothing.
+	float2 reach = 0.0;
+	[branch] if (id.x < State.Load(StateListed) * PBRWaterBisection::GridVertices)
+		reach = EvaluateVertex(id.x);
 	InterlockedMax(GroupReach[0], asuint(reach.x));
 	InterlockedMax(GroupReach[1], asuint(reach.y));
 	GroupMemoryBarrierWithGroupSync();

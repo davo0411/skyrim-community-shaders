@@ -2341,7 +2341,9 @@ namespace PBRWater
 		o.current = clamp(o.current, -limit, limit);
 		o.previous = clamp(o.previous, -limit, limit);
 		float2 gridUV;
-		float surf = ctx.hasTerrain > 0.5 && ShoreGridUV(absXY, gridUV) ? SurfSharesAt(ctx).drawn : 0.0;
+		float surf = 0.0;
+		[branch] if (ctx.hasTerrain > 0.5 && ShoreGridUV(absXY, gridUV))
+			surf = SurfSharesAt(ctx).drawn;
 		o.shore = float4(surf, 0.0, clamp(waves, -limit, limit), positionWS.z);
 		return o;
 	}
