@@ -1906,16 +1906,6 @@ PS_OUTPUT main(PS_INPUT input)
 	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
 	float pbrRawCoverage = pbrSurface.breakerFoam;
 	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);
-	// Whitewater is a layer of bubbles light scatters through, not a surface: it is lit about the normal bent halfway up,
-	// with the sun wrapping around it. Lit about the water's own normal, the foam on the underside of a curling lip (facing
-	// down, seeing neither the sun nor the sky) drew a dark line along every curling crest.
-	float3 pbrFoamNormal = PBRWater::SafeNormalize(normal + float3(0.0, 0.0, 1.0), float3(0.0, 0.0, 1.0));
-	float3 pbrFoamIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * (dirShadow * saturate((dot(pbrFoamNormal, SunDir.xyz) + 0.5) / 1.5)) * pbrWaveSunLight;
-	float3 pbrSkyIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting());
-#							if defined(SKYLIGHTING)
-	pbrSkyIrradiance *= Skylighting::EvaluateDiffuse(skylightingSH, pbrFoamNormal, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
-#							endif
-	float3 pbrFoamColor = ColorManagement::LinearToScene(PBRWaterFoam::Albedo * (pbrFoamIrradiance + pbrSkyIrradiance));
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
@@ -1927,8 +1917,23 @@ PS_OUTPUT main(PS_INPUT input)
 	pbrSunGlint *= pbrEdge;
 	float pbrFilmFoam = smoothstep(0.0, 0.04 * PBRWater::UnitsPerMetre, pbrFilm);
 	float pbrFoam = max(pbrFoamPattern * pbrFilmFoam, saturate(pbrSurface.fftFoam) * pbrFilmFoam);
+	// Lit only where there is foam: most of the water has none.
+	[branch] if (pbrFoam > 0.0)
+	{
+		// Whitewater is a layer of bubbles light scatters through, not a surface: it is lit about the normal bent halfway up,
+		// with the sun wrapping around it. Lit about the water's own normal, the foam on the underside of a curling lip (facing
+		// down, seeing neither the sun nor the sky) drew a dark line along every curling crest.
+		float3 pbrFoamNormal = PBRWater::SafeNormalize(normal + float3(0.0, 0.0, 1.0), float3(0.0, 0.0, 1.0));
+		float3 pbrFoamIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * (dirShadow * saturate((dot(pbrFoamNormal, SunDir.xyz) + 0.5) / 1.5)) * pbrWaveSunLight;
+		float3 pbrSkyIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting());
+#							if defined(SKYLIGHTING)
+		pbrSkyIrradiance *= Skylighting::EvaluateDiffuse(skylightingSH, pbrFoamNormal, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
+#							endif
+		float3 pbrFoamColor = ColorManagement::LinearToScene(PBRWaterFoam::Albedo * (pbrFoamIrradiance + pbrSkyIrradiance));
+		finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam);
+	}
 	// Foam scatters the glint with the rest of the light that reaches it.
-	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + pbrSunGlint * (1.0 - pbrFoam);
+	finalColorPreFog += pbrSunGlint * (1.0 - pbrFoam);
 #						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float waterOpacity = diffuseOutput.refractionMul;
