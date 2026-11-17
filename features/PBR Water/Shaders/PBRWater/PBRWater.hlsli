@@ -61,7 +61,7 @@ namespace PBRWater
 		float4 Terrain0;                 // xy terrain uv scale, zw terrain uv offset
 		float4 Terrain1;                 // x terrain z at texel value 0, y at 1, z enabled, w vertex spacing (units)
 		float4 Shore0;                   // x shore waves on (shore field ready), y blend from the previous shore field (0) to the current one (1), z unused, w largest run-up (units)
-		float4 Shore1;                   // xy unused, z swell Hs (units), w open-sea wind sea Hs (units)
+		float4 Shore1;                   // x crest wobble (waves), y curl tessellation multiplier, z swell Hs (units), w open-sea wind sea Hs (units)
 		float4 Ripple0;                  // xy simulation origin (absolute world units), z 1 / simulation extent (units), w enabled
 		float4 Ripple1;                  // x displacement scale (units), y normal strength, z unused, w texel size (uv)
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
@@ -75,12 +75,12 @@ namespace PBRWater
 		float4 Surface0;                 // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
 		float4 Surface1;                 // x wind slick strength, y unused, z fetch scale, w unused
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
-		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), y deep-water phase speed g / omega of its mean frequency (units/s), zw unused
+		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Swash0;                   // xy wet grid corner (absolute units), z 1 / its extent (units), w enabled (ShoreSimCS; read by the lit terrain and objects)
-		float4 Shore2;                   // x wave clock (rad, wrapped after ShoreClockCycles waves), y the clock last frame, z its rate (rad/s): the eased angular frequency, w peak period Tp (s)
+		float4 Shore2;                   // x wave clock (rad, wrapped after ShoreClockCycles waves), y the clock last frame, z unused, w peak period Tp (s)
 		float4 Shore3;                   // x swash linger (the bed's drag on the surf simulation, times), y undular bore whelps strength, z breaker curl, w deep-water wavelength L0 (units)
-		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, z the sea's own deep-water wavelength L0 (units; run-up), w this frame's time step (s; foam motion vectors)
+		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, zw unused
 		float4 Shore6;                   // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                    // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                   // xy surface noise grid corner (absolute units), z 1 / its extent (units), w baked (SurfaceNoiseCS)

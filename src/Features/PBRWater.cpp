@@ -2003,8 +2003,8 @@ void PBRWater::UpdateFrameConstants()
 			const auto& band = o.cascades[c];
 			d.Cascade0[c] = { static_cast<float>(1.0 / tile), static_cast<float>(u + halfTexel), static_cast<float>(v + halfTexel), static_cast<float>(tile / size) };
 			d.Cascade1[c] = { band.meanOmega, 1.0f / std::max(band.pmWeightOpenSea, 1e-4f), band.meanK / UnitsPerMetre, 0.0f };
-			// Height spread (depth-limited breaking) and deep-water phase speed of the band.
-			d.Cascade2[c] = { std::sqrt(std::max(band.variance, 0.0f)) * UnitsPerMetre, static_cast<float>(PBRWaterModel::Gravity) / std::max(band.meanOmega, 1e-3f) * UnitsPerMetre, 0.0f, 0.0f };
+			// Height spread of the band (depth-limited breaking).
+			d.Cascade2[c] = { std::sqrt(std::max(band.variance, 0.0f)) * UnitsPerMetre, 0.0f, 0.0f, 0.0f };
 		}
 		const bool active = ocean.IsReady() && !o.calm;
 		d.Params0 = { active ? 1.0f : 0.0f, o.windSpeed, o.peakOmega, static_cast<float>(PBRWaterModel::Gravity) * UnitsPerMetre };
@@ -2025,9 +2025,9 @@ void PBRWater::UpdateFrameConstants()
 		// The clock now and as last frame drew it (motion vectors); the first frame has no motion.
 		const float shoreClock = static_cast<float>(shore.phase);
 		const bool consecutive = lastFrame != UINT32_MAX && frame == lastFrame + 1 && frameData.Shore2.w > 0.0f;
-		d.Shore2 = { shoreClock, consecutive ? frameData.Shore2.x : shoreClock, shore.rate, shore.period };
+		d.Shore2 = { shoreClock, consecutive ? frameData.Shore2.x : shoreClock, 0.0f, shore.period };
 		d.Shore3 = { settings.SwashLinger, shore.whelps, settings.ShoreCurl, shore.deepLength };
-		d.Shore4 = { shoreReady ? snap->shoreField->omega : shore.omega, blending ? snap->shorePrevious->omega : shore.omega, shore.seaLength, renderDelta.load(std::memory_order_acquire) };
+		d.Shore4 = { shoreReady ? snap->shoreField->omega : shore.omega, blending ? snap->shorePrevious->omega : shore.omega, 0.0f, 0.0f };
 		auto fieldMap = [](const PBRWaterModel::ShoreField& f) {
 			return float4{ f.minX - 0.5f * f.step, f.minY - 0.5f * f.step, 1.0f / (static_cast<float>(f.width) * f.step), 1.0f / (static_cast<float>(f.height) * f.step) };
 		};
@@ -2112,8 +2112,7 @@ void PBRWater::UpdateFrameConstants()
 
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, 0.0f, settings.RefractionDistortion, settings.PointLightSpecular };
-	// Where the waves break.
-	// The open sea's foam test, for the shore waves' crests (PBRWater::ShoreCrestFoam).
+	// The open sea's foam test, also applied to the shore waves' crests (PBRWater::EvaluateWavesFiltered).
 	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, 0.0f, settings.RiverWaveDamping };
 
 	// Water clarity and the light in the water.

@@ -1909,7 +1909,7 @@ namespace PBRWaterModel
 			ctx.hasTerrain = true;
 		}
 
-		// Same weighting as PBRWater::CascadeWeight in the shader (minus the render-only distance fade): the fetch-
+		// Same weighting as PBRWater::BuildWaveContext in the shader (minus the render-only distance fade): the fetch-
 		// limited spectrum, shoaling (Green's law) and depth-limited breaking.
 		const float depthMetres = ctx.depth * static_cast<float>(MetresPerUnit);
 		float variance = 0.0f;

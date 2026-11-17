@@ -237,12 +237,12 @@ struct PBRWater : Feature
 		float4 Surface0;
 		float4 Surface1;
 		float4 Flow0;                                 // worldspace flowmap UV = absolute xy * xz + yw (x = 0: no flowmap)
-		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), y deep-water phase speed of the mean frequency (units/s)
+		float4 Cascade2[PBRWaterModel::NumCascades];  // x height std (units), yzw unused
 		float4 ShoreMap;                              // xy shore field corner (absolute units), zw 1 / extent (units)
 		float4 Swash0;                                // xy swash grid corner (absolute units), z 1 / extent, w enabled
-		float4 Shore2;                                // x wave clock (rad, wrapped), y the clock last frame, z its rate (rad/s), w peak period Tp (s)
-		float4 Shore3;                                // x swash linger, y surf splitting, z breaker curl, w deep-water wavelength L0 (units)
-		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's, z the sea's own deep-water wavelength (units, run-up)
+		float4 Shore2;                                // x wave clock (rad, wrapped), y the clock last frame, z unused, w peak period Tp (s; > 0: the clock is set)
+		float4 Shore3;                                // x swash linger, y undular bore whelps strength, z breaker curl, w deep-water wavelength L0 (units)
+		float4 Shore4;                                // x angular frequency the current shore field was traced for (rad/s), y the previous field's, zw unused
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
