@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "PBRWater/BisectionTessellator.h"
 #include "PBRWater/ComputeTessellation.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
@@ -163,6 +164,8 @@ struct PBRWater : Feature
 
 		// Performance
 		bool EnableTessellation = true;
+		bool DeferredSurface = true;             ///< shade the tessellated water once per pixel (PBRWater/Deferred.hlsli)
+		bool BisectionTessellation = false;      ///< experimental: refine by longest-edge bisection (BisectionTessellator)
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
 		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
 		float DisplacementFadeStart = 16384.0f;  ///< units
@@ -405,10 +408,78 @@ private:
 	void UpdateSurfaceNoise();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
-	std::unique_ptr<ConstantBuffer> drawBuffer;         ///< this frame's constants for the compute tessellator's mesh (Tess0.x = 1)
-	std::unique_ptr<ConstantBuffer> flatDrawBuffer;     ///< for the untessellated draws (Tess0.x = 0)
-	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;  ///< for the engine's own draw of a mesh the compute tessellator draws instead (Tess0.x = 2: culled)
+	std::unique_ptr<ConstantBuffer> drawBuffer;          ///< this frame's constants for the compute tessellator's mesh (Tess0.x = 1)
+	std::unique_ptr<ConstantBuffer> flatDrawBuffer;      ///< for the untessellated draws (Tess0.x = 0)
+	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;   ///< for the engine's own draw of a mesh the compute tessellator draws instead (Tess0.x = 2: culled)
+	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;  ///< for the deferred surface's rectangle around a tessellated mesh (Tess0.x = 3)
+
+	// The deferred surface (PBRWater/Deferred.hlsli): the stencil pass records each pixel of the tessellated water, and the
+	// surface and point light passes shade those pixels once each instead of drawing the mesh's small triangles again.
+	/// Mirrors DeferredCommon.hlsli: the tiles' size (pixels) and the most meshes recorded a frame (one bit each per tile).
+	static constexpr uint32_t DeferredTile = 8;
+	static constexpr uint32_t DeferredMeshes = 32;
+	struct alignas(16) DeferredDrawCB
+	{
+		uint32_t tag[4] = {};  ///< x the mesh's tag (1..DeferredMeshes), y the tile list's room per mesh, z texture coordinates recorded
+		float4 viewport{};     ///< xy the viewport's size (pixels)
+		float4 uvMapU{};       ///< the mesh's texture coordinates over its model-space xy (WaterTessellator::AffineTexCoords)
+		float4 uvMapV{};
+	};
+	/// A tessellated mesh the stencil pass recorded this frame.
+	struct DeferredMesh
+	{
+		uint32_t startIndex = 0;  ///< its range of the tessellator's index buffer
+		bool texCoords = false;   ///< its texture coordinates are recorded (not one plane over the mesh)
+		float4 uvMapU{};
+		float4 uvMapV{};
+	};
+	// The stencil pass's record (Deferred.hlsli): SV_Target2-5 there, t38-t41 of the surface.
+	std::unique_ptr<Texture2D> deferredTags;              ///< R32_UINT: tag, vertex alpha, 16 bits of the depth
+	std::unique_ptr<Texture2D> deferredWaves;             ///< R16G16B16A16_FLOAT: the waves' displacement, the waves without the surf
+	std::unique_ptr<Texture2D> deferredNoise;             ///< R8G8_UNORM: the surface noise
+	std::unique_ptr<Texture2D> deferredTexCoords;         ///< R32G32_FLOAT: texture coordinates, of the meshes that need them
+	std::unique_ptr<ConstantBuffer> deferredCB;           ///< b13 (DeferredDrawCB)
+	winrt::com_ptr<ID3D11ComputeShader> deferredTilesCS;  ///< DeferredTilesCS: sorts the tiles by mesh
+	std::unique_ptr<ConstantBuffer> deferredTilesCB;
+	winrt::com_ptr<ID3D11Buffer> deferredArgs;  ///< per mesh: DrawInstancedIndirect's arguments
+	winrt::com_ptr<ID3D11UnorderedAccessView> deferredArgsUAV;
+	std::unique_ptr<Buffer> deferredTiles;  ///< per mesh: its tiles (t101 of the vertex stage)
+	uint32_t deferredMaxTiles = 0;
+	std::vector<DeferredMesh> deferredMeshes;  ///< this frame's recorded meshes, by tag - 1
+	uint32_t deferredMeshesFrame = UINT32_MAX;
+	uint32_t deferredTilesFrame = UINT32_MAX;
+	/** @brief Render thread: (re)creates the stencil pass's records at the depth buffer's size; false when there is none. */
+	bool EnsureDeferredRecords();
+	/** @brief Render thread, RestoreDraw: draws the cached mesh in the stencil pass, recording its pixels. */
+	void DrawRecordedStencil();
+	/** @brief Render thread: sorts the screen's tiles by the meshes the stencil pass recorded (DeferredTilesCS). */
+	void ClassifyDeferredTiles();
+	/** @brief Render thread, RestoreDraw: shades the pixels the stencil pass recorded for the cached mesh; false to draw it forward. */
+	bool DrawDeferredSurface();
+	/// The deferred surface's state, bound once for a batch of water draws instead of around every draw.
+	struct DeferredBatchState
+	{
+		bool recording = false;                        ///< the stencil batch: the record's targets and blend state are bound
+		bool shading = false;                          ///< a surface or point light batch: the read-only depth and the record are bound
+		UINT recordTargets = 0;                        ///< targets bound while recording: 5, or 6 with texture coordinates
+		ID3D11BlendState* recordBlend = nullptr;       ///< the blend state bound while recording (one of recordBlendStates)
+		winrt::com_ptr<ID3D11BlendState> engineBlend;  ///< the engine's, put back at the batch's end
+		float blendFactor[4] = {};
+		UINT sampleMask = 0xFFFFFFFF;
+		ID3D11DepthStencilView* readOnly = nullptr;        ///< the read-only depth view bound while shading
+		winrt::com_ptr<ID3D11DepthStencilView> engineDSV;  ///< the engine's writable one, put back at the batch's end
+	};
+	DeferredBatchState deferredBatch;
+	std::unique_ptr<ConstantBuffer> deferredZeroCB;  ///< b13 between the recorded draws: tag 0, no record
+	/** @brief Render thread, EndDrawBatch: puts back the engine's state and lists the recorded meshes' tiles. */
+	void EndDeferredBatch();
 	WaterTessellator tessellator;
+	/// The experimental tessellator (Settings::BisectionTessellation): reads the meshes through `tessellator`.
+	BisectionTessellator bisection;
+	bool bisectionActive = false;          ///< render thread: this frame's mesh is the bisection tessellator's
+	bool uploadedBisectionActive = false;  ///< what the draw buffers were uploaded for
+	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh with whichever tessellator built it. */
+	void DrawCachedMesh();
 	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */
 	void UpdateTessellation();
 	GpuData frameData{};
@@ -515,13 +586,25 @@ private:
 	bool cachedDrawPending = false;
 	uint32_t cachedDrawStart = 0;
 	uint32_t cachedDrawCount = 0;
+	uint32_t cachedDrawTechnique = 0;
+	RE::BSGeometry* cachedDrawGeometry = nullptr;
 	/// The water draws of one frame, for the Debug section.
 	struct DrawStats
 	{
 		uint32_t draws = 0;
-		uint32_t computeDraws = 0;     ///< draws of the compute tessellator's mesh
-		uint32_t byTechnique[6] = {};  ///< draws per technique (DrawPassIndex)
+		uint32_t computeDraws = 0;             ///< draws of the compute tessellator's mesh
+		uint32_t byTechnique[6] = {};          ///< draws per technique (DrawPassIndex)
+		uint32_t deferredRecorded = 0;         ///< meshes the stencil pass recorded for the deferred surface
+		uint32_t deferredShaded = 0;           ///< surface and point light draws shaded from the record
+		uint32_t deferredForward = 0;          ///< tessellated draws that fell back to drawing their triangles
+		const char* deferredReason = nullptr;  ///< why the last of those did
 	};
+	/** @brief Render thread: a tessellated draw the deferred surface could not take, and why (Debug section). */
+	void DeferredFallback(const char* reason);
+	/// The stencil pass's blend state with the record's targets (2-5) written whole and unblended, by the engine's state.
+	std::unordered_map<ID3D11BlendState*, winrt::com_ptr<ID3D11BlendState>> recordBlendStates;
+	/** @brief Render thread: the blend state for recording under `engineState` (recordBlendStates). */
+	ID3D11BlendState* RecordBlendState(ID3D11BlendState* engineState);
 	GpuData uploadedDrawData{};                              ///< what the draw buffers hold
 	ID3D11ShaderResourceView* drawSRVs[WaterSRVCount] = {};  ///< the views for those constants
 	uint32_t drawResourcesFrame = UINT32_MAX;                ///< the frame the views were last bound in

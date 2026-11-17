@@ -44,6 +44,15 @@ namespace
 	/// The steepest a wave's face typically is (its slope): seen at a grazing angle, the water's profile still spans this
 	/// much of a segment's length on screen, however flat the angle (Factor).
 	constexpr float GrazingFloor = 0.1f;  // mirrored by PBRWater::TessellationGrazingFloor
+	/// The least share of the target size a triangle keeps across the line of sight (Factor): at grazing angles it is at
+	/// most this many times wider than the target, and keeps the target's height on the steepest wave faces up to there.
+	constexpr float GrazingShareMin = 0.25f;  // mirrored by PBRWater::TessellationGrazingMin
+	/// Where the curl detail fades in (Factor): from the deepest water a wave curls in to this share of it, and from a lip
+	/// spacing of CurlLipFar to CurlLipNear deep-water wavelengths (a lip needs a few dozen vertices across its wave).
+	/// Mirrored by PBRWater::ShoreCurlSpacing.
+	constexpr float CurlDepthFade = 0.75f;
+	constexpr float CurlLipFar = 0.6f / 25.0f;
+	constexpr float CurlLipNear = 0.45f / 25.0f;
 	/// Meshes not drawn for this many frames are read back again if they return.
 	constexpr uint32_t MeshLifetime = 600;
 
@@ -113,10 +122,16 @@ namespace
 	}
 
 	/// Smallest e with 2^e >= f (f >= 1).
-	uint32_t CeilLog2(float f)
+	/**
+	 * The points a segment of `factor` gets: the power of two nearest to it (log2 rounded). Rounded up, every segment
+	 * carried up to twice the points the target size asked for, and the triangles came out at half to all of it, with the
+	 * newest level's half-morphed vertices cutting slivers between them: the pixel shader paid whole quads for those. The
+	 * newest level morphs in over the half level below its own (TessellationMorph), so nothing pops.
+	 */
+	uint32_t PointsLog2(float factor)
 	{
 		uint32_t e = 0;
-		while (static_cast<float>(1u << e) < f && e < 15)
+		while (static_cast<float>(1u << e) * 1.41421356f < factor && e < 15)
 			++e;
 		return e;
 	}
@@ -278,13 +293,18 @@ namespace
 				return 1.0f;
 
 			const float x = static_cast<float>(mid.x), y = static_cast<float>(mid.y);
-			bool detailed = false;
+			// The detail the waves need here, as weights that fade in and out over a distance instead of switching: each was a
+			// step in the triangles' size (twice the points at the ripple grid's and the shore band's edge, and the curl detail's
+			// factor on top in the surf zone), and the leaves straddling a step took the finer side across their whole grid and
+			// fanned slivers along their coarser sides.
+			float detail = 0.0f;  // 0..1 the ripple grid or the shore band: the setting's size instead of twice it
 			if (params.ripples) {
 				const float u = (x - params.rippleX) * params.rippleInvExtent, v = (y - params.rippleY) * params.rippleInvExtent;
-				detailed = u > 0.0f && v > 0.0f && u < 1.0f && v < 1.0f;
+				detail = Smoothstep(0.0f, 0.1f, std::min({ u, v, 1.0f - u, 1.0f - v }));
 			}
-			bool shore = false;
-			float crestDepth = std::numeric_limits<float>::max();  // m: past the shore field, no wave breaks
+			float curlWeight = 0.0f;  // 0..1 the breakers' lips need the curl detail here
+			const float curlDetail = std::max(params.curlDetail, 1.0f);
+			const float viewDist = std::max(d, 1.0f);
 			if (const auto* field = params.shore) {
 				const float u = (x - params.shoreMinX) * params.shoreInvX, v = (y - params.shoreMinY) * params.shoreInvY;
 				if (u > 0.0f && v > 0.0f && u < 1.0f && v < 1.0f && field->Valid()) {
@@ -294,32 +314,43 @@ namespace
 					const uint32_t y0 = std::min(static_cast<uint32_t>(fy), field->height - 2);
 					const float tx = fx - static_cast<float>(x0), ty = fy - static_cast<float>(y0);
 					const size_t i = static_cast<size_t>(y0) * field->width + x0;
-					const auto& f = field->distance;
-					const float top = f[i] + (f[i + 1] - f[i]) * tx;
-					const float bottom = f[i + field->width] + (f[i + field->width + 1] - f[i + field->width]) * tx;
-					shore = top + (bottom - top) * ty < 2.0f * params.deepLength;
-					crestDepth = field->CrestDepthAt(x, y, crestDepth);
+					auto bilinear = [&](const std::vector<float>& f) {
+						const float top = f[i] + (f[i + 1] - f[i]) * tx;
+						const float bottom = f[i + field->width] + (f[i + field->width + 1] - f[i + field->width]) * tx;
+						return top + (bottom - top) * ty;
+					};
+					// The shore band: within two deep-water wavelengths of the waterline, fading out over the next half.
+					const float shoreWeight = Smoothstep(2.25f * params.deepLength, 1.75f * params.deepLength, bilinear(field->distance));
+					detail = std::max(detail, shoreWeight);
+					// A breaker curls only on the shore train (PBRWater::ShoreWaves runs where ctx.train > 0): within its reach of
+					// the waterline, where it has room. Past that the curl's detail bought nothing but quads.
+					const bool train = bilinear(field->travelTime) * field->omega / static_cast<float>(PBRWaterModel::TwoPi) < params.trainCycles &&
+					                   (field->room.size() != field->level.size() || bilinear(field->room) > 0.0f);
+					if (train && params.curl > 0.0f && shoreWeight > 0.0f) {
+						// In the surf zone, where the waves can curl at all (PBRWaterModel::ShoreCurlDepth), and as far as the mesh
+						// can hold a lip, measured by the deep-water wavelength (it covered the whole sea in a storm). Mirrored by
+						// PBRWater::ShoreCurlSpacing, which the lip's own detail follows.
+						const float crestDepth = field->CrestDepthAt(x, y, std::numeric_limits<float>::max());
+						const float lipSpacing = std::max(targetSize, 1.0f) * viewDist / std::max(params.pixelsPerUnit, 1e-3f) / curlDetail;
+						curlWeight = shoreWeight * Smoothstep(params.curlDepth, CurlDepthFade * params.curlDepth, crestDepth) *
+						             Smoothstep(CurlLipFar * params.deepLength, CurlLipNear * params.deepLength, lipSpacing);
+					}
 				}
 			}
-			const float viewDist = std::max(d, 1.0f);
 			const float length = static_cast<float>(Length(b - a));
 			const float edgePixels = length * params.pixelsPerUnit / viewDist;
-			float target = std::max(targetSize, 1.0f) * (detailed || shore ? 1.0f : 2.0f);
-			// Where breakers can curl the mesh carries the lip (PBRWater::ShoreCurlSpacing).
-			const float curlDetail = std::max(params.curlDetail, 1.0f);
-			// Only in the surf zone, where the waves can curl at all (PBRWaterModel::ShoreCurlDepth): reaching as far as the
-			// mesh can hold a lip, measured by the deep-water wavelength, it covered the whole sea in a storm.
-			if (shore && params.curl > 0.0f && crestDepth < params.curlDepth &&
-				std::max(targetSize, 1.0f) * viewDist / std::max(params.pixelsPerUnit, 1e-3f) / curlDetail < 0.6f * params.deepLength / 25.0f) {
-				target /= curlDetail;
-			}
-			// Seen at a grazing angle the water's triangles cover the angle's sine of the screen they would face on: thin
-			// slivers that cost the pixel shader whole quads each for a few pixels. The points follow the area a segment
-			// covers, the square root of that share, from the camera's height over the water alone, so turning the camera
-			// changes nothing and both sides of an edge still agree (the waves' vertex filter matches it: TessellationCS).
+			float target = std::max(targetSize, 1.0f) * (2.0f - detail) / (1.0f + (curlDetail - 1.0f) * curlWeight);
+			// Seen at a grazing angle the water's triangles cover the angle's sine of the screen they would face on, a wave's
+			// face (GrazingFloor) a little more. Points by the square root of that share kept their area: 3000 units out with
+			// the camera 400 up they were 21 pixels wide and 3 high, rows of slivers that made the middle distance a solid
+			// mesh and cost the stencil pass quads for a few pixels each. Points by the share itself keep the triangles about
+			// the target's height on the wave faces, wider across the view instead (GrazingShareMin times at most): the far
+			// waves' shapes on screen are the faces' height, and the shading's detail is the pixel shader's own. From the
+			// camera's height over the water alone, so turning the camera changes nothing and both sides of an edge still
+			// agree (the waves' vertex filter and the curl's spacing match it: TessellationCS, PBRWater::ShoreCurlSpacing).
 			const float height = std::abs(static_cast<float>(camera.z - mid.z));
 			const float grazing = std::min(height / viewDist + GrazingFloor, 1.0f);
-			float factor = edgePixels / target * std::sqrt(grazing);
+			float factor = edgePixels / target * std::max(grazing, GrazingShareMin);
 			// No finer than the finest spacing (Maximum Tessellation).
 			if (params.minSpacing > 0.0f)
 				factor = std::min(factor, length / params.minSpacing);
@@ -562,7 +593,7 @@ namespace
 	struct TessellationCB
 	{
 		uint32_t counts[4];
-		float spacing[4];  // x target size (px, coarsened to the budget), y GrazingFloor, z the finest spacing (units)
+		float spacing[4];  // x target size (px, coarsened to the budget), y unused, z the finest spacing (units)
 	};
 
 	template <class T>
@@ -731,6 +762,83 @@ bool WaterTessellator::Lookup(RE::BSGeometry& geometry, uint32_t& startIndex, ui
 	return true;
 }
 
+void WaterTessellator::TakeBaseTriangles(std::vector<WorldMesh>& out)
+{
+	out.clear();
+	++frame;
+	Clear();
+	auto sources = std::move(registered);
+	registered.clear();
+	if (!ready)
+		return;
+	for (const auto& [geometry, source] : sources) {
+		const Mesh* mesh = GetMesh(source);
+		if (!mesh)
+			continue;
+		WorldMesh& world = out.emplace_back();
+		world.geometry = geometry;
+		world.source = source;
+		const auto& w = source.world;
+		world.triangles.resize(mesh->corners.size() / 3);
+		for (size_t t = 0; t < world.triangles.size(); ++t) {
+			WorldTriangle& tri = world.triangles[t];
+			for (int i = 0; i < 3; ++i) {
+				const Corner& c = mesh->corners[t * 3 + i];
+				const double s = w.scale;
+				const double x = c.position[0] * s, y = c.position[1] * s, z = c.position[2] * s;
+				tri.world[i][0] = w.translate.x + w.rotate.entry[0][0] * x + w.rotate.entry[0][1] * y + w.rotate.entry[0][2] * z;
+				tri.world[i][1] = w.translate.y + w.rotate.entry[1][0] * x + w.rotate.entry[1][1] * y + w.rotate.entry[1][2] * z;
+				tri.world[i][2] = w.translate.z + w.rotate.entry[2][0] * x + w.rotate.entry[2][1] * y + w.rotate.entry[2][2] * z;
+				std::copy_n(c.position, 3, tri.model[i]);
+				std::copy_n(c.uv, 2, tri.uv[i]);
+				std::copy_n(c.color, 4, tri.color[i]);
+			}
+		}
+	}
+	std::erase_if(meshes, [&](const auto& entry) { return frame - entry.second.lastUsed > MeshLifetime; });
+}
+
+bool WaterTessellator::StillSource(RE::BSGeometry& geometry, const Source& source)
+{
+	Source s;
+	return MakeSource(geometry, s) && SameSource(s, source);
+}
+
+bool WaterTessellator::AffineTexCoords(RE::BSGeometry& geometry, float4& mapU, float4& mapV) const
+{
+	const auto range = ranges.find(&geometry);
+	if (range == ranges.end())
+		return false;
+	const auto mesh = meshes.find(range->second.source.rendererData);
+	if (mesh == meshes.end() || !mesh->second.valid || mesh->second.corners.size() != 6)
+		return false;
+	const auto& c = mesh->second.corners;
+	const double e1x = c[1].position[0] - c[0].position[0], e1y = c[1].position[1] - c[0].position[1];
+	const double e2x = c[2].position[0] - c[0].position[0], e2y = c[2].position[1] - c[0].position[1];
+	const double det = e1x * e2y - e1y * e2x;
+	if (std::abs(det) < 1e-6)
+		return false;
+	double map[2][3];
+	for (int k = 0; k < 2; ++k) {
+		const double d1 = c[1].uv[k] - c[0].uv[k], d2 = c[2].uv[k] - c[0].uv[k];
+		const double ddx = (d1 * e2y - d2 * e1y) / det, ddy = (e1x * d2 - e2x * d1) / det;
+		map[k][0] = ddx;
+		map[k][1] = ddy;
+		map[k][2] = c[0].uv[k] - ddx * c[0].position[0] - ddy * c[0].position[1];
+	}
+	// Both triangles on that plane (a merged rectangle always is; two triangles of their own need not be).
+	for (const auto& corner : c) {
+		for (int k = 0; k < 2; ++k) {
+			const double fit = map[k][0] * corner.position[0] + map[k][1] * corner.position[1] + map[k][2];
+			if (std::abs(fit - corner.uv[k]) > 1e-3 + 1e-3 * std::abs(corner.uv[k]))
+				return false;
+		}
+	}
+	mapU = { static_cast<float>(map[0][0]), static_cast<float>(map[0][1]), static_cast<float>(map[0][2]), 0.0f };
+	mapV = { static_cast<float>(map[1][0]), static_cast<float>(map[1][1]), static_cast<float>(map[1][2]), 0.0f };
+	return true;
+}
+
 bool WaterTessellator::BuiltFor(uint32_t frameCount, const float4& cameraPosAdjust) const
 {
 	return built && builtFrame == frameCount && builtCamera.x == cameraPosAdjust.x && builtCamera.y == cameraPosAdjust.y && builtCamera.z == cameraPosAdjust.z;
@@ -848,6 +956,23 @@ void WaterTessellator::Build(const FrameParams& params)
 	std::vector<SideSegment> segments[3];
 	std::vector<Cell> stack;
 
+	// Water wholly under the land: the terrain stands above the highest the surface can reach (the waves, or the swash
+	// running up the beach and the mesh held on the bed under it: DisplaceSurface) everywhere the waves can carry the
+	// cell's points. Coastal cells' water planes run under the whole cell, the land included: built, evaluated and drawn,
+	// it only lost the depth test. The terrain's block minima bound its triangles (Bathymetry::LowestOver); cells too large
+	// for a cheap answer are left to their children.
+	const float ceilingAbove = std::max(marginZ, params.runup + 0.5f * static_cast<float>(PBRWaterModel::UnitsPerMetre)) + 64.0f;
+	auto underTerrain = [&](const Cell& cell) {
+		if (!params.terrain)
+			return false;
+		const Vec3 p0 = sub.Position(cell.p[0], cell.depth), p1 = sub.Position(cell.p[1], cell.depth), p2 = sub.Position(cell.p[2], cell.depth);
+		const double x0 = std::min({ p0.x, p1.x, p2.x }) - marginXY, x1 = std::max({ p0.x, p1.x, p2.x }) + marginXY;
+		const double y0 = std::min({ p0.y, p1.y, p2.y }) - marginXY, y1 = std::max({ p0.y, p1.y, p2.y }) + marginXY;
+		const double top = std::max({ p0.z, p1.z, p2.z }) + ceilingAbove;
+		const float lowest = params.terrain->LowestOver(static_cast<float>(x0), static_cast<float>(y0), static_cast<float>(x1), static_cast<float>(y1), 256);
+		return lowest > top;
+	};
+
 	// One subdivision at `scale` times the target triangle size; overflow when it needs more than `vertexLimit` vertices.
 	auto subdivide = [&](float scale, uint64_t vertexLimit) {
 		sub.targetSize = std::max(params.targetSize, 1.0f) * scale;
@@ -862,6 +987,7 @@ void WaterTessellator::Build(const FrameParams& params)
 		baseTriangles.clear();
 		ranges.clear();
 		stats.meshes = 0;
+		stats.underTerrain = 0;
 
 		for (const auto& [geometry, source] : sources) {
 			const Mesh* mesh = GetMesh(source);
@@ -930,6 +1056,10 @@ void WaterTessellator::Build(const FrameParams& params)
 						rel[i] = sub.Position(cell.p[i], cell.depth) - sub.camera;
 					if (cell.depth > 0 && OutsideFrustum(params.viewProj, rel, 3, marginXY, marginZ))
 						continue;
+					if (underTerrain(cell)) {
+						++stats.underTerrain;
+						continue;
+					}
 					if (sub.Split(cell)) {
 						Cell child;
 						child.depth = cell.depth + 1;
@@ -956,7 +1086,7 @@ void WaterTessellator::Build(const FrameParams& params)
 						uint32_t code = static_cast<uint32_t>(segments[s].size());
 						for (size_t i = 0; i < segments[s].size() && i < 4; ++i) {
 							const auto& seg = segments[s][i];
-							const uint32_t log2Points = CeilLog2(seg.factor);
+							const uint32_t log2Points = PointsLog2(seg.factor);
 							code |= ((seg.log2Quarters & 3u) | (log2Points << 2)) << (3 + 6 * i);
 							leaf.sideLog2[s][i] = std::log2(seg.factor);
 							// Across the whole side (the leaf's grid) a segment of q quarters needs 4 / q times its points.
@@ -1060,7 +1190,7 @@ void WaterTessellator::Build(const FrameParams& params)
 
 		PBRWaterProfiling::Scope pass("PBRWater::Tessellate");
 		auto context = globals::d3d::context;
-		TessellationCB cb{ { stats.leaves, stats.vertices, stats.triangles, 0 }, { std::max(params.targetSize, 1.0f) * scale, GrazingFloor, std::max(params.minSpacing, 0.0f), 0.0f } };
+		TessellationCB cb{ { stats.leaves, stats.vertices, stats.triangles, 0 }, { std::max(params.targetSize, 1.0f) * scale, 0.0f, std::max(params.minSpacing, 0.0f), 0.0f } };
 		constants->Update(cb);
 		ID3D11Buffer* cbs[1] = { constants->CB() };
 		context->CSSetConstantBuffers(0, 1, cbs);

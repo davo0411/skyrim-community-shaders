@@ -96,6 +96,9 @@ public:
 		float curl = 0.0f;                                                             ///< Shore3.z: breaker curl
 		float curlDetail = 1.0f;                                                       ///< Shore1.y: curl tessellation multiplier
 		float curlDepth = 0.0f;                                                        ///< the deepest water a wave curls in (m): PBRWaterModel::ShoreCurlDepth
+		float trainCycles = 0.0f;                                                      ///< Tune3.z: the shore train's reach (waves from the waterline)
+		const PBRWaterModel::Bathymetry* terrain = nullptr;                            ///< the land: water wholly under it is not built
+		float runup = 0.0f;                                                            ///< Shore0.w: the highest the swash runs up (units above the still water)
 	};
 
 	struct Stats
@@ -106,7 +109,8 @@ public:
 		uint32_t vertices = 0;
 		uint32_t triangles = 0;
 		float cpuMs = 0.0f;
-		float detailScale = 1.0f;  ///< how many times the target triangle size the mesh was built at, to fit the vertex budget
+		float detailScale = 1.0f;   ///< how many times the target triangle size the mesh was built at, to fit the vertex budget
+		uint32_t underTerrain = 0;  ///< quadtree cells left out under the land
 	};
 
 	void SetupResources();
@@ -143,10 +147,51 @@ public:
 	 */
 	void Draw(uint32_t startIndex, uint32_t indexCount) const;
 
+	/**
+	 * @brief The texture coordinates of `geometry`'s mesh as one plane over its model-space xy, where they are one (a mesh
+	 * merged into its rectangle, MergeRectangle): u = dot(mapU.xy, xy) + mapU.z, and v from mapV.
+	 * @return false when they are not, or the geometry is not in this frame's mesh
+	 */
+	bool AffineTexCoords(RE::BSGeometry& geometry, float4& mapU, float4& mapV) const;
+
 	/// Whether the current mesh was built for this frame and camera (absolute position, CameraPosAdjust).
 	bool BuiltFor(uint32_t frameCount, const float4& cameraPosAdjust) const;
 
 	const Stats& GetStats() const { return stats; }
+
+	/// A geometry drawn tessellated in the main view.
+	struct Source
+	{
+		RE::NiTransform world;
+		const void* rendererData = nullptr;
+		uint32_t triangleCount = 0;
+		uint64_t vertexDesc = 0;
+	};
+
+	/// A base triangle of a registered water mesh, for the bisection tessellator (BisectionTessellator).
+	struct WorldTriangle
+	{
+		double world[3][3];  ///< absolute world positions of the corners
+		float model[3][3];   ///< model-space positions
+		float uv[3][2];
+		float color[3][4];
+	};
+	/// A registered water geometry and its base triangles (merged into its rectangle where it is one: MergeRectangle).
+	struct WorldMesh
+	{
+		const void* geometry = nullptr;
+		Source source;
+		std::vector<WorldTriangle> triangles;
+	};
+	/**
+	 * @brief Takes the draws registered for the next build, as Build does, and returns their meshes' base triangles in
+	 * world space instead of subdividing them (the bisection tessellator builds from these). This tessellator draws
+	 * nothing this frame.
+	 */
+	void TakeBaseTriangles(std::vector<WorldMesh>& out);
+	/// Whether `geometry` is still the mesh `source` was made from (its buffers and transform unchanged).
+	static bool StillSource(RE::BSGeometry& geometry, const Source& source);
+
 	/// The budget's coarsening of the target size the next subdivision starts from.
 	float GetDetailScale() const { return detailScale; }
 
@@ -168,15 +213,6 @@ private:
 		uint32_t lastUsed = 0;
 		bool read = false;   ///< read back (successfully or not)
 		bool valid = false;  ///< and usable
-	};
-
-	/// A geometry drawn tessellated in the main view.
-	struct Source
-	{
-		RE::NiTransform world;
-		const void* rendererData = nullptr;
-		uint32_t triangleCount = 0;
-		uint64_t vertexDesc = 0;
 	};
 
 	struct Range

@@ -1213,6 +1213,16 @@ namespace PBRWater
 
 	/// The grazing angle's floor in the tessellator's density: the waves' slope (WaterTessellator GrazingFloor).
 	static const float TessellationGrazingFloor = 0.1;
+	/// The least share of the target size the tessellator keeps across the line of sight (WaterTessellator GrazingShareMin).
+	static const float TessellationGrazingMin = 0.25;
+
+	/// How many times the target size the tessellator's spacing grows by at camera-relative `positionWS` (WaterTessellator Factor).
+	float TessellationGrazingScale(float3 positionWS)
+	{
+		float distance = max(length(positionWS), 1.0);
+		float grazing = min(abs(positionWS.z) / distance + TessellationGrazingFloor, 1.0);
+		return 1.0 / max(grazing, TessellationGrazingMin);
+	}
 
 	/// The deepest water (m, under a crest) a shore wave can curl in: no curl detail further out. Mirrors PBRWaterModel::ShoreCurlDepth.
 	float ShoreCurlDepth()
@@ -1221,20 +1231,30 @@ namespace PBRWater
 		return height / ((2.0 / 3.0) * ShoreBreakerLimit * (1.0 - ShoreWindBreaking));
 	}
 
+	/// Where the tessellator fades the curl detail in (WaterTessellator CurlDepthFade, CurlLipFar, CurlLipNear).
+	static const float TessellationCurlDepthFade = 0.75;
+	static const float TessellationCurlLipFar = 0.6 / 25.0;
+	static const float TessellationCurlLipNear = 0.45 / 25.0;
+
 	/**
-	 * Mesh spacing (units) at camera-relative `positionWS` where the shore waves can curl, or 1e6 where the draw is not
-	 * tessellated (the curl needs the extra triangles the tessellator adds in the surf zone, Shore1.y). The compute
-	 * tessellator's rule (WaterTessellator Factor): the target size coarsened to its vertex budget (Draw0.w), sparser at
-	 * grazing angles, never finer than 128 / Maximum Tessellation. A function of the position and the draw only, so the
-	 * vertices and the pixels of one draw agree on it.
+	 * Mesh spacing (units) at camera-relative `positionWS` in the surf zone, or 1e6 where the draw is not tessellated (the
+	 * curl needs the extra triangles the tessellator adds where breakers can curl, Shore1.y). The compute tessellator's
+	 * rule (WaterTessellator Factor): the target size coarsened to its vertex budget (Draw0.w), the curl detail faded in by
+	 * the depth under the crests and the lip's spacing, sparser at grazing angles, never finer than 128 / Maximum
+	 * Tessellation. A function of the position and the draw only, so the vertices and the pixels of one draw agree on it.
 	 */
 	float ShoreCurlSpacing(float3 positionWS)
 	{
 		if (Tess0.x < 0.5)
 			return 1e6;
 		float distance = max(length(positionWS), 1.0);
-		float grazing = min(abs(positionWS.z) / distance + TessellationGrazingFloor, 1.0);
-		float target = max(Tess0.y, 1.0) * max(Draw0.w, 1.0) * distance / max(Tess0.w, 1e-3) / max(Shore1.y, 1.0) * rsqrt(grazing);
+		float size = max(Tess0.y, 1.0) * max(Draw0.w, 1.0) * distance / max(Tess0.w, 1e-3);
+		float curlDetail = max(Shore1.y, 1.0);
+		float curlDepth = ShoreCurlDepth();
+		float crestDepth = ShoreCrestDepth(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, 1e6);
+		float weight = smoothstep(curlDepth, TessellationCurlDepthFade * curlDepth, crestDepth) *
+		               smoothstep(TessellationCurlLipFar * Shore3.w, TessellationCurlLipNear * Shore3.w, size / curlDetail);
+		float target = size / (1.0 + (curlDetail - 1.0) * weight) * TessellationGrazingScale(positionWS);
 		return max(target, 128.0 / max(Tess0.z, 1.0));
 	}
 

@@ -17,7 +17,7 @@
 cbuffer TessellationCB : register(b0)
 {
 	uint4 Counts;    // x leaves, y vertices, z triangles, w unused
-	float4 Spacing;  // x target triangle size (px, as the budget coarsened it), y grazing floor, z the finest spacing (units)
+	float4 Spacing;  // x target triangle size (px, as the budget coarsened it), y unused, z the finest spacing (units)
 };
 
 StructuredBuffer<PBRWaterTess::Leaf> Leaves : register(t0);
@@ -92,8 +92,7 @@ float2 EvaluateVertex(uint v)
 	// leaves gets the same waves from both. The open water's target (twice the setting), sparser at grazing angles as the
 	// CPU made it (WaterTessellator Factor), never finer than the finest spacing.
 	float distance = max(length(world), 1.0);
-	float grazing = min(abs(world.z) / distance + Spacing.y, 1.0);
-	float spacing = max(2.0 * max(Spacing.x, 1.0) * distance / max(PBRWater::Tess0.w, 1e-3) * rsqrt(grazing), Spacing.z);
+	float spacing = max(2.0 * max(Spacing.x, 1.0) * distance / max(PBRWater::Tess0.w, 1e-3) * PBRWater::TessellationGrazingScale(world), Spacing.z);
 	PBRWater::VertexWaves waves = PBRWater::EvaluateVertexWaves(world, spacing, true);
 
 	PBRWaterTess::Vertex o;

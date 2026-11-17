@@ -243,8 +243,20 @@ namespace PBRWaterModel
 		float minX = 0.0f, minY = 0.0f;    ///< world position of texel (0, 0) centre
 		float stepX = 1.0f, stepY = 1.0f;  ///< world units per texel
 		float minZ = 0.0f, maxZ = 0.0f;    ///< range of `heights`
+		/// The lowest of each block of Block x Block texels and the texels on its far edges (BuildBlockMinima), so a block's
+		/// minimum bounds the terrain's triangles over its whole extent: what the tessellator culls under the land by.
+		static constexpr uint32_t Block = 8;
+		std::vector<float> blockMin;
+		uint32_t blockWidth = 0, blockHeight = 0;
 
 		bool Valid() const { return width > 1 && height > 1 && !heights.empty(); }
+		/** @brief Fills blockMin from heights. */
+		void BuildBlockMinima();
+		/**
+		 * @brief The lowest the terrain stands anywhere over the rectangle [x0, x1] x [y0, y1] (world units), from the block
+		 * minima: a lower bound. -FLT_MAX when the rectangle leaves the grid or spans more than `maxBlocks` blocks.
+		 */
+		float LowestOver(float x0, float y0, float x1, float y1, uint32_t maxBlocks) const;
 		/** @brief True when (x, y) lies inside the sampled grid (no edge clamping needed). */
 		bool Contains(float x, float y) const;
 		float Sample(float x, float y) const;
@@ -314,6 +326,15 @@ namespace PBRWaterModel
 		std::vector<float> level;  ///< absolute still water z (NaN: no water in reach)
 
 		bool Valid() const { return width > 1 && height > 1 && level.size() == static_cast<size_t>(width) * height && travelTime.size() == level.size(); }
+
+		/// The field as the shaders' textures hold it (PBRWater::UploadShoreField), packed by the worker that built it so
+		/// the render thread only hands it to the driver: travel time, distance, along, level (float); slowness x and y,
+		/// slope, exposure (half); room, crest depth (half).
+		std::vector<float> gpuTimes;
+		std::vector<uint16_t> gpuRays;
+		std::vector<uint16_t> gpuRoom;
+		/** @brief Fills gpuTimes, gpuRays and gpuRoom from the field. */
+		void PackForGpu();
 
 		struct Sample
 		{

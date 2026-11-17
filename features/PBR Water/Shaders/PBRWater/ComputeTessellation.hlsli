@@ -204,6 +204,17 @@ namespace PBRWaterTess
 	}
 
 	/**
+	 * The morph of a vertex first present at `level` (log2 points) where the detail asks for 2^factorLog2: a level's
+	 * points come in with the power of two nearest the factor (WaterTessellator PointsLog2), from the midpoint of their
+	 * parents half a level before that to their own place at it, so the newest level is never more than half collapsed
+	 * into slivers and nothing pops when it arrives.
+	 */
+	float TessellationMorph(float factorLog2, float level)
+	{
+		return saturate(2.0 * (factorLog2 - level) + 1.0);
+	}
+
+	/**
 	 * How far vertex g (a representative) has morphed in from the midpoint of its parents, and the parents. 1 for the
 	 * vertices a coarser level also has.
 	 */
@@ -230,7 +241,7 @@ namespace PBRWaterTess
 					// Selected rather than indexed: dynamic indexing copies the leaf into an indexable temporary.
 					float4 side = s == 0 ? l.sideLog2[0] : (s == 1 ? l.sideLog2[1] : l.sideLog2[2]);
 					float factorLog2 = dot(side, float4(seg.index == 0, seg.index == 1, seg.index == 2, seg.index == 3));
-					weight = saturate(factorLog2 - level + 1.0);
+					weight = TessellationMorph(factorLog2, level);
 				}
 			}
 		} else {
@@ -253,7 +264,7 @@ namespace PBRWaterTess
 			parentA = Representative(l, parentA);
 			parentB = Representative(l, parentB);
 			float level = (float)LeafLog2N(l) - (float)low;
-			weight = saturate(l.interiorLog2 - level + 1.0);
+			weight = TessellationMorph(l.interiorLog2, level);
 		}
 		return weight;
 	}

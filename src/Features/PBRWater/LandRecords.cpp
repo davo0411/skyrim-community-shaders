@@ -559,6 +559,7 @@ namespace PBRWaterLand
 			for (uint32_t y = 0; y < CellVertices; ++y)
 				std::copy_n(&heights[y * CellVertices], CellVertices, &grid->heights[static_cast<size_t>(originY + y) * grid->width + originX]);
 		}
+		grid->BuildBlockMinima();
 		return grid;
 	}
 }

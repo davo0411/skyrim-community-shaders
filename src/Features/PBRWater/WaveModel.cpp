@@ -1,5 +1,7 @@
 #include "WaveModel.h"
 
+#include <DirectXPackedVector.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -813,6 +815,49 @@ namespace PBRWaterModel
 		return fx >= 0.0f && fy >= 0.0f && fx <= static_cast<float>(width - 1) && fy <= static_cast<float>(height - 1);
 	}
 
+	void Bathymetry::BuildBlockMinima()
+	{
+		blockWidth = (width - 1 + Block - 1) / Block;
+		blockHeight = (height - 1 + Block - 1) / Block;
+		blockMin.assign(static_cast<size_t>(blockWidth) * blockHeight, std::numeric_limits<float>::max());
+		for (uint32_t y = 0; y < height; ++y) {
+			// A texel on a block's edge bounds the triangles of the blocks on both sides of it.
+			const uint32_t by0 = y > 0 ? (y - 1) / Block : 0, by1 = std::min(y / Block, blockHeight - 1);
+			const float* row = &heights[static_cast<size_t>(y) * width];
+			for (uint32_t x = 0; x < width; ++x) {
+				const uint32_t bx0 = x > 0 ? (x - 1) / Block : 0, bx1 = std::min(x / Block, blockWidth - 1);
+				for (uint32_t by = by0; by <= by1; ++by) {
+					for (uint32_t bx = bx0; bx <= bx1; ++bx) {
+						float& m = blockMin[static_cast<size_t>(by) * blockWidth + bx];
+						m = std::min(m, row[x]);
+					}
+				}
+			}
+		}
+	}
+
+	float Bathymetry::LowestOver(float x0, float y0, float x1, float y1, uint32_t maxBlocks) const
+	{
+		constexpr float none = -std::numeric_limits<float>::max();
+		if (blockMin.empty())
+			return none;
+		const float span = static_cast<float>(Block);
+		const float fx0 = (x0 - minX) / (stepX * span), fx1 = (x1 - minX) / (stepX * span);
+		const float fy0 = (y0 - minY) / (stepY * span), fy1 = (y1 - minY) / (stepY * span);
+		if (fx0 < 0.0f || fy0 < 0.0f || fx1 >= static_cast<float>(blockWidth) || fy1 >= static_cast<float>(blockHeight))
+			return none;
+		const uint32_t bx0 = static_cast<uint32_t>(fx0), bx1 = static_cast<uint32_t>(fx1);
+		const uint32_t by0 = static_cast<uint32_t>(fy0), by1 = static_cast<uint32_t>(fy1);
+		if ((bx1 - bx0 + 1) * (by1 - by0 + 1) > maxBlocks)
+			return none;
+		float lowest = std::numeric_limits<float>::max();
+		for (uint32_t by = by0; by <= by1; ++by) {
+			for (uint32_t bx = bx0; bx <= bx1; ++bx)
+				lowest = std::min(lowest, blockMin[static_cast<size_t>(by) * blockWidth + bx]);
+		}
+		return lowest;
+	}
+
 	float Bathymetry::Sample(float x, float y) const
 	{
 		const float fx = std::clamp((x - minX) / stepX, 0.0f, static_cast<float>(width - 1));
@@ -1610,7 +1655,33 @@ namespace PBRWaterModel
 			}
 		}
 		Blur(field->along, w, h, 4);
+		field->PackForGpu();
 		return field;
+	}
+
+	void ShoreField::PackForGpu()
+	{
+		const size_t count = static_cast<size_t>(width) * height;
+		if (!Valid())
+			return;
+		gpuTimes.resize(count * 4);
+		gpuRays.resize(count * 4);
+		gpuRoom.resize(count * 2);
+		auto half = [](float v) { return DirectX::PackedVector::XMConvertFloatToHalf(v); };
+		const bool crest = crestDepth.size() == count;
+		for (size_t i = 0; i < count; ++i) {
+			gpuTimes[i * 4 + 0] = travelTime[i];
+			gpuTimes[i * 4 + 1] = distance[i];
+			gpuTimes[i * 4 + 2] = along[i];
+			// No water in reach: a sentinel the shaders test for (NaN would spread through the bilinear filter).
+			gpuTimes[i * 4 + 3] = std::isfinite(level[i]) ? level[i] : -1.0e9f;
+			gpuRays[i * 4 + 0] = half(slownessX[i]);
+			gpuRays[i * 4 + 1] = half(slownessY[i]);
+			gpuRays[i * 4 + 2] = half(slope[i]);
+			gpuRays[i * 4 + 3] = half(exposure[i]);
+			gpuRoom[i * 2 + 0] = half(room[i]);
+			gpuRoom[i * 2 + 1] = half(crest ? crestDepth[i] : 0.0f);
+		}
 	}
 
 	// ========================================================================

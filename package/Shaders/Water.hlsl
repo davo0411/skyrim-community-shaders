@@ -80,10 +80,27 @@ PS_OUTPUT main(PS_INPUT input)
 #			undef WADING
 #		endif
 #	endif
+// The vertex program's wading permutation: its own define, or in the pixel stage (the deferred surface runs the vertex
+// program there) the descriptor's flag.
+#	if defined(WADING)
+#		define PBRW_VS_WADING true
+#	elif defined(PSHADER) && defined(WADING_RT)
+#		define PBRW_VS_WADING ((Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Wading) != 0)
+#	else
+#		define PBRW_VS_WADING false
+#	endif
 
 #	include "Common/SharedData.hlsli"
 
-#	if defined(VSHADER)
+// PBR Water's deferred surface (PBRWater::RestoreDraw): the tessellated water's surface and point light passes draw a
+// screen rectangle around each mesh instead of its triangles, and every pixel the stencil pass left to that mesh runs the
+// vertex program and the shading once, from what the stencil pass wrote there (PBRWater/Deferred.hlsli). Small triangles
+// no longer shade their pixels several times over (2x2 quads along every edge).
+#	if defined(PBR_WATER) && defined(SPECULAR) && defined(PSHADER)
+#		define PBRW_DEFERRED
+#	endif
+
+#	if defined(VSHADER) || defined(PBRW_DEFERRED)
 struct VS_INPUT
 {
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)
@@ -146,6 +163,13 @@ struct VS_OUTPUT
 	float4 HPosition : SV_POSITION0;
 	float4 WorldPosition : POSITION1;
 	float4 PreviousWorldPosition : POSITION2;
+#		if defined(PBR_WATER)
+	// What the deferred surface reads back per pixel (PBRWater/Deferred.hlsli): the tessellated mesh's vertices only.
+	float3 DeferredWave : TEXCOORD9;    // the waves' displacement (units)
+	float2 DeferredUV : TEXCOORD10;     // the mesh's texture coordinate
+	float DeferredAlpha : TEXCOORD11;   // the mesh's vertex colour alpha
+	float2 DeferredNoise : TEXCOORD13;  // SurfaceNoise
+#		endif
 #	endif
 
 	float4 NormalsScale : TEXCOORD8;
@@ -175,14 +199,22 @@ struct VS_OUTPUT
 #		define PBRW_PRECISE
 #	endif
 
-#	if defined(VSHADER)
+#	if defined(VSHADER) || defined(PBRW_DEFERRED)
 
-cbuffer PerTechnique : register(b0)
+// The deferred surface runs the vertex program per pixel: the pixel stage gets the draw's vertex constants as well
+// (PBRWater::RestoreDraw binds them at b8-b10), under names of their own beside the pixel stage's.
+#		if defined(VSHADER)
+#			define PBRW_VS_CBUFFER(name, vsSlot, psSlot) cbuffer name : register(vsSlot)
+#		else
+#			define PBRW_VS_CBUFFER(name, vsSlot, psSlot) cbuffer VS##name : register(psSlot)
+#		endif
+
+PBRW_VS_CBUFFER(PerTechnique, b0, b8)
 {
 	float4 QPosAdjust : packoffset(c0);
 };
 
-cbuffer PerMaterial : register(b1)
+PBRW_VS_CBUFFER(PerMaterial, b1, b9)
 {
 	float4 VSFogParam : packoffset(c0);
 	float4 VSFogNearColor : packoffset(c1);
@@ -192,7 +224,7 @@ cbuffer PerMaterial : register(b1)
 	float4 NormalsScale : packoffset(c5);
 };
 
-cbuffer PerGeometry : register(b2)
+PBRW_VS_CBUFFER(PerGeometry, b2, b10)
 {
 	row_major float4x4 World : packoffset(c0);
 	row_major float4x4 PreviousWorld : packoffset(c4);
@@ -244,8 +276,13 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 #			if !defined(STENCIL)
 		vsout.WaveParam = float4(scrollWorldPos.xyz, waves.flowDamping);
 		vsout.FlowVelocity = waves.flowVelocity;
+#				if defined(PSHADER)
+		// The deferred surface's vertex program: the stencil pass recorded the noise (Deferred.hlsli).
+		vsout.SurfaceNoise = 0.0;
+#				else
 		float2 absXY = scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy;
 		vsout.SurfaceNoise = PBRWater::SurfaceNoise(absXY);
+#				endif
 		vsout.Barycentric = 1.0 / 3.0;
 #			endif
 	}
@@ -267,6 +304,12 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 #		if defined(STENCIL)
 	vsout.WorldPosition = worldPos;
 	vsout.PreviousWorldPosition = mul(PreviousWorld, previousInputPosition);
+#			if defined(PBR_WATER)
+	vsout.DeferredWave = waves.surface.current;
+	vsout.DeferredUV = 0.0;
+	vsout.DeferredAlpha = 1.0;
+	vsout.DeferredNoise = PBRWater::SurfaceNoise(scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy);
+#			endif
 #		else
 
 #			if !defined(UNIFIED_WATER)
@@ -335,27 +378,32 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 #					endif
 #					if !defined(NORMAL_TEXCOORD)
 	vsout.TexCoord3 = 0.0;
-#					elif defined(WADING)
+#					else
+	if (PBRW_VS_WADING) {
 #						if defined(UNIFIED_WATER)
-	float2 wadingUV = (input.TexCoord0.xy - 0.5f) * 0.5f;
-	vsout.TexCoord2.zw = (CellTexCoordOffset.xy + wadingUV) / ObjectUV.xy;
-	vsout.TexCoord3.xy = CellTexCoordOffset.zw + wadingUV;
+		float2 wadingUV = (input.TexCoord0.xy - 0.5f) * 0.5f;
+		vsout.TexCoord2.zw = (CellTexCoordOffset.xy + wadingUV) / ObjectUV.xy;
+		vsout.TexCoord3.xy = CellTexCoordOffset.zw + wadingUV;
 #						else
-	vsout.TexCoord2.zw = ((-0.5 + input.TexCoord0.xy) * 0.1 + CellTexCoordOffset.xy) +
-	                     float2(CellTexCoordOffset.z, -CellTexCoordOffset.w + ObjectUV.x) / ObjectUV.xx;
-	vsout.TexCoord3.xy = -0.25 + (input.TexCoord0.xy * 0.5 + ObjectUV.yz);
+		vsout.TexCoord2.zw = ((-0.5 + input.TexCoord0.xy) * 0.1 + CellTexCoordOffset.xy) +
+		                     float2(CellTexCoordOffset.z, -CellTexCoordOffset.w + ObjectUV.x) / ObjectUV.xx;
+		vsout.TexCoord3.xy = -0.25 + (input.TexCoord0.xy * 0.5 + ObjectUV.yz);
 #						endif
-	vsout.TexCoord3.zw = input.TexCoord0.xy;
-#					elif (defined(REFRACTIONS) || NUM_SPECULAR_LIGHTS == 0 || defined(BLEND_NORMALS))
-#						if defined(UNIFIED_WATER)
-	float2 dims = float2(ObjectUV.x, ObjectUV.y);
-	vsout.TexCoord2.zw = (CellTexCoordOffset.xy + scaledUV) / dims;
-	vsout.TexCoord3.xy = CellTexCoordOffset.zw + scaledUV;
-	vsout.TexCoord3.zw = scaledUV;
-#						else
-	vsout.TexCoord2.zw = (CellTexCoordOffset.xy + input.TexCoord0.xy) / ObjectUV.xx;
-	vsout.TexCoord3.xy = CellTexCoordOffset.zw + input.TexCoord0.xy;
-	vsout.TexCoord3.zw = input.TexCoord0.xy;
+		vsout.TexCoord3.zw = input.TexCoord0.xy;
+	}
+#						if (defined(REFRACTIONS) || NUM_SPECULAR_LIGHTS == 0 || defined(BLEND_NORMALS))
+	else {
+#							if defined(UNIFIED_WATER)
+		float2 dims = float2(ObjectUV.x, ObjectUV.y);
+		vsout.TexCoord2.zw = (CellTexCoordOffset.xy + scaledUV) / dims;
+		vsout.TexCoord3.xy = CellTexCoordOffset.zw + scaledUV;
+		vsout.TexCoord3.zw = scaledUV;
+#							else
+		vsout.TexCoord2.zw = (CellTexCoordOffset.xy + input.TexCoord0.xy) / ObjectUV.xx;
+		vsout.TexCoord3.xy = CellTexCoordOffset.zw + input.TexCoord0.xy;
+		vsout.TexCoord3.zw = input.TexCoord0.xy;
+#							endif
+	}
 #						endif
 #					endif
 	vsout.TexCoord4 = ObjectUV.xy;
@@ -365,14 +413,26 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 	vsout.TexCoord2.xy = NormalsScroll1.xy + scrollAdjust3;
 	vsout.TexCoord2.z = worldViewPos.w;
 	vsout.TexCoord2.w = 0;
-#					if (defined(WADING) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)))
-	vsout.TexCoord3 = 0.0;
-#						if (defined(NORMAL_TEXCOORD) && ((!defined(BLEND_NORMALS) && !defined(VERTEX_ALPHA_DEPTH)) || defined(WADING)))
-	vsout.TexCoord3.xy = input.TexCoord0;
+#					if defined(VERTEX_ALPHA_DEPTH) && defined(VC)
+	const bool alphaDepth = true;
+#					else
+	const bool alphaDepth = false;
+#					endif
+#					if defined(WADING_RT) || defined(WADING) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC))
+	if (PBRW_VS_WADING || alphaDepth) {
+		vsout.TexCoord3 = 0.0;
+#						if defined(NORMAL_TEXCOORD)
+#							if !defined(BLEND_NORMALS) && !defined(VERTEX_ALPHA_DEPTH)
+		vsout.TexCoord3.xy = input.TexCoord0;
+#							else
+		if (PBRW_VS_WADING)
+			vsout.TexCoord3.xy = input.TexCoord0;
+#							endif
 #						endif
 #						if defined(VERTEX_ALPHA_DEPTH) && defined(VC)
-	vsout.TexCoord3.z = input.Color.w;
+		vsout.TexCoord3.z = input.Color.w;
 #						endif
+	}
 #					endif
 #				endif
 #			endif
@@ -381,25 +441,27 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 	return vsout;
 }
 
+#		if defined(VSHADER)
 /**
  * The complete water vertex program: the waves at this vertex, then the rest (WaterVertexWith).
  * @param spacing local vertex spacing in world units (for wave Nyquist filtering)
  */
 VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 {
-#		if defined(PBR_WATER)
+#			if defined(PBR_WATER)
 	PBRW_PRECISE float4 scrollWorldPos = mul(World, float4(input.Position.xyz, 1.0));
-#			if defined(STENCIL)
+#				if defined(STENCIL)
 	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, spacing, true));
-#			else
+#				else
 	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, spacing, false));
-#			endif
-#		else
+#				endif
+#			else
 	return WaterVertexWith(input);
-#		endif
+#			endif
 }
+#		endif
 
-#	endif  // VSHADER
+#	endif  // VSHADER || PBRW_DEFERRED
 
 #	if defined(VSHADER)
 #		if defined(PBR_WATER) && defined(PBRW_TESSELLATION)
@@ -426,13 +488,50 @@ VS_OUTPUT CachedWaterVertex(uint vertexID)
 	waves.surface.shore = t.shore;
 	waves.flowDamping = t.flowDamping;
 	waves.flowVelocity = t.flowVelocity;
-	return WaterVertexWith(v, waves);
+	VS_OUTPUT vsout = WaterVertexWith(v, waves);
+#			if defined(STENCIL)
+	// Whatever the stencil pass's own permutation reads of the mesh: the surface's may read more.
+	vsout.DeferredUV = float2(t.texCoordX, t.texCoordY);
+	vsout.DeferredAlpha = f16tof32(t.color.y >> 16);
+#			endif
+	return vsout;
 }
 
-VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID)
+#			if defined(SPECULAR)
+#				include "PBRWater/Deferred.hlsli"
+#			endif
+#			include "PBRWater/Bisection.hlsli"
+
+/// The bisection tessellator's vertex for this draw's vertex `vertexID` (BisectionTessellator::Draw): each bisector is
+/// 3 GridTriangles vertices, from its place in the draw lists on (the draw's StartVertexLocation), its grid's vertices
+/// stored after one another (BisectionCS VertexCS).
+uint BisectionVertexIndex(uint vertexID)
+{
+	static const uint perBisector = 3 * PBRWaterBisection::GridTriangles;
+	uint listIndex = vertexID / perBisector;
+	uint local = vertexID % perBisector;
+	uint2 a, b, c;
+	PBRWaterTess::TriangleCorners(local / 3, PBRWaterBisection::GridN, a, b, c);
+	uint corner = local % 3;
+	uint2 g = corner == 0 ? a : (corner == 1 ? b : c);
+	return listIndex * PBRWaterBisection::GridVertices + PBRWaterTess::VertexIndex(g.x, g.y, PBRWaterBisection::GridN);
+}
+
+VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
 	// Tess0.x: 0 an untessellated draw, 1 the compute tessellator's vertices (PBRWater::RestoreDraw), 2 the engine's own
-	// draw of a mesh the compute tessellator draws instead: every vertex outside the frustum, so it rasterises nothing.
+	// draw of a mesh the compute tessellator draws instead: every vertex outside the frustum, so it rasterises nothing;
+	// 3 the deferred surface's tiles of the mesh (PBRWater/Deferred.hlsli), 4 the bisection tessellator's vertices
+	// (BisectionTessellator::Draw).
+	if (PBRWater::Tess0.x > 3.5)
+		return CachedWaterVertex(BisectionVertexIndex(vertexID));
+#			if defined(SPECULAR)
+	if (PBRWater::Tess0.x > 2.5) {
+		VS_OUTPUT tile = (VS_OUTPUT)0;
+		tile.HPosition = PBRWaterDeferred::TileVertex(vertexID, instanceID);
+		return tile;
+	}
+#			endif
 	if (PBRWater::Tess0.x > 1.5) {
 		VS_OUTPUT culled = (VS_OUTPUT)0;
 		culled.HPosition = float4(2.0, 2.0, 2.0, 1.0);
@@ -476,6 +575,13 @@ struct PS_OUTPUT
 #	if defined(STENCIL)
 	float4 WaterMask : SV_Target0;
 	float2 MotionVector : SV_Target1;
+#		if defined(PBR_WATER)
+	// The deferred surface's record (PBRWater/Deferred.hlsli): bound for the tessellated meshes only.
+	uint DeferredTag : SV_Target2;
+	float4 DeferredWaves : SV_Target3;
+	float2 DeferredNoise : SV_Target4;
+	float2 DeferredUV : SV_Target5;
+#		endif
 #	endif
 };
 
@@ -558,6 +664,9 @@ cbuffer PerGeometry : register(b2)
 
 #		if defined(PBR_WATER)
 #			include "PBRWater/Shading.hlsli"
+#			if defined(PBRW_DEFERRED) || defined(STENCIL)
+#				include "PBRWater/Deferred.hlsli"
+#			endif
 #		endif
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)
@@ -1307,16 +1416,28 @@ PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
 
+#		if defined(PBRW_DEFERRED)
+	// The deferred surface's tiles (Deferred.hlsli): the pixels the stencil pass left to this mesh, already tested
+	// against the waterline there. The rest only lend their quad its derivatives (discard demotes them to helpers).
+	[branch] if (abs(PBRWater::Tess0.x - 3.0) < 0.5)
+	{
+		if (!PBRWaterDeferred::Resolve(input))
+			discard;
+	}
+	else
+#		endif
 #		if defined(PBR_WATER)
-	// Dry: the bed rises above the waves and the surf, where DisplaceSurface held the mesh just above it. Both passes
-	// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
+	{
+		// Dry: the bed rises above the waves and the surf, where DisplaceSurface held the mesh just above it. Both passes
+		// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
 #			if defined(STENCIL)
-	if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
-		discard;
+		if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
+			discard;
 #			else
-	if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
-		discard;
+		if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
+			discard;
 #			endif
+	}
 #		endif
 
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
@@ -1941,6 +2062,13 @@ PS_OUTPUT main(PS_INPUT input)
 	previousPosition.xy = lerp(previousPosition.xy, pbrFoamPrevious.xy, saturate(2.0 * pbrMotionFoam) * pbrStill);
 #			endif
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, previousPosition);
+#			if defined(PBR_WATER)
+	PBRWaterDeferred::Record pbrRecord = PBRWaterDeferred::Pack(input.HPosition.z, input.DeferredWave, input.ShoreState.z, input.DeferredNoise, input.DeferredUV, input.DeferredAlpha);
+	psout.DeferredTag = pbrRecord.tag;
+	psout.DeferredWaves = pbrRecord.waves;
+	psout.DeferredNoise = pbrRecord.noise;
+	psout.DeferredUV = pbrRecord.uv;
+#			endif
 #		endif
 
 	return psout;

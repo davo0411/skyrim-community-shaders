@@ -113,6 +113,8 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
+		DeferredSurface,
+		BisectionTessellation,
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
@@ -226,6 +228,8 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
+		DeferredSurface,
+		BisectionTessellation,
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
@@ -856,6 +860,13 @@ void PBRWater::DrawSettings()
 		}
 		Util::CheckboxTip(T(TKEY("enable_tessellation"), "Tessellation"), &s.EnableTessellation,
 			T(TKEY("enable_tessellation_tooltip"), "Subdivides the water mesh adaptively once a frame so waves are real geometry, and evaluates each vertex's waves once for every pass that draws the water. Without it, waves are limited by the mesh resolution."));
+		{
+			Util::DisableGuard disable(!s.EnableTessellation);
+			Util::CheckboxTip(T(TKEY("bisection_tessellation"), "Bisection Tessellation (Experimental)"), &s.BisectionTessellation,
+				T(TKEY("bisection_tessellation_tooltip"), "Refines the water mesh triangle by triangle on the GPU (longest-edge bisection) instead of in patches, so the density changes smoothly with no blocks or fans of thin triangles. Experimental: off by default."));
+			Util::CheckboxTip(T(TKEY("deferred_surface"), "Deferred Surface"), &s.DeferredSurface,
+				T(TKEY("deferred_surface_tooltip"), "Shades each pixel of the tessellated water once, from what the depth pass recorded there, instead of once per triangle touching it. Small triangles then cost no extra shading. Turn off only to compare."));
+		}
 		Util::SliderFloatTip(T(TKEY("tessellation_triangle_size"), "Target Triangle Size"), &s.TessellationTriangleSize, 4.0f, 40.0f, "%.0f px",
 			T(TKEY("tessellation_triangle_size_tooltip"), "Smaller values give smoother waves at a higher GPU cost. Scales automatically with the render resolution. Default 10 px."));
 		Util::SliderFloatTip(T(TKEY("tessellation_max_factor"), "Maximum Tessellation"), &s.TessellationMaxFactor, 4.0f, 64.0f, "%.0f",
@@ -899,7 +910,16 @@ void PBRWater::DrawSettings()
 		ImGui::Text("Water draws last frame: %u, %u of them from the tessellated mesh", lastDrawStats.draws, lastDrawStats.computeDraws);
 		{
 			const auto& t = tessellator.GetStats();
-			ImGui::Text("Compute tessellation: %u meshes, %u triangles in view, %u leaves, %u vertices, %u triangles, target size x%.2f (CPU %.3f ms)", t.meshes, t.baseTriangles, t.leaves, t.vertices, t.triangles, t.detailScale, t.cpuMs);
+			ImGui::Text("Compute tessellation: %u meshes, %u triangles in view, %u leaves, %u vertices, %u triangles, %u cells under the land, target size x%.2f (CPU %.3f ms)", t.meshes, t.baseTriangles, t.leaves, t.vertices, t.triangles, t.underTerrain, t.detailScale, t.cpuMs);
+		}
+		if (bisectionActive) {
+			const auto& b = bisection.GetStats();
+			ImGui::Text("Bisection tessellation: %u meshes, %u base triangles, %u shared root edges (CPU %.3f ms)", b.meshes, b.roots, b.twins, b.cpuMs);
+		}
+		{
+			const auto& ds = lastDrawStats;
+			ImGui::Text("Deferred surface: %u meshes recorded, %u draws shaded from the record, %u drawn forward%s%s%s", ds.deferredRecorded, ds.deferredShaded, ds.deferredForward,
+				ds.deferredReason ? " (last: " : "", ds.deferredReason ? ds.deferredReason : "", ds.deferredReason ? ")" : "");
 		}
 		{
 			const auto& n = lastDrawStats.byTechnique;
@@ -962,7 +982,12 @@ void PBRWater::SetupResources()
 	}
 	flatDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::FlatDrawConstants");
 	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
+	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
+	deferredCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DeferredDrawCB>(), "PBRWater::DeferredDrawCB");
+	deferredZeroCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DeferredDrawCB>(), "PBRWater::DeferredZeroCB");
+	deferredZeroCB->Update(DeferredDrawCB{});
 	tessellator.SetupResources();
+	bisection.SetupResources();
 
 	D3D11_SAMPLER_DESC samplerDesc{};
 	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1110,6 +1135,7 @@ void PBRWater::ClearShaderCache()
 	ocean.ClearShaderCache();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
 	tessellator.CompileShaders();
+	bisection.CompileShaders();
 }
 
 void PBRWater::Reset()
@@ -1331,9 +1357,12 @@ void PBRWater::UpdateTessellation()
 {
 	if (!gpuBuffer || !settings.EnableTessellation || !tessellator.IsReady() || !globals::shaderCache->IsEnabled()) {
 		tessellator.Reset();
+		bisection.Clear();
+		bisectionActive = false;
 		PBRWaterProfiling::Skipped("PBRWater::Tessellate");
 		return;
 	}
+	bisectionActive = settings.BisectionTessellation && bisection.IsReady();
 
 	// The vertices are evaluated as the tessellated draws evaluate them: this frame's constants (tessellated: Tess0.x
 	// set, so the breakers curl), textures, the surf's state and the river flowmap.
@@ -1342,7 +1371,7 @@ void PBRWater::UpdateTessellation()
 	d.Tess0.x = 1.0f;
 	d.Draw0.x = 0.0f;
 	// The budget's coarsening the subdivision starts from (last frame's), for ShoreCurlSpacing in the compute pass.
-	d.Draw0.w = std::max(tessellator.GetDetailScale(), 1.0f);
+	d.Draw0.w = bisectionActive ? 1.0f : std::max(tessellator.GetDetailScale(), 1.0f);
 	gpuBuffer->Update(d);
 	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
 	context->CSSetConstantBuffers(7, 1, cbs);
@@ -1413,9 +1442,19 @@ void PBRWater::UpdateTessellation()
 	p.curl = d.Shore3.z;
 	p.curlDetail = d.Shore1.y;
 	p.curlDepth = PBRWaterModel::ShoreCurlDepth(std::max(d.Shore1.z, d.Shore1.w) / UnitsPerMetre);
-	tessellator.Build(p);
-	// The draws' ShoreCurlSpacing: the coarsening the mesh was built at.
-	frameData.Draw0.w = std::max(tessellator.GetStats().detailScale, 1.0f);
+	p.trainCycles = settings.ShoreTrainCycles;
+	p.terrain = uploadedTerrain && uploadedTerrain->Valid() ? uploadedTerrain.get() : nullptr;
+	p.runup = std::max(d.Shore0.w, 0.0f);
+	if (bisectionActive) {
+		// The meshes registered last frame, subdivided by bisection instead: the patch tessellator draws nothing.
+		bisection.Build(p, tessellator);
+		frameData.Draw0.w = 1.0f;
+	} else {
+		bisection.Clear();
+		tessellator.Build(p);
+		// The draws' ShoreCurlSpacing: the coarsening the mesh was built at.
+		frameData.Draw0.w = std::max(tessellator.GetStats().detailScale, 1.0f);
+	}
 
 	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
 	context->CSSetShaderResources(110, WaterSRVCount, nullSrvs);
@@ -1450,23 +1489,18 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 	const size_t count = static_cast<size_t>(field->width) * field->height;
 	// Full precision for the travel times and distances: they become the waves' phase (omega tau, tens of radians) and the
 	// nearest point of the coast, where half floats would step them visibly. The slownesses (0.05-1 s/m) and the rest
-	// are fine as halves.
-	std::vector<float> times(count * 4);
-	std::vector<uint16_t> rays(count * 4), room(count * 2);
-	auto half = [](float v) { return DirectX::PackedVector::XMConvertFloatToHalf(v); };
-	for (size_t i = 0; i < count; ++i) {
-		times[i * 4 + 0] = field->travelTime[i];
-		times[i * 4 + 1] = field->distance[i];
-		times[i * 4 + 2] = field->along[i];
-		// No water in reach: a sentinel the shaders test for (NaN would spread through the bilinear filter).
-		times[i * 4 + 3] = std::isfinite(field->level[i]) ? field->level[i] : -1.0e9f;
-		rays[i * 4 + 0] = half(field->slownessX[i]);
-		rays[i * 4 + 1] = half(field->slownessY[i]);
-		rays[i * 4 + 2] = half(field->slope[i]);
-		rays[i * 4 + 3] = half(field->exposure[i]);
-		room[i * 2 + 0] = half(field->room[i]);
-		room[i * 2 + 1] = half(field->crestDepth.size() == count ? field->crestDepth[i] : 0.0f);
+	// are fine as halves. Packed by the worker that built the field (ShoreField::PackForGpu): a field from elsewhere is
+	// packed here.
+	std::shared_ptr<PBRWaterModel::ShoreField> packed;
+	const PBRWaterModel::ShoreField* source = field.get();
+	if (field->gpuTimes.size() != count * 4 || field->gpuRays.size() != count * 4 || field->gpuRoom.size() != count * 2) {
+		packed = std::make_shared<PBRWaterModel::ShoreField>(*field);
+		packed->PackForGpu();
+		source = packed.get();
 	}
+	const float* times = source->gpuTimes.data();
+	const uint16_t* rays = source->gpuRays.data();
+	const uint16_t* room = source->gpuRoom.data();
 
 	auto create = [&](DXGI_FORMAT format, const void* data, UINT pitch, const char* name) -> std::unique_ptr<Texture2D> {
 		D3D11_TEXTURE2D_DESC desc{};
@@ -1492,9 +1526,9 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 		texture2D->CreateSRV(srvDesc);
 		return texture2D;
 	};
-	result.times = create(DXGI_FORMAT_R32G32B32A32_FLOAT, times.data(), static_cast<UINT>(field->width * 4 * sizeof(float)), "PBRWater::ShoreTimes");
-	result.rays = create(DXGI_FORMAT_R16G16B16A16_FLOAT, rays.data(), static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreRays");
-	result.room = create(DXGI_FORMAT_R16G16_FLOAT, room.data(), static_cast<UINT>(field->width * 2 * sizeof(uint16_t)), "PBRWater::ShoreRoom");
+	result.times = create(DXGI_FORMAT_R32G32B32A32_FLOAT, times, static_cast<UINT>(field->width * 4 * sizeof(float)), "PBRWater::ShoreTimes");
+	result.rays = create(DXGI_FORMAT_R16G16B16A16_FLOAT, rays, static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreRays");
+	result.room = create(DXGI_FORMAT_R16G16_FLOAT, room, static_cast<UINT>(field->width * 2 * sizeof(uint16_t)), "PBRWater::ShoreRoom");
 	if (result.times && result.rays && result.room)
 		result.field = std::move(field);
 	else
@@ -2164,7 +2198,11 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	if (settings.EnableTessellation && tessellator.IsReady() && hasWaves && IsTessellatedTechnique(technique) && mainView && customShadersLive()) {
 		// Next frame's mesh covers this draw; this frame's does if the draw was there last frame too.
 		tessellator.Register(*pass->geometry);
-		cached = tessellator.BuiltFor(state->frameCount, globals::game::frameBufferCached.GetCameraPosAdjust()) && tessellator.Lookup(*pass->geometry, cachedStart, cachedCount);
+		const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+		if (bisectionActive)
+			cached = bisection.BuiltFor(state->frameCount, camera) && bisection.Lookup(*pass->geometry, cachedStart);
+		else
+			cached = tessellator.BuiltFor(state->frameCount, camera) && tessellator.Lookup(*pass->geometry, cachedStart, cachedCount);
 	}
 
 	ID3D11GeometryShader* geometryShader = nullptr;
@@ -2195,13 +2233,17 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// constants differ between draws only in the vertex shader's mode (Tess0.x) and, without tessellation, the spacing: the
 	// modes are uploaded once and swapped by binding another buffer.
 	GpuData& d = frameData;
-	if (std::memcmp(&uploadedDrawData, &d, sizeof(GpuData)) != 0) {
+	if (std::memcmp(&uploadedDrawData, &d, sizeof(GpuData)) != 0 || uploadedBisectionActive != bisectionActive) {
 		uploadedDrawData = d;
+		uploadedBisectionActive = bisectionActive;
 		GpuData drawData = d;
-		drawData.Tess0.x = 1.0f;
+		// The cached mesh's vertex mode: the patch tessellator's indexed vertices, or the bisection tessellator's.
+		drawData.Tess0.x = bisectionActive ? 4.0f : 1.0f;
 		drawBuffer->Update(drawData);
 		drawData.Tess0.x = 2.0f;
 		swallowDrawBuffer->Update(drawData);
+		drawData.Tess0.x = 3.0f;
+		deferredDrawBuffer->Update(drawData);
 		drawData.Tess0.x = 0.0f;
 		flatDrawBuffer->Update(drawData);
 		GatherWaterSRVs(d, drawSRVs);
@@ -2260,6 +2302,8 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	cachedDrawPending = cached;
 	cachedDrawStart = cachedStart;
 	cachedDrawCount = cachedCount;
+	cachedDrawTechnique = technique;
+	cachedDrawGeometry = pass->geometry;
 
 	if (geometryShader) {
 		context->GSSetConstantBuffers(7, 1, &cb);
@@ -2291,6 +2335,7 @@ void PBRWater::EndDrawBatch()
 {
 	if (!std::exchange(drawBatchOpen, false))
 		return;
+	EndDeferredBatch();
 	PBRWaterProfiling::End();
 }
 
@@ -2338,15 +2383,438 @@ void PBRWater::RestoreDraw()
 	globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits |= (3u << 12);
 	if (std::exchange(cachedDrawPending, false)) {
 		// The engine's draw rasterised nothing (the vertex shader's culling mode): the compute mesh, with all of the
-		// draw's state, the vertex shader in its compute mode.
-		ID3D11Buffer* cb = drawBuffer->CB();
-		context->VSSetConstantBuffers(7, 1, &cb);
-		tessellator.Draw(cachedDrawStart, cachedDrawCount);
+		// draw's state, the vertex shader in its compute mode. With the deferred surface the stencil pass also records its
+		// pixels, and the surface and point light passes shade those instead of drawing the triangles again.
+		const bool deferred = settings.DeferredSurface && settings.WireframeMode == 0;
+		if (deferred && IsStencilTechnique(cachedDrawTechnique))
+			DrawRecordedStencil();
+		else if (!(deferred && cachedDrawTechnique < 8 && DrawDeferredSurface()))
+			DrawCachedMesh();
 	}
 	if (geometryShaderBound) {
 		context->GSSetShader(nullptr, nullptr, 0);
 		geometryShaderBound = false;
 	}
+}
+
+bool PBRWater::EnsureDeferredRecords()
+{
+	auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
+	if (!depth)
+		return false;
+	if (!deferredTilesCS) {
+		deferredTilesCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\DeferredTilesCS.hlsl", {}, "cs_5_0")));
+		if (!deferredTilesCS)
+			return false;
+	}
+	D3D11_TEXTURE2D_DESC depthDesc{};
+	depth->GetDesc(&depthDesc);
+	if (deferredTags && deferredTags->desc.Width == depthDesc.Width && deferredTags->desc.Height == depthDesc.Height)
+		return true;
+
+	auto device = globals::d3d::device;
+	auto context = globals::d3d::context;
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = depthDesc.Width;
+	desc.Height = depthDesc.Height;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+	rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	const float zero[4] = {};
+	const std::tuple<std::unique_ptr<Texture2D>*, DXGI_FORMAT, const char*> targets[] = {
+		{ &deferredTags, DXGI_FORMAT_R32_UINT, "PBRWater::DeferredTags" },
+		{ &deferredWaves, DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::DeferredWaves" },
+		{ &deferredNoise, DXGI_FORMAT_R8G8_UNORM, "PBRWater::DeferredNoise" },
+		{ &deferredTexCoords, DXGI_FORMAT_R32G32_FLOAT, "PBRWater::DeferredTexCoords" },
+	};
+	for (const auto& [target, format, name] : targets) {
+		desc.Format = srvDesc.Format = rtvDesc.Format = format;
+		*target = std::make_unique<Texture2D>(desc, name);
+		(*target)->CreateSRV(srvDesc);
+		(*target)->CreateRTV(rtvDesc);
+		context->ClearRenderTargetView((*target)->rtv.get(), zero);
+	}
+
+	// The tile lists: DrawInstancedIndirect's arguments per mesh, and room for every tile of the screen per mesh.
+	deferredMaxTiles = ((desc.Width + DeferredTile - 1) / DeferredTile) * ((desc.Height + DeferredTile - 1) / DeferredTile);
+	D3D11_BUFFER_DESC argsDesc{};
+	argsDesc.ByteWidth = DeferredMeshes * 4 * sizeof(uint32_t);
+	argsDesc.Usage = D3D11_USAGE_DEFAULT;
+	argsDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+	argsDesc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+	deferredArgs = nullptr;
+	deferredArgsUAV = nullptr;
+	DX::ThrowIfFailed(device->CreateBuffer(&argsDesc, nullptr, deferredArgs.put()));
+	Util::SetResourceName(deferredArgs.get(), "PBRWater::DeferredTileArgs");
+	D3D11_UNORDERED_ACCESS_VIEW_DESC argsUav{};
+	argsUav.Format = DXGI_FORMAT_R32_TYPELESS;
+	argsUav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+	argsUav.Buffer.NumElements = DeferredMeshes * 4;
+	argsUav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+	DX::ThrowIfFailed(device->CreateUnorderedAccessView(deferredArgs.get(), &argsUav, deferredArgsUAV.put()));
+
+	D3D11_BUFFER_DESC tilesDesc{};
+	tilesDesc.ByteWidth = DeferredMeshes * deferredMaxTiles * sizeof(uint32_t);
+	tilesDesc.Usage = D3D11_USAGE_DEFAULT;
+	tilesDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+	tilesDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+	tilesDesc.StructureByteStride = sizeof(uint32_t);
+	deferredTiles = std::make_unique<Buffer>(tilesDesc, nullptr, "PBRWater::DeferredTiles");
+	D3D11_SHADER_RESOURCE_VIEW_DESC tilesSrv{};
+	tilesSrv.Format = DXGI_FORMAT_UNKNOWN;
+	tilesSrv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+	tilesSrv.Buffer.NumElements = DeferredMeshes * deferredMaxTiles;
+	deferredTiles->CreateSRV(tilesSrv);
+	D3D11_UNORDERED_ACCESS_VIEW_DESC tilesUav{};
+	tilesUav.Format = DXGI_FORMAT_UNKNOWN;
+	tilesUav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+	tilesUav.Buffer.NumElements = DeferredMeshes * deferredMaxTiles;
+	deferredTiles->CreateUAV(tilesUav);
+
+	deferredMeshes.clear();
+	deferredMeshesFrame = UINT32_MAX;
+	deferredTilesFrame = UINT32_MAX;
+	return true;
+}
+
+void PBRWater::DrawCachedMesh()
+{
+	ID3D11Buffer* cb = drawBuffer->CB();
+	globals::d3d::context->VSSetConstantBuffers(7, 1, &cb);
+	if (bisectionActive)
+		bisection.Draw(cachedDrawStart);
+	else
+		tessellator.Draw(cachedDrawStart, cachedDrawCount);
+}
+
+namespace
+{
+	/// The render targets and depth target bound now, with references held for the scope.
+	struct BoundTargets
+	{
+		ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+		ID3D11DepthStencilView* dsv = nullptr;
+		UINT count = 0;
+
+		explicit BoundTargets(ID3D11DeviceContext* context)
+		{
+			context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+			while (count < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT && rtv[count])
+				++count;
+		}
+		~BoundTargets()
+		{
+			for (auto* view : rtv) {
+				if (view)
+					view->Release();
+			}
+			if (dsv)
+				dsv->Release();
+		}
+		BoundTargets(const BoundTargets&) = delete;
+		BoundTargets& operator=(const BoundTargets&) = delete;
+	};
+}
+
+void PBRWater::DrawRecordedStencil()
+{
+	auto context = globals::d3d::context;
+	const uint32_t frame = globals::state->frameCount;
+	BoundTargets bound(context);
+	// The record's targets stay bound across the stencil batch (EndDeferredBatch puts the engine's back): the engine
+	// binds its own again only when it changes targets.
+	const bool ours = deferredTags && bound.rtv[2] == deferredTags->rtv.get();
+	const char* reason = nullptr;
+	if (!bound.dsv)
+		reason = "the stencil pass has no depth target";
+	else if (!ours && (bound.rtv[2] || bound.rtv[3] || bound.rtv[4] || bound.rtv[5]))
+		reason = "the stencil pass already uses render targets 2-5";
+	else if (!cachedDrawGeometry)
+		reason = "no geometry for the draw";
+	else if (!EnsureDeferredRecords())
+		reason = "the record could not be created (no depth buffer, or DeferredTilesCS did not compile)";
+	else if (deferredMeshesFrame == frame && deferredMeshes.size() >= DeferredMeshes)
+		reason = "more tessellated meshes than the record holds (32)";
+	if (reason) {
+		DeferredFallback(reason);
+		DrawCachedMesh();
+		return;
+	}
+	if (deferredMeshesFrame != frame) {
+		// No mesh anywhere until this frame's stencil pass records one.
+		deferredMeshes.clear();
+		deferredMeshesFrame = frame;
+		const float zero[4] = {};
+		context->ClearRenderTargetView(deferredTags->rtv.get(), zero);
+	}
+	DeferredMesh mesh;
+	mesh.startIndex = cachedDrawStart;
+	// Texture coordinates that are one plane over the mesh are rebuilt per pixel: only the others are written.
+	mesh.texCoords = bisectionActive || !tessellator.AffineTexCoords(*cachedDrawGeometry, mesh.uvMapU, mesh.uvMapV);
+	deferredMeshes.push_back(mesh);
+
+	auto& batch = deferredBatch;
+	if (!batch.recording) {
+		batch.recording = true;
+		batch.recordTargets = 0;
+		batch.recordBlend = nullptr;
+	}
+	const UINT needed = mesh.texCoords ? 6 : 5;
+	if (!ours || batch.recordTargets != needed) {
+		ID3D11RenderTargetView* recorded[6] = { bound.rtv[0], bound.rtv[1], deferredTags->rtv.get(), deferredWaves->rtv.get(), deferredNoise->rtv.get(), deferredTexCoords->rtv.get() };
+		context->OMSetRenderTargets(needed, recorded, bound.dsv);
+		batch.recordTargets = needed;
+	}
+	// The engine's blend state need not write targets 2-5 (a zero write mask drops the record without a word): its own for
+	// targets 0 and 1, the record's written whole. Set again only when the engine has set its own since.
+	{
+		winrt::com_ptr<ID3D11BlendState> blend;
+		float factor[4] = {};
+		UINT mask = 0xFFFFFFFF;
+		context->OMGetBlendState(blend.put(), factor, &mask);
+		if (blend.get() != batch.recordBlend || !batch.recordBlend) {
+			batch.engineBlend = blend;
+			std::copy_n(factor, 4, batch.blendFactor);
+			batch.sampleMask = mask;
+			batch.recordBlend = RecordBlendState(blend.get());
+			context->OMSetBlendState(batch.recordBlend, factor, mask);
+		}
+	}
+
+	DeferredDrawCB data;
+	data.tag[0] = static_cast<uint32_t>(deferredMeshes.size());
+	deferredCB->Update(data);
+	ID3D11Buffer* drawCb = deferredCB->CB();
+	context->PSSetConstantBuffers(13, 1, &drawCb);
+	DrawCachedMesh();
+	// The untessellated stencil draws in between write the record too, with no tag: where their water stands nearer,
+	// none of the tessellated meshes owns the pixel.
+	ID3D11Buffer* zeroCb = deferredZeroCB->CB();
+	context->PSSetConstantBuffers(13, 1, &zeroCb);
+	++drawStats.deferredRecorded;
+}
+
+void PBRWater::EndDeferredBatch()
+{
+	auto& batch = deferredBatch;
+	if (!batch.recording && !batch.shading)
+		return;
+	auto context = globals::d3d::context;
+	if (batch.recording) {
+		BoundTargets bound(context);
+		if (deferredTags && bound.rtv[2] == deferredTags->rtv.get())
+			context->OMSetRenderTargets(2, bound.rtv, bound.dsv);
+		winrt::com_ptr<ID3D11BlendState> blend;
+		float factor[4] = {};
+		UINT mask = 0xFFFFFFFF;
+		context->OMGetBlendState(blend.put(), factor, &mask);
+		if (blend.get() == batch.recordBlend)
+			context->OMSetBlendState(batch.engineBlend.get(), batch.blendFactor, batch.sampleMask);
+		ID3D11Buffer* nullCb = nullptr;
+		context->PSSetConstantBuffers(13, 1, &nullCb);
+		// Which tiles each recorded mesh is in, for the surface and point light passes: GPU work only.
+		if (deferredMeshesFrame == globals::state->frameCount && !deferredMeshes.empty())
+			ClassifyDeferredTiles();
+		batch.recording = false;
+		batch.recordBlend = nullptr;
+		batch.engineBlend = nullptr;
+	}
+	if (batch.shading) {
+		ID3D11ShaderResourceView* nullSrvs[6] = {};
+		context->PSSetShaderResources(38, 6, nullSrvs);
+		context->VSSetShaderResources(101, 1, nullSrvs);
+		ID3D11Buffer* nullCbs[3] = {};
+		context->PSSetConstantBuffers(8, 3, nullCbs);
+		context->PSSetConstantBuffers(13, 1, nullCbs);
+		context->VSSetConstantBuffers(13, 1, nullCbs);
+		ID3D11Buffer* cb = drawBuffer->CB();
+		context->VSSetConstantBuffers(7, 1, &cb);
+		context->PSSetConstantBuffers(7, 1, &cb);
+		BoundTargets bound(context);
+		if (bound.dsv && bound.dsv == batch.readOnly && batch.engineDSV)
+			context->OMSetRenderTargets(bound.count, bound.rtv, batch.engineDSV.get());
+		batch.shading = false;
+		batch.readOnly = nullptr;
+		batch.engineDSV = nullptr;
+	}
+}
+
+ID3D11BlendState* PBRWater::RecordBlendState(ID3D11BlendState* engineState)
+{
+	auto& cached = recordBlendStates[engineState];
+	if (!cached) {
+		D3D11_BLEND_DESC desc{};
+		if (engineState)
+			engineState->GetDesc(&desc);
+		else {
+			desc.RenderTarget[0].SrcBlend = desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+			desc.RenderTarget[0].DestBlend = desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+			desc.RenderTarget[0].BlendOp = desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+			desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		}
+		if (!desc.IndependentBlendEnable) {
+			for (uint32_t i = 1; i < 8; ++i)
+				desc.RenderTarget[i] = desc.RenderTarget[0];
+			desc.IndependentBlendEnable = TRUE;
+		}
+		for (uint32_t i = 2; i < 6; ++i) {
+			auto& target = desc.RenderTarget[i];
+			target.BlendEnable = FALSE;
+			target.SrcBlend = target.SrcBlendAlpha = D3D11_BLEND_ONE;
+			target.DestBlend = target.DestBlendAlpha = D3D11_BLEND_ZERO;
+			target.BlendOp = target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+			target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		}
+		if (FAILED(globals::d3d::device->CreateBlendState(&desc, cached.put())))
+			return engineState;
+		Util::SetResourceName(cached.get(), "PBRWater::DeferredRecordBlend");
+	}
+	return cached.get();
+}
+
+void PBRWater::DeferredFallback(const char* reason)
+{
+	++drawStats.deferredForward;
+	drawStats.deferredReason = reason;
+}
+
+void PBRWater::ClassifyDeferredTiles()
+{
+	auto context = globals::d3d::context;
+	deferredTilesFrame = globals::state->frameCount;
+	// No tiles for any mesh yet; DeferredTilesCS fills in the vertex counts as it lists them. Cleared on the GPU: a
+	// CPU upload into a buffer the last frame's draws read can make the driver wait for them.
+	const UINT zero[4] = {};
+	context->ClearUnorderedAccessViewUint(deferredArgsUAV.get(), zero);
+
+	struct alignas(16) TilesCB
+	{
+		uint32_t width, height, maxTiles, pad;
+	} tilesData{ deferredTags->desc.Width, deferredTags->desc.Height, deferredMaxTiles, 0 };
+	if (!deferredTilesCB)
+		deferredTilesCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<TilesCB>(), "PBRWater::DeferredTilesCB");
+	deferredTilesCB->Update(tilesData);
+
+	winrt::com_ptr<ID3D11ComputeShader> savedShader;
+	context->CSGetShader(savedShader.put(), nullptr, nullptr);
+	ID3D11Buffer* savedCb = nullptr;
+	context->CSGetConstantBuffers(0, 1, &savedCb);
+	ID3D11ShaderResourceView* savedSrv = nullptr;
+	context->CSGetShaderResources(0, 1, &savedSrv);
+	ID3D11UnorderedAccessView* savedUavs[2] = {};
+	context->CSGetUnorderedAccessViews(0, 2, savedUavs);
+
+	ID3D11Buffer* cb = deferredTilesCB->CB();
+	ID3D11ShaderResourceView* srv = deferredTags->srv.get();
+	ID3D11UnorderedAccessView* uavs[2] = { deferredArgsUAV.get(), deferredTiles->uav.get() };
+	context->CSSetShader(deferredTilesCS.get(), nullptr, 0);
+	context->CSSetConstantBuffers(0, 1, &cb);
+	context->CSSetShaderResources(0, 1, &srv);
+	context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+	context->Dispatch((tilesData.width + DeferredTile - 1) / DeferredTile, (tilesData.height + DeferredTile - 1) / DeferredTile, 1);
+
+	context->CSSetShader(savedShader.get(), nullptr, 0);
+	context->CSSetConstantBuffers(0, 1, &savedCb);
+	context->CSSetShaderResources(0, 1, &savedSrv);
+	context->CSSetUnorderedAccessViews(0, 2, savedUavs, nullptr);
+	if (savedCb)
+		savedCb->Release();
+	if (savedSrv)
+		savedSrv->Release();
+	for (auto* uav : savedUavs) {
+		if (uav)
+			uav->Release();
+	}
+}
+
+bool PBRWater::DrawDeferredSurface()
+{
+	const uint32_t frame = globals::state->frameCount;
+	if (deferredMeshesFrame != frame || !deferredTags) {
+		DeferredFallback("the stencil pass recorded no mesh this frame");
+		return false;
+	}
+	const auto mesh = std::find_if(deferredMeshes.begin(), deferredMeshes.end(), [&](const DeferredMesh& m) { return m.startIndex == cachedDrawStart; });
+	if (mesh == deferredMeshes.end()) {
+		DeferredFallback("the stencil pass did not record this mesh");
+		return false;
+	}
+	const uint32_t slot = static_cast<uint32_t>(mesh - deferredMeshes.begin());
+
+	auto context = globals::d3d::context;
+	auto& batch = deferredBatch;
+	BoundTargets bound(context);
+	// The read-only depth and the record stay bound across the batch (EndDeferredBatch puts the engine's back); bound
+	// again only when the engine has bound its own depth target since, which also drops the depth's view from the
+	// pixel stage.
+	if (!batch.shading || bound.dsv != batch.readOnly) {
+		auto& depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+		ID3D11DepthStencilView* readOnly = nullptr;
+		ID3D11DepthStencilView* engineDSV = nullptr;
+		for (uint32_t i = 0; i < std::size(depth.views); ++i) {
+			if (bound.dsv && depth.views[i] == bound.dsv) {
+				readOnly = depth.readOnlyViews[i];
+				engineDSV = bound.dsv;
+			}
+			if (bound.dsv && depth.readOnlyViews[i] == bound.dsv)
+				readOnly = bound.dsv;  // the engine bound it already
+		}
+		if (!readOnly || !depth.depthSRV) {
+			DeferredFallback(!bound.dsv ? "the surface pass has no depth target" : "the surface pass's depth target is not the main depth buffer");
+			return false;
+		}
+		// Normally listed at the end of the stencil pass (EndDeferredBatch).
+		if (deferredTilesFrame != frame)
+			ClassifyDeferredTiles();
+		if (readOnly != bound.dsv) {
+			context->OMSetRenderTargets(bound.count, bound.rtv, readOnly);
+			batch.engineDSV.copy_from(engineDSV);
+		}
+		ID3D11ShaderResourceView* flowmap = frameData.Flow0.x != 0.0f ? worldFlowmap : nullptr;
+		ID3D11ShaderResourceView* srvs[6] = { deferredTags->srv.get(), deferredWaves->srv.get(), deferredNoise->srv.get(), deferredTexCoords->srv.get(), depth.depthSRV, flowmap };
+		context->PSSetShaderResources(38, 6, srvs);
+		ID3D11ShaderResourceView* tilesSrv = deferredTiles->srv.get();
+		context->VSSetShaderResources(101, 1, &tilesSrv);
+		batch.shading = true;
+		batch.readOnly = readOnly;
+	}
+
+	// The vertex program runs per pixel: the draw's vertex constants go to the pixel stage too (b8-b10).
+	ID3D11Buffer* vertexCbs[3] = {};
+	context->VSGetConstantBuffers(0, 3, vertexCbs);
+	context->PSSetConstantBuffers(8, 3, vertexCbs);
+	for (auto* buffer : vertexCbs) {
+		if (buffer)
+			buffer->Release();
+	}
+
+	D3D11_VIEWPORT viewport{};
+	UINT viewports = 1;
+	context->RSGetViewports(&viewports, &viewport);
+	DeferredDrawCB data;
+	data.tag[0] = slot + 1;
+	data.tag[1] = deferredMaxTiles;
+	data.tag[2] = mesh->texCoords ? 1u : 0u;
+	data.viewport = { std::max(viewport.Width, 1.0f), std::max(viewport.Height, 1.0f), 0.0f, 0.0f };
+	data.uvMapU = mesh->uvMapU;
+	data.uvMapV = mesh->uvMapV;
+	deferredCB->Update(data);
+	ID3D11Buffer* drawCb = deferredCB->CB();
+	context->VSSetConstantBuffers(13, 1, &drawCb);
+	context->PSSetConstantBuffers(13, 1, &drawCb);
+	ID3D11Buffer* tileCb = deferredDrawBuffer->CB();
+	context->VSSetConstantBuffers(7, 1, &tileCb);
+	context->PSSetConstantBuffers(7, 1, &tileCb);
+	context->DrawInstancedIndirect(deferredArgs.get(), slot * 4 * sizeof(uint32_t));
+	++drawStats.deferredShaded;
+	return true;
 }
 
 // ============================================================================

@@ -12,6 +12,16 @@
 
 namespace PBRWater
 {
+	/// What the geometry needs of the waves at one vertex.
+	struct VertexWaves
+	{
+		SurfaceDisplacement surface;
+		float flowDamping;    // the river current's calming of the open-water waves (WaveParam.w)
+		float2 flowVelocity;  // the river current (units/s)
+	};
+
+	// The deferred surface (Deferred.hlsli) only takes the struct: its pixel stage has the engine's flowmap in t8.
+#if !defined(PSHADER)
 	SamplerState FlowMapSamplerVS : register(s8);
 	Texture2D<float4> FlowMapTexVS : register(t8);
 
@@ -32,14 +42,6 @@ namespace PBRWater
 		return 1.0 - Foam1.w * saturate(flow.z * flow.w);
 	}
 
-	/// What the geometry needs of the waves at one vertex.
-	struct VertexWaves
-	{
-		SurfaceDisplacement surface;
-		float flowDamping;    // the river current's calming of the open-water waves (WaveParam.w)
-		float2 flowVelocity;  // the river current (units/s)
-	};
-
 	/**
 	 * @param positionWS undisplaced camera-relative position of the vertex
 	 * @param spacing    local vertex spacing (units) the waves are filtered to
@@ -52,6 +54,7 @@ namespace PBRWater
 		o.surface = DisplaceSurface(positionWS, o.flowDamping, o.flowVelocity, spacing, motion);
 		return o;
 	}
+#endif
 }
 
 #endif  // __PBR_WATER_VERTEX_WAVES_HLSLI__
