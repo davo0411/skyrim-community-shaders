@@ -1924,7 +1924,8 @@ namespace PBRWaterModel
 			const float r2 = r * r;
 			float weight = std::clamp(std::exp(-1.25f * r2 * r2) / std::max(band.pmWeightOpenSea, 1e-4f), 0.0f, 1.0f) * energyGain;
 			deepVariance += weight * weight * band.variance;
-			if (ctx.hasTerrain)
+			// Waves only feel a bottom shallower than about half their wavelength (k h < pi), as in the shader.
+			if (ctx.hasTerrain && band.meanK * depthMetres < static_cast<float>(Pi))
 				weight *= ShoalingCoefficient(band.meanOmega, depthMetres);
 			ctx.weight[c] = weight;
 			variance += weight * weight * band.variance;
