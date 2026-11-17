@@ -78,12 +78,10 @@ float SampleFoam(float2 q)
 	int2 i = int2(base);
 	float4 wx = CatmullRom(f.x);
 	float4 wy = CatmullRom(f.y);
+	// The 4 x 4 texels around q, offsets -1..2: each row whole (component writes read as maybe uninitialised, X4000).
 	float4 rows[4];
 	[unroll] for (int y = 0; y < 4; y++)
-	{
-		[unroll] for (int x = 0; x < 4; x++)
-			rows[y][x] = LoadFoam(i + int2(x - 1, y - 1)).x;
-	}
+		rows[y] = float4(LoadFoam(i + int2(-1, y - 1)).x, LoadFoam(i + int2(0, y - 1)).x, LoadFoam(i + int2(1, y - 1)).x, LoadFoam(i + int2(2, y - 1)).x);
 	float result = dot(wy, float4(dot(wx, rows[0]), dot(wx, rows[1]), dot(wx, rows[2]), dot(wx, rows[3])));
 	// The four texels around q: the middle of the block.
 	float2 lo = min(rows[1].yz, rows[2].yz);

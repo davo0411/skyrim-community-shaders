@@ -527,7 +527,7 @@ namespace PBRWater
 		float depthMetres = ctx.depth * MetresPerUnit;
 		float deepVariance = 0.0;
 		float shoaledVariance = 0.0;
-		float4 shoaledWeight;  // fetch weight times shoaling of each cascade
+		float4 shoaledWeight = 0.0;  // fetch weight times shoaling of each cascade
 		[unroll] for (uint c = 0; c < PBRW_CASCADES; c++)
 		{
 			float fetch = FetchWeight(c, ctx);
