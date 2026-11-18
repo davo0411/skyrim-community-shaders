@@ -1,29 +1,52 @@
 #pragma once
 
-#include "ComputeTessellation.h"
+#include "Buffer.h"
+#include "WaterMeshes.h"
+
+#include <memory>
+#include <unordered_map>
+#include <vector>
 
 /**
  * @brief PBR Water's bisection tessellator: the water meshes refined by conforming longest-edge bisection on the GPU,
  * every triangle at its own level (BisectionCS.hlsl; design: docs/development/pbr-water-bisection-tessellator.md).
  *
- * The alternative to WaterTessellator's quadtree of patches, whose leaves take their densest side's grid across their
- * whole area and fan slivers along their coarser sides. Here a triangle splits only together with the triangle across
- * its longest edge, so there is never a hanging vertex, and the density follows the spacing rule
- * (PBRWaterBisection::TessellationSpacing) triangle by triangle. It reads the meshes through WaterTessellator
- * (TakeBaseTriangles) and rebuilds the subdivision from them every frame: no state survives the frame.
+ * A triangle splits only together with the triangle across its longest edge, so there is never a hanging vertex, and the
+ * density follows the spacing rule (PBRWaterBisection::TessellationSpacing) triangle by triangle. (The quadtree of
+ * patches it replaced took each leaf's densest side's grid across its whole area and fanned slivers along its coarser
+ * sides.) It reads the meshes through WaterMeshes (TakeBaseTriangles) and keeps the subdivision from frame to frame
+ * while they stay the same, refining and merging only what the view changed. Every tessellated pass of the main view
+ * draws the vertices it evaluated (Water.hlsl, vertex shader mode 1).
  */
 class BisectionTessellator
 {
 public:
 	/// Mirrors Bisection.hlsli (PBRW_BISECTION_GRID_N): each bisector is drawn as a grid of GridN segments a side.
-	static constexpr uint32_t GridN = 4;
+	static constexpr uint32_t GridN = 8;
 	static constexpr uint32_t GridVertices = (GridN + 1) * (GridN + 2) / 2;
 	static constexpr uint32_t GridTriangles = GridN * GridN;
 	/// The most bisectors a frame (each GridTriangles triangles), meshes and split iterations.
-	static constexpr uint32_t Capacity = 1u << 16;
+	static constexpr uint32_t Capacity = 1u << 14;
 	static constexpr uint32_t MaxMeshes = 256;
 	static constexpr uint32_t MaxIterations = 40;
 	static constexpr uint32_t MaxDepth = 30;
+
+	/// Mirrors PBRWaterTess::Vertex (ComputeTessellation.hlsli).
+	struct alignas(4) GpuVertex
+	{
+		float data[20];
+	};
+	static_assert(sizeof(GpuVertex) == 80);
+
+	/// What the subdivision needs of the frame (PBRWater::UpdateTessellation fills it).
+	struct FrameParams
+	{
+		uint32_t frame = 0;                                  ///< the frame the mesh is for (State::frameCount)
+		double cameraX = 0.0, cameraY = 0.0, cameraZ = 0.0;  ///< absolute camera position (CameraPosAdjust)
+		float viewProj[4][4] = {};                           ///< camera-relative view-projection (row-major, mul(M, v))
+		float cullMarginXY = 0.0f;                           ///< how far the waves can move the surface sideways (units)
+		float cullMarginZ = 0.0f;                            ///< and up or down
+	};
 
 	struct Stats
 	{
@@ -31,6 +54,11 @@ public:
 		uint32_t roots = 0;
 		uint32_t twins = 0;  ///< root edges matched to another root's (across meshes too)
 		float cpuMs = 0.0f;
+		// From the GPU, a few frames late (asynchronous read-back):
+		uint32_t bisectors = 0;     ///< triangles of the subdivision
+		uint32_t listed = 0;        ///< of them in view (drawn)
+		uint32_t iterations = 0;    ///< refinement iterations that changed anything
+		uint32_t iterationCap = 0;  ///< iterations issued this frame
 	};
 
 	void SetupResources();
@@ -38,10 +66,10 @@ public:
 	bool IsReady() const { return ready; }
 
 	/**
-	 * @brief Builds this frame's subdivision from the meshes `meshes` had registered (WaterTessellator::Register). The
-	 * caller binds what the wave program reads in the compute stage, as for WaterTessellator::Build.
+	 * @brief Builds this frame's subdivision from the meshes `meshes` had registered (WaterMeshes::Register). The caller
+	 * binds what the wave program reads in the compute stage (b7, b12, t8, t110-t127, s8, s12, s13).
 	 */
-	void Build(const WaterTessellator::FrameParams& params, WaterTessellator& meshes);
+	void Build(const FrameParams& params, WaterMeshes& meshes);
 
 	/// Forgets this frame's subdivision: every draw is untessellated.
 	void Clear();
@@ -54,7 +82,7 @@ public:
 
 	/**
 	 * @brief Draws mesh `slot` with the device's current state (the water draw's shaders and constants, the vertex shader
-	 * in its bisection mode, Tess0.x = 4). Restores t109.
+	 * in its tessellated mode, Tess0.x = 1). Restores b11, t108 and t109.
 	 */
 	void Draw(uint32_t slot) const;
 
@@ -87,10 +115,11 @@ private:
 
 	struct Slot
 	{
-		WaterTessellator::Source source;
+		WaterMeshes::Source source;
 	};
 
-	winrt::com_ptr<ID3D11ComputeShader> initCS, classifyCS, allocateCS, linkCS, argsCS, countCS, offsetsCS, scatterCS, vertexCS;
+	winrt::com_ptr<ID3D11ComputeShader> initCS, frameStartCS, mergeDecideCS, mergeLinkCS, compactCountCS, compactWriteCS, compactArgsCS, classifyCS, linkCS,
+		argsCS, fixupCS, countCS, offsetsCS, scatterCS, vertexCS;
 	std::unique_ptr<ConstantBuffer> constants;
 	std::unique_ptr<Buffer> roots;
 	uint32_t rootCapacity = 0;
@@ -99,7 +128,38 @@ private:
 	std::unique_ptr<Buffer> list;
 	std::unique_ptr<Buffer> vertices;
 	winrt::com_ptr<ID3D11Buffer> state, meshCounts, drawArgs, dispatchArgs, reach;
+	/// The state read back without waiting (three frames in flight): how many iterations the subdivision took, so the next
+	/// frame issues about that many instead of MaxIterations, each of which costs a few dispatches even once converged.
+	winrt::com_ptr<ID3D11Buffer> stateStaging[3];
+	uint32_t stagingSlot = 0;
+	uint32_t iterationCap = MaxIterations;
+	Stats gpuStats;
+	void ReadBackState();
+	/// The draw arguments as the vertex shader reads them (t108): each mesh's offset in the draw lists.
+	winrt::com_ptr<ID3D11ShaderResourceView> drawArgsSRV;
+	/// Per draw: the mesh slot (vertex shader b11).
+	std::unique_ptr<ConstantBuffer> drawCB;
+	struct alignas(16) DrawCB
+	{
+		uint32_t mesh[4];
+	};
 	winrt::com_ptr<ID3D11UnorderedAccessView> stateUAV, meshCountsUAV, drawArgsUAV, reachUAV;
+
+	/// The subdivision is kept from frame to frame while the roots stay the same (same meshes, same triangles, same order):
+	/// a frame then refines and merges only what the view changed. Meshes stay roots for a while after their last draw, so
+	/// turning away from one and back does not start the subdivision over.
+	struct Retained
+	{
+		WaterMeshes::WorldMesh mesh;
+		uint32_t lastFrame = 0;
+	};
+	static constexpr uint32_t RetainFrames = 120;
+	std::unordered_map<const void*, Retained> retained;
+	uint64_t rootSignature = 0;
+	uint32_t rootCount = 0;
+	bool persistent = false;  ///< bisectors[current] holds last frame's subdivision of these roots
+	uint32_t current = 0;
+	uint32_t frameCounter = 0;
 
 	std::unordered_map<const void*, uint32_t> slotOf;  ///< this frame's meshes, by geometry
 	std::vector<Slot> slots;

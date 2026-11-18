@@ -393,40 +393,30 @@ in the inner surf, and the drawn surface passes from the one to the other across
 
 ## Tessellation
 
-The water is tessellated by a compute tessellator (`WaterTessellator`, `src/Features/PBRWater/ComputeTessellation.*`,
-`TessellationCS.hlsl`). It replaced a hull/domain shader path, which is gone: both need Direct3D 11 feature level 11.0,
-so no GPU could run one and not the other, and the compute path was faster on the CPU and the GPU alike.
+The water is tessellated on the GPU by longest-edge bisection (`BisectionTessellator`,
+`src/Features/PBRWater/BisectionTessellator.*`, `BisectionCS.hlsl`; design and measurements:
+[pbr-water-bisection-tessellator.md](pbr-water-bisection-tessellator.md)). It replaced a hull/domain shader path (both
+need Direct3D 11 feature level 11.0, and a compute path was faster on the CPU and the GPU alike) and then a CPU quadtree
+of patches (`WaterTessellator`, removed 2026-11-18), whose leaves took their densest side's grid across their whole area
+and fanned slivers along their coarser sides.
 
-Once a frame (`PBRWater::UpdateTessellation`, in the prepass) the CPU cuts the water meshes the main view drew last
-frame into an adaptive, 2:1 balanced quadtree of triangles (leaves) with the same on-screen size at every distance; each
-leaf is an N x N grid whose border is clamped onto its sides' points, so neighbouring leaves, triangles and meshes share
-their edges' points and never crack. `TessellationCS` then evaluates every vertex's waves once (`VertexCS`, the whole
-expensive part of the vertex program), geomorphs the vertices a coarser level lacks (`MorphCS`) and writes the indices
-(`IndexCS`). Every pass of the main view (stencil, surface, point lights, underwater) draws the same vertices: the water
-vertex shader reads them by `SV_VertexID` from t109 and runs only the cheap rest of its program
-(`CachedWaterVertex`). The engine still issues its own draw of each mesh; the vertex shader's culling mode (Tess0.x = 2)
-puts every vertex outside the frustum, and `RestoreDraw` draws the tessellated range with the engine's state. Reflections,
-cubemaps and draws the mesh does not cover yet (a mesh's first frame, meshes over 4096 triangles, a frame over budget)
+The roots are the base triangles of the water meshes the main view drew (`WaterMeshes`, read back once from their GPU
+buffers; a mesh that is one flat rectangle with affine UVs and colours is merged into its rectangle's two triangles,
+`MergeRectangle`). A triangle splits only together with the triangle across its longest edge, so there is never a
+hanging vertex; the subdivision is kept from frame to frame and only what the view changed is split or merged. Each
+triangle of the subdivision is drawn as an 8 x 8 grid whose vertices `VertexCS` evaluates once a frame (the whole
+expensive part of the vertex program). Every pass of the main view (stencil, surface, point lights, underwater) draws the
+same vertices: the water vertex shader reads them from t109 (`CachedWaterVertex`, `BisectionVertexIndex`) and runs only
+the cheap rest of its program. The engine still issues its own draw of each mesh; the vertex shader's culling mode
+(Tess0.x = 2) puts every vertex outside the frustum, and `RestoreDraw` draws the tessellated mesh with the engine's
+state. Reflections, cubemaps and draws the mesh does not cover yet (a mesh's first frame, meshes over 4096 triangles)
 are drawn untessellated, their waves filtered to the mesh's spacing.
 
-What decides the cost, measured at 1440p over a stormy sea (PBRWaterTest; Nsight Perf and a leaf dump):
-
--   **Base triangles.** The cells' water is a 32 x 32 grid of quads (2048 triangles each), and every one was a base
-    triangle the CPU visited every frame: 45 ms of the render thread. A mesh that is one flat rectangle with affine UVs
-    and colours is merged into its rectangle's two triangles (`MergeRectangle`), so the quadtree alone sets the detail:
-    about 0.6 ms. Leaves span 32 target-sized triangles.
--   **Culling.** The frustum test's margin was the waves' hard clamp (`DisplacementLimit`, a storm's worst crest
-    everywhere: 112 m), which kept everything near the camera, behind it too: 71 % of the triangles never reached the
-    screen. `VertexCS` now records how far the waves moved this frame's vertices and the CPU reads it back a few frames
-    later without stalling; the margin is that reach with room to spare.
--   **Density.** The pixel shader is some 6000 instructions per pixel, and triangles of a few pixels cost it whole 2 x 2
-    quads. The point count follows the screen area a segment covers (the grazing angle's sine from the camera's height,
-    floored at the waves' slope), no edge is finer than 128 units over Maximum Tessellation, the curl's extra detail is
-    limited to the surf zone (`ShoreCurlDepth`, from the shore field's crest depth), and a vertex budget of one vertex
-    per 7 render pixels coarsens the target size when a view needs more.
-
-With those the tessellated surface pass cost 6.4 ms against 3.6 ms untessellated and 13.5 ms for the old hull/domain
-path, and the frame 21 ms against 18 ms and 29 ms.
+The density follows one rule, `PBRWater::TessellationSpacing`: the target size on screen at that distance, twice it on
+open water and once in the shore band and the ripple grid, finer where breakers curl, wider at grazing angles (floored
+at the waves' slope), never finer than 128 units over Maximum Tessellation. The split test, the waves' vertex filter and
+the curl's mesh spacing all read it. The frustum test's margin is the waves' analytic reach (not the hard clamp
+`DisplacementLimit`, a storm's worst crest everywhere, which kept everything near the camera, behind it too).
 
 ### Why the old branches broke on STENCIL and with DLSS / frame generation
 
@@ -482,8 +472,8 @@ What the research says, and what it means here:
     camera-snapped clipmap mesh (329k vertices at high quality) whose vertex shader only samples the displacement
     cascades, the projected grid spaces vertices evenly on screen instead of in the world (Johanson 2004), and Unreal's
     water plugin draws instanced tiles from a quadtree with concentric LODs (`FWaterQuadTree`); Unreal 5 removed
-    hardware tessellation altogether. The compute tessellator is a CDLOD-like quadtree on the game's own water meshes,
-    after John Hable's "Compute Tessellation" posts.
+    hardware tessellation altogether. PBR Water refines the game's own water meshes on the GPU by longest-edge
+    bisection (Dupuy, "Concurrent Binary Trees", HPG 2020; Benyoub & Dupuy, HPG 2024).
 
 ## Shading
 
@@ -684,7 +674,7 @@ re-centres its grid when the texel size changes); all settings are clamped by `S
     roughness, wave height, fetch), plus
     live sea-state values (mean square slope) and whether
     the GPU ocean and the gameplay mirror are running, last frame's water draws and how many came from the
-    tessellated mesh, and the tessellator's meshes, leaves, vertices, budget coarsening and CPU time.
+    tessellated mesh, and the tessellator's meshes, base triangles, bisectors in view, iterations and CPU time.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
 -   The GPU work is wrapped in perf events (`PBR Water - Simulation`, `- Ocean FFT`, `- Ripples`, `- Surface Noise`, `- Swash`, `- Foam`,
     `- Skylighting Occluder`, `- Draw` per water draw), so RenderDoc, Nsight and the devbench

@@ -4,7 +4,7 @@
 // ============================================================================
 // PBR Water - the deferred surface.
 //
-// The surface and point light passes shade a pixel once for every triangle of its 2x2 quad: with the compute tessellator's
+// The surface and point light passes shade a pixel once for every triangle of its 2x2 quad: with the tessellator's
 // small triangles each water pixel ran the whole surface program about 1.75 times. The stencil pass draws the same
 // triangles first; for the tessellated meshes it also writes, per pixel, which mesh is there and what the vertex program
 // reads of the waves (Pack). DeferredTilesCS sorts the screen's tiles by the meshes in them; the surface and point light
@@ -29,7 +29,7 @@ namespace PBRWaterDeferred
 {
 	cbuffer DeferredDraw : register(b13)
 	{
-		uint4 Tag;        // x this mesh's tag (1..PBRWATER_DEFERRED_MESHES), y the tile list's room for each mesh, z texture coordinates recorded (else UVMapU/V)
+		uint4 Tag;        // x this mesh's tag (1..PBRWATER_DEFERRED_MESHES), y the tile list's room for each mesh, z texture coordinates recorded (else UVMapU/V), w the shore train is baked (DeferredShoreCS)
 		float4 Viewport;  // xy the viewport's size (pixels)
 		float4 UVMapU;    // the mesh's texture coordinate u over its model-space xy: x d/dx, y d/dy, z at the origin
 		float4 UVMapV;
@@ -152,6 +152,10 @@ namespace PBRWaterDeferred
 		float4 world = mul(FrameBuffer::CameraViewProjInverse, float4(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, p.depth, 1.0));
 		float3 displaced = world.xyz / world.w;
 		float3 undisplaced = displaced - recordWaves.xyz;
+		// The shore train from DeferredShoreCS (Tag.w: it ran this frame), read where the pixel program evaluates it.
+		PBRWater::BakedShoreActive = Tag.w != 0 && p.water;
+		PBRWater::BakedShorePixel = px;
+		PBRWater::BakedShoreDistance = max(length(displaced), 1.0);
 
 		VS_INPUT v = (VS_INPUT)0;
 		float3 worldOrigin = float3(World[0].w, World[1].w, World[2].w);

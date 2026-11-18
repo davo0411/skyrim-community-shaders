@@ -5,8 +5,8 @@
 // PBR Water - the waves at one vertex of the surface.
 //
 // The geometry's whole wave program: the river current read from the worldspace flowmap, then DisplaceSurface. The water
-// vertex shader runs it for untessellated draws, and the compute tessellator (TessellationCS) runs it once a frame for
-// every vertex it makes, which every tessellated pass then draws. One function, so the two can never drift apart.
+// vertex shader runs it for untessellated draws, and the bisection tessellator (BisectionCS VertexCS) runs it once a
+// frame for every vertex it makes, which every tessellated pass then draws. One function, so the two never drift apart.
 // Needs PBRWater.hlsli.
 // ============================================================================
 

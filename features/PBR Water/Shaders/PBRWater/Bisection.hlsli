@@ -19,8 +19,10 @@
 
 #include "PBRWater/PBRWater.hlsli"
 
-#define PBRW_BISECTION_GRID_N 4
+#define PBRW_BISECTION_GRID_N 8
 #define PBRW_BISECTION_NONE 0xFFFFFFFFu
+/// Mirrors BisectionTessellator::MaxMeshes.
+#define PBRW_BISECTION_MAX_MESHES 256
 
 namespace PBRWaterBisection
 {
@@ -32,6 +34,14 @@ namespace PBRWaterBisection
 	static const uint FlagSplit = 1u;   // splits this iteration (with its twin)
 	static const uint FlagForced = 2u;  // a finer neighbour waits on it: split even if the spacing does not ask
 	static const uint FlagCulled = 4u;  // outside the view: drawn by nobody, split only when forced
+	static const uint FlagSettled = 8u;  // classified as fine enough: later iterations skip it unless forced
+	static const uint FlagMergeA = 16u;  // merges with its sibling this frame: the parent takes its slot
+	static const uint FlagMergeB = 32u;  // merges with its sibling this frame: its slot is freed
+	static const uint FlagDead = 64u;    // a freed slot, gone at the compaction
+	/// The marks of one frame's refinement (ScatterCS clears them for the next).
+	static const uint FrameFlags = FlagSplit | FlagForced | FlagSettled | FlagMergeA | FlagMergeB;
+	/// The depth is kept in the flags' upper bits (the bit operations on the flags leave them alone).
+	static const uint DepthShift = 16;
 
 	/// A water mesh's base triangle: the bisection's root. 192 bytes. Mirrors BisectionTessellator::GpuRoot.
 	struct Root
@@ -53,10 +63,12 @@ namespace PBRWaterBisection
 		float2 b1;
 		float2 b2;
 		uint root;
-		uint depth;
-		uint3 n;  // the bisector across edges 0, 1 and 2 (None: the border)
-		uint flags;
+		uint path;  // the splits from the root, one bit a level (0 child A, 1 child B), the last in bit 0
+		uint3 n;    // the bisector across edges 0, 1 and 2 (None: the border)
+		uint flags;  // Flag* below, the depth from bit DepthShift
 	};
+
+	uint Depth(Bisector b) { return b.flags >> DepthShift; }
 
 	float3 Weights(float2 b) { return float3(1.0 - b.x - b.y, b.x, b.y); }
 
@@ -79,48 +91,13 @@ namespace PBRWaterBisection
 		b.b0 = p.b2;
 		b.b1 = m;
 		b.b2 = p.b1;
-		a.depth = b.depth = p.depth + 1;
-		a.flags = b.flags = 0;
+		a.path = p.path << 1;
+		b.path = (p.path << 1) | 1u;
+		a.flags = b.flags = (Depth(p) + 1) << DepthShift;
 	}
 
-	// ------------------------------------------------------------------------
-	// The spacing the mesh should have: the one rule the split test, the waves' vertex filter and the curl share.
-	// ------------------------------------------------------------------------
-
-	/**
-	 * World spacing (units) the water mesh should have at camera-relative `positionWS`: the target size (Tess0.y, as the
-	 * budget coarsened it: Draw0.w) on screen at this distance, twice it on open water and once in the shore band and the
-	 * ripple grid, divided by the curl detail where breakers curl (ShoreCurlSpacing's weights), wider at grazing angles
-	 * (TessellationGrazingScale), never finer than 128 / Maximum Tessellation (Tess0.z).
-	 */
-	float TessellationSpacing(float3 positionWS)
-	{
-		float distance = max(length(positionWS), 1.0);
-		float size = max(PBRWater::Tess0.y, 1.0) * max(PBRWater::Draw0.w, 1.0) * distance / max(PBRWater::Tess0.w, 1e-3);
-		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
-		float curlDetail = max(PBRWater::Shore1.y, 1.0);
-
-		float detail = 0.0;
-		float2 uv;
-		if (PBRWater::RippleUV(absXY, PBRWater::Ripple0.xy, uv))
-			detail = smoothstep(0.0, 0.1, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
-		float curl = 0.0;
-		[branch] if (PBRWater::ShoreFieldUV(absXY, uv))
-		{
-			PBRWater::ShoreRay ray = PBRWater::SampleShore(absXY);
-			float shore = smoothstep(2.25 * PBRWater::Shore3.w, 1.75 * PBRWater::Shore3.w, ray.distance) * ray.weight;
-			detail = max(detail, shore);
-			[branch] if (PBRWater::Shore3.z > 0.0 && shore > 0.0)
-			{
-				float curlDepth = PBRWater::ShoreCurlDepth();
-				float crestDepth = PBRWater::ShoreCrestDepth(absXY, 1e6);
-				curl = shore * smoothstep(curlDepth, PBRWater::TessellationCurlDepthFade * curlDepth, crestDepth) *
-				       smoothstep(PBRWater::TessellationCurlLipFar * PBRWater::Shore3.w, PBRWater::TessellationCurlLipNear * PBRWater::Shore3.w, size / curlDetail);
-			}
-		}
-		float spacing = size * (2.0 - detail) / (1.0 + (curlDetail - 1.0) * curl) * PBRWater::TessellationGrazingScale(positionWS);
-		return max(spacing, 128.0 / max(PBRWater::Tess0.z, 1.0));
-	}
+	/// The world spacing (units) the mesh should have at camera-relative `positionWS` (PBRWater::TessellationSpacing).
+	float TessellationSpacing(float3 positionWS) { return PBRWater::TessellationSpacing(positionWS); }
 }
 
 #endif  // __PBR_WATER_BISECTION_HLSLI__

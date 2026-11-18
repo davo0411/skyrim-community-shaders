@@ -1767,8 +1767,6 @@
     "feature.lod_blending.lod_terrain_gamma": "LOD Terrain Gamma",
     "feature.lod_blending.name": "LOD Blending",
     "feature.pbr_water.advanced": "Advanced",
-    "feature.pbr_water.bisection_tessellation": "Bisection Tessellation (Experimental)",
-    "feature.pbr_water.bisection_tessellation_tooltip": "Refines the water mesh triangle by triangle on the GPU (longest-edge bisection) instead of in patches, so the density changes smoothly with no blocks or fans of thin triangles. Experimental: off by default.",
     "feature.pbr_water.buoyancy_strength": "Small Object Buoyancy",
     "feature.pbr_water.buoyancy_strength_tooltip": "How strongly the waves push loose props and bodies that float on the water. Default 1.",
     "feature.pbr_water.carry_actors": "Carry Actors on Board",

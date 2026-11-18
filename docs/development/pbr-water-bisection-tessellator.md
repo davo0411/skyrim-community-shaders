@@ -13,18 +13,30 @@ Every split is a "diamond" split of two triangles sharing their longest edge.
 
 ## Status
 
-Everything below is built and compiles (shaders with fxc, the DLL with the Dev-Opt preset), but none of it has run in
-game yet. It is behind **Performance > Bisection Tessellation (Experimental)**, off by default; with it off nothing
-changes.
+Built and running in game (2026-11-18), and the only tessellator since: the patch tessellator (`WaterTessellator`,
+`TessellationCS.hlsl`) is removed, and its mesh read-back lives on as `WaterMeshes`. Vertex shader mode 1 draws it. First run: every mesh after the first drew the first mesh's bisectors through its
+own transform (doubled, exploded water), because `SV_VertexID` does not count a draw's `StartVertexLocation` (seen in
+RenderDoc: vertex 0 of the second mesh's draw had `SV_VertexID` 0). The draws now start at vertex 0 and the vertex
+shader adds the mesh's list offset, stored after the draw arguments (t108), for the mesh slot in b11.
+
+Tuned the same day (`GridN` 8, capacity 16384; split by the legs, not the refinement edge, which made every triangle
+twice too fine in area; settled bisectors skip the spacing test; once an iteration changes nothing the rest dispatch
+zero groups, with `FixupCS` restoring the buffer parity; the loop issues last frame's iteration count plus two, read
+back without waiting). Then made persistent (v2 below, without a CBT): the subdivision is kept from frame to frame, a
+level of merges a frame, and AllocateCS is folded into ClassifyCS.
+
+Same session at the bench pose against the patch tessellator: static camera, refinement 0.065 ms + vertices 0.07 ms
+vs 0.10 ms in all, stencil pass +0.015 ms, total water GPU level; moving camera, refinement 0.07 ms, stencil +0.03 ms,
+surface about +0.15 ms (the finer mesh behind a moving camera merges back a level a frame, under a hysteresis).
 
 | Piece | State |
 |---|---|
-| `Bisection.hlsli`: bisector layout, child rules, the shared spacing rule | done, not run |
-| `BisectionCS.hlsl`: init, classify, split (allocate + link), compact, vertices | done, not run |
-| `BisectionTessellator` (C++ host): buffers, roots, cross-mesh twins, dispatch sequence, draws | done, not run |
+| `Bisection.hlsli`: bisector layout, child rules, the shared spacing rule | runs |
+| `BisectionCS.hlsl`: init, classify, split (allocate + link), compact, vertices | runs |
+| `BisectionTessellator` (C++ host): buffers, roots, cross-mesh twins, dispatch sequence, draws | runs |
 | `WaterTessellator::TakeBaseTriangles` / `StillSource`: the meshes for the host | done |
-| Water.hlsl VS mode 4 (`BisectionVertexIndex`) | done, not run |
-| `PBRWater` switch (`BisectionTessellation`, `DrawCachedMesh`), deferred surface on top | done, not run |
+| Water.hlsl VS mode 4 (`BisectionVertexIndex`) | runs (mesh offset from t108/b11) |
+| `PBRWater` switch (`BisectionTessellation`, `DrawCachedMesh`), deferred surface on top | runs |
 | Debug line: meshes, base triangles, shared root edges, CPU time | done |
 | Persistent pool + merges (the actual CBT) | not started: v2 |
 | Terrain culling on the GPU, measured-reach margins | not started (uses the analytic margins) |
@@ -108,9 +120,10 @@ Per iteration, over all `count` bisectors, using `DispatchIndirect` sized from t
      - If the twin `n[2]` is `None`, or `bisector[twin].n[2] == self`, it's a diamond: set `SPLIT` on self and twin
        (InterlockedOr).
      - Otherwise the twin is coarser: set `FORCED` on the twin, which splits in a later iteration.
-2. **AllocateCS.** For each `SPLIT` bisector that leads its diamond (lower index, or no twin): reserve 2 slots, or 1,
-   with one atomic add. Write `childB[self]` and `childB[twin]`. If the pool is full, clear both flags: a diamond
-   either splits whole or not at all, so conformity can't break.
+2. **Allocation (in ClassifyCS since v2; AllocateCS before).** The first of a diamond's bisectors to set `SPLIT` on the
+   diamond's leader (lower index, or no twin) reserves 2 slots, or 1, with one atomic add, writes `childB` for both and
+   sets `SPLIT` on the other. If the pool is full it clears the leader's flag: a diamond either splits whole or not at
+   all, so conformity can't break.
 3. **LinkCS.** Double-buffered: read `src`, write `dst`.
    - Split bisectors write both children (table above).
    - Unsplit bisectors copy themselves and re-point any neighbour that split (`resolve`).
@@ -133,7 +146,7 @@ The CPU no longer mirrors it, so the vertex filter, the curl's spacing and the s
 
 ### Vertices, morph, popping
 
-- Each bisector is drawn as a small uniform grid, `GridN = 4`: 15 vertices, 16 triangles. Neighbours share whole
+- Each bisector is drawn as a small uniform grid, `GridN = 8`: 45 vertices, 64 triangles. Neighbours share whole
   edges, so equal `GridN` on both sides matches point for point. There's no snapping, and no cracks as long as shared
   points come out bit-identical. Interpolate in canonical corner order, as `VertexCS` does today with
   `BaseTriangle.order`.
@@ -149,8 +162,10 @@ The CPU no longer mirrors it, so the vertex filter, the curl's spacing and the s
 
 - **CompactCS.** Counts bisectors per mesh slot. A one-thread pass computes offsets and writes per-mesh
   `DrawInstanced` arguments: `VertexCountPerInstance = 3·GridN²·count`, `InstanceCount = 1`,
-  `StartVertexLocation = 3·GridN²·offset`. `SV_VertexID` includes the start vertex for non-indexed draws, so the
-  vertex shader needs no per-draw constant. A scatter pass writes each bisector's index into the per-mesh list.
+  `StartVertexLocation = 0`, and each mesh's offset after all the arguments. `SV_VertexID` does not include the
+  start vertex, so the vertex shader adds the offset itself: the mesh slot comes in a per-draw constant (b11), the
+  offsets in the arguments buffer as a raw view (t108). A scatter pass writes each bisector's index into the per-mesh
+  list.
 - **Water.hlsl VS mode 1.** Replace `TessellatedVertices[vertexID]` with:
   - `list = vertexID / (3·GridN²)`, `t = (vertexID % (3·GridN²)) / 3`, `corner = vertexID % 3`;
   - `TriangleCorners(t, GridN)` gives the grid vertex;
@@ -187,18 +202,32 @@ The CPU no longer mirrors it, so the vertex filter, the curl's spacing and the s
 - Budget: the pool capacity bounds the bisectors. Read back the counter asynchronously (like the reach), and coarsen
   `targetSize` (`detailScale`) when the pool fills.
 
-## v2: persistent pool with a CBT (Benyoub & Dupuy 2024)
+## v2: persistent subdivision (implemented 2026-11-18, without a CBT)
 
-- Keep the bisectors between frames. Each frame:
-  - classify into split or merge (with hysteresis);
-  - do conforming splits as above;
-  - merge diamonds whose four children all agree.
-- Allocate and free slots through a CBT over the pool:
-  - a bitfield plus a sum-reduction tree;
-  - `DecodeBit(k)` finds the k-th used slot, which drives the dispatch over live bisectors;
-  - `DecodeZero(k)` finds the k-th free slot, for allocation.
-- Cost then follows the change in the view instead of the whole subdivision. Base-mesh changes (cells loading) need
-  a remap, or a reset with a few catch-up iterations.
+The bisectors are kept between frames while the roots stay the same. Each frame:
+
+- **Roots.** The meshes drawn this frame, plus those drawn within `RetainFrames` (120), sorted by geometry, so the
+  roots keep their indices while the camera turns away from a mesh and back. A hash of the meshes and quantized corners
+  decides: the same roots keep the subdivision; other roots (a cell loaded or dropped) start over with `InitCS` and the
+  full `MaxIterations`.
+- **FrameStartCS.** This frame's counters from last frame's count.
+- **MergeDecideCS.** Each child A whose sibling B (across its edge 0) is a leaf of the same depth leads; of a diamond the
+  child A with the lower slot. The parent's twin's children are A' (across B's edge 0) and B' (across A's edge 1), both
+  leaves, or neither at the border. The diamond merges when neither parent would split with the view
+  (`SplitRatio <= MergeHysteresis`, 0.8, or outside the frustum). The four children are marked `MergeA`/`MergeB`.
+  Parents are rebuilt from the children: `(A.b2, A.b0, B.b0)`, the path shifted right, the depth one less (depth sits in
+  the flags' upper bits, the path in the old depth field: one bit a level, 0 child A, 1 child B).
+- **MergeLinkCS.** Writes each parent into its child A's slot (`n = (Merged(A.n.z), Merged(B.n.z), B.n.x)`), marks the B
+  slots dead, and re-points every other link through `Merged` (a merged B's parent sits in its sibling A's slot).
+- **CompactCountCS / CompactWriteCS / CompactArgsCS.** Pack the live bisectors to the front, links renumbered through
+  the new slots (in `ChildB`). The free space is then at the end again, so splitting keeps its bump allocation.
+- **Refinement.** As v1, starting from last frame's subdivision: one or two iterations change anything most frames. The
+  allocation is folded into `ClassifyCS`: the first of a diamond's two bisectors to set the split flag on the leader
+  (the lower slot) reserves both children's slots.
+- **ScatterCS** clears the frame's marks (split, forced, settled, merge) for the next frame.
+
+A CBT (Benyoub & Dupuy 2024) would replace the compaction with a free-slot bitfield; at 16k bisectors the compaction's
+two passes are cheap enough.
 
 ## Validation plan
 

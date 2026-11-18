@@ -106,8 +106,7 @@ private:
 	std::unique_ptr<Texture2D> surfMoved;    ///< the state between a step's two passes: new velocities, old depths
 	std::unique_ptr<Texture2D> spraySource;  ///< ShoreFoamCS: where the breakers throw spray (GetSpraySourceSRV)
 	winrt::com_ptr<ID3D11ComputeShader> foamCS;
-	winrt::com_ptr<ID3D11ComputeShader> momentumCS;    ///< SwashStepCS, first pass
-	winrt::com_ptr<ID3D11ComputeShader> continuityCS;  ///< SwashStepCS with SWASH_CONTINUITY, second pass
+	winrt::com_ptr<ID3D11ComputeShader> stepCS;  ///< SwashStepCS: one step over the whole grid
 	winrt::com_ptr<ID3D11ComputeShader> outCS;
 
 	/// The steps after a frame's first run only where water can move (SwashTilesCS): the tiles, listed for DispatchIndirect.
@@ -128,8 +127,7 @@ private:
 	std::unique_ptr<ConstantBuffer> tilesCB;
 	winrt::com_ptr<ID3D11ComputeShader> tilesMarkCS;
 	winrt::com_ptr<ID3D11ComputeShader> tilesListCS;
-	winrt::com_ptr<ID3D11ComputeShader> momentumTilesCS;    ///< SwashStepCS on the listed tiles
-	winrt::com_ptr<ID3D11ComputeShader> continuityTilesCS;  ///< and its second pass
+	winrt::com_ptr<ID3D11ComputeShader> stepTilesCS;  ///< SwashStepCS on the listed tiles
 	bool tilesReady = false;
 
 	void SetupTileResources();

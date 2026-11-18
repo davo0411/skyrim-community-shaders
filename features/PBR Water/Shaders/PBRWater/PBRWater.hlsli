@@ -1242,12 +1242,13 @@ namespace PBRWater
 		return lip;
 	}
 
-	/// The grazing angle's floor in the tessellator's density: the waves' slope (WaterTessellator GrazingFloor).
+	/// The grazing angle's floor in the tessellator's density: the waves' slope.
 	static const float TessellationGrazingFloor = 0.1;
-	/// The least share of the target size the tessellator keeps across the line of sight (WaterTessellator GrazingShareMin).
+	/// The least share of the target size the tessellator keeps across the line of sight: at grazing angles a triangle is
+	/// at most this many times wider than the target, and keeps the target's height on the steepest wave faces.
 	static const float TessellationGrazingMin = 0.25;
 
-	/// How many times the target size the tessellator's spacing grows by at camera-relative `positionWS` (WaterTessellator Factor).
+	/// How many times the target size the tessellator's spacing grows by at camera-relative `positionWS` (TessellationSpacing).
 	float TessellationGrazingScale(float3 positionWS)
 	{
 		float distance = max(length(positionWS), 1.0);
@@ -1262,31 +1263,58 @@ namespace PBRWater
 		return height / ((2.0 / 3.0) * ShoreBreakerLimit * (1.0 - ShoreWindBreaking));
 	}
 
-	/// Where the tessellator fades the curl detail in (WaterTessellator CurlDepthFade, CurlLipFar, CurlLipNear).
+	/// Where the tessellator fades the curl detail in: from the deepest water a wave curls in to this share of it, and from a
+	/// lip spacing of CurlLipFar to CurlLipNear deep-water wavelengths (a lip needs a few dozen vertices across its wave).
 	static const float TessellationCurlDepthFade = 0.75;
 	static const float TessellationCurlLipFar = 0.6 / 25.0;
 	static const float TessellationCurlLipNear = 0.45 / 25.0;
 
+	bool RippleUV(float2 absXY, float2 origin, out float2 uv);
+
 	/**
-	 * Mesh spacing (units) at camera-relative `positionWS` in the surf zone, or 1e6 where the draw is not tessellated (the
-	 * curl needs the extra triangles the tessellator adds where breakers can curl, Shore1.y). The compute tessellator's
-	 * rule (WaterTessellator Factor): the target size coarsened to its vertex budget (Draw0.w), the curl detail faded in by
-	 * the depth under the crests and the lip's spacing, sparser at grazing angles, never finer than 128 / Maximum
-	 * Tessellation. A function of the position and the draw only, so the vertices and the pixels of one draw agree on it.
+	 * World spacing (units) the tessellated mesh has at camera-relative `positionWS`: the rule the bisection tessellator
+	 * splits by (BisectionCS), the waves' vertex filter and the curl share. The target size (Tess0.y) on screen at this
+	 * distance, twice it on open water and once in the shore band and the ripple grid, divided by the curl detail where
+	 * breakers curl, wider at grazing angles (TessellationGrazingScale), never finer than 128 / Maximum Tessellation
+	 * (Tess0.z). A function of the position and the frame only, so the vertices and the pixels agree on it.
 	 */
-	float ShoreCurlSpacing(float3 positionWS)
+	float TessellationSpacing(float3 positionWS)
 	{
-		if (Tess0.x < 0.5)
-			return 1e6;
 		float distance = max(length(positionWS), 1.0);
 		float size = max(Tess0.y, 1.0) * max(Draw0.w, 1.0) * distance / max(Tess0.w, 1e-3);
+		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
 		float curlDetail = max(Shore1.y, 1.0);
-		float curlDepth = ShoreCurlDepth();
-		float crestDepth = ShoreCrestDepth(positionWS.xy + FrameBuffer::CameraPosAdjust.xy, 1e6);
-		float weight = smoothstep(curlDepth, TessellationCurlDepthFade * curlDepth, crestDepth) *
-		               smoothstep(TessellationCurlLipFar * Shore3.w, TessellationCurlLipNear * Shore3.w, size / curlDetail);
-		float target = size / (1.0 + (curlDetail - 1.0) * weight) * TessellationGrazingScale(positionWS);
-		return max(target, 128.0 / max(Tess0.z, 1.0));
+
+		float detail = 0.0;
+		float2 uv;
+		if (RippleUV(absXY, Ripple0.xy, uv))
+			detail = smoothstep(0.0, 0.1, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
+		float curl = 0.0;
+		[branch] if (ShoreFieldUV(absXY, uv))
+		{
+			ShoreRay ray = SampleShore(absXY);
+			float shore = smoothstep(2.25 * Shore3.w, 1.75 * Shore3.w, ray.distance) * ray.weight;
+			detail = max(detail, shore);
+			[branch] if (Shore3.z > 0.0 && shore > 0.0)
+			{
+				float curlDepth = ShoreCurlDepth();
+				float crestDepth = ShoreCrestDepth(absXY, 1e6);
+				curl = shore * smoothstep(curlDepth, TessellationCurlDepthFade * curlDepth, crestDepth) *
+				       smoothstep(TessellationCurlLipFar * Shore3.w, TessellationCurlLipNear * Shore3.w, size / curlDetail);
+			}
+		}
+		float spacing = size * (2.0 - detail) / (1.0 + (curlDetail - 1.0) * curl) * TessellationGrazingScale(positionWS);
+		return max(spacing, 128.0 / max(Tess0.z, 1.0));
+	}
+
+	/// Mesh spacing (units) at camera-relative `positionWS`, or 1e6 where the draw is not tessellated: the curl needs the
+	/// extra triangles the tessellator adds where breakers can curl (Shore1.y).
+	float ShoreCurlSpacing(float3 positionWS)
+	{
+		float spacing = 1e6;
+		[branch] if (Tess0.x > 0.5)
+			spacing = TessellationSpacing(positionWS);
+		return spacing;
 	}
 
 	/**
@@ -1311,7 +1339,7 @@ namespace PBRWater
 			// The lip needs a few dozen vertices across its wave to hold its shape. Measured against the wave's deep-water
 			// length (Shore3.w), which does not change as it comes in, so a wave keeps its curl all the way to the shore;
 			// against its length here, which shrinks in the shallows, the curl unwound as the wave reached the beach.
-			// The tessellator refines the mesh by the same length (WaterTessellator Factor).
+			// The tessellator refines the mesh by the same length (TessellationSpacing).
 			float lipLength = max(wavelength, Shore3.w);
 			float spacing = ShoreCurlSpacing(positionWS);
 			amount = Shore3.z * smoothstep(0.0, 0.3, plunging) * smoothstep(lipLength / 25.0, lipLength / 50.0, spacing);
@@ -1347,6 +1375,7 @@ namespace PBRWater
 		float sheetSurface;  // the simulation's surface here (units above the still water)
 		float sheetDepth;    // its depth (units; 0 where dry or not drawn)
 		float sheetFoam;     // 0..1 the white water it carries
+		float seaHold;       // 0..1 the sea is held over a bed below the still water (SeaFloorHold): none where the simulation alone is the water
 	};
 
 	static const float ShoreRollerLumps = 0.12;  // the roller's churning lumps, in wave heights at full aeration
@@ -1660,6 +1689,17 @@ namespace PBRWater
 	}
 
 	/**
+	 * How far inshore of the hand-over a point is, 0..1, from the simulation's share of the drawn surface there (its grid's
+	 * border fade included): from halfway through the hand-over band the simulation alone says where the water is. A cell
+	 * it has drained there is the backwash's bare sand, even below the still water; further out the sea holds (ComposeSurf,
+	 * SeaFloorHold, AboveWaterline).
+	 */
+	float SurfInner(float drawnShare)
+	{
+		return smoothstep(0.5, 1.0, drawnShare);
+	}
+
+	/**
 	 * Hands the train's surface to the surf simulation where the simulation is the water (SurfSharesAt): the heights pass
 	 * to its surface and the train's forward lean fades out (the simulation is a height field), over the fixed band of
 	 * the hand-over. A breaker's lip stays (ShoreTrain::lip): it is drawn over whichever water is under it.
@@ -1671,6 +1711,7 @@ namespace PBRWater
 	void ComposeSurf(inout ShoreTrain train, float3 positionWS, WaveContext ctx, bool pixel, float spacing, float scale)
 	{
 		train.rawHeight = train.displacement.z;
+		train.seaHold = 1.0;
 		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
 		float2 uv;
 		[branch] if (ctx.hasTerrain > 0.5 && ShoreGridUV(absXY, uv))
@@ -1680,11 +1721,14 @@ namespace PBRWater
 			{
 				SurfSheet sheet = SampleSurf(absXY + (1.0 - drawn) * train.displacement.xy, pixel, spacing);
 				drawn *= sheet.share;
-				// Where the simulation has drained a cell whose bed lies below the still water (a hard backwash, uprush and
-				// backwash parting), the sea is still there: the train's surface is drawn instead. Taken as dry, the bed
-				// showed through a hole in the water with straight edges along the hand-over band. Only the beach above
-				// the still water is ever dry ground.
-				float belowSea = 1.0 - smoothstep(-0.05 * UnitsPerMetre, 0.0, ctx.elevation);
+				// Where the simulation has drained a cell whose bed lies below the still water in the hand-over band (uprush
+				// and backwash parting there), the sea is still there: the train's surface is drawn instead. Taken as dry, the
+				// bed showed through a hole in the water with straight edges along the band. Inshore of it the simulation is
+				// the water: what it drains is the backwash's bare sand, and the water ends with its sheet (held there to the
+				// train, or to a film over the bed, a band of foamless water lay beyond the last of the swash's foam).
+				float inner = SurfInner(drawn);
+				train.seaHold = 1.0 - inner;
+				float belowSea = (1.0 - smoothstep(-0.05 * UnitsPerMetre, 0.0, ctx.elevation)) * (inner < 0.5 ? 1.0 : 0.0);
 				drawn *= lerp(1.0, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth), belowSea);
 				float keep = 1.0 - drawn;
 				// Dry: no water for the pixels; the geometry keeps the train's own height there and is laid on the bed by
@@ -1753,6 +1797,8 @@ namespace PBRWater
 		float sheetSurface;           // the surf simulation's surface here (units above the still water; ShoreTrain::sheetSurface)
 		float sheetDepth;             // its depth (units)
 		float sheetFoam;              // 0..1 the white water it carries
+		float3 lip;                   // a breaker's overturning lip, included in `displacement` (ShoreTrain::lip)
+		float3 previousLip;           // the same last frame
 	};
 
 	// The open sea's foam settings (Tune1, Tune2), after the sample scene's _FoamSubtract0..3, the cascade weighting (ours:
@@ -1878,6 +1924,32 @@ namespace PBRWater
 		o.sheetSurface = train.sheetSurface;
 		o.sheetDepth = train.sheetDepth;
 		o.sheetFoam = train.sheetFoam;
+		o.lip = train.lip;
+		o.previousLip = train.previousLip;
+	}
+
+	/// Water this deep (units) is kept over the bed where the bed lies below the still water (SeaFloorHold): more than the colour
+	/// pass's waterline fade (Water.hlsl, pbrEdge, 6 cm), so the rendered terrain standing a few cm above the bilinear bed stays under it.
+	static const float SeaFloorFilm = 0.1 * UnitsPerMetre;
+
+	/**
+	 * Where the bed lies below the still water, out to sea of the inner surf (ShoreTrain::seaHold), the sea never parts
+	 * from it: a shore wave's trough, the train handed over to a drained simulation cell, stays a film above the bed. The
+	 * train is no depth-limited solution (its troughs are Green's-law shoaled sines and cnoidal profiles over the depth at
+	 * the crest), and where its trough ran below the bed in the hand-over band the ground showed through holes in the water
+	 * between the incoming crest and the swash. Inshore the simulation's sheet decides (SurfInner). The lip is left as it
+	 * is: it is thrown over the trough, and its tip plunges into the water below.
+	 */
+	void SeaFloorHold(inout WaveSums sums, WaveContext ctx, ShoreTrain train)
+	{
+		[branch] if (ctx.hasTerrain > 0.5 && ctx.elevation < 0.0 && train.seaHold > 0.0)
+		{
+			float floorZ = ctx.elevation + SeaFloorFilm;
+			float z = sums.displacement.z - train.lip.z;
+			float previous = sums.previous.z - train.previousLip.z;
+			sums.displacement.z = lerp(z, max(z, floorZ), train.seaHold) + train.lip.z;
+			sums.previous.z = lerp(previous, max(previous, floorZ), train.seaHold) + train.previousLip.z;
+		}
 	}
 
 	WaveResult FinishWaves(WaveSums sums, WaveResult o)
@@ -1950,6 +2022,7 @@ namespace PBRWater
 		ShoreTrain train = ShoreWaves(positionWS, ctx, spacing, previous, false);
 		ComposeSurf(train, positionWS, ctx, false, spacing, spacing);
 		AddShoreTrain(sums, o, train);
+		SeaFloorHold(sums, ctx, train);
 		return FinishWaves(sums, o);
 	}
 
@@ -1965,6 +2038,86 @@ namespace PBRWater
 	{
 		return saturate(0.5 * log2(max(max(dot(gx, gx), dot(gy, gy)), 1e-8)));
 	}
+
+#if defined(PSHADER)
+	// The shore train the deferred surface's pixels read back (DeferredShoreCS): set per pixel by
+	// PBRWaterDeferred::Resolve, t46-t48 bound with the record.
+	Texture2D<uint4> BakedShore0 : register(t46);
+	Texture2D<uint4> BakedShore1 : register(t47);
+	Texture2D<uint4> BakedShore2 : register(t48);
+	static bool BakedShoreActive = false;
+	static int2 BakedShorePixel = 0;
+	static float BakedShoreDistance = 0.0;
+
+	float2 UnpackHalves(uint v)
+	{
+		return float2(f16tof32(v & 0xFFFF), f16tof32(v >> 16));
+	}
+
+	float4 UnpackUnorm4(uint v)
+	{
+		return float4(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, v >> 24) / 255.0;
+	}
+
+	/**
+	 * The shore train at this pixel from DeferredShoreCS: the four nearest 2x2 blocks blended bilinearly, each only where
+	 * it was evaluated at about this pixel's distance (the same water, not a wave in front of it or the sea behind).
+	 * @return false where no block is: the pixel evaluates the train itself
+	 */
+	bool BakedShoreTrain(out ShoreTrain t)
+	{
+		t = (ShoreTrain)0;
+		uint width, height;
+		BakedShore0.GetDimensions(width, height);
+		float2 h = (BakedShorePixel + 0.5) * 0.5 - 0.5;
+		int2 base = (int2)floor(h);
+		float2 f = h - base;
+		float4 a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0, a4 = 0.0, u0 = 0.0, u1 = 0.0;
+		float total = 0.0;
+		[unroll] for (uint i = 0; i < 4; i++)
+		{
+			int2 offset = int2(i & 1, i >> 1);
+			int2 c = clamp(base + offset, 0, int2(width, height) - 1);
+			float bilinear = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y);
+			uint4 o0 = BakedShore0.Load(int3(c, 0));
+			float2 zd = UnpackHalves(o0.y);
+			float w = (zd.y > 0.0 && abs(zd.y - BakedShoreDistance) < 0.1 * BakedShoreDistance) ? max(bilinear, 1e-3) : 0.0;
+			[branch] if (w > 0.0)
+			{
+				uint4 o1 = BakedShore1.Load(int3(c, 0));
+				uint4 o2 = BakedShore2.Load(int3(c, 0));
+				a0 += w * float4(UnpackHalves(o0.x), zd.x, 0.0);
+				a1 += w * float4(UnpackHalves(o0.z), UnpackHalves(o0.w));
+				a2 += w * float4(UnpackHalves(o1.x), UnpackHalves(o1.y));
+				a3 += w * float4(UnpackHalves(o1.z), UnpackHalves(o1.w));
+				a4 += w * float4(UnpackHalves(o2.x), UnpackHalves(o2.y));
+				u0 += w * UnpackUnorm4(o2.z);
+				u1 += w * UnpackUnorm4(o2.w);
+				total += w;
+			}
+		}
+		if (total <= 0.0)
+			return false;
+		float r = rcp(total);
+		a0 *= r, a1 *= r, a2 *= r, a3 *= r, a4 *= r, u0 *= r, u1 *= r;
+		t.displacement = a0.xyz;
+		t.lip = a1.xyz;
+		t.curl = a1.w;
+		t.slope = a2.xy;
+		t.lipSlope = a2.zw;
+		t.compression = a3.xyz;
+		t.slopeVariance = a3.w;
+		t.lipCompression = a4.xyz;
+		t.crest = a4.w;
+		t.foam = u0.x;
+		t.breakStage = u0.y;
+		t.bore = u0.z;
+		t.aeration = u0.w;
+		t.impact = u1.x;
+		t.clearFace = u1.y;
+		return true;
+	}
+#endif
 
 	/**
 	 * Waves for shading at undisplaced camera-relative `positionWS`, filtered over the pixel footprint
@@ -2041,9 +2194,16 @@ namespace PBRWater
 				}
 			}
 		}
-		ShoreTrain train = ShoreWaves(positionWS, ctx, footprint, false, true);
+		ShoreTrain train = (ShoreTrain)0;
+#if defined(PSHADER)
+		// The deferred surface has the train once per 2x2 pixels (DeferredShoreCS).
+		bool baked = BakedShoreActive && BakedShoreTrain(train);
+		[branch] if (!baked)
+#endif
+			train = ShoreWaves(positionWS, ctx, footprint, false, true);
 		ComposeSurf(train, positionWS, ctx, true, 0.0, footprint);
 		AddShoreTrain(sums, o, train);
+		SeaFloorHold(sums, ctx, train);
 		o = FinishWaves(sums, o);
 		// A shore wave steepening before it breaks whitecaps as the open sea does: the sea's own foam test (OceanAssembleCS:
 		// foam where bias - Jacobian passes the threshold) on the whole surface, its cascades and the shore wave together.
@@ -2290,14 +2450,22 @@ namespace PBRWater
 			return false;
 		float bed = terrainZ - (shoreState.w + FrameBuffer::CameraPosAdjust.z);
 		float water = shoreState.z;
+		float hold = 1.0;
 		[branch] if (shoreState.x > 0.0)
 		{
 			SurfSheet sheet = SampleSurf(absXY, false, 0.0);
-			// A drained cell below the still water is still sea (ComposeSurf): the waves' surface stands there.
-			float belowSea = 1.0 - smoothstep(-0.05 * UnitsPerMetre, 0.0, bed);
-			float share = shoreState.x * sheet.share * lerp(1.0, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth), belowSea);
+			// A drained cell below the still water in the hand-over band is still sea (ComposeSurf): the waves' surface
+			// stands there. Inshore of it the simulation's sheet is the water.
+			float drawn = shoreState.x * sheet.share;
+			float inner = SurfInner(drawn);
+			hold = 1.0 - inner;
+			float belowSea = (1.0 - smoothstep(-0.05 * UnitsPerMetre, 0.0, bed)) * (inner < 0.5 ? 1.0 : 0.0);
+			float share = drawn * lerp(1.0, smoothstep(0.0, 2.0 * SwashMinDepth, sheet.depth), belowSea);
 			water = lerp(water, sheet.depth > SwashMinDepth ? sheet.surface : -1e6, share);
 		}
+		// The sea bed below the still water out to sea of the inner surf is always under water (SeaFloorHold).
+		if (bed < 0.0)
+			water = lerp(water, max(water, bed + SeaFloorFilm), hold);
 		return bed > water + 0.05 * UnitsPerMetre;
 	}
 
@@ -2340,19 +2508,21 @@ namespace PBRWater
 		// The bed is taken where the waves have carried the vertex (they move it along by up to a wavelength, towards the
 		// beach and back), and as high as the game's terrain triangles can stand there: held above the bed under its rest
 		// position, the triangles of a vertex carried up the slope sank into the sand and left pockets of ground in the water.
+		// A breaker's lip is no part of it: the surface it rides on is held, and the lip is laid over that. Thrown ahead over
+		// the trough, the lip measured against the ground where it lands was lifted onto a ledge it plunges into; released
+		// from the hold instead (by the curl's weight), the whole trough under a curl sank into the sand with it, holes where
+		// the plunge met the swash.
 		if (ctx.hasTerrain > 0.5) {
-			float ceiling = TerrainCeiling(absXY + o.current.xy);
+			float3 base = o.current - now.lip;
+			float ceiling = TerrainCeiling(absXY + base.xy);
 			float bed = ceiling > -1e8 ? ceiling - (positionWS.z + FrameBuffer::CameraPosAdjust.z) : ctx.elevation;
-			float water = o.current.z;
+			float water = base.z;
 			float highest = max(water, max(Shore0.w, 0.0) + 0.5 * UnitsPerMetre);
 			float2 uv;
 			float held = ShoreGridUV(absXY, uv) ? highest : min(water + max(0.5 * UnitsPerMetre, 2.0 * spacing * length(ctx.terrainGrad)), highest);
 			float lifted = min(bed, held) + WaterlineLift(spacing, ctx.terrainGrad);
-			// Not a breaker's lip: thrown ahead over the trough it is measured against the ground where it lands, and was
-			// lifted onto a ledge it plunges into. The ground stands in front of it there.
-			float hold = 1.0 - saturate(now.curl);
-			o.current.z = max(o.current.z, lerp(o.current.z, lifted, hold));
-			o.previous.z = max(o.previous.z, lerp(o.previous.z, lifted, hold));
+			o.current.z = max(base.z, lifted) + now.lip.z;
+			o.previous.z = max(o.previous.z - now.previousLip.z, lifted) + now.previousLip.z;
 		}
 
 		// Hard bound. Clamping also flushes NaN (D3D min/max return the non-NaN operand), so a bad input can never throw

@@ -84,7 +84,7 @@ public:
 	using Emitters = std::array<Emitter, EmitterCount>;
 	/// The layout and emission saved emitters were tuned for: 3 = procedural shapes, the breakers' spray thrown from the
 	/// surf's grid. Saved emitters of another version start over from the defaults.
-	static constexpr int EmitterVersion = 3;
+	static constexpr int EmitterVersion = 5;
 
 	/** @brief The emitters the feature ships with. */
 	static Emitters DefaultEmitters();

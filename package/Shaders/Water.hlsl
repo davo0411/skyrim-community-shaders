@@ -187,7 +187,7 @@ struct VS_OUTPUT
 
 #	if defined(PBR_WATER)
 #		include "PBRWater/PBRWater.hlsli"
-// Draws that may be tessellated (the compute tessellator's mesh, WaterTessellator). LOD water never is: it is far away and flat.
+// Draws that may be tessellated (BisectionTessellator's mesh). LOD water never is: it is far away and flat.
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(SIMPLE) || defined(STENCIL)
 #			define PBRW_TESSELLATION
 #		endif
@@ -250,7 +250,7 @@ float3x3 InverseLinear(float4x4 m)
 
 /**
  * The water vertex program after the waves: everything but their evaluation. Runs with the waves just evaluated
- * (WaterVertex) or as the compute tessellator evaluated them for this frame (CachedWaterVertex), so both produce the
+ * (WaterVertex) or as the tessellator evaluated them for this frame (CachedWaterVertex), so both produce the
  * same attributes.
  */
 #		if defined(PBR_WATER)
@@ -467,10 +467,11 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 #		if defined(PBR_WATER) && defined(PBRW_TESSELLATION)
 #			include "PBRWater/ComputeTessellation.hlsli"
 
-// The compute tessellator's vertices this frame (WaterTessellator): read by SV_VertexID, the draw's own index buffer.
+// The tessellated water's vertices this frame (BisectionTessellator), each bisector's grid after one another
+// (BisectionVertexIndex finds them).
 StructuredBuffer<PBRWaterTess::Vertex> TessellatedVertices : register(t109);
 
-/// A vertex the compute tessellator made and evaluated the waves of this frame: only the cheap rest of the program runs.
+/// A vertex the tessellator made and evaluated the waves of this frame: only the cheap rest of the program runs.
 VS_OUTPUT CachedWaterVertex(uint vertexID)
 {
 	PBRWaterTess::Vertex t = TessellatedVertices[vertexID];
@@ -502,13 +503,21 @@ VS_OUTPUT CachedWaterVertex(uint vertexID)
 #			endif
 #			include "PBRWater/Bisection.hlsli"
 
+// The bisection tessellator's draw (BisectionTessellator::Draw): the mesh drawn, and where each mesh's bisectors start in
+// the draw lists (BisectionCS OffsetsCS).
+cbuffer BisectionDraw : register(b11)
+{
+	uint4 BisectionMesh;  // x the mesh slot
+};
+ByteAddressBuffer BisectionDrawArgs : register(t108);
+
 /// The bisection tessellator's vertex for this draw's vertex `vertexID` (BisectionTessellator::Draw): each bisector is
-/// 3 GridTriangles vertices, from its place in the draw lists on (the draw's StartVertexLocation), its grid's vertices
-/// stored after one another (BisectionCS VertexCS).
+/// 3 GridTriangles vertices, the mesh's from its offset in the draw lists on (SV_VertexID starts at 0 whatever the
+/// draw's StartVertexLocation), its grid's vertices stored after one another (BisectionCS VertexCS).
 uint BisectionVertexIndex(uint vertexID)
 {
 	static const uint perBisector = 3 * PBRWaterBisection::GridTriangles;
-	uint listIndex = vertexID / perBisector;
+	uint listIndex = vertexID / perBisector + BisectionDrawArgs.Load(PBRW_BISECTION_MAX_MESHES * 16 + BisectionMesh.x * 4);
 	uint local = vertexID % perBisector;
 	uint2 a, b, c;
 	PBRWaterTess::TriangleCorners(local / 3, PBRWaterBisection::GridN, a, b, c);
@@ -519,12 +528,9 @@ uint BisectionVertexIndex(uint vertexID)
 
 VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
-	// Tess0.x: 0 an untessellated draw, 1 the compute tessellator's vertices (PBRWater::RestoreDraw), 2 the engine's own
-	// draw of a mesh the compute tessellator draws instead: every vertex outside the frustum, so it rasterises nothing;
-	// 3 the deferred surface's tiles of the mesh (PBRWater/Deferred.hlsli), 4 the bisection tessellator's vertices
-	// (BisectionTessellator::Draw).
-	if (PBRWater::Tess0.x > 3.5)
-		return CachedWaterVertex(BisectionVertexIndex(vertexID));
+	// Tess0.x: 0 an untessellated draw, 1 the tessellated mesh's vertices (PBRWater::RestoreDraw, BisectionTessellator::Draw),
+	// 2 the engine's own draw of a mesh the tessellator draws instead: every vertex outside the frustum, so it rasterises
+	// nothing; 3 the deferred surface's tiles of the mesh (PBRWater/Deferred.hlsli).
 #			if defined(SPECULAR)
 	if (PBRWater::Tess0.x > 2.5) {
 		VS_OUTPUT tile = (VS_OUTPUT)0;
@@ -538,7 +544,7 @@ VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV
 		return culled;
 	}
 	if (PBRWater::Tess0.x > 0.5)
-		return CachedWaterVertex(vertexID);
+		return CachedWaterVertex(BisectionVertexIndex(vertexID));
 	return WaterVertex(input, PBR_WATER_SPACING);
 }
 #		else
@@ -1667,22 +1673,28 @@ PS_OUTPUT main(PS_INPUT input)
 
 			float3 normalizedLightDirection = normalize(lightDirection);
 
-			float lightShadow = 1.0;
-			[branch] if (localShadow)
-				lightShadow = LightLimitFix::GetLocalShadow(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
-
 #					if defined(PBR_WATER)
 			float3 lightColor = Color::PointLight(light.color.xyz) * light.fade *
 			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
 									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius(), lightDist)) *
-			                    PBRWater::Light1.w;
+			                    PBRWater::Light1.w * intensityMultiplier;
+			// Water lights only with its specular lobe, which a lamp's reflection fills on a few pixels: the local shadow
+			// (a filtered cube map lookup) is only worth reading where it does. Read for every pixel in a lit cluster it was
+			// the costliest part of the surface pass in a lit town on the coast (1.4 of 5.3 ms at Dawnstar).
+			[branch] if (localShadow && max(lightColor.x, max(lightColor.y, lightColor.z)) > 1e-4)
+				lightColor *= LightLimitFix::GetLocalShadow(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
+			specularLighting += lightColor;
 #					else
+			float lightShadow = 1.0;
+			[branch] if (localShadow)
+				lightShadow = LightLimitFix::GetLocalShadow(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
+
 			float3 H = normalize(normalizedLightDirection - viewDirection);
 			float HdotN = saturate(dot(H, normal));
 
 			float3 lightColor = Color::PointLight(light.color.xyz) * pow(HdotN, FresnelRI.z) * light.fade;
-#					endif
 			specularLighting += lightColor * intensityMultiplier * lightShadow;
+#					endif
 		}
 	}
 	specularColor += specularLighting * 3;
@@ -1876,7 +1888,11 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrFilm = pbrSurface.height - pbrBed;
 	// With refractions, dry pixels show the ground instead (pbrEdge = 0): the stencil pass put them in the water mask,
 	// and ISWaterBlend composites whatever this target holds there - after a discard, an old frame's water.
-	float pbrEdge = smoothstep(0.0, 0.06 * PBRWater::UnitsPerMetre, pbrFilm);
+	// The last centimetres of a sheet on sand are no smooth mirror: grains and ripple marks break through, the meniscus
+	// clings to them, and the water reads as glossy wet sand that turns into water as it deepens. Faded over 6 cm, the
+	// edge of a backwash pool on a gentle beach was a hard glassy rim a slab's thickness above the sand.
+	float pbrEdge = smoothstep(0.0, 0.12 * PBRWater::UnitsPerMetre, pbrFilm);
+	pbrEdge *= pbrEdge * (3.0 - 2.0 * pbrEdge);
 
 	// Foam (PBRWater.hlsli): the shore waves' and the swash's, drawn with the foam texture below; and the open sea's
 	// (pbrSurface.fftFoam, the accumulated cascade foam of GarrettGunnell/Water), blended in raw as a coverage.
@@ -1906,7 +1922,11 @@ PS_OUTPUT main(PS_INPUT input)
 		pbrFoamPosition += viewDirection * min(pbrMeshAbove / -viewDirection.z, pbrPathLength);
 	float pbrFlat = smoothstep(0.80, 0.95, pbrSurface.waveNormal.z);
 	float pbrBoreFlat = pbrSurface.bore * pbrFlat;
-	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet);
+	// The swash's edge carries a lace of foam: what each uprush pushes ahead of it and the backwash leaves along the
+	// water's edge, where the sheet thins over the sand. Without it the water past the last of the bores' foam ended in a
+	// clean line on the sand.
+	float pbrEdgeLace = 0.4 * pbrSurface.simShare * (1.0 - smoothstep(0.02 * PBRWater::UnitsPerMetre, 0.10 * PBRWater::UnitsPerMetre, pbrFilm));
+	float pbrPatternCoverage = max(max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
 	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
 	float pbrRawCoverage = pbrSurface.breakerFoam;
 	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);

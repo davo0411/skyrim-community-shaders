@@ -14,9 +14,13 @@
 // bore over seven cells, and stopped a sheet shallower than the bed's rise from one cell to the next dead, as if against
 // a wall: on a 1:10 beach it carried a dam-break uprush a third of the way up (the exact solution: Shen & Meyer).
 //
-// Two passes a step. The momentum pass moves the face velocities under the old depths; the continuity pass moves the
-// depths (and the foam) with the new velocities, soaks the sheet into the sand, and makes and decays the foam. A frame's
-// first step covers the whole grid; with SWASH_TILES the later ones cover only the tiles SwashTilesCS listed.
+// Two halves a step, in one pass. The momentum half moves the face velocities under the old depths; the continuity half
+// moves the depths (and the foam) with the new velocities, soaks the sheet into the sand, and makes and decays the foam.
+// Each 8 x 8 group reads the old state around its tile into group memory (two cells beyond it), moves the velocities of
+// its cells and of the row and column behind them, then the depths of its own: as two passes, a step wrote the whole
+// state out and read it back in between (16 MB at 1024^2), most of its cost. The state is read from one texture and
+// written to the other. A frame's first step covers the whole grid; with SWASH_TILES the later ones cover only the
+// tiles SwashTilesCS listed.
 //
 // The waves come in through the hand-over (PBRWater::SurfSharesAt, laid out by ShoreFoamCS): there the simulation takes
 // the train's incoming Riemann invariant, u + 2 sqrt(g h) along the waves' travel, and keeps its own outgoing one,
@@ -41,7 +45,7 @@ cbuffer SwashStepCB : register(b0)
 	float4 Pad1;
 };
 
-Texture2D<float4> Source : register(t0);  // momentum pass: the state; continuity pass: the momentum pass's output
+Texture2D<float4> Source : register(t0);  // the state before the step
 Texture2D<float4> Prep : register(t1);    // ShoreFoamCS: x bed (m above the still water), y incoming share, z outgoing share, w the train's level (m)
 Texture2D<float4> Stage : register(t2);   // ShoreFoamCS: yz the waves' direction of travel, w the foam they carry
 RWTexture2D<float4> Target : register(u0);
@@ -75,9 +79,9 @@ float4 LoadPrep(int2 c)
 	return Prep.Load(int3(Clamped(c), 0));
 }
 
-/// The water in cell `c` before the pass. Where the grid has just scrolled in (the momentum pass), at rest over the bed.
-/// Outside the grid, the edge cell's.
-float4 LoadState(int2 c)
+/// The water in cell `c` before the step. Where the grid has just scrolled in (the frame's first step), at rest over the
+/// bed. Outside the grid, the edge cell's.
+float4 LoadSourceState(int2 c)
 {
 	c = Clamped(c);
 	int2 q = c + Shift;
@@ -85,6 +89,20 @@ float4 LoadState(int2 c)
 	[branch] if (all(q >= 0) && all(q < (int)GridSize))
 		state = Source.Load(int3(q, 0));
 	return state;
+}
+
+/// The group's tile: its first cell. The old state is held from two cells before it to two after (12 x 12), the state
+/// after the momentum half from one cell before it to its last (9 x 9).
+static int2 TileOrigin;
+groupshared float4 OldState[12][12];
+groupshared float4 Moved[9][9];
+
+/// The old state of cell `c` (LoadSourceState), from group memory: `c` within two cells of the tile, or a cell the clamp
+/// to the grid brings there.
+float4 LoadState(int2 c)
+{
+	int2 l = Clamped(c) - TileOrigin + 2;
+	return OldState[l.y][l.x];
 }
 
 /**
@@ -123,8 +141,6 @@ float2 TrainState(float bed, float level)
 	return float2(depth, 2.0 * (sqrt(G * depth) - sqrt(G * still)));
 }
 
-#if !defined(SWASH_CONTINUITY)
-
 /**
  * The velocity through the face between cell C and the next cell N along an axis, after the step.
  * @param uP           the face's velocity now
@@ -158,37 +174,25 @@ float FaceVelocity(float uP, float uBack, float uFore, float hBack, float hC, fl
 	return u / (1.0 + Dt * drag * length(float2(u, across)));
 }
 
-void Step(uint3 id)
+/// The momentum half at cell `c` (in the grid): the cell's state with its east and north face velocities moved.
+float4 MomentumAt(int2 c)
 {
-	if (any(id.xy >= GridSize))
-		return;
-	int2 c = int2(id.xy);
 	float4 prep = LoadPrep(c);
 	float4 s = LoadState(c);
-	if (prep.x > Wall) {
-		Target[id.xy] = 0.0;
-		return;
-	}
+	if (prep.x > Wall)
+		return 0.0;
 	float4 prepE = LoadPrep(c + int2(1, 0));
 	float4 prepN = LoadPrep(c + int2(0, 1));
 	float3 stage = Stage.Load(int3(c, 0)).yzw;
 	float2 dir = stage.xy;
 
 	// Where the train alone is the water, the state is the train's.
-	[branch] if (min(prep.z, min(prepE.z, prepN.z)) > 0.999)
-	{
-		Target[id.xy] = float4(s.x, dir * TrainState(prep.x, prep.w).y, s.w);
-		return;
-	}
+	[branch] if (min(prep.z, min(prepE.z, prepN.z)) > 0.999) return float4(s.x, dir * TrainState(prep.x, prep.w).y, s.w);
 
 	float4 sE = LoadState(c + int2(1, 0));
 	float4 sN = LoadState(c + int2(0, 1));
 	// Dry here and beyond both faces: nothing moves. Most of the grid's beach is this.
-	[branch] if (max(s.x, max(sE.x, sN.x)) <= DryDepth)
-	{
-		Target[id.xy] = float4(s.x, 0.0, 0.0, s.w);
-		return;
-	}
+	[branch] if (max(s.x, max(sE.x, sN.x)) <= DryDepth) return float4(s.x, 0.0, 0.0, s.w);
 
 	float4 sW = LoadState(c - int2(1, 0));
 	float4 sS = LoadState(c - int2(0, 1));
@@ -223,43 +227,43 @@ void Step(uint3 id)
 	float2 velocity = clamp(float2(u, v), -fastest, fastest);
 	if (!all(abs(velocity) < 1e30))
 		velocity = 0.0;
-	Target[id.xy] = float4(s.x, velocity, s.w);
+	return float4(s.x, velocity, s.w);
 }
 
-#else
-
-void Step(uint3 id)
+/// The state after the momentum half at cell `c`, from group memory: `c` from one cell before the tile to its last.
+float4 LoadMoved(int2 c)
 {
-	if (any(id.xy >= GridSize))
-		return;
-	int2 c = int2(id.xy);
+	int2 l = Clamped(c) - TileOrigin + 1;
+	return Moved[l.y][l.x];
+}
+
+/// The depth and foam after the momentum half at cell `c` (x and w: it moves neither), for any cell within two of the
+/// tile. Only the continuity half's east and north neighbours, of which it reads nothing else.
+float4 LoadMovedDepth(int2 c)
+{
+	return LoadPrep(c).x > Wall ? 0.0 : LoadState(c);
+}
+
+/// The continuity half at cell `c` (in the grid), from the state after the momentum half.
+float4 ContinuityAt(int2 c)
+{
 	float4 prep = LoadPrep(c);
-	float4 s = Source.Load(int3(c, 0));
+	float4 s = LoadMoved(c);
 	float bed = prep.x;
-	if (bed > Wall) {
-		Target[id.xy] = 0.0;
-		return;
-	}
+	if (bed > Wall)
+		return 0.0;
 	float3 stage = Stage.Load(int3(c, 0)).yzw;
 
 	// Where the train alone is the water, the state is the train's: its level, and the white water it carries.
-	[branch] if (prep.z > 0.999)
-	{
-		Target[id.xy] = float4(TrainState(bed, prep.w).x, s.yz, stage.z);
-		return;
-	}
+	[branch] if (prep.z > 0.999) return float4(TrainState(bed, prep.w).x, s.yz, stage.z);
 
-	float4 sW = Source.Load(int3(Clamped(c - int2(1, 0)), 0));
-	float4 sS = Source.Load(int3(Clamped(c - int2(0, 1)), 0));
-	float4 sE = Source.Load(int3(Clamped(c + int2(1, 0)), 0));
-	float4 sN = Source.Load(int3(Clamped(c + int2(0, 1)), 0));
+	float4 sW = LoadMoved(c - int2(1, 0));
+	float4 sS = LoadMoved(c - int2(0, 1));
+	float4 sE = LoadMovedDepth(c + int2(1, 0));
+	float4 sN = LoadMovedDepth(c + int2(0, 1));
 
 	// Dry ground with dry neighbours and no foam left on it: nothing flows in or out.
-	[branch] if (bed >= 0.0 && s.w < 0.01 && max(max(s.x, sE.x), max(max(sW.x, sN.x), sS.x)) < 1e-5)
-	{
-		Target[id.xy] = 0.0;
-		return;
-	}
+	[branch] if (bed >= 0.0 && s.w < 0.01 && max(max(s.x, sE.x), max(max(sW.x, sN.x), sS.x)) < 1e-5) return 0.0;
 
 	float dx = TexelSize * PBRWater::MetresPerUnit;
 	// The discharge through each face: the new velocity times the depth of the cell the water comes from. The foam rides
@@ -313,21 +317,41 @@ void Step(uint3 id)
 	float4 next = float4(depth, s.yz, min(foam, 1.0));
 	if (!all(abs(next) < 1e30))
 		next = float4(max(-bed, 0.0), 0.0, 0.0, 0.0);
-	Target[id.xy] = next;
+	return next;
 }
 
-#endif
+/// One step of the 8 x 8 tile `tile`, thread `thread` (`index` in the group) of its group.
+void Step(uint2 tile, uint2 thread, uint index)
+{
+	TileOrigin = int2(tile * 8);
+	// The old state, two cells around the tile: 144 cells by 64 threads.
+	for (uint i = index; i < 144; i += 64) {
+		int2 l = int2(i % 12, i / 12);
+		OldState[l.y][l.x] = LoadSourceState(TileOrigin - 2 + l);
+	}
+	GroupMemoryBarrierWithGroupSync();
+	// The momentum half for the tile and the column and row behind it (the faces the continuity half reads there), at the
+	// cells the clamp to the grid finds there.
+	for (uint j = index; j < 81; j += 64) {
+		int2 l = int2(j % 9, j / 9);
+		Moved[l.y][l.x] = MomentumAt(Clamped(TileOrigin - 1 + l));
+	}
+	GroupMemoryBarrierWithGroupSync();
+	int2 c = TileOrigin + int2(thread);
+	if (all(c < (int)GridSize))
+		Target[c] = ContinuityAt(c);
+}
 
 #if defined(SWASH_TILES)
 // The frame's later steps: only the tiles SwashTilesCS found anything to move in (x | y << 16), one group each.
 StructuredBuffer<uint> ActiveTiles : register(t3);
 
-[numthreads(8, 8, 1)] void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
+[numthreads(8, 8, 1)] void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex) {
 	uint tile = ActiveTiles[group.x];
-	Step(uint3(uint2(tile & 0xFFFF, tile >> 16) * 8 + thread.xy, 0));
+	Step(uint2(tile & 0xFFFF, tile >> 16), thread.xy, index);
 }
 #else
-[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
-	Step(id);
+[numthreads(8, 8, 1)] void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex) {
+	Step(group.xy, thread.xy, index);
 }
 #endif

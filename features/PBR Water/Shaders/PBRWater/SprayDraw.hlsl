@@ -31,12 +31,12 @@ StructuredBuffer<uint> Alive : register(t2);
 
 struct VS_OUTPUT
 {
-	float4 position: SV_POSITION;
-	float3 positionWS: TEXCOORD0;             // camera-relative
-	float3 normalWS: TEXCOORD1;               // a puff's bulging normal
-	float2 uv: TEXCOORD2;                     // -1..1 across the quad (droplets: x across, y along the streak)
-	nointerpolation float4 info: TEXCOORD3;   // x alpha, y emitter, z view depth of the centre (units), w radius (units)
-	nointerpolation float4 shape: TEXCOORD4;  // droplets: x streak length over width; puffs: x life (0..1), yz noise offset
+	float4 position : SV_POSITION;
+	float3 positionWS : TEXCOORD0;             // camera-relative
+	float3 normalWS : TEXCOORD1;               // a puff's bulging normal
+	float2 uv : TEXCOORD2;                     // -1..1 across the quad (droplets: x across, y along the streak)
+	nointerpolation float4 info : TEXCOORD3;   // x alpha, y emitter, z view depth of the centre (units), w radius (units)
+	nointerpolation float4 shape : TEXCOORD4;  // droplets: x streak length over width; puffs: x life (0..1), yz noise offset
 };
 
 #if defined(VSHADER)
@@ -179,7 +179,8 @@ float3 SunColor(float3 positionWS)
 	return color * ShadowSampling::GetWorldShadow(positionWS, FrameBuffer::CameraPosAdjust.xyz);
 }
 
-float4 PSMain(VS_OUTPUT input) : SV_Target0
+float4 PSMain(VS_OUTPUT input) :
+	SV_Target0
 {
 	PBRWaterSpray::Emitter em = Emitters[(uint)input.info.y];
 	float alpha = input.info.x;
@@ -215,17 +216,21 @@ float4 PSMain(VS_OUTPUT input) : SV_Target0
 		float2 q = input.uv * (2.0 + 3.0 * detail) + input.shape.yz + life * float2(0.6, -0.9);
 		float n1 = Fbm(q);
 		float n2 = Fbm(q * 2.13 + 7.31);
-		// The outline frays at a finer scale than the body breaks up: wisps, not lumps.
-		float n3 = Fbm(q * 3.7 + 3.1);
+		// The outline frays at a finer scale than the body breaks up: wisps, not lumps (one octave: the body's two Fbm
+		// carry the rest).
+		float n3 = ValueNoise(q * 3.7 + 3.1);
 		float2 warped = input.uv + (float2(n1, n3) - 0.5) * (1.2 * detail);
 		float r = length(warped);
 		float body = (1.0 - smoothstep(0.25, 1.0, r)) * lerp(1.0, saturate(1.8 * n2 - 0.1), 0.6 * detail);
 		float erosion = detail * (0.08 + 0.6 * life * life);
-		float softness = max(em.Shape.y, 0.02);
+		// Never a hard edge: thresholded sharply, the value noise drew the outline in blocky steps.
+		float softness = max(em.Shape.y, 0.15);
 		density = saturate((body - erosion) / softness);
 		density *= density * (3.0 - 2.0 * density);
 		float3 normal = normalize(input.normalWS);
-		sunWrap = saturate((dot(normal, SharedData::DirLightDirection.xyz) + 0.5) / 1.5);
+		// Mostly the scattering's own light: a cloud of droplets is no lit solid, and shaded as one from a bulging normal
+		// every puff read as a cotton ball.
+		sunWrap = lerp(0.6, 1.0, saturate((dot(normal, SharedData::DirLightDirection.xyz) + 0.5) / 1.5));
 		// The sky lights a puff from above: its underside, facing the water, is darker.
 		skyShade = 0.75 + 0.25 * saturate(0.5 + 0.5 * normal.z);
 	}

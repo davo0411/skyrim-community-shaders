@@ -2,7 +2,7 @@
 
 #include "Feature.h"
 #include "PBRWater/BisectionTessellator.h"
-#include "PBRWater/ComputeTessellation.h"
+#include "PBRWater/WaterMeshes.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
 #include "PBRWater/OceanSimulation.h"
@@ -165,7 +165,6 @@ struct PBRWater : Feature
 		// Performance
 		bool EnableTessellation = true;
 		bool DeferredSurface = true;             ///< shade the tessellated water once per pixel (PBRWater/Deferred.hlsli)
-		bool BisectionTessellation = false;      ///< experimental: refine by longest-edge bisection (BisectionTessellator)
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
 		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
 		float DisplacementFadeStart = 16384.0f;  ///< units
@@ -408,9 +407,9 @@ private:
 	void UpdateSurfaceNoise();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
-	std::unique_ptr<ConstantBuffer> drawBuffer;          ///< this frame's constants for the compute tessellator's mesh (Tess0.x = 1)
+	std::unique_ptr<ConstantBuffer> drawBuffer;          ///< this frame's constants for the tessellated mesh (Tess0.x = 1: BisectionTessellator)
 	std::unique_ptr<ConstantBuffer> flatDrawBuffer;      ///< for the untessellated draws (Tess0.x = 0)
-	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;   ///< for the engine's own draw of a mesh the compute tessellator draws instead (Tess0.x = 2: culled)
+	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;   ///< for the engine's own draw of a mesh the tessellator draws instead (Tess0.x = 2: culled)
 	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;  ///< for the deferred surface's rectangle around a tessellated mesh (Tess0.x = 3)
 
 	// The deferred surface (PBRWater/Deferred.hlsli): the stencil pass records each pixel of the tessellated water, and the
@@ -422,13 +421,13 @@ private:
 	{
 		uint32_t tag[4] = {};  ///< x the mesh's tag (1..DeferredMeshes), y the tile list's room per mesh, z texture coordinates recorded
 		float4 viewport{};     ///< xy the viewport's size (pixels)
-		float4 uvMapU{};       ///< the mesh's texture coordinates over its model-space xy (WaterTessellator::AffineTexCoords)
+		float4 uvMapU{};       ///< the mesh's texture coordinates over its model-space xy (WaterMeshes::AffineTexCoords)
 		float4 uvMapV{};
 	};
 	/// A tessellated mesh the stencil pass recorded this frame.
 	struct DeferredMesh
 	{
-		uint32_t startIndex = 0;  ///< its range of the tessellator's index buffer
+		uint32_t startIndex = 0;  ///< its mesh slot (BisectionTessellator::Lookup)
 		bool texCoords = false;   ///< its texture coordinates are recorded (not one plane over the mesh)
 		float4 uvMapU{};
 		float4 uvMapV{};
@@ -448,6 +447,13 @@ private:
 	std::vector<DeferredMesh> deferredMeshes;  ///< this frame's recorded meshes, by tag - 1
 	uint32_t deferredMeshesFrame = UINT32_MAX;
 	uint32_t deferredTilesFrame = UINT32_MAX;
+	// The shore train once per 2x2 pixels of the record (DeferredShoreCS): t46-t48 of the surface and point light passes.
+	std::unique_ptr<Texture2D> deferredShore[3];          ///< R32G32B32A32_UINT at half the record's size
+	winrt::com_ptr<ID3D11ComputeShader> deferredShoreCS;  ///< null when it failed to compile: the pixels evaluate the train
+	std::unique_ptr<ConstantBuffer> deferredShoreCB;
+	uint32_t deferredShoreFrame = UINT32_MAX;
+	/** @brief Render thread, the first deferred surface draw of a frame: evaluates the shore train per 2x2 pixels of the record. */
+	void BakeDeferredShore(ID3D11ShaderResourceView* depthSRV, ID3D11ShaderResourceView* flowmap);
 	/** @brief Render thread: (re)creates the stencil pass's records at the depth buffer's size; false when there is none. */
 	bool EnsureDeferredRecords();
 	/** @brief Render thread, RestoreDraw: draws the cached mesh in the stencil pass, recording its pixels. */
@@ -473,12 +479,10 @@ private:
 	std::unique_ptr<ConstantBuffer> deferredZeroCB;  ///< b13 between the recorded draws: tag 0, no record
 	/** @brief Render thread, EndDrawBatch: puts back the engine's state and lists the recorded meshes' tiles. */
 	void EndDeferredBatch();
-	WaterTessellator tessellator;
-	/// The experimental tessellator (Settings::BisectionTessellation): reads the meshes through `tessellator`.
+	/// The water meshes the tessellated draws drew, for the tessellator to subdivide.
+	WaterMeshes waterMeshes;
 	BisectionTessellator bisection;
-	bool bisectionActive = false;          ///< render thread: this frame's mesh is the bisection tessellator's
-	bool uploadedBisectionActive = false;  ///< what the draw buffers were uploaded for
-	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh with whichever tessellator built it. */
+	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh. */
 	void DrawCachedMesh();
 	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */
 	void UpdateTessellation();
@@ -582,17 +586,16 @@ private:
 
 	// Per-draw state (render thread)
 	bool geometryShaderBound = false;
-	/// The compute tessellator's range for the current draw, issued in RestoreDraw once the engine's state is bound.
+	/// The tessellated mesh for the current draw (its slot), issued in RestoreDraw once the engine's state is bound.
 	bool cachedDrawPending = false;
 	uint32_t cachedDrawStart = 0;
-	uint32_t cachedDrawCount = 0;
 	uint32_t cachedDrawTechnique = 0;
 	RE::BSGeometry* cachedDrawGeometry = nullptr;
 	/// The water draws of one frame, for the Debug section.
 	struct DrawStats
 	{
 		uint32_t draws = 0;
-		uint32_t computeDraws = 0;             ///< draws of the compute tessellator's mesh
+		uint32_t computeDraws = 0;             ///< draws of the tessellated mesh
 		uint32_t byTechnique[6] = {};          ///< draws per technique (DrawPassIndex)
 		uint32_t deferredRecorded = 0;         ///< meshes the stencil pass recorded for the deferred surface
 		uint32_t deferredShaded = 0;           ///< surface and point light draws shaded from the record

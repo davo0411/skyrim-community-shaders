@@ -77,12 +77,11 @@ void Emit(float sources[5], Launch l, inout uint seed)
 			continue;
 		float strength = saturate((sources[kind] - em.Source.z) / max(em.Source.w - em.Source.z, 1e-3));
 		float distanceFade = 1.0 - smoothstep(0.7 * em.Size.w, em.Size.w, l.distance);
-		// Level of detail: past LodDistance the spray is made of fewer, larger puffs, (LodDistance / d)^2 as many and
-		// d / LodDistance as wide, which covers the same share of the screen at a fraction of the particles and overdraw.
-		// Droplets only thin out (each is held at a pixel's width).
-		bool droplet = em.Shape.x < 0.5;
+		// Level of detail: past LodDistance the spray thins out, (LodDistance / d)^2 as many. Grown d / LodDistance as wide
+		// to cover the same share of the screen, the distant puffs were metres across (a whitecap's 20 cm puff stood 7 m
+		// wide at 300 m): white cotton balls dotted over the sea, where real spray that far is a faint haze at most.
 		float lod = max(l.distance / (LodDistance * PBRWater::UnitsPerMetre), 1.0);
-		float sizeScale = droplet ? 1.0 : lod;
+		float sizeScale = 1.0;
 		float expected = em.Source.y * l.area * dt * strength * distanceFade / (lod * lod);
 		if (expected <= 0.0)
 			continue;

@@ -75,7 +75,9 @@ namespace PBRWater
 		float2 uvDir = dir.xy * SunMap0.z * float2(1.0, -1.0);
 		float2 toEdge = (uvDir > 0.0 ? 1.0 - uv0 : uv0) / abs(uvDir);
 		reach = min(reach, min(toEdge.x, toEdge.y));
-		static const uint Steps = 12;
+		// Six steps: the jitter moves them every frame and the temporal filter adds them up (twelve cost 0.5 ms more in
+		// the surface pass for no difference once filtered).
+		static const uint Steps = 6;
 		float stepLength = reach / Steps;
 		// The heightfield's grid filters out waves shorter than its spacing, which the surface here still carries.
 		static const float Bias = 0.04 * UnitsPerMetre;
