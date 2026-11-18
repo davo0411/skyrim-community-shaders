@@ -9,7 +9,7 @@ Turns "add a settings page for X" or "make this window look right" into finished
 
 **Read first, every run:** `PRODUCT.md` and `DESIGN.md` (repo root: who it is for, mode, theme model, tokens, motion, components), `.claude/CLAUDE.md` (ImGui, i18n, build rules), and the nearest existing page to what you are building.
 
-**References** (all in `references/`): `design-principles.md` (the rules), `reuse-catalog.md` (shared widgets), `audit-checklist.md` (signs of slop), `critique-rubric.md` (scored review), `pretty-ui-checklist.md` (the gate), `skill-map.md` (exact external calls and briefs), `ATTRIBUTION.md`.
+**References** (all in `references/`): `in-game-capture.md` (how to capture the UI; read before step 2), `design-principles.md` (the rules), `reuse-catalog.md` (shared widgets), `audit-checklist.md` (signs of slop), `critique-rubric.md` (scored review), `pretty-ui-checklist.md` (the gate), `skill-map.md` (exact external calls and briefs), `ATTRIBUTION.md`.
 
 ## Ground rules
 
@@ -42,7 +42,9 @@ Keep the task list current. Steps 1 and 5 are skipped for a small tweak to an ex
 Plan the UX before any visual work: the task path, the screen regions, the states, the entry point. Call `Skill` `impeccable` with args `shape <feature>` using the brief in `skill-map.md`. If it is not installed, write the plan yourself from `design-principles.md` §1, §2 and §7. Output: a short plan the user could correct.
 
 ### 2. Capture the live state
-Open the nearest existing page and the surface being changed (`mcp__devbench-se__menu`, then `capture` with `checkpointId` `cs-ui-<name>-before`). Read the frame. Note resolution, font size and theme. Also read the nearest page's code for the patterns to match.
+First confirm the surface can appear in the current build: read what triggers it (the Constraints table, for example, only shows when a feature overrides `GetActiveConstraints()`, and none does today). If it cannot appear, say so and pick another surface.
+
+Then capture it **with the UI**: devbench `capture` and the CS screenshot feature exclude ImGui, so use the RenderDoc route in `references/in-game-capture.md` (menu open via the End key, RenderDoc frame, export the last draw's render target, crop). Read the capture. Note resolution, font size, theme and the scene behind it. Also read the nearest page's code for the patterns to match.
 
 ### 3. Audit (existing UI) and direction
 - **Audit:** go through `audit-checklist.md` A to D against the capture and the code. Run `python tools/cs-ui-lint.py <files>`. For a second opinion call `Skill` `unslop:unslop` as an audit only (brief in `skill-map.md`). Classify heavy, light or none.
@@ -69,7 +71,7 @@ Follow `design-principles.md` and `DESIGN.md`. Apply unslop's passes in order ac
 `./BuildDevFast.bat`; fix every error and warning in touched files. Then `python tools/extract-i18n.py --write` and `python tools/sort-i18n.py --write --prune-extra`, then formatting.
 
 ### 8. Verify in game
-Deploy the build as this checkout normally does, relaunch, open the surface, `capture` with `checkpointId` `cs-ui-<name>-after`. Check Default, then switch theme in the menu and capture Light and HighContrast; if a theme cannot be switched through devbench, say so and mark it unverified. Check the extremes from `design-principles.md` §9: largest font size, longer strings, 1080p and 1440p, empty and error states.
+**Do not deploy over the user's test build.** Check which branch the deployed DLL came from (the menu title shows it) and ask before replacing it. Deploy as the checkout that owns `build/dfb` normally does, relaunch, open the surface, and capture it with the RenderDoc route (`references/in-game-capture.md`), saved as `cs-ui-<name>-after`. Check Default; theme switching, hover, focus and gamepad cannot be driven through devbench today, so do them by hand with the user or mark them unverified. Check the extremes from `design-principles.md` §9: largest font size, longer strings, 1080p and 1440p, empty and error states.
 
 ### 9. Review and gate
 1. `python tools/cs-ui-lint.py --changed --strict`: fix every ERROR and every WARN the change added.

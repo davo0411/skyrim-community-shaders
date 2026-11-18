@@ -35,10 +35,10 @@ Which installed skill or tool the playbook calls, at which step, with which brie
 
 | Step | Tool | Use |
 |---|---|---|
-| 2 Capture before | `mcp__devbench-se__menu` (open the page), `mcp__devbench-se__capture` | Ground truth. Take it before judging anything. |
+| 2 Capture before | `mcp__devbench-se__input` (End key), `communityshaders_capture kind=renderdoc`, `mcp__renderdoc-mcp__*` | Ground truth, with the ImGui layer. `capture` and the screenshot feature exclude it; recipe in `in-game-capture.md`. |
 | 4 Mockup | `mcp__imgui__*` with `python tools/cs-theme-to-mockup.py <Theme>` | Real theme colours, rounding, spacing and font in the canvas. See the playbook, step 4. |
 | 6 Implement | `src/Menu/`, `src/Utils/UI.h` via `reuse-catalog.md` | Reuse before building. |
-| 7 Verify | `./BuildDevFast.bat`, `python tools/cs-ui-lint.py --changed --strict`, `mcp__devbench-se__capture` | Compile, lint, capture the result. |
+| 7 Verify | `./BuildDevFast.bat`, `python tools/cs-ui-lint.py --changed --strict`, the RenderDoc capture route | Compile, lint, capture the result. |
 | 9 Strings | `python tools/extract-i18n.py --write`, `python tools/sort-i18n.py --write --prune-extra` | Keep `en.json` in sync. |
 
 The hook in `.claude/settings.json` runs `tools/cs-ui-lint.py --hook` after every edit to a UI file, so convention breaks surface while writing, not at the end.

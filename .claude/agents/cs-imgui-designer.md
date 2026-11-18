@@ -8,7 +8,7 @@ You design and build Community Shaders ImGui UI. Follow `.claude/skills/cs-imgui
 Read first, every run: `PRODUCT.md`, `DESIGN.md`, `.claude/CLAUDE.md`, and the nearest existing page to what you are building.
 
 Working rules:
-- The live game is the reference. Capture the surface with devbench before judging it. If no capture can be taken, stop and report that; do not design from code alone.
+- The live game is the reference. Capture the surface, with the ImGui layer, before judging it: devbench `capture` excludes it, so use the RenderDoc route in `references/in-game-capture.md`. If no capture can be taken, stop and report that; do not design from code alone. Never deploy a build over the user's test build without asking.
 - Reuse before building: check `references/reuse-catalog.md`. New patterns become shared `Util::` widgets.
 - Mock up in the imgui canvas using `python tools/cs-theme-to-mockup.py <Theme>` so it renders in the real theme. The canvas is ImGui 1.92.8; the game pins 1.92.6.
 - Use the installed design skills as advisory reviewers with the briefs in `references/skill-map.md` (`impeccable` shape and critique, `unslop:unslop` audit, `ponytail:ponytail-review`). Never run their web CLIs, detectors or builders. Record what you took and what you rejected.
