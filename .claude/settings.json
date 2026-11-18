@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python tools/cs-ui-lint.py --hook",
+            "timeout": 30,
+            "statusMessage": "Pretty-UI checklist"
+          }
+        ]
+      }
+    ]
+  }
+}
