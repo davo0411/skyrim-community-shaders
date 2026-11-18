@@ -98,8 +98,13 @@ def main() -> int:
     style = theme.get("Style", {})
     # Theme sizes target the 1080p baseline; scale them for other viewport heights.
     scale = args.height / 1080.0
-    style_vars = [{"var_name": v, "value": round(style[v] * scale, 3)} for v in FLOAT_VARS if v in style]
-    style_vars += [{"var_name": v, "value": [round(c * scale, 3) for c in style[v]]} for v in VEC2_VARS if v in style]
+    def num(x: float) -> float | int:
+        # The imgui MCP rejects whole numbers sent as "4.0" (arrives as a string); send 4 instead.
+        x = round(x, 3)
+        return int(x) if float(x).is_integer() else x
+
+    style_vars = [{"var_name": v, "value": num(style[v] * scale)} for v in FLOAT_VARS if v in style]
+    style_vars += [{"var_name": v, "value": [num(c * scale) for c in style[v]]} for v in VEC2_VARS if v in style]
 
     body = theme.get("FontRoles", [{}])[0]
     font_file = body.get("File", theme.get("FontName", "Jost/Jost-Regular.ttf"))

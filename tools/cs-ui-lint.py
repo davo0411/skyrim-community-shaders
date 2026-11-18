@@ -47,7 +47,7 @@ LINE_RULES = [
      "use MenuFonts::FontRoleGuard / ImFontGuard so the font always pops"),
     (WARN, "untranslated", re.compile(
         r'\bImGui::(Text|TextWrapped|TextDisabled|Button|SmallButton|Checkbox|SliderFloat|SliderInt|'
-        r'Selectable|CollapsingHeader|SeparatorText|MenuItem|BeginTabItem|TextLink)\s*\(\s*"(?!##)'),
+        r'Selectable|CollapsingHeader|SeparatorText|MenuItem|BeginTabItem|TextLink)\s*\(\s*"(?!##)(?!(?:%[-+# 0-9.]*[a-zA-Z]|\s)*")'),
      "user-visible literal not wrapped in T(...)"),
     (WARN, "tracked-caps", re.compile(r'"[^"\n]*\b[A-Z]{3,} [A-Z]{3,}\b[^"\n]*"'),
      "all-caps label; use sentence case (tracked capitals read as template UI)"),
