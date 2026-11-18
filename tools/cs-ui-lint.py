@@ -6,9 +6,11 @@ flags things a regex can see: convention breaks, leftover placeholders, and
 common slop tells. Visual judgement stays in the checklist.
 
 Usage:
-  python tools/cs-ui-lint.py [paths...]     lint files or folders
-  python tools/cs-ui-lint.py --changed      lint UI files changed vs HEAD (plus untracked)
-  python tools/cs-ui-lint.py --hook         Claude Code PostToolUse hook: reads JSON on stdin
+  python tools/cs-ui-lint.py [paths...]     lint files or folders (every line: a baseline)
+  python tools/cs-ui-lint.py --changed      UI files changed vs HEAD (plus untracked); reports only
+                                            findings on lines the change added (--all-lines for all)
+  python tools/cs-ui-lint.py --hook         Claude Code PostToolUse hook: reads JSON on stdin;
+                                            same added-lines filter, so legacy code does not nag
 
 Exit codes: 0 clean, 1 warnings under --strict, 2 errors (or hook feedback to Claude).
 """
@@ -39,6 +41,10 @@ LINE_RULES = [
      "no TODO/FIXME placeholders in shipped code (CLAUDE.md)"),
     (WARN, "literal-colour", re.compile(r"\b(IM_COL32\s*\(|ImVec4\s*\(|ImVec4\s+\w+\s*\()"),
      "colour literal; take it from ThemeManager::Constants or the active theme"),
+    (WARN, "text-colored", re.compile(r"\bImGui::TextColored\s*\("),
+     "use Util::Text::Warning/Error/Success/Info/... or a Util::Colors role instead of TextColored"),
+    (WARN, "push-font", re.compile(r"\bImGui::PushFont\s*\("),
+     "use MenuFonts::FontRoleGuard / ImFontGuard so the font always pops"),
     (WARN, "untranslated", re.compile(
         r'\bImGui::(Text|TextWrapped|TextDisabled|Button|SmallButton|Checkbox|SliderFloat|SliderInt|'
         r'Selectable|CollapsingHeader|SeparatorText|MenuItem|BeginTabItem|TextLink)\s*\(\s*"(?!##)'),
@@ -88,6 +94,8 @@ def lint_file(path: Path) -> list[tuple[str, int, str, str, str]]:
         for sev, name, pat, msg in LINE_RULES:
             if name == "literal-colour" and literal_allowed(rel):
                 continue
+            if name == "push-font" and rel.startswith("src/Menu/Fonts"):
+                continue
             if pat.search(code):
                 findings.append((sev, rel, lineno, name, msg))
         if any(ord(ch) > 0xFFFF for ch in code):
@@ -95,14 +103,55 @@ def lint_file(path: Path) -> list[tuple[str, int, str, str, str]]:
                              "character above U+FFFF will not load in the game's font; use Tabler or plain text"))
 
     # Whole-file pairing checks.
-    pairs = [("BeginTable", "EndTable"), ("PushID", "PopID")]
-    for open_tok, close_tok in pairs:
-        n_open = len(re.findall(rf"\b(ImGui::)?{open_tok}\s*\(", text))
-        n_close = len(re.findall(rf"\b(ImGui::)?{close_tok}\s*\(", text))
+    for open_tok, close_tok, sev in PAIRS:
+        n_open, n_close = pair_counts(text, open_tok, close_tok)
         if n_open != n_close:
-            findings.append((ERROR, rel, 0, "pairing",
+            findings.append((sev, rel, 0, "pairing",
                              f"{open_tok} x{n_open} but {close_tok} x{n_close}; they must pair"))
     return findings
+
+
+PAIRS = [("BeginTable", "EndTable", ERROR), ("PushID", "PopID", WARN)]
+
+
+def pair_counts(text: str, open_tok: str, close_tok: str) -> tuple[int, int]:
+    return (len(re.findall(rf"\b(ImGui::)?{open_tok}\s*\(", text)),
+            len(re.findall(rf"\b(ImGui::)?{close_tok}\s*\(", text)))
+
+
+def git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+def changed_lines(rel: str) -> set[int] | None:
+    """Lines added or changed vs HEAD, or None when the file is new (every line counts)."""
+    if git("ls-files", "--error-unmatch", rel).returncode != 0:
+        return None
+    lines: set[int] = set()
+    for m in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", git("diff", "-U0", "HEAD", "--", rel).stdout, re.M):
+        start, count = int(m.group(1)), int(m.group(2) or 1)
+        lines.update(range(start, start + count))
+    return lines
+
+
+def only_new(findings: list[tuple[str, str, int, str, str]], rel: str) -> list[tuple[str, str, int, str, str]]:
+    """Keep findings the current change added: on changed lines, or a pairing the change broke."""
+    lines = changed_lines(rel)
+    if lines is None:
+        return findings
+    head = git("show", f"HEAD:{rel}").stdout
+    out = []
+    for f in findings:
+        _, _, line, name, msg = f
+        if name == "pairing":
+            open_tok = msg.split()[0]
+            close_tok = next(c for o, c, _ in PAIRS if o == open_tok)
+            if pair_counts(head, open_tok, close_tok)[0] == pair_counts(head, open_tok, close_tok)[1]:
+                out.append(f)
+        elif line in lines:
+            out.append(f)
+    return out
 
 
 def collect(paths: list[str]) -> list[Path]:
@@ -148,7 +197,7 @@ def main(argv: list[str]) -> int:
             return 0
         if not is_ui_file(rel) or not Path(file_path).is_file():
             return 0
-        findings = lint_file(Path(file_path))
+        findings = only_new(lint_file(Path(file_path)), rel)
         if not findings:
             return 0
         # Exit 2 sends stderr back to Claude as feedback, so every finding reaches the agent.
@@ -165,9 +214,12 @@ def main(argv: list[str]) -> int:
     else:
         files = collect([a for a in args if not a.startswith("--")] or list(UI_DIRS))
 
-    findings: list[tuple[str, int, str, str, str]] = []
+    findings: list[tuple[str, str, int, str, str]] = []
     for f in files:
-        findings += lint_file(f)
+        found = lint_file(f)
+        if "--changed" in args and "--all-lines" not in args:
+            found = only_new(found, f.relative_to(ROOT).as_posix())
+        findings += found
     report(findings)
 
     n_err = sum(1 for f in findings if f[0] == ERROR)

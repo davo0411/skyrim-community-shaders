@@ -116,6 +116,10 @@ Versioning (enforced by `tools/feature_version_audit.py`):
 - Colours drawn straight to an `ImDrawList` go through `ImGui::GetColorU32`, or they skip the menu fade.
 - Icons: use Tabler (`Icons::TI`) for UI. FA and Game-Icons are for game-world icons (places, creatures, lore), e.g. `LocationTypeIcons.h`. Glyphs above U+FFFF can't load.
 
+## UI design workflow
+
+Any new or changed in-game UI (a new feature, a new system such as the CS Editor, a menu page, overlay, notification or window) goes through the `cs-imgui-design` skill (`.claude/skills/cs-imgui-design/`). It reads `PRODUCT.md` and `DESIGN.md`, reuses the shared `Util::` widgets, mocks up in the imgui canvas using the real theme (`tools/cs-theme-to-mockup.py`), builds, captures in game with devbench, and passes the Pretty UI checklist. `tools/cs-ui-lint.py` runs after each UI edit (hook in `.claude/settings.json`) and flags convention breaks on the lines you changed; run it by hand with `python tools/cs-ui-lint.py --changed --strict`.
+
 ## Internationalization (i18n)
 
 All user-visible strings go through the translation system (`src/I18n/I18n.h`). Source of truth for English: `package/SKSE/Plugins/CommunityShaders/Translations/en.json`.

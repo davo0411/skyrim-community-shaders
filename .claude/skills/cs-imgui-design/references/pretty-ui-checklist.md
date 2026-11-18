@@ -1,77 +1,90 @@
 # Pretty UI checklist
 
-The gate every new or changed CS UI passes before it is reported as done. Two layers:
+The gate every new or changed CS UI passes before it is reported done. Three layers:
 
-1. **Automatic (code):** `tools/cs-ui-lint.py` runs as a Claude Code PostToolUse hook (`.claude/settings.json`) on every Edit or Write to a UI file. Any finding goes back to the agent as feedback. Run it by hand with `python tools/cs-ui-lint.py --changed --strict`.
-2. **Manual (eyes):** the items below, answered from the in-game capture, not from the code.
+1. **Automatic (code):** `tools/cs-ui-lint.py` runs as a PostToolUse hook (`.claude/settings.json`) on every edit to a UI file, and by hand with `python tools/cs-ui-lint.py --changed --strict`. Findings go back to the agent.
+2. **Scored review:** `critique-rubric.md` applied to the in-game capture, by this skill and, when installed, by a live `impeccable critique` call (`skill-map.md`).
+3. **Manual checklist:** the items below, answered from the capture, not from the code.
 
-Mark each item PASS, FAIL, or N/A with a reason. Every FAIL gets fixed or waived in writing. Put the table in the final report.
+Mark each item PASS, FAIL or N/A with a reason. Every FAIL is fixed or waived in writing (tier model: `audit-checklist.md` §C). Put the table in the report.
 
-## 1. Automatic checks (must be clean)
+## 1. Automatic (must be clean)
 
 - [ ] No `ImGui::Button`; buttons go through `Util::Button`. (ERROR)
-- [ ] No `TODO` or `FIXME` in shipped code. (ERROR)
-- [ ] No character above U+FFFF in UI strings. The game font cannot load it. (ERROR)
-- [ ] `BeginTable`/`EndTable` and `PushID`/`PopID` pair in each file. (ERROR)
+- [ ] No `TODO` or `FIXME`. (ERROR)
+- [ ] No character above U+FFFF in UI strings. (ERROR)
+- [ ] `BeginTable`/`EndTable` and `PushID`/`PopID` pair. (ERROR)
 - [ ] Every user-visible literal goes through `T()`. (WARN)
-- [ ] No colour literals outside `ThemeManager` and the icon/font files. (WARN)
-- [ ] No all-caps labels, middle-dot meta strings, or arrows glued to labels. (WARN)
-- [ ] No fixed pixel sizes in `ImVec2(...)` that should scale with the font. (WARN)
+- [ ] No colour literals outside `ThemeManager` and the icon and font files; no `ImGui::TextColored` with a literal. (WARN)
+- [ ] No all-caps labels, middle-dot meta strings, arrows glued to labels. (WARN)
+- [ ] No fixed pixel sizes that should scale. (WARN)
+- [ ] No `ImGui::PushFont` outside the font helpers. (WARN)
 
 Warnings on legacy code in a touched file count against the change only when the change adds them.
 
-## 2. Cohesion (does it belong with the rest of CS?)
+## 2. Scored review (from `critique-rubric.md`)
 
-- [ ] **Same family.** Spacing, rounding, border weight, and button shape match the nearest existing page or feature.
-- [ ] **One accent.** The accent colour marks the active or changed state, not decoration.
-- [ ] **Same vocabulary.** Labels and tooltips use the terms the menu already uses for the same settings.
-- [ ] **Same icon style.** Tabler icons for UI; no mixing with FA or Game-Icons outside world-style icons.
-- [ ] **Same motion.** Hover and open/close easing match the menu; nothing animates while idle.
+- [ ] Heuristics scored out of the applicable maximum; **no heuristic below 2**, total in the "good" band or better for new UI.
+- [ ] Cognitive load: at most 1 failed checklist item for a new view.
+- [ ] Pre-build critique axes (`design-principles.md` §14) all at 3 or above; the weakest axis named.
+- [ ] No open P0 or P1 findings.
 
-## 3. Hierarchy and layout
+## 3. Cohesion: does it belong in CS?
 
-- [ ] **One primary thing.** Each view has one element the eye lands on first.
-- [ ] **Scannable grouping.** Related settings are grouped with a header, separator, or indent. No flat wall of same-weight controls.
-- [ ] **Most-used first.** The settings people change most are at the top.
-- [ ] **Actions near their content.** Apply, reset, and per-setting buttons sit next to what they change.
-- [ ] **Empty, loading, and error states** exist and are designed, not left as blank panels.
+- [ ] **Same family.** Spacing, rounding, border weight and button shape match the nearest existing page; it reads as part of the same product with the name covered.
+- [ ] **Reuse.** Shared `Util::` widgets used; any new pattern became a shared widget, not inline code (`reuse-catalog.md`).
+- [ ] **One accent**, marking selection and the active state only.
+- [ ] **Same vocabulary.** Labels and tooltips reuse the menu's terms.
+- [ ] **Same icon style.** Tabler for UI.
+- [ ] **Same motion.** Rates and durations come from `DESIGN.md` §6; nothing animates at idle.
+- [ ] **Three themes.** Reads correctly in Default, Light and HighContrast (and DwemerBronze or DragonBlood for warm and display-font checks), or the report says which could not be checked.
 
-## 4. Type and copy
+## 4. Hierarchy and layout
 
-- [ ] **Labels are short** and in sentence case.
-- [ ] **Tooltips explain one thing** and say what the setting does to the image, not how the code works.
-- [ ] **No invented numbers or claims** in any text.
-- [ ] **Text fits** at the default font scale and at the largest scale the menu allows, without clipping or overlap.
-- [ ] **Units and ranges are shown** on sliders and inputs.
+- [ ] **One primary thing**; the squint test names primary, secondary and groups in order.
+- [ ] **Grouped by proximity**; no boxes compensating for weak spacing; no card in a card.
+- [ ] **Most used first**; advanced settings behind a disclosure.
+- [ ] **Actions beside their content.**
+- [ ] **First screen works without scrolling** at the default size.
+- [ ] **Rhythm**: tight inside groups, generous between, one gap per role.
 
-## 5. Colour and contrast
+## 5. Type and copy
 
-- [ ] **Readable text.** Body text and labels pass the contrast the menu already uses in its darkest and lightest themes.
-- [ ] **State is not colour alone.** Enabled, disabled, warning, and error also differ by label or icon.
-- [ ] **Disabled controls** look disabled and say why, where the reason is not obvious.
+- [ ] **Roles by meaning**, sentence case, no eyebrow.
+- [ ] **Labels short; tooltips say what it does to the image.**
+- [ ] **No invented numbers or claims.** Sample data labelled.
+- [ ] **Text fits** at the default and the largest font size and with 30 to 40% longer strings; wraps or truncates with a tooltip.
+- [ ] **Units and ranges** shown on sliders and inputs; one number format per column.
 
-## 6. States and feedback
+## 6. Colour and contrast
 
-- [ ] **Hover, focus, active, and disabled** each look distinct.
-- [ ] **Keyboard and gamepad** reach every control (menu nav is enabled).
-- [ ] **Changes are visible.** Saving, applying, or a failed setting gives feedback through the existing notification path.
-- [ ] **Destructive actions** ask first.
+- [ ] Body text at least 4.5:1, large text 3:1, in all three themes.
+- [ ] State is never colour alone; every state colour comes with text or an icon.
+- [ ] Disabled controls look disabled and say why where it is not obvious.
 
-## 7. Placement and scale
+## 7. States and feedback
 
-- [ ] **Clear of the game's HUD** at the smallest supported resolution.
-- [ ] **Overlays and notifications** do not block input or cover the crosshair or dialogue.
-- [ ] **Checked at 1080p and 1440p**, plus the user's UI scale if it differs.
-- [ ] **Stays on screen** when the window is resized or moved to an edge.
+- [ ] Hover, focus, active, disabled, loading, error, success each look distinct; CS states handled where they apply (unsaved, restart needed, overridden, locked, not loaded).
+- [ ] Empty state: what is empty, why it matters, the next action.
+- [ ] Keyboard and gamepad reach every control with visible focus.
+- [ ] Changes give feedback through the existing notification or banner path.
+- [ ] Destructive actions are undoable, or confirm by naming the action and object.
+- [ ] Inputs do not change size with state.
 
-## 8. Performance and polish
+## 8. Placement and scale
 
-- [ ] **No per-frame allocation** of strings or vectors in the draw path, unless the existing code already does it.
-- [ ] **No redundant redraws**: static content is not rebuilt every frame without a reason.
-- [ ] **Nothing pulses or loops** on screen when the user is idle.
+- [ ] Clear of the HUD, crosshair and dialogue; never blocks input it does not need.
+- [ ] Checked at 1080p and 1440p and the user's UI scale if different.
+- [ ] Stays on screen when resized or moved to an edge.
+
+## 9. Performance and polish
+
+- [ ] No per-frame string or vector allocation in the draw path unless existing code already does it.
+- [ ] No redundant rebuilds of static content every frame.
+- [ ] `./BuildDevFast.bat` clean for touched files; `en.json` regenerated; formatting run.
 
 ## Scoring
 
-- **All sections PASS:** ship.
-- **Any FAIL in sections 1, 3, or 6:** fix before reporting. These are the ones people feel first.
-- **FAIL only in 2, 4, 5, 7, or 8:** fix, or waive with a reason in the report.
+- **Every section PASS:** ship.
+- **Any FAIL in sections 1, 4 or 7, or an open P0 or P1:** fix before reporting.
+- **FAIL only in 2, 3, 5, 6, 8 or 9:** fix, or waive with a reason and the evidence.
