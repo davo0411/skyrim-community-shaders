@@ -49,7 +49,7 @@ namespace PBRWater
 	cbuffer PBRWaterData : register(b7)
 	{
 		float4 Cascade0[PBRW_CASCADES];  // x 1 / tile size (1/unit), yz tile coordinate of the reference camera (incl. half texel), w texel size (units)
-		float4 Cascade1[PBRW_CASCADES];  // x energy-weighted angular frequency (rad/s), y 1 / its Pierson-Moskowitz weight at unlimited fetch, z energy-weighted wavenumber (rad/unit), w unused
+		float4 Cascade1[PBRW_CASCADES];  // x energy-weighted angular frequency (rad/s), y 1 / its Pierson-Moskowitz weight at unlimited fetch, z energy-weighted wavenumber (rad/unit), w the band's slope variance
 		float4 Params0;                  // x FFT ocean active, y wind speed (m/s), z peak omega at unlimited fetch, w gravity (units/s^2)
 		float4 Params1;                  // xy wind direction, z displacement fade start, w displacement fade end (units)
 		float4 Params2;                  // x choppiness, y Water Effects' parallax off (Wave Height above 0), z displacement bound (units), w highest mip level
@@ -1558,11 +1558,23 @@ namespace PBRWater
 		float gate = ctx.train * (1.0 - smoothstep(0.0, ShoreTrainLanding, ctx.elevation));
 		[branch] if (gate > 0.0)
 		{
+			// The wavelength as ShoreWaveAt finds it: from the ray alone.
+			float omega = max(Shore4.x, 1e-3);
+			float k = omega * max(ctx.shore.slowness, 1e-6);
+			float fade = smoothstep(Math::PI, 0.5 * Math::PI, k * scale);
+			[branch] if (fade <= 0.0)
+			{
+				// Too short for the mesh or the pixel (distant water): nothing of the wave is drawn but its slope variance,
+				// taken from the sea's height shoaled to the depth here instead of the wave's own (no ShoreWaveAt).
+				float localDepth = max(ctx.depth * MetresPerUnit, 0.05);
+				float approx = min(ShoreDeepHeight(ctx) * ShoalingCoefficient(omega, localDepth), ShoreBreakerLimit * localDepth) * UnitsPerMetre;
+				float a = 0.5 * approx;
+				o.slopeVariance = gate * gate * 0.5 * a * a * k * k;
+				return o;
+			}
 			float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
 			float2 coast = CoastPoint(absXY, ctx.shore);
 			ShoreWave wave = ShoreWaveAt(absXY, coast, ctx, Shore2.x);
-			float k = Math::TAU / wave.wavelength;
-			float fade = smoothstep(Math::PI, 0.5 * Math::PI, k * scale);
 			float w = gate * fade;
 			float height = wave.height * UnitsPerMetre;
 			// A broken wave answers to the water it is in: in the inner surf its height saturates at 0.4 to 0.6 of the
@@ -2151,7 +2163,19 @@ namespace PBRWater
 				// cascade the context has turned off (the shore train's, the open sea's in a pond) costs no texture reads.
 				float2 gx = ddx_fine(uv.xy);
 				float2 gy = ddy_fine(uv.xy);
-				[branch] if (vertical > 0.0)
+				// A pixel whose footprint covers half the tile or more reads the cascade's top mips, its mean: no displacement,
+				// slope or foam of its own, only its slope variance, which the band's statistics give (Cascade1.w). Its reads
+				// are skipped there (the short cascades over most distant water), faded in over the footprint before.
+				float filtered = smoothstep(0.25, 0.5, sqrt(min(dot(gx, gx), dot(gy, gy))));
+				[branch] if (vertical > 0.0 && filtered >= 1.0)
+				{
+					sums.slopeVariance += Cascade1[c].w * vertical * vertical;
+					sums.foam += saturate(vertical / max(Tune2.x, 0.01)) * Tune1[c];
+					float seaShare = saturate(ctx.sea[c] / max(Tune2.x, 0.01));
+					sums.seaFoam += seaShare * Tune1[c];
+					sums.seaFoamWeight += seaShare;
+				}
+				else if (vertical > 0.0)
 				{
 					float4 d, g;
 					float2 m;
@@ -2179,16 +2203,18 @@ namespace PBRWater
 						[branch] if (FoamEnabled())
 							foam = OceanFoam.SampleGrad(OceanSampler, uv, gx, gy);
 					}
+					// Fading towards the mean: its share of the read, and the band's variance for the rest.
+					float kept = 1.0 - filtered;
 					float horizontal = vertical * steepnessScale;
-					AddCascade(sums, c, vertical, horizontal, d, g);
-					sums.foam += saturate(vertical / max(Tune2.x, 0.01)) * (foam + Tune1[c]);
+					AddCascade(sums, c, vertical * kept, horizontal * kept, d, g);
+					sums.foam += saturate(vertical / max(Tune2.x, 0.01)) * (foam * kept + Tune1[c]);
 					float seaShare = saturate(ctx.sea[c] / max(Tune2.x, 0.01));
-					sums.seaFoam += seaShare * (foam + Tune1[c]);
+					sums.seaFoam += seaShare * (foam * kept + Tune1[c]);
 					sums.seaFoamWeight += seaShare;
 					float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
 					float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
 					float minified = MinifiedShare(gx * texelsPerUV, gy * texelsPerUV);
-					sums.slopeVariance += variance * vertical * vertical * minified;
+					sums.slopeVariance += (variance * minified * kept + Cascade1[c].w * filtered) * vertical * vertical;
 				}
 			}
 		}

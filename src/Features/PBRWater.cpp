@@ -1999,7 +1999,8 @@ void PBRWater::UpdateFrameConstants()
 			const double halfTexel = 0.5 / size;
 			const auto& band = o.cascades[c];
 			d.Cascade0[c] = { static_cast<float>(1.0 / tile), static_cast<float>(u + halfTexel), static_cast<float>(v + halfTexel), static_cast<float>(tile / size) };
-			d.Cascade1[c] = { band.meanOmega, 1.0f / std::max(band.pmWeightOpenSea, 1e-4f), band.meanK / UnitsPerMetre, 0.0f };
+			// w: the band's slope variance, which a pixel covering most of a tile sees as roughness (EvaluateWavesFiltered).
+			d.Cascade1[c] = { band.meanOmega, 1.0f / std::max(band.pmWeightOpenSea, 1e-4f), band.meanK / UnitsPerMetre, band.meanSquareSlope };
 			// Height spread of the band (depth-limited breaking).
 			d.Cascade2[c] = { std::sqrt(std::max(band.variance, 0.0f)) * UnitsPerMetre, 0.0f, 0.0f, 0.0f };
 		}
