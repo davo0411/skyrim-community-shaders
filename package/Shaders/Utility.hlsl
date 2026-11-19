@@ -260,10 +260,6 @@ VS_OUTPUT main(VS_INPUT input)
 
 #	endif
 
-#	if defined(OFFSET_DEPTH)
-	vsout.PositionCS.z += 10.0;
-#	endif
-
 	return vsout;
 }
 #endif

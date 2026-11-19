@@ -46,13 +46,18 @@ public:
 	/** @brief Creates GPU resources including depth textures, blended depth buffers, and stencil states. */
 	virtual void SetupResources() override;
 
-	/** @brief Returns the terrain depth vertex shader, compiling on first use. */
-	ID3D11VertexShader* GetTerrainVertexShader();
-	/** @brief Returns the terrain depth-offset vertex shader, compiling on first use. */
-	ID3D11VertexShader* GetTerrainOffsetVertexShader();
+	/** @brief Returns the prepass pixel shader that writes terrain pushed back by a fixed linear depth, compiling on first use. Null if compilation failed. */
+	ID3D11PixelShader* GetOffsetDepthPixelShader();
 
-	ID3D11VertexShader* terrainVertexShader = nullptr;
-	ID3D11VertexShader* terrainOffsetVertexShader = nullptr;
+	ID3D11PixelShader* offsetDepthPixelShader = nullptr;
+	bool offsetDepthPixelShaderFailed = false;
+
+	/** @brief True for terrain close enough to get terrain blending; must give the same answer in the prepass and the main pass. */
+	bool IsNearTerrain(const RE::BSRenderPass* a_pass);
+	/** @brief Rebinds the pixel shader the game (or the shader cache) last set, after the offset depth shader replaced it. */
+	void RestoreGamePixelShader();
+	/** @brief Binds the prepass main-depth copy that landscape pixel shaders read as their blend mask (t55). */
+	void BindTerrainMask();
 
 	/** @brief Returns the depth blend compute shader, compiling on first use. */
 	ID3D11ComputeShader* GetDepthBlendShader();
