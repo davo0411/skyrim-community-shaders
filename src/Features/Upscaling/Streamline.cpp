@@ -158,7 +158,7 @@ void Streamline::LoadInterposer()
 	slSetD3DDevice = (PFun_slSetD3DDevice*)GetProcAddress(interposer, "slSetD3DDevice");
 
 	if (SL_FAILED(res, slInit(pref, sl::kSDKVersion))) {
-		logger::critical("[Streamline] Failed to initialize Streamline");
+		logger::critical("[Streamline] Failed to initialize Streamline: slInit returned {} ({})", magic_enum::enum_name(res), std::to_underlying(res));
 	} else {
 		initialized = true;
 		featureDLSS = false;
@@ -474,7 +474,7 @@ void Streamline::SetDLSSOptions(sl::ViewportHandle p_viewport, uint32_t width)
 		dlssOptions.ultraPerformancePreset = sl::DLSSPreset::ePresetL;
 	}
 
-	dlssOptions.preExposure = 1.0f;
+	dlssOptions.preExposure = globals::state->preExposure;
 	dlssOptions.sharpness = 0.0f;
 
 	if (SL_FAILED(result, slDLSSSetOptions(p_viewport, dlssOptions))) {

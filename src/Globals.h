@@ -16,6 +16,7 @@ struct LightLimitFix;
 struct LinearLighting;
 struct LODBlending;
 struct InteriorSun;
+struct PhysicalSky;
 struct ProceduralSun;
 struct RainRefraction;
 struct ScreenSpaceGI;
@@ -27,9 +28,11 @@ struct SubsurfaceScattering;
 struct TerrainBlending;
 struct TerrainHelper;
 struct TerrainShadows;
+struct TreeWind;
 struct UnifiedWater;
 struct PBRWater;
 struct VolumetricLighting;
+class ViewAtmosphere;
 struct WaterEffects;
 struct PerformanceOverlay;
 struct WetnessEffects;
@@ -44,6 +47,7 @@ struct PostProcessing;
 struct ScreenshotFeature;
 struct Skin;
 struct SceneManager;
+struct ProceduralAurora;
 
 class State;
 class Deferred;
@@ -53,6 +57,7 @@ class RenderDoc;
 class RemoteControl;
 class Menu;
 class SceneSettingsManager;
+class HiZPyramid;
 
 namespace SIE
 {
@@ -110,6 +115,7 @@ namespace globals
 		extern LinearLighting linearLighting;
 		extern LODBlending lodBlending;
 		extern InteriorSun interiorSun;
+		extern PhysicalSky physicalSky;
 		extern ProceduralSun proceduralSun;
 		extern RainRefraction rainRefraction;
 		extern ScreenSpaceGI screenSpaceGI;
@@ -121,9 +127,11 @@ namespace globals
 		extern TerrainBlending terrainBlending;
 		extern TerrainHelper terrainHelper;
 		extern TerrainShadows terrainShadows;
+		extern TreeWind treeWind;
 		extern UnifiedWater unifiedWater;
 		extern PBRWater pbrWater;
 		extern VolumetricLighting volumetricLighting;
+		extern ViewAtmosphere viewAtmosphere;
 		extern WaterEffects waterEffects;
 		extern PerformanceOverlay performanceOverlay;
 		extern WetnessEffects wetnessEffects;
@@ -142,6 +150,7 @@ namespace globals
 		extern Skin skin;
 		extern SceneManager sceneManager;
 		extern PostProcessing postProcessing;
+		extern ProceduralAurora proceduralAurora;
 
 	}
 
@@ -258,6 +267,7 @@ namespace globals
 	extern Menu* menu;
 	extern SIE::ShaderCache* shaderCache;
 	extern Profiler* profiler;
+	extern HiZPyramid* hiZPyramid;
 	extern SceneSettingsManager* sceneSettingsManager;
 
 	/** @brief Initializes core singletons (ShaderCache, State, Menu, Deferred). Called once at plugin load. */
