@@ -167,9 +167,13 @@ float SampleFoam(float2 q)
 
 	// Semi-Lagrangian: the water here came from upstream, and its foam with it. Up the beach there is none of this foam:
 	// the simulation carries its own.
-	float2 upstream = float2(p) - velocity * (dt / TexelSize);
-	float carried = any(upstream != float2(p)) ? SampleFoam(upstream) : LoadFoam(p).x;
-	float foam = ctx.elevation > 0.0 ? 0.0 : carried * exp(-dt / max(PBRWater::Tune5.w, 0.1));
+	float foam = 0.0;
+	[branch] if (ctx.elevation <= 0.0)
+	{
+		float2 upstream = float2(p) - velocity * (dt / TexelSize);
+		float carried = any(upstream != float2(p)) ? SampleFoam(upstream) : LoadFoam(p).x;
+		foam = carried * exp(-dt / max(PBRWater::Tune5.w, 0.1));
+	}
 
 	// The breakers make foam; what they leave behind is a share of it (Tune3.w).
 	foam = max(foam, source * PBRWater::Tune3.w);
