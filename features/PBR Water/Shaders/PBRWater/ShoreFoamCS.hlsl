@@ -103,7 +103,7 @@ float SampleFoam(float2 q)
 		return;
 	}
 	float3 positionWS = float3(absXY, level) - FrameBuffer::CameraPosAdjust.xyz;
-	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS));
+	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS), false);
 	float bed = max(ctx.elevation * PBRWater::MetresPerUnit, -SwashDepthCap);
 	float2 dir = ctx.shore.direction;
 	if (ctx.train <= 0.0 && ctx.beach <= 0.0) {

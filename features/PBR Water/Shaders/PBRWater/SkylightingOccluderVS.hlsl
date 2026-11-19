@@ -50,7 +50,7 @@ VS_OUTPUT main(uint id : SV_VertexID)
 	float3 absPos = float3(absXY, water ? level : Eye.z);
 	float3 positionWS = absPos - FrameBuffer::CameraPosAdjust.xyz;
 	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * PBRWater::LoadedGridFade(absXY) * FlowDamping(absXY);
-	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping);
+	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping, false);
 	PBRWater::WaveResult waves = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false);
 	float3 displacement = waves.displacement;
 	// Where the surf simulation is dry the geometry's surface lies on the bed: no water, nothing to occlude with.

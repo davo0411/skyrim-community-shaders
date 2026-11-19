@@ -498,7 +498,12 @@ namespace PBRWater
 		return smoothstep(2.0, 12.0, Params0.y) * dot(Params1.xy, direction);
 	}
 
-	WaveContext BuildWaveContext(float3 positionWS, float damping)
+	/**
+	 * Everything that makes the sea vary over the map, at undisplaced camera-relative `positionWS`.
+	 * @param withGradient also work out the terrain's gradient (WaveContext::terrainGrad: eight more loads), which only the
+	 *                     geometry's hold over the bed reads (DisplaceSurface)
+	 */
+	WaveContext BuildWaveContext(float3 positionWS, float damping, bool withGradient)
 	{
 		WaveContext ctx;
 		float3 absPos = positionWS + FrameBuffer::CameraPosAdjust.xyz;
@@ -517,7 +522,7 @@ namespace PBRWater
 		// The undisplaced surface point is the water plane: its own z is the water height.
 		float z;
 		float2 grad;
-		if (SampleTerrain(absPos.xy, true, z, grad)) {
+		if (SampleTerrain(absPos.xy, withGradient, z, grad)) {
 			ctx.elevation = z - absPos.z;
 			ctx.terrainGrad = grad;
 			ctx.hasTerrain = 1.0;
@@ -2558,7 +2563,7 @@ namespace PBRWater
 		SurfaceDisplacement o;
 		float damping = DisplacementFade(positionWS) * flowDamping;
 
-		WaveContext ctx = BuildWaveContext(positionWS, damping);
+		WaveContext ctx = BuildWaveContext(positionWS, damping, true);
 		ctx.flow = flowVelocity;
 		WaveResult now = EvaluateWaves(positionWS, ctx, spacing, motion);
 

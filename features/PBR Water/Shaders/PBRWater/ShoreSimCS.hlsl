@@ -39,7 +39,7 @@ RWTexture2D<float4> Wet : register(u0);
 		return;
 	}
 	float3 positionWS = float3(absXY, level) - FrameBuffer::CameraPosAdjust.xyz;
-	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS));
+	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS), false);
 
 	// The water surface here, for the lit objects (caustics, wetness): waves, surf, swash and ripples. Where the surf
 	// simulation is dry there is no water (the geometry's surface lies on the bed there).

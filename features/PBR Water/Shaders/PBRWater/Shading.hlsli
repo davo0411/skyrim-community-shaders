@@ -236,7 +236,7 @@ namespace PBRWater
 		[branch] if (FoamEnabled())
 			o.surfFoam = ShoreFoamAt(absXY);
 
-		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
+		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w, false);
 		ctx.flow = flowVelocity;
 		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam, footprint);
 		// Enable Foam off: no foam of any kind reaches the roughness or Water.hlsl's foam pass.

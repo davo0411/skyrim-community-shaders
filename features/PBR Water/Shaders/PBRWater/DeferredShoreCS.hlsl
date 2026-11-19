@@ -107,7 +107,7 @@ uint PackUnorm4(float4 v)
 	}
 	else footprint = length(displaced) * max(length(rayX - ray), length(rayY - ray)) / max(abs(ray.z), 0.02);
 
-	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(undisplaced, flowDamping);
+	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(undisplaced, flowDamping, false);
 	ctx.flow = flowVelocity;
 	PBRWater::ShoreTrain t = PBRWater::ShoreWaves(undisplaced, ctx, footprint, false, true);
 
