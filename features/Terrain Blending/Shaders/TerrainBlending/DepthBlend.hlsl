@@ -1,8 +1,7 @@
 RWTexture2D<float> BlendedDepthTexture : register(u0);
 RWTexture2D<unorm float> BlendedDepthTexture16 : register(u1);
 
-// Unmodified copy of the main depth, read by landscape passes as TerrainBlendingMaskTexture (t55).
-// Written here so no separate depth-to-depth CopyResource is needed.
+// Main depth as it left the prepass, read by landscape pixel shaders as TerrainBlendingMaskTexture
 RWTexture2D<float> MainDepthCopy : register(u2);
 
 Texture2D<unorm float> MainDepthTexture : register(t0);

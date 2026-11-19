@@ -1,13 +1,13 @@
-// Second z-prepass draw of nearby terrain, into the main depth buffer.
-// Pushes the terrain back by a fixed linear distance so that objects buried just under the
-// surface survive the prepass and get blended, while anything deeper is depth-culled as usual.
-// Only ever pushes depth further away, so SV_DepthGreaterEqual keeps early depth rejection.
+// Second prepass draw of nearby terrain, into the main depth buffer. Pushing the surface back a
+// fixed distance lets objects buried just under it survive the prepass so terrain can blend over
+// them, while anything deeper stays depth-culled. Depth only ever moves away from the camera,
+// so SV_DepthGreaterEqual keeps early depth rejection.
 
 #include "Common/SharedData.hlsli"
 
-// Must exceed the 10-unit blend range in Lighting.hlsl (blendFactorTerrain), with margin for
-// depth-buffer quantisation, so open terrain still resolves to a blend factor of exactly 1.
-static const float TerrainBlendDepthOffset = 20.0;
+// Larger than the 10 unit blend range in Lighting.hlsl, with headroom for depth quantisation,
+// so bare terrain still resolves to a blend factor of exactly 1
+static const float DepthOffset = 20.0;
 
 struct PS_INPUT
 {
@@ -17,7 +17,8 @@ struct PS_INPUT
 float main(PS_INPUT input) :
 	SV_DepthGreaterEqual
 {
-	float linearDepth = SharedData::GetScreenDepth(input.Position.z) + TerrainBlendDepthOffset;
+	// Inverse of SharedData::GetScreenDepth
+	float linearDepth = SharedData::GetScreenDepth(input.Position.z) + DepthOffset;
 	float offsetDepth = (SharedData::CameraData.x - SharedData::CameraData.w / linearDepth) / SharedData::CameraData.z;
 	return max(offsetDepth, input.Position.z);
 }

@@ -2026,8 +2026,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	[branch] if (SharedData::terrainBlendingSettings.Enabled)
 	{
 		const float visibleRawDepth = SharedData::DepthTexture.Load(int3(input.Position.xy, 0)).x;
-		// Depth increases with distance, so a pixel at or in front of the visible surface cannot be buried.
-		// Checking in raw depth skips the linearisations for the vast majority of object pixels.
+		// Only pixels behind the visible surface can be buried; comparing raw depth first skips the linearisation for the rest
 		[branch] if (input.Position.z > visibleRawDepth)
 		{
 			const float visibleDepth = SharedData::GetScreenDepth(visibleRawDepth);

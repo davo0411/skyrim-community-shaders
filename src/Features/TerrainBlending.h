@@ -46,18 +46,30 @@ public:
 	/** @brief Creates GPU resources including depth textures, blended depth buffers, and stencil states. */
 	virtual void SetupResources() override;
 
-	/** @brief Returns the prepass pixel shader that writes terrain pushed back by a fixed linear depth, compiling on first use. Null if compilation failed. */
+	/** Terrain whose bound comes within this distance of the camera is blended; the rest renders as vanilla. */
+	static constexpr float BlendDistance = 1024.0f;
+	/** Pixel shader slot of TerrainBlendingMaskTexture in TerrainBlending.hlsli. */
+	static constexpr UINT MaskTextureSlot = 55;
+	/** Pixel shader slot of the SharedData constant buffer, read by OffsetDepthPS.hlsl. */
+	static constexpr UINT SharedDataSlot = 5;
+
+	/**
+	 * @brief Returns the prepass pixel shader that pushes terrain depth back by a fixed linear distance.
+	 * @return The shader, compiled on first use, or nullptr if compilation failed.
+	 */
 	ID3D11PixelShader* GetOffsetDepthPixelShader();
 
 	ID3D11PixelShader* offsetDepthPixelShader = nullptr;
-	bool offsetDepthPixelShaderFailed = false;
 
-	/** @brief True for terrain close enough to get terrain blending; must give the same answer in the prepass and the main pass. */
-	bool IsNearTerrain(const RE::BSRenderPass* a_pass);
-	/** @brief Rebinds the pixel shader the game (or the shader cache) last set, after the offset depth shader replaced it. */
+	/**
+	 * @brief Whether a terrain pass is close enough to blend.
+	 * Depends only on the bound and the eye position captured before the prepass, so the
+	 * prepass and the main pass always agree on which terrain gets a terrain depth.
+	 */
+	bool IsNearTerrain(const RE::BSRenderPass* a_pass) const;
+
+	/** @brief Rebinds the pixel shader the game or the shader cache last set, replacing the offset depth shader. */
 	void RestoreGamePixelShader();
-	/** @brief Binds the prepass main-depth copy that landscape pixel shaders read as their blend mask (t55). */
-	void BindTerrainMask();
 
 	/** @brief Returns the depth blend compute shader, compiling on first use. */
 	ID3D11ComputeShader* GetDepthBlendShader();
@@ -96,7 +108,7 @@ public:
 
 	Texture2D* blendedDepthTexture = nullptr;
 	Texture2D* blendedDepthTexture16 = nullptr;
-	/** @brief Copy of the prepass main depth, sampled by landscape passes while they rewrite the live depth buffer. */
+	/** Prepass main depth, read by landscape pixel shaders as their blend mask while the live depth buffer changes under them. */
 	Texture2D* mainDepthCopy = nullptr;
 
 	RE::BSGraphics::DepthStencilData terrainDepth;
