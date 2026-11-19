@@ -91,6 +91,8 @@ public:
 
 	Texture2D* blendedDepthTexture = nullptr;
 	Texture2D* blendedDepthTexture16 = nullptr;
+	/** @brief Copy of the prepass main depth, sampled by landscape passes while they rewrite the live depth buffer. */
+	Texture2D* mainDepthCopy = nullptr;
 
 	RE::BSGraphics::DepthStencilData terrainDepth;
 

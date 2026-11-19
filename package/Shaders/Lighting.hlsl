@@ -2026,16 +2026,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	[branch] if (SharedData::terrainBlendingSettings.Enabled)
 	{
 		const float visibleRawDepth = SharedData::DepthTexture.Load(int3(input.Position.xy, 0)).x;
-		const float visibleDepth = SharedData::GetScreenDepth(visibleRawDepth);
-		// Objects read the 16-bit blended depth, so ignore differences within one of its steps.
-		const float depthStep = SharedData::GetScreenDepth(visibleRawDepth + 1.0 / 65535.0) - visibleDepth;
-		const float buriedDepth = max(viewPosition.z - visibleDepth - depthStep, 0.0);
-		[branch] if (buriedDepth > 0.0)
+		// Depth increases with distance, so a pixel at or in front of the visible surface cannot be buried.
+		// Checking in raw depth skips the linearisations for the vast majority of object pixels.
+		[branch] if (input.Position.z > visibleRawDepth)
 		{
-			// A downward normal passes through zero halfway, so fall back to up there instead of normalizing it
-			const float3 blendedNormal = lerp(worldNormal, float3(0, 0, 1), saturate(buriedDepth / 10.0));
-			worldNormal = dot(blendedNormal, blendedNormal) > 1e-6 ? normalize(blendedNormal) : float3(0, 0, 1);
-			localShadowPosition *= 1.0 - buriedDepth / viewPosition.z;
+			const float visibleDepth = SharedData::GetScreenDepth(visibleRawDepth);
+			// Objects read the 16-bit blended depth, so ignore differences within one of its steps.
+			const float depthStep = SharedData::GetScreenDepth(visibleRawDepth + 1.0 / 65535.0) - visibleDepth;
+			const float buriedDepth = max(viewPosition.z - visibleDepth - depthStep, 0.0);
+			[branch] if (buriedDepth > 0.0)
+			{
+				// A downward normal passes through zero halfway, so fall back to up there instead of normalizing it
+				const float3 blendedNormal = lerp(worldNormal, float3(0, 0, 1), saturate(buriedDepth / 10.0));
+				worldNormal = dot(blendedNormal, blendedNormal) > 1e-6 ? normalize(blendedNormal) : float3(0, 0, 1);
+				localShadowPosition *= 1.0 - buriedDepth / viewPosition.z;
+			}
 		}
 	}
 #	endif

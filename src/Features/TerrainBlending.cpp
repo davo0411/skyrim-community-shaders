@@ -111,6 +111,14 @@ void TerrainBlending::SetupResources()
 		blendedDepthTexture16->CreateSRV(srvDesc);
 		blendedDepthTexture16->CreateUAV(uavDesc);
 
+		texDesc.Format = DXGI_FORMAT_R32_FLOAT;
+		srvDesc.Format = texDesc.Format;
+		uavDesc.Format = texDesc.Format;
+
+		mainDepthCopy = new Texture2D(texDesc, "TerrainBlending::MainDepthCopy");
+		mainDepthCopy->CreateSRV(srvDesc);
+		mainDepthCopy->CreateUAV(uavDesc);
+
 		auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		depthSRVBackup = mainDepth.depthSRV;
 
@@ -207,7 +215,7 @@ void TerrainBlending::BlendPrepassDepths()
 		ID3D11ShaderResourceView* views[2] = { depthSRVBackup, terrainDepth.depthSRV };
 		context->CSSetShaderResources(0, ARRAYSIZE(views), views);
 
-		ID3D11UnorderedAccessView* uavs[2] = { blendedDepthTexture->uav.get(), blendedDepthTexture16->uav.get() };
+		ID3D11UnorderedAccessView* uavs[3] = { blendedDepthTexture->uav.get(), blendedDepthTexture16->uav.get(), mainDepthCopy->uav.get() };
 		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
 		context->CSSetShader(GetDepthBlendShader(), nullptr, 0);
@@ -220,7 +228,7 @@ void TerrainBlending::BlendPrepassDepths()
 	ID3D11ShaderResourceView* views[2] = { nullptr, nullptr };
 	context->CSSetShaderResources(0, ARRAYSIZE(views), views);
 
-	ID3D11UnorderedAccessView* uavs[2] = { nullptr, nullptr };
+	ID3D11UnorderedAccessView* uavs[3] = { nullptr, nullptr, nullptr };
 	context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
 	ID3D11ComputeShader* shader = nullptr;
@@ -228,13 +236,6 @@ void TerrainBlending::BlendPrepassDepths()
 
 	auto stateUpdateFlags = globals::game::stateUpdateFlags;
 	stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
-
-	auto renderer = globals::game::renderer;
-	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
-
-	globals::profiler->BeginPass("TerrainBlending::CopyDepth");
-	context->CopyResource(terrainDepth.texture, mainDepth.texture);
-	globals::profiler->EndPass();
 
 	if (globals::state->frameAnnotations)
 		globals::state->EndPerfEvent();
@@ -288,6 +289,7 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 		if (singleton.renderTerrainDepth) {
 			singleton.renderTerrainDepth = false;
 			singleton.ResetTerrainDepth();
+			globals::profiler->EndPass();
 		}
 
 		singleton.BlendPrepassDepths();
@@ -321,17 +323,19 @@ void TerrainBlending::Hooks::BSBatchRenderer__RenderPassImmediately::thunk(RE::B
 				}
 			}
 
+			// One profiler pass spans each contiguous run of terrain draws instead of one timer per draw.
 			if (singleton.renderTerrainDepth != inTerrain) {
-				if (!inTerrain)
+				if (inTerrain) {
+					globals::profiler->BeginPass("TerrainBlending::TerrainDepth");
+				} else {
 					singleton.ResetTerrainDepth();
+					globals::profiler->EndPass();
+				}
 				singleton.renderTerrainDepth = inTerrain;
 			}
 
-			if (inTerrain) {
-				globals::profiler->BeginPass("TerrainBlending::TerrainDepth");
+			if (inTerrain)
 				func(a_pass, a_technique, a_alphaTest, a_renderFlags);  // Run terrain twice
-				globals::profiler->EndPass();
-			}
 		} else if (globals::state->inWorld) {
 			if (auto shaderProperty = a_pass->shaderProperty) {
 				if (a_pass->shader->shaderType.get() == RE::BSShader::Type::Lighting) {
@@ -377,7 +381,8 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 	auto shadowState = globals::game::shadowState;
 	auto stateUpdateFlags = globals::game::stateUpdateFlags;
 
-	context->PSSetShaderResources(55, 1, &terrainDepth.depthSRV);
+	ID3D11ShaderResourceView* mainDepthCopySRV = mainDepthCopy->srv.get();
+	context->PSSetShaderResources(55, 1, &mainDepthCopySRV);
 
 	const uint64_t terrainPassCount = static_cast<uint64_t>(terrainRenderPasses.size());
 	const uint64_t noBlendPassCount = static_cast<uint64_t>(renderPasses.size());
