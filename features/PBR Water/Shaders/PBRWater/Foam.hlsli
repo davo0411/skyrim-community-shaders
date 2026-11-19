@@ -14,7 +14,7 @@
 // the breakers', the shore's) is one coverage drawn through here, so all of it has the same bubbles, edge and translucency.
 // ============================================================================
 
-// The shore foam's anti-tiling is Terrain Variation's (it defines TERRAIN_VARIATION for the water shaders when it is
+// The foam pattern's anti-tiling is Terrain Variation's (it defines TERRAIN_VARIATION for the water shaders when it is
 // installed); without it the foam is read plainly.
 #if defined(TERRAIN_VARIATION)
 #	include "TerrainVariation/TerrainVariation.hlsli"

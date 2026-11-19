@@ -21,9 +21,8 @@
 //   Sun       : the waves shade themselves from the sun: each point marches towards it through a heightfield of the
 //               displaced surface around the eye (PBRWater::UpdateSunMap). The water it crosses hides the sun's glint
 //               and attenuates the light reaching the foam and the water below; the crest glow reads its thickness.
-//   Wind      : micro-roughness from the local wind (Cox & Munk 1954): gusts sweep across the water as
-//               darker, rougher patches (cat's paws), the lee of the upwind shore lies glassy and rain
-//               roughens the surface.
+//   Wind      : micro-roughness from the local wind (Cox & Munk 1954): the lee of the upwind shore lies
+//               glassy and rain roughens the surface.
 //   Foam      : a coverage made where the waves break (PBRWater.hlsli) drawn with the baked foam texture
 //               (PBRWater/Foam.hlsli).
 // ============================================================================
@@ -112,13 +111,13 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Wind speed (m/s) just above the water, with the gust factor `gust` there (WindGust). Close to the upwind shore
-	 * (short fetch) the water lies in the lee, where the wind has not yet reached the surface.
+	 * Wind speed (m/s) just above the water. Close to the upwind shore (short fetch) the water lies in the lee, where the
+	 * wind has not yet reached the surface.
 	 */
-	float LocalWindSpeed(float gust, float fetchMetres)
+	float LocalWindSpeed(float fetchMetres)
 	{
 		float shelter = sqrt(saturate(fetchMetres / 150.0));
-		return Params0.y * gust * lerp(0.25, 1.0, shelter);
+		return Params0.y * lerp(0.25, 1.0, shelter);
 	}
 
 	/// Mean square slope of the ripples too small for the waves and normal maps: the capillary share of the
@@ -132,42 +131,6 @@ namespace PBRWater
 	float RainMeanSquareSlope()
 	{
 		return 0.015 * saturate(Surface0.w);
-	}
-
-	/**
-	 * Windrows: Langmuir circulation sweeps whatever floats into lines along the wind, spaced at about
-	 * twice the dominant wavelength (Craik & Leibovich 1976). Returns 0..1 how close `absXY` is to a line;
-	 * the lines meander and break up along their length. In light winds they collect natural surface films,
-	 * which damp the capillary ripples into glassy slicks.
-	 */
-	float WindrowPattern(float2 absXY, float peakOmega)
-	{
-		if (Surface1.x <= 0.0 || Params0.y < 1.5)
-			return 0.0;
-		float wavelength = Math::TAU * Gravity() / max(peakOmega * peakOmega, 1e-4);
-		float spacing = max(2.0 * wavelength, 3.0 * UnitsPerMetre);
-		float2 along = Params1.xy;
-		float2 across = float2(-along.y, along.x);
-		// Rows drift slowly downwind with the surface water.
-		float v = (dot(absXY, along) - ClarityTime() * 0.15 * UnitsPerMetre) / (spacing * 6.0);
-		float u = dot(absXY, across) / spacing;
-		u += (ValueNoise(float2(v * 2.0, u * 0.3)) - 0.5) * 0.8;
-		float row = 1.0 - abs(frac(u) * 2.0 - 1.0);
-		row *= row;
-		row *= row;
-		row *= row;
-		float breakup = smoothstep(0.3, 0.8, ValueNoise(float2(floor(u) * 7.31, v * 3.0)));
-		return row * breakup;
-	}
-
-	/// Slicks: in light winds (~2-7 m/s) the windrows (WindrowPattern) hold surface films that damp the ripples (0..1).
-	float WindrowSlick(float2 absXY, float peakOmega)
-	{
-		float slick = 0.0;
-		// The pattern only where the wind can hold a slick.
-		[branch] if (Params0.y > 1.5 && Params0.y < 7.0 && Surface1.x > 0.0)
-			slick = WindrowPattern(absXY, peakOmega) * saturate((Params0.y - 1.5) / 2.0) * saturate((7.0 - Params0.y) / 3.0) * saturate(Surface1.x);
-		return slick;
 	}
 
 	/// Angular radius of the sun disc (rad).
@@ -258,12 +221,11 @@ namespace PBRWater
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
 	 * @param waveParam  xyz undisplaced camera-relative position, w flow damping
 	 * @param flowVelocity the river current here (units/s, interpolated from the vertices; FlowVelocity)
-	 * @param gust       wind gust factor (WindGust, interpolated from the vertices)
 	 * @param detailNormal vanilla normal-map normal (z up)
 	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
 	 *                       blended amplitude
 	 */
-	SurfaceShading ShadeSurface(float4 waveParam, float2 flowVelocity, float gust, float3 detailNormal, float detailVariance)
+	SurfaceShading ShadeSurface(float4 waveParam, float2 flowVelocity, float3 detailNormal, float detailVariance)
 	{
 		SurfaceShading o;
 
@@ -286,15 +248,14 @@ namespace PBRWater
 			waves.sheetFoam = 0.0;
 		}
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
-		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
-		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
-		// River currents and rain ripple it whatever the wind.
+		float wind = LocalWindSpeed(ctx.fetchMetres);
+		// The vanilla normal maps are the wind's ripples: calm water turns glassy, wind ripples it. River currents and
+		// rain ripple it whatever the wind.
 		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
-		float slick = WindrowSlick(absXY, ctx.peakOmega);
 		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
 		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
 		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
-		float detailScale = max(windDetail * (1.0 - 0.6 * slick), max(flow, Surface0.w));
+		float detailScale = max(windDetail, max(flow, Surface0.w));
 		// A breaker's face drawn up to plunge is stretched glassy: the wind's ripples on it are pulled out along the face.
 		detailScale *= 1.0 - 0.5 * waves.clearFace;
 
@@ -328,7 +289,7 @@ namespace PBRWater
 		//  - detail maps: Toksvig (2005) from the shortening of their mip-filtered normals (Water.hlsl).
 		// All of it comes from filtered textures, none from screen derivatives: those are shared by 2x2 pixel quads
 		// and turned the roughness into blocks (the ripples are magnified, never sub-pixel, so they need no term).
-		float windVariance = 0.5 * (WindMeanSquareSlope(wind) * (1.0 - 0.8 * slick) + RainMeanSquareSlope());
+		float windVariance = 0.5 * (WindMeanSquareSlope(wind) + RainMeanSquareSlope());
 		float mapVariance = detailVariance * detailScale * detailScale;
 		// Foam Roughness from all the foam, as Water.hlsl gathers it (there gated by flatness), faded with distance like it.
 		float shoreCover = saturate(max(max(waves.shoreFoam * waves.bore, o.surfFoam), waves.sheetFoam * waves.surf) * Foam1.z);

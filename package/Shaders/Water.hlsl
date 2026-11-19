@@ -179,7 +179,7 @@ struct VS_OUTPUT
 
 #	if defined(PBR_WATER) && !defined(STENCIL)
 	float4 WaveParam : TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
-	float2 SurfaceNoise : TEXCOORD10;  // x sediment patches (TurbidityPatches), y wind gust factor (WindGust)
+	float2 SurfaceNoise : TEXCOORD10;  // x sediment patches (TurbidityPatches), y unused
 	float3 Barycentric : TEXCOORD11;
 	float2 FlowVelocity : TEXCOORD13;  // the river current (units/s, PBRWater::FlowVelocity), 0 on still water
 #	endif
@@ -1606,7 +1606,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal = waterData.normal;
 
 #			if defined(PBR_WATER)
-	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.FlowVelocity, input.SurfaceNoise.y, normal, waterData.detailVariance);
+	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.FlowVelocity, normal, waterData.detailVariance);
 	normal = pbrSurface.normal;
 	// A curling lip can turn its far side to the camera (seen from behind the wave, or where the lip passes through the
 	// water behind it). Shaded about a normal facing away, its reflection, sun and foam lighting turned odd along the crest:

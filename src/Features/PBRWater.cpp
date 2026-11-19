@@ -34,9 +34,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		Choppiness,
 		DirectionalSpread,
 		FetchScale,
-		Gusts,
-		GustSize,
-		WindStreaks,
 		ShoreShortestPeriod,
 		ShoreLongestPeriod,
 		ShoreTrainCycles,
@@ -156,9 +153,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		Choppiness,
 		DirectionalSpread,
 		FetchScale,
-		Gusts,
-		GustSize,
-		WindStreaks,
 		ShoreShortestPeriod,
 		ShoreLongestPeriod,
 		ShoreTrainCycles,
@@ -360,9 +354,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.Choppiness, 0.0f, 10.0f, d.Choppiness);
 	clamp(s.DirectionalSpread, 0.0f, 1.0f, d.DirectionalSpread);
 	clamp(s.FetchScale, 1.0f, 1000.0f, d.FetchScale);
-	clamp(s.Gusts, 0.0f, 1.0f, d.Gusts);
-	clamp(s.GustSize, 1.0f, 10000.0f, d.GustSize);
-	clamp(s.WindStreaks, 0.0f, 1.0f, d.WindStreaks);
 	clamp(s.ShoreShortestPeriod, 0.5f, 60.0f, d.ShoreShortestPeriod);
 	clamp(s.ShoreLongestPeriod, 0.5f, 120.0f, d.ShoreLongestPeriod);
 	clamp(s.ShoreTrainCycles, 1.0f, 64.0f, d.ShoreTrainCycles);
@@ -636,14 +627,6 @@ void PBRWater::DrawSettings()
 			T(TKEY("swell_period_tooltip"), "Time between swell crests. Longer periods mean longer waves. Default 10 s."));
 		Util::SliderFloatTip(T(TKEY("swell_direction"), "Swell Direction"), &s.SwellDirection, -180.0f, 180.0f, "%.0f deg",
 			T(TKEY("swell_direction_tooltip"), "Direction the swell travels, relative to the wind. Swell crossing the wind sea gives the most natural, irregular water. Default 35 degrees."));
-
-		ImGui::SeparatorText(T(TKEY("wind_on_water"), "Wind on the Water"));
-		Util::SliderFloatTip(T(TKEY("gusts"), "Gust Strength"), &s.Gusts, 0.0f, 1.0f, "%.2f",
-			T(TKEY("gusts_tooltip"), "How strongly gusts vary the wind over the water: darker, rougher patches sweep across it. 0 is a steady wind. Default 0.6."));
-		Util::SliderFloatTip(T(TKEY("gust_size"), "Gust Size"), &s.GustSize, 10.0f, 200.0f, "%.0f m",
-			T(TKEY("gust_size_tooltip"), "Width of a gust patch. Default 40 m."));
-		Util::SliderFloatTip(T(TKEY("wind_streaks"), "Wind Streaks"), &s.WindStreaks, 0.0f, 1.0f, "%.2f",
-			T(TKEY("wind_streaks_tooltip"), "Windrows: in light wind, lines of surface film along the wind calm the ripples into glassy slicks. 0 turns them off. Default 1."));
 
 		if (ImGui::CollapsingHeader(T(TKEY("advanced"), "Advanced"))) {
 			Util::SliderFloatTip(T(TKEY("swell_peakedness"), "Swell Peakedness"), &s.SwellPeakedness, 1.0f, 20.0f, "%.1f",
@@ -2110,22 +2093,22 @@ void PBRWater::UpdateFrameConstants()
 	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), (snap && snap->ocean) ? snap->ocean->significantHeight : 0.0f };
 
 	// Wind and rain on the surface.
-	d.Surface0 = { settings.WindRoughness, settings.Gusts, settings.GustSize * UnitsPerMetre, rainIntensity.load(std::memory_order_acquire) };
+	d.Surface0 = { settings.WindRoughness, 0.0f, 0.0f, rainIntensity.load(std::memory_order_acquire) };
 	{
-		// The surface noise bake around the camera (UpdateSurfaceNoise): four texels across a cell of the noise's finest
-		// octave (the gusts' second, half their size; the sediment patches' third, a quarter of theirs), between 0.5 m and
-		// 16 m. 128^2 texels cost what as many vertices did, and cover the tessellated water (640 m at the defaults). In
-		// whole texels, so the samples stay put as the camera moves.
-		const float finest = std::min(settings.GustSize / 2.03f, settings.TurbidityPatchSize / 4.12f) * UnitsPerMetre;
+		// The surface noise bake around the camera (UpdateSurfaceNoise): four texels across a cell of the sediment patches'
+		// finest octave (their third, a quarter of their size), between 0.5 m and 16 m. 128^2 texels cost what as many
+		// vertices did, and cover the tessellated water (640 m at the defaults). In whole texels, so the samples stay put as
+		// the camera moves. Only the sediment is in it: without Water Clarity nothing is baked (Noise0.z = 0).
+		const float finest = settings.TurbidityPatchSize / 4.12f * UnitsPerMetre;
 		const float texel = std::clamp(finest / 4.0f, 0.5f * UnitsPerMetre, 16.0f * UnitsPerMetre);
 		const auto& cameraPos = globals::game::frameBufferCached.GetCameraPosAdjust();
 		const float half = 0.5f * static_cast<float>(SurfaceNoiseSize);
 		const float originX = (std::floor(cameraPos.x / texel) - half) * texel;
 		const float originY = (std::floor(cameraPos.y / texel) - half) * texel;
 		// w is set once this frame's bake has run.
-		d.Noise0 = { originX, originY, 1.0f / (texel * static_cast<float>(SurfaceNoiseSize)), 0.0f };
+		d.Noise0 = { originX, originY, settings.EnableClarity ? 1.0f / (texel * static_cast<float>(SurfaceNoiseSize)) : 0.0f, 0.0f };
 	}
-	d.Surface1 = { settings.WindStreaks, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, 0.0f };
+	d.Surface1 = { 0.0f, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, 0.0f };
 
 	// The artistic scales the shaders read (PBRWater.hlsli Tune0..Tune5).
 	d.Tune0 = { settings.RiverCurrentSpeed, settings.FlowPeriodScale, settings.FlowPeriodMin, settings.FlowPeriodMax };

@@ -65,9 +65,6 @@ struct PBRWater : Feature
 		float Choppiness = 1.0f;       ///< horizontal displacement scale; 1 = linear wave theory
 		float DirectionalSpread = 0.6f;
 		float FetchScale = 15.0f;  ///< Skyrim's distances are compressed: upwind open water counts this many times over
-		float Gusts = 0.6f;        ///< how strongly gusts vary the wind over the water
-		float GustSize = 40.0f;    ///< metres
-		float WindStreaks = 1.0f;  ///< windrows: slicks in light wind
 
 		// Shore
 		bool EnableShoreWaves = true;      ///< waves shoal, break and run up beaches

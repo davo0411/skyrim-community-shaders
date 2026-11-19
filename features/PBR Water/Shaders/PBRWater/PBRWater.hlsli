@@ -72,8 +72,8 @@ namespace PBRWater
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
-		float4 Surface0;                 // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
-		float4 Surface1;                 // x wind slick strength, y sediment on (Enable Water Clarity), z fetch scale, w unused
+		float4 Surface0;                 // x wind roughness scale, yz unused, w rain intensity (0..1)
+		float4 Surface1;                 // x unused, y sediment on (Enable Water Clarity), z fetch scale, w unused
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
@@ -110,7 +110,7 @@ namespace PBRWater
 	Texture2D<float4> ShoreField1 : register(t90);                     // xy grad tau (s/m, seaward; up the beach: the waterline's), z beach slope (tan) at the waterline, w exposure to the swell
 	Texture2D<float4> ShoreFieldPrevious : register(t92);              // ShoreField0 of the field being replaced (Shore0.y < 1)
 	Texture2D<float2> ShoreRoomTexture : register(t94);                // x 0..1 room for the shore wave train: the width of the water against the wavelength, y the depth a wave's crest answers to (m; ShoreCrestDepth)
-	Texture2D<float2> SurfaceNoiseTexture : register(t96);             // x TurbidityPatches, y WindGust around the camera (SurfaceNoiseCS)
+	Texture2D<float2> SurfaceNoiseTexture : register(t96);             // x TurbidityPatches around the camera (SurfaceNoiseCS), y unused
 	Texture2D<float4> ShoreFoamTexture : register(t97);                // SwashOutCS: x the foam the surf left on the water, y the surf simulation's surface (units above the still water; the bed where dry), z its depth (units), w its foam
 	SamplerState LinearClampSampler : register(s14);
 	SamplerState OceanSampler : register(s15);  // anisotropic, wrap
@@ -2171,27 +2171,10 @@ namespace PBRWater
 						d = OceanDisplacement.SampleGrad(OceanSampler, uv, gx, gy);
 						g = OceanDerivatives.SampleGrad(OceanSampler, uv, gx, gy);
 						m = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
-						// The breakers' white water is drawn with this foam (BreakerFoamDrawn), thickened until whole stretches
-						// of the tile pass: there its repeats showed along every beach. In the shore train's water it is read with
-						// Terrain Variation's two-tap stochastic lattice instead, when it is installed (a random offset per cell a
-						// tile across), the blend's contrast kept (variance-preserving about no foam). The sea's foam and the
-						// breakers' share this one read: read apart, the surf showed two different laces over each other.
-						[branch] if (!FoamEnabled())
-						{
-						}
-						else
-#if defined(TERRAIN_VARIATION)
-						[branch] if (ctx.train > 0.0)
-						{
-							float2 cell1, cell2;
-							StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv.xy, 1.0, 0.0, cell1, cell2);
-							float a = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset1, c), gx, gy);
-							float b = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset2, c), gx, gy);
-							float w = taps.tap1Weight;
-							foam = lerp(b, a, w) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5));
-						}
-						else
-#endif
+						// The breakers' white water is drawn with this foam (BreakerFoamDrawn): one read for the sea's foam and the
+						// breakers', the same everywhere. (Read through a stochastic lattice in the shore train's water only, the foam
+						// there had another look from the open sea's, with a seam where the train began.)
+						[branch] if (FoamEnabled())
 							foam = OceanFoam.SampleGrad(OceanSampler, uv, gx, gy);
 					}
 					float horizontal = vertical * steepnessScale;
@@ -2219,14 +2202,13 @@ namespace PBRWater
 		SeaFloorHold(sums, ctx, train);
 		o = FinishWaves(sums, o);
 		// A shore wave steepening before it breaks whitecaps as the open sea does: the sea's own foam test (OceanAssembleCS:
-		// foam where bias - Jacobian passes the threshold) on the whole surface, its cascades and the shore wave together.
-		// The sea's foam is accumulated in its cascades' tiles, which the shore wave is no part of, so this is the test's
-		// coverage now, drawn with the sea's foam below. Only in the shore train's water, where the cascades' own foam does
-		// not see the train's crests; off a plunger's clear face, and given over to the breaker's own white water once the
-		// jet lands.
-		float jacobian = (1.0 + sums.dxdx) * (1.0 + sums.dydy) - sums.dxdy * sums.dxdy;
+		// foam where bias - Jacobian passes the threshold) on the shore wave's own compression, which the cascades' foam does
+		// not see. Only the shore wave's: tested on the whole surface (cascades and train together) wherever the train
+		// reached, the sea's own crests foamed a second time across all the shallow water, a second whitecap unlike the open
+		// sea's. Off a plunger's clear face, and given over to the breaker's own white water once the jet lands.
+		float jacobian = (1.0 + train.compression.x) * (1.0 + train.compression.y) - train.compression.z * train.compression.z;
 		float biased = max(Foam1.x - jacobian, 0.0);
-		float crestFoam = saturate((biased - Foam1.y) / 0.3) * ctx.train * (1.0 - o.clearFace) * (1.0 - o.bore);
+		float crestFoam = saturate((biased - Foam1.y) / 0.3) * (1.0 - o.clearFace) * (1.0 - o.bore);
 		// A face about to plunge is clear water: the sea's foam is drawn off it (ShoreClearFace). What the surf left on the
 		// water stays: it lies on the surface and rides up the face (cleared too, it left a bare band ahead of every plunger).
 		float clear = 1.0 - o.clearFace;
@@ -2246,8 +2228,8 @@ namespace PBRWater
 	}
 
 	// ------------------------------------------------------------------------
-	// Low-frequency surface noise. Drifting sediment plumes and wind gusts are tens of metres across: the vertices
-	// evaluate them (WaterVertex) and the pixels interpolate, which saves their noise octaves on every pixel.
+	// Low-frequency surface noise. Drifting sediment plumes are tens of metres across: the vertices evaluate them
+	// (WaterVertex) and the pixels interpolate, which saves their noise octaves on every pixel.
 	// ------------------------------------------------------------------------
 	float ClarityTime() { return Optics0.z; }
 
@@ -2262,33 +2244,22 @@ namespace PBRWater
 		return smoothstep(0.3, 0.72, Fbm(q + warp * 1.4));
 	}
 
-	/// Gusts: patches of stronger and weaker wind carried downwind at the wind speed, stretched along the wind.
-	/// Returns the factor on the wind speed.
-	float WindGust(float2 absXY)
-	{
-		float U = Params0.y;
-		float2 along = Params1.xy;
-		float2 across = float2(-along.y, along.x);
-		float scale = max(Surface0.z, 100.0);
-		float t = ClarityTime();
-		float2 q = float2(dot(absXY, along) / (scale * 1.8), dot(absXY, across) / scale);
-		q.x -= t * U * UnitsPerMetre / (scale * 1.8);
-		float gusts = smoothstep(0.25, 0.75, Fbm2(q + float2(t * 0.01, 3.7)));
-		return lerp(1.0, 0.35 + 1.3 * gusts, saturate(Surface0.y));
-	}
-
 	/**
-	 * The low-frequency surface noise at absolute `absXY`: x TurbidityPatches, y WindGust. Around the camera it is read
+	 * The low-frequency surface noise at absolute `absXY`: x TurbidityPatches, y unused (1). Around the camera it is read
 	 * from this frame's bake (SurfaceNoiseCS: the noise once per texel instead of once per vertex, which with tessellation
-	 * is every generated vertex in every pass); beyond it, and until the bake is ready, it is evaluated here.
+	 * is every generated vertex in every pass); beyond it, and until the bake is ready, it is evaluated here. Without
+	 * Water Clarity nothing reads the sediment: no noise at all.
 	 */
 	float2 SurfaceNoise(float2 absXY)
 	{
-		float2 noise;
-		float2 uv = (absXY - Noise0.xy) * Noise0.z;
-		[branch] if (Noise0.w > 0.5 && all(uv > 0.002) && all(uv < 0.998))
-			noise = SurfaceNoiseTexture.SampleLevel(LinearClampSampler, uv, 0);
-		else noise = float2(TurbidityPatches(absXY), WindGust(absXY));
+		float2 noise = float2(0.0, 1.0);
+		[branch] if (ClarityEnabled())
+		{
+			float2 uv = (absXY - Noise0.xy) * Noise0.z;
+			[branch] if (Noise0.w > 0.5 && all(uv > 0.002) && all(uv < 0.998))
+				noise.x = SurfaceNoiseTexture.SampleLevel(LinearClampSampler, uv, 0).x;
+			else noise.x = TurbidityPatches(absXY);
+		}
 		return noise;
 	}
 
