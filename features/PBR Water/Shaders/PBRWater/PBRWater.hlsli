@@ -72,7 +72,7 @@ namespace PBRWater
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
-		float4 Surface0;                 // x wind roughness scale, yz unused, w rain intensity (0..1)
+		float4 Surface0;                 // x wind roughness scale, y adaptive tessellation's error tolerance (pixels; 0 off), z its largest coarsening, w rain intensity (0..1)
 		float4 Surface1;                 // x unused, y sediment on (Enable Water Clarity), z fetch scale, w vanilla normal maps skipped under the FFT waves
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
@@ -1276,11 +1276,65 @@ namespace PBRWater
 	bool RippleUV(float2 absXY, float2 origin, out float2 uv);
 
 	/**
+	 * Motion-adaptive tessellation: how many times coarser than `base` (units) the open water's mesh may be at absolute
+	 * `absXY`, from the geometric error the waves leave between its vertices. Screen-space error rather than distance alone
+	 * (the adaptive tessellation of Filmic Worlds' compute tessellation posts): a triangle leg h across a wave of amplitude
+	 * a and wavenumber k misses it by about a (k h)^2 / 8 (the chord's sag), and by all of a once the vertex filter drops
+	 * the wave (k h past pi / 2). Every band the base spacing resolves (the four cascades, at the fetch-limited height they
+	 * have here, and the shore train) must stay within the tolerance (Surface0.y pixels, split between the five so the sum
+	 * of their squares does): calm water, lakes and ponds take large triangles, a storm keeps the fine mesh. Bands the base
+	 * spacing already filters out set nothing: their detail is in the shading either way. Uses the position and the frame
+	 * only, like TessellationSpacing.
+	 * @param size        the screen target's spacing here (units)
+	 * @param shoreWeight 0..1 the shore field's weight here (the train's waves)
+	 */
+	float AdaptiveCoarsening(float2 absXY, float distance, float base, float size, float shoreWeight)
+	{
+		float coarsen = 1.0;
+		[branch] if (Surface0.y > 0.0 && Surface0.z > 1.0)
+		{
+			static const float Share = 0.4472136;  // 1 / sqrt(5): four cascades and the train
+			float tolerance = size * Surface0.y / max(Tess0.y, 1.0) * Share;
+			float fade = DisplacementDistanceFade(distance);
+			// Vertical and choppy horizontal displacement together, at the band's amplitude (sqrt(2) its height std).
+			float reach = 1.41421356 * sqrt(1.0 + Params2.x * Params2.x) * fade;
+			float spacing = base * Surface0.z;
+			[branch] if (OceanActive() && reach > 0.0)
+			{
+				// The fetch-limited sea here, as BuildWaveContext weights the cascades (FetchWeight), without the depth.
+				float fetchMetres = SampleFetchMetres(absXY);
+				float peak = FetchPeakOmega(fetchMetres);
+				float gain = FetchEnergyGain(fetchMetres);
+				[unroll] for (uint c = 0; c < PBRW_CASCADES; c++)
+				{
+					float r = peak / Cascade1[c].x;
+					float r2 = r * r;
+					float a = Cascade2[c].x * saturate(exp(-1.25 * r2 * r2) * Cascade1[c].y) * gain * reach;
+					float k = Cascade1[c].z;
+					if (a > tolerance && k * base < Math::PI)
+						spacing = min(spacing, min(sqrt(8.0 * tolerance / a), 0.5 * Math::PI) / k);
+				}
+			}
+			float omega = Shore4.x;
+			float train = 0.5 * ShoreHeightRatio * sqrt(Shore1.z * Shore1.z + Shore1.w * Shore1.w) * shoreWeight * fade;
+			[branch] if (train > tolerance && omega > 1e-3)
+			{
+				float k = omega * omega / Gravity();
+				if (k * base < Math::PI)
+					spacing = min(spacing, min(sqrt(8.0 * tolerance / train), 0.5 * Math::PI) / k);
+			}
+			coarsen = clamp(spacing / max(base, 1e-3), 1.0, Surface0.z);
+		}
+		return coarsen;
+	}
+
+	/**
 	 * World spacing (units) the tessellated mesh has at camera-relative `positionWS`: the rule the bisection tessellator
 	 * splits by (BisectionCS), the waves' vertex filter and the curl share. The target size (Tess0.y) on screen at this
 	 * distance, twice it on open water and once in the shore band and the ripple grid, divided by the curl detail where
-	 * breakers curl, wider at grazing angles (TessellationGrazingScale), never finer than 128 / Maximum Tessellation
-	 * (Tess0.z). A function of the position and the frame only, so the vertices and the pixels agree on it.
+	 * breakers curl, coarser on open water where the waves leave little to resolve (AdaptiveCoarsening), wider at grazing
+	 * angles (TessellationGrazingScale), never finer than 128 / Maximum Tessellation (Tess0.z). A function of the position
+	 * and the frame only, so the vertices and the pixels agree on it.
 	 */
 	float TessellationSpacing(float3 positionWS)
 	{
@@ -1294,9 +1348,11 @@ namespace PBRWater
 		if (RippleUV(absXY, Ripple0.xy, uv))
 			detail = smoothstep(0.0, 0.1, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
 		float curl = 0.0;
+		float shoreWeight = 0.0;
 		[branch] if (ShoreFieldUV(absXY, uv))
 		{
 			ShoreRay ray = SampleShore(absXY);
+			shoreWeight = ray.weight;
 			float shore = smoothstep(2.25 * Shore3.w, 1.75 * Shore3.w, ray.distance) * ray.weight;
 			detail = max(detail, shore);
 			[branch] if (Shore3.z > 0.0 && shore > 0.0)
@@ -1307,7 +1363,11 @@ namespace PBRWater
 				       smoothstep(TessellationCurlLipFar * Shore3.w, TessellationCurlLipNear * Shore3.w, size / curlDetail);
 			}
 		}
-		float spacing = size * (2.0 - detail) / (1.0 + (curlDetail - 1.0) * curl) * TessellationGrazingScale(positionWS);
+		float base = size * (2.0 - detail) / (1.0 + (curlDetail - 1.0) * curl);
+		// Only the open water coarsens: the shore band and the ripple grid keep the target.
+		[branch] if (detail < 1.0)
+			base *= lerp(AdaptiveCoarsening(absXY, distance, base, size, shoreWeight), 1.0, detail);
+		float spacing = base * TessellationGrazingScale(positionWS);
 		return max(spacing, 128.0 / max(Tess0.z, 1.0));
 	}
 

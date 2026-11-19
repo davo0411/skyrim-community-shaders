@@ -175,6 +175,9 @@ struct PBRWater : Feature
 		float DistantHalfRateDistance = 60.0f;   ///< metres: where the distant tiles start
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
 		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
+		bool AdaptiveTessellation = true;        ///< coarsen the open water's mesh where the waves leave little to resolve (PBRWater::AdaptiveCoarsening)
+		float TessellationErrorPixels = 0.5f;    ///< the height error the adaptive tessellation allows (pixels)
+		float TessellationMaxCoarsening = 8.0f;  ///< the most it coarsens the open water's mesh
 		float DisplacementFadeStart = 16384.0f;  ///< units
 		float DisplacementFadeEnd = 32768.0f;
 		int WaveResolution = 1;  ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512

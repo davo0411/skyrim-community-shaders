@@ -108,6 +108,9 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(
 		NLOHMANN_JSON_TO,
 		TessellationMaxFactor,
+		AdaptiveTessellation,
+		TessellationErrorPixels,
+		TessellationMaxCoarsening,
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
@@ -230,6 +233,9 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(
 		NLOHMANN_JSON_FROM_WITH_DEFAULT,
 		TessellationMaxFactor,
+		AdaptiveTessellation,
+		TessellationErrorPixels,
+		TessellationMaxCoarsening,
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
@@ -433,6 +439,8 @@ void PBRWater::SanitizeSettings()
 	clamp(s.MaxFloatingSize, 1.0f, 10000.0f, d.MaxFloatingSize);
 	clamp(s.FloatingResponse, 0.0f, 100.0f, d.FloatingResponse);
 	clamp(s.TessellationMaxFactor, 1.0f, 64.0f, d.TessellationMaxFactor);
+	clamp(s.TessellationErrorPixels, 0.05f, 100.0f, d.TessellationErrorPixels);
+	clamp(s.TessellationMaxCoarsening, 1.0f, 64.0f, d.TessellationMaxCoarsening);
 	clamp(s.DisplacementFadeStart, 0.0f, 10000000.0f, d.DisplacementFadeStart);
 	clamp(s.DisplacementFadeEnd, 1.0f, 10000000.0f, d.DisplacementFadeEnd);
 	clamp(s.SedimentColor.x, 0.0f, Huge, d.SedimentColor.x);
@@ -899,6 +907,15 @@ void PBRWater::DrawSettings()
 			T(TKEY("tessellation_triangle_size_tooltip"), "Smaller values give smoother waves at a higher GPU cost. Scales automatically with the render resolution. Default 10 px."));
 		Util::SliderFloatTip(T(TKEY("tessellation_max_factor"), "Maximum Tessellation"), &s.TessellationMaxFactor, 4.0f, 64.0f, "%.0f",
 			T(TKEY("tessellation_max_factor_tooltip"), "Caps how finely the water is subdivided near the camera: the smallest triangle is the water mesh's grid (about 1.8 m) divided by this. Higher values make waves smoother up close but cost more. Default 32."));
+		Util::CheckboxTip(T(TKEY("adaptive_tessellation"), "Adaptive Tessellation"), &s.AdaptiveTessellation,
+			T(TKEY("adaptive_tessellation_tooltip"), "Sizes the open water's triangles by how much the waves there move, not by distance alone: calm seas, lakes and ponds take large triangles, a storm keeps the fine mesh. The shore band and the ripples around the player always keep the target size."));
+		{
+			Util::DisableGuard disableAdaptive(!s.AdaptiveTessellation);
+			Util::SliderFloatTip(T(TKEY("tessellation_error_pixels"), "Allowed Wave Error"), &s.TessellationErrorPixels, 0.1f, 4.0f, "%.2f px",
+				T(TKEY("tessellation_error_pixels_tooltip"), "How far, in pixels, the mesh may miss the waves' true surface between its vertices before it subdivides. Higher is coarser and faster. Default 0.5 px."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("tessellation_max_coarsening"), "Largest Coarsening"), &s.TessellationMaxCoarsening, 1.0f, 16.0f, "%.0fx",
+				T(TKEY("tessellation_max_coarsening_tooltip"), "The most times larger than the target size the open water's triangles grow on calm water. Default 8x."));
+		}
 		Util::SliderFloatTip(T(TKEY("displacement_fade_start"), "Wave Fade Start"), &s.DisplacementFadeStart, 2000.0f, 60000.0f, "%.0f units",
 			T(TKEY("displacement_fade_start_tooltip"), "Distance at which the waves start to flatten towards the game's flat distant water (70 units are a metre). Default 16384 units."));
 		Util::SliderFloatTip(T(TKEY("displacement_fade_end"), "Wave Fade End"), &s.DisplacementFadeEnd, 4000.0f, 120000.0f, "%.0f units",
@@ -2122,7 +2139,9 @@ void PBRWater::UpdateFrameConstants()
 	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), (snap && snap->ocean) ? snap->ocean->significantHeight : 0.0f };
 
 	// Wind and rain on the surface.
-	d.Surface0 = { settings.WindRoughness, 0.0f, 0.0f, rainIntensity.load(std::memory_order_acquire) };
+	// yz: the adaptive tessellation (PBRWater::AdaptiveCoarsening).
+	d.Surface0 = { settings.WindRoughness, settings.AdaptiveTessellation ? settings.TessellationErrorPixels : 0.0f, settings.TessellationMaxCoarsening,
+		rainIntensity.load(std::memory_order_acquire) };
 	{
 		// The surface noise bake around the camera (UpdateSurfaceNoise): four texels across a cell of the sediment patches'
 		// finest octave (their third, a quarter of their size), between 0.5 m and 16 m. 128^2 texels cost what as many
