@@ -40,10 +40,19 @@ RWTexture2D<float4> Wet : register(u0);
 	}
 	float3 positionWS = float3(absXY, level) - FrameBuffer::CameraPosAdjust.xyz;
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, PBRWater::DisplacementFade(positionWS), false);
+	float limit = PBRWater::DisplacementLimit();
+
+	// Ground higher than any water can reach: no waves to evaluate (most of the field's land). Its surface is what the
+	// waves gave it: the surf simulation's dry sand on its grid, about the still water beyond.
+	if (ctx.hasTerrain > 0.5 && ctx.elevation > limit) {
+		float2 gridUV;
+		float dryLand = PBRWater::ShoreGridUV(absXY, gridUV) ? -limit : 0.0;
+		Wet[id.xy] = float4(clamp(max(wet.x - DryRate * Dt, dryLand), -limit, limit), 0.0, 0.0, dryLand);
+		return;
+	}
 
 	// The water surface here, for the lit objects (caustics, wetness): waves, surf, swash and ripples. Where the surf
 	// simulation is dry there is no water (the geometry's surface lies on the bed there).
-	float limit = PBRWater::DisplacementLimit();
 	PBRWater::WaveResult waves = PBRWater::EvaluateWaves(positionWS, ctx, TexelSize, false);
 	float surface = waves.displacement.z;
 	if (waves.sheetDepth <= PBRWater::SwashMinDepth)
