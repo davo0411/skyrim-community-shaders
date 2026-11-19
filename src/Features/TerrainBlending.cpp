@@ -313,7 +313,10 @@ void TerrainBlending::Hooks::BSBatchRenderer__RenderPassImmediately::thunk(RE::B
 			bool inTerrain = a_pass->shaderProperty && a_pass->shaderProperty->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape);
 
 			if (inTerrain && a_pass->geometry) {
-				if ((a_pass->geometry->worldBound.center.GetDistance(singleton.eyePosition) - a_pass->geometry->worldBound.radius) > 1024.0f) {
+				// (distance - radius) > 1024  <=>  distance > radius + 1024, compared squared to avoid a sqrt per pass
+				const auto& bound = a_pass->geometry->worldBound;
+				const float cullDistance = bound.radius + 1024.0f;
+				if (cullDistance > 0.0f && bound.center.GetSquaredDistance(singleton.eyePosition) > cullDistance * cullDistance) {
 					inTerrain = false;
 				}
 			}
