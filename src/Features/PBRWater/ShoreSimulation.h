@@ -18,9 +18,12 @@ class ShoreSimulation
 {
 public:
 	static constexpr uint32_t GridSize = 512;
-	/// The surf simulation and the surf's foam: a finer grid around the camera.
-	static constexpr uint32_t FoamGridSize = 1024;
-	static constexpr float FoamTexelSize = 12.0f;  ///< units (17 cm): 175 m across
+	/// The surf simulation and the surf's foam: a finer grid around the camera, 175 m across at every quality.
+	static constexpr float FoamExtent = 12288.0f;    ///< units
+	static constexpr uint32_t MaxFoamGridSize = 1024;  ///< High: 17 cm cells
+	/// Surf simulation quality: 0 Low (512 cells of 34 cm), 1 High (1024 cells of 17 cm). The step's time scales with the
+	/// cell, so Low runs half the steps on a quarter of the cells.
+	static constexpr uint32_t QualityCount = 2;
 
 	struct Settings
 	{
@@ -31,6 +34,16 @@ public:
 	void SetupResources();
 	void ClearShaderCache();
 	void Reset();
+
+	/**
+	 * @brief Render thread: the surf simulation's resolution (QualityCount). A change recreates its grids, which start
+	 * over at rest.
+	 */
+	void SetQuality(uint32_t quality);
+	/** @brief Cells across the surf simulation's grid at the current quality. */
+	uint32_t GetFoamGridSize() const { return foamGridSize; }
+	/** @brief Its cell size (units). */
+	float GetFoamTexelSize() const { return FoamExtent / static_cast<float>(foamGridSize); }
 
 	/**
 	 * @brief Render thread: moves the wet level to the camera and updates it. PBR Water's constants (b7), frame constants
@@ -56,9 +69,9 @@ public:
 
 	/** @brief x the surf's foam, y the surf simulation's surface (units above the still water), z its depth (units), w its foam. */
 	ID3D11ShaderResourceView* GetFoamSRV() const { return foamReady ? foam[foamCurrent]->srv.get() : nullptr; }
-	float GetFoamOriginX() const { return static_cast<float>(foamOriginX) * FoamTexelSize; }
-	float GetFoamOriginY() const { return static_cast<float>(foamOriginY) * FoamTexelSize; }
-	float GetFoamExtent() const { return FoamTexelSize * FoamGridSize; }
+	float GetFoamOriginX() const { return static_cast<float>(foamOriginX) * GetFoamTexelSize(); }
+	float GetFoamOriginY() const { return static_cast<float>(foamOriginY) * GetFoamTexelSize(); }
+	float GetFoamExtent() const { return FoamExtent; }
 	bool IsFoamReady() const { return foamReady && foamHasOrigin; }
 	/**
 	 * @brief Where the breakers throw spray this frame (ShoreFoamCS), at the drawn surface over each texel: x a plunging
@@ -109,8 +122,14 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> stepCS;  ///< SwashStepCS: one step over the whole grid
 	winrt::com_ptr<ID3D11ComputeShader> outCS;
 
+	uint32_t foamGridSize = MaxFoamGridSize / 2;  ///< cells across the surf's grids (SetQuality)
+	/** @brief Render thread: (re)creates the surf's grids at foamGridSize. */
+	void CreateFoamResources();
+
 	/// The steps after a frame's first run only where water can move (SwashTilesCS): the tiles, listed for DispatchIndirect.
-	static constexpr uint32_t TileCount = FoamGridSize / 8;
+	/// Sized for the finest grid; a coarser one uses the first TileCount() rows and columns.
+	static constexpr uint32_t MaxTileCount = MaxFoamGridSize / 8;
+	uint32_t TileCount() const { return foamGridSize / 8; }
 	struct alignas(16) TilesCB
 	{
 		uint32_t gridSize;

@@ -40,17 +40,42 @@ void ShoreSimulation::SetupResources()
 {
 	wet[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet0");
 	wet[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet1");
-	foam[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam0", FoamGridSize);
-	foam[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam1", FoamGridSize);
-	stage = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashStage", FoamGridSize);
-	prep = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashPrep", FoamGridSize);
-	surf = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Surf", FoamGridSize);
-	surfMoved = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SurfMoved", FoamGridSize);
-	spraySource = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SpraySource", FoamGridSize);
+	CreateFoamResources();
 	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::SwashCB");
 	SetupTileResources();
 	ClearShaderCache();
 	Reset();
+}
+
+void ShoreSimulation::CreateFoamResources()
+{
+	foam[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam0", foamGridSize);
+	foam[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam1", foamGridSize);
+	stage = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashStage", foamGridSize);
+	prep = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashPrep", foamGridSize);
+	surf = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Surf", foamGridSize);
+	surfMoved = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SurfMoved", foamGridSize);
+	spraySource = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SpraySource", foamGridSize);
+}
+
+void ShoreSimulation::SetQuality(uint32_t quality)
+{
+	const uint32_t size = quality >= 1 ? MaxFoamGridSize : MaxFoamGridSize / 2;
+	if (size == foamGridSize)
+		return;
+	foamGridSize = size;
+	if (!foam[0])
+		return;  // SetupResources creates them at this size
+	CreateFoamResources();
+	foamReady = foamCS && stepCS && outCS && foam[0] && foam[1] && stage && prep && surf && surfMoved && spraySource && simCB;
+	// The grids start over at rest, at the new resolution.
+	foamHasOrigin = false;
+	const float dry[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	auto context = globals::d3d::context;
+	for (auto* texture : { foam[0].get(), foam[1].get(), surf.get(), surfMoved.get() }) {
+		if (texture)
+			context->ClearUnorderedAccessViewFloat(texture->uav.get(), dry);
+	}
 }
 
 void ShoreSimulation::ClearShaderCache()
@@ -77,8 +102,8 @@ void ShoreSimulation::SetupTileResources()
 	auto device = globals::d3d::device;
 
 	D3D11_TEXTURE2D_DESC desc{};
-	desc.Width = TileCount;
-	desc.Height = TileCount;
+	desc.Width = MaxTileCount;
+	desc.Height = MaxTileCount;
 	desc.MipLevels = 1;
 	desc.ArraySize = 1;
 	desc.Format = DXGI_FORMAT_R32_UINT;
@@ -97,7 +122,7 @@ void ShoreSimulation::SetupTileResources()
 	busyTiles->CreateUAV(uavDesc);
 
 	D3D11_BUFFER_DESC listDesc{};
-	listDesc.ByteWidth = TileCount * TileCount * sizeof(uint32_t);
+	listDesc.ByteWidth = MaxTileCount * MaxTileCount * sizeof(uint32_t);
 	listDesc.Usage = D3D11_USAGE_DEFAULT;
 	listDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 	listDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
@@ -108,14 +133,14 @@ void ShoreSimulation::SetupTileResources()
 	D3D11_SHADER_RESOURCE_VIEW_DESC listSrv{};
 	listSrv.Format = DXGI_FORMAT_UNKNOWN;
 	listSrv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-	listSrv.Buffer.NumElements = TileCount * TileCount;
+	listSrv.Buffer.NumElements = MaxTileCount * MaxTileCount;
 	if (FAILED(device->CreateShaderResourceView(tileList.get(), &listSrv, tileListSRV.put())))
 		return;
 	Util::SetResourceName(tileListSRV.get(), "PBRWater::SwashTileList SRV");
 	D3D11_UNORDERED_ACCESS_VIEW_DESC listUav{};
 	listUav.Format = DXGI_FORMAT_UNKNOWN;
 	listUav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-	listUav.Buffer.NumElements = TileCount * TileCount;
+	listUav.Buffer.NumElements = MaxTileCount * MaxTileCount;
 	listUav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_APPEND;
 	if (FAILED(device->CreateUnorderedAccessView(tileList.get(), &listUav, tileListUAV.put())))
 		return;
@@ -143,8 +168,8 @@ bool ShoreSimulation::ListActiveTiles(uint32_t steps)
 	PBRWaterProfiling::Scope pass("PBRWater::SwashTiles");
 
 	TilesCB cb{};
-	cb.gridSize = FoamGridSize;
-	cb.tileCount = TileCount;
+	cb.gridSize = foamGridSize;
+	cb.tileCount = TileCount();
 	// Water moves a cell a step at most: the frame's remaining steps cannot carry it further than this from a busy tile.
 	cb.radius = static_cast<int32_t>((steps - 1 + 7) / 8);
 	tilesCB->Update(cb);
@@ -161,7 +186,7 @@ bool ShoreSimulation::ListActiveTiles(uint32_t steps)
 		context->CSSetShader(tilesMarkCS.get(), nullptr, 0);
 		context->CSSetShaderResources(0, 2, srvs);
 		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-		context->Dispatch(FoamGridSize / 8, FoamGridSize / 8, 1);
+		context->Dispatch(foamGridSize / 8, foamGridSize / 8, 1);
 		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 		context->CSSetShaderResources(0, 2, nullSrvs);
 	}
@@ -172,7 +197,7 @@ bool ShoreSimulation::ListActiveTiles(uint32_t steps)
 		context->CSSetShader(tilesListCS.get(), nullptr, 0);
 		context->CSSetShaderResources(0, 1, &srv);
 		context->CSSetUnorderedAccessViews(0, 1, &uav, &reset);
-		context->Dispatch((TileCount + 7) / 8, (TileCount + 7) / 8, 1);
+		context->Dispatch((TileCount() + 7) / 8, (TileCount() + 7) / 8, 1);
 		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 		context->CSSetShaderResources(0, 1, nullSrvs);
 	}
@@ -267,10 +292,12 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	auto context = globals::d3d::context;
 
 	// Whole texels, so scrolling never resamples (and never smears) the foam and the surf.
-	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / FoamTexelSize)) - FoamGridSize / 2;
-	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / FoamTexelSize)) - FoamGridSize / 2;
+	const float texelSize = GetFoamTexelSize();
+	const int64_t gridSize = foamGridSize;
+	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / texelSize)) - gridSize / 2;
+	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / texelSize)) - gridSize / 2;
 	bool fresh = false;
-	if (!foamHasOrigin || std::abs(newOriginX - foamOriginX) >= FoamGridSize || std::abs(newOriginY - foamOriginY) >= FoamGridSize) {
+	if (!foamHasOrigin || std::abs(newOriginX - foamOriginX) >= gridSize || std::abs(newOriginY - foamOriginY) >= gridSize) {
 		const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		for (auto& texture : foam)
 			context->ClearUnorderedAccessViewFloat(texture->uav.get(), clear);
@@ -285,17 +312,17 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	SimCB cb{};
 	cb.shiftX = static_cast<int32_t>(newOriginX - foamOriginX);
 	cb.shiftY = static_cast<int32_t>(newOriginY - foamOriginY);
-	cb.gridSize = FoamGridSize;
+	cb.gridSize = foamGridSize;
 	// A long hitch must not carry the foam off in one step.
 	cb.dt = std::clamp(dt, 0.0f, 0.1f);
-	cb.originX = static_cast<float>(newOriginX) * FoamTexelSize;
-	cb.originY = static_cast<float>(newOriginY) * FoamTexelSize;
-	cb.texelSize = FoamTexelSize;
+	cb.originX = static_cast<float>(newOriginX) * texelSize;
+	cb.originY = static_cast<float>(newOriginY) * texelSize;
+	cb.texelSize = texelSize;
 	simCB->Update(cb);
 
 	ID3D11Buffer* cbs[1] = { simCB->CB() };
 	context->CSSetConstantBuffers(0, 1, cbs);
-	const UINT groups = FoamGridSize / 8;
+	const UINT groups = foamGridSize / 8;
 	ID3D11ShaderResourceView* nullSrvs[3] = {};
 	ID3D11UnorderedAccessView* nullUavs[3] = {};
 
@@ -314,14 +341,15 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	// The surf simulation: explicit steps within the shallow water's stability limit. Each moves the face velocities under
 	// the old depths, then the depths with the new velocities, in one pass (SwashStepCS). The scheme is stable to a
 	// Courant number of about 0.7 in two dimensions: bores and uprushes of up to 9 m/s over a couple of metres of water
-	// (waves at 4.5 m/s), across 17 cm cells, stay under 0.35 at 4 ms, and no face moves water more than a quarter of a
+	// (waves at 4.5 m/s), across 17 cm cells, stay under 0.35 at 4 ms (34 cm cells at 8 ms alike), and no face moves water more than a quarter of a
 	// cell, which keeps every depth positive. The frame's first step takes the grid's scroll; a fresh grid starts with the
 	// water at rest. A step reads one of `surf` and `surfMoved` and writes the other; the first (over the whole grid) is
 	// copied back into `surf`, so cells the later steps' tiles leave out are this frame's in both, and the frame ends in
 	// `surf`.
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::SwashStep");
-		constexpr float maxStep = 0.004f;  // s
+		// The stability limit grows with the cell (the Courant number is speed x step / cell): 4 ms at 17 cm, 8 ms at 34.
+		const float maxStep = 0.004f * texelSize / 12.0f;  // s
 		// The surf keeps the waves' time down to 10 fps, as the foam does: held to fewer steps a frame it ran slower than
 		// the waves feeding it at low frame rates, and each uprush followed its bore late.
 		const float stepDt = std::clamp(dt, 0.0f, 0.1f);
@@ -336,7 +364,7 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 			if (i > 0)
 				stepCb.shiftX = stepCb.shiftY = 0;
 			else if (fresh)
-				stepCb.shiftX = static_cast<int32_t>(FoamGridSize) * 4;
+				stepCb.shiftX = static_cast<int32_t>(foamGridSize) * 4;
 			simCB->Update(stepCb);
 			Texture2D* from = (i % 2 == 0) ? surf.get() : surfMoved.get();
 			Texture2D* to = (i % 2 == 0) ? surfMoved.get() : surf.get();

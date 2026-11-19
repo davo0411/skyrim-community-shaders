@@ -116,6 +116,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
+		SurfQuality,
 		EnableOceanWaves,
 		EnableWaveShadows,
 		EnablePointLightSpecular,
@@ -235,6 +236,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
+		SurfQuality,
 		EnableOceanWaves,
 		EnableWaveShadows,
 		EnablePointLightSpecular,
@@ -438,6 +440,7 @@ void PBRWater::SanitizeSettings()
 	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
 	s.SprayQuality = std::clamp(s.SprayQuality, 0, 2);
+	s.SurfQuality = std::clamp(s.SurfQuality, 0, 2);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
 	s.DebugView = std::clamp(s.DebugView, 0, 14);
 }
@@ -644,6 +647,9 @@ void PBRWater::DrawSettings()
 		if (s.EnableShoreWaves) {
 			Util::CheckboxTip(T(TKEY("wet_shores"), "Wet Shores"), &s.WetShores,
 				T(TKEY("wet_shores_tooltip"), "Sand, rocks and anything else the swash reaches turn wet and slowly dry out (Wetness Effects)."));
+			const char* surfQualities[] = { T(TKEY("surf_quality_off"), "Off"), T(TKEY("surf_quality_low"), "Low (34 cm)"), T(TKEY("surf_quality_high"), "High (17 cm)") };
+			ImGui::Combo(T(TKEY("surf_quality"), "Surf Simulation"), &s.SurfQuality, surfQualities, IM_ARRAYSIZE(surfQualities));
+			Util::HoverTip(T(TKEY("surf_quality_tooltip"), "Simulates the broken waves' water through the inner surf and up the beach: bores, uprush, backwash and the foam they carry. Off: the shore waves end at the waterline, with no swash and no foam left on the water, and the whole simulation costs nothing. Low simulates a quarter of the cells at half the steps of High."));
 		}
 		Util::SliderFloatTip(T(TKEY("shore_train_cycles"), "Shore Wave Reach"), &s.ShoreTrainCycles, 2.0f, 16.0f, "%.1f waves",
 			T(TKEY("shore_train_cycles_tooltip"), "How many waves out from the shore the breaking wave train reaches. Beyond it the open sea's waves carry on. Default 7."));
@@ -1534,9 +1540,18 @@ void PBRWater::UpdateSwash(float dt)
 	ShoreSimulation::Settings swashSettings;
 	// The swash runs wherever the waves are still at full height (about a metre per texel at the default fade).
 	swashSettings.extent = std::clamp(2.0f * settings.DisplacementFadeStart, 8960.0f, 32768.0f);
-	// The swash first: the wet level follows it.
-	swash.UpdateFoam(cameraPos.x, cameraPos.y, dt);
-	d.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), swash.IsFoamReady() ? 1.0f : 0.0f };
+	// The surf simulation first: the wet level follows it. Off, the train runs to the waterline (Foam2.w = 0).
+	const bool surf = settings.SurfQuality > 0;
+	if (surf) {
+		swash.SetQuality(static_cast<uint32_t>(settings.SurfQuality - 1));
+		swash.UpdateFoam(cameraPos.x, cameraPos.y, dt);
+	} else {
+		PBRWaterProfiling::Skipped("PBRWater::ShoreFoam");
+		PBRWaterProfiling::Skipped("PBRWater::SwashStep");
+		PBRWaterProfiling::Skipped("PBRWater::SwashOut");
+	}
+	const bool foamReady = surf && swash.IsFoamReady();
+	d.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), foamReady ? 1.0f : 0.0f };
 	gpuBuffer->Update(d);
 	ID3D11ShaderResourceView* swashSrv = d.Foam2.w > 0.5f ? swash.GetFoamSRV() : nullptr;
 	context->CSSetShaderResources(WaterSRVBase + 17, 1, &swashSrv);
@@ -1553,7 +1568,7 @@ void PBRWater::UpdateSwash(float dt)
 
 	// The draws read the wet state the simulation just wrote.
 	frameData.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), swash.IsReady() ? 1.0f : 0.0f };
-	frameData.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), swash.IsFoamReady() ? 1.0f : 0.0f };
+	frameData.Foam2 = d.Foam2;
 
 	// Lit terrain and objects read the wet sand, the foam on it and the water height from it.
 	ID3D11ShaderResourceView* wetSrv = swash.IsReady() ? swash.GetWetSRV() : nullptr;
@@ -1617,8 +1632,8 @@ void PBRWater::UpdateSpray(float dt)
 		input.shorePrep = swash.GetPrepSRV();
 		input.shoreOriginX = swash.GetFoamOriginX();
 		input.shoreOriginY = swash.GetFoamOriginY();
-		input.shoreTexelSize = ShoreSimulation::FoamTexelSize;
-		input.shoreGridSize = ShoreSimulation::FoamGridSize;
+		input.shoreTexelSize = swash.GetFoamTexelSize();
+		input.shoreGridSize = swash.GetFoamGridSize();
 	}
 
 	SprayParticles::Settings spraySettings;
@@ -2006,7 +2021,7 @@ void PBRWater::UpdateFrameConstants()
 				d.Shore6 = fieldMap(*snap->shorePrevious);
 			// Last frame's wet and foam grids, until this frame's step (UpdateSwash) replaces them.
 			d.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), swash.IsReady() ? 1.0f : 0.0f };
-			d.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), swash.IsFoamReady() ? 1.0f : 0.0f };
+			d.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), settings.SurfQuality > 0 && swash.IsFoamReady() ? 1.0f : 0.0f };
 		}
 
 		// Fetch

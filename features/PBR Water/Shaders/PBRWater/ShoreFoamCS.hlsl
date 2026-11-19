@@ -134,17 +134,11 @@ float SampleFoam(float2 q)
 		// water drawn over this texel rests behind it by the crest's forward lean, x + D(x) = X, solved by fixed-point
 		// steps x = X - D(x). Read at the texel's own rest position instead, the simulation's bore ran a lean behind the
 		// train's crest, and the crest stepped back as the draws passed from the train to the simulation. (A breaker's lip
-		// is drawn over the simulation's water and stays out.)
+		// is drawn over the simulation's water and stays out.) One step: the lean changes slowly along the wave, and a
+		// second step only refined it, for another evaluation of the train per cell.
 		PBRWater::ShoreTrain drawnHere = train;
 		[branch] if (any(abs(train.displacement.xy) > 0.01 * PBRWater::UnitsPerMetre))
-		{
-			float2 lean = train.displacement.xy;
-			[unroll] for (uint i = 0; i < 2; i++)
-			{
-				drawnHere = PBRWater::ShoreWaves(float3(positionWS.xy - lean, positionWS.z), ctx, TexelSize, false, true);
-				lean = drawnHere.displacement.xy;
-			}
-		}
+			drawnHere = PBRWater::ShoreWaves(float3(positionWS.xy - train.displacement.xy, positionWS.z), ctx, TexelSize, false, true);
 		trainLevel = drawnHere.displacement.z * PBRWater::MetresPerUnit;
 		trainFoam = drawnHere.foam;
 		// The spray the breaker throws here: the splash-up where its jet has landed, before the bore forms (the aerated,

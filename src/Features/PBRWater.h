@@ -69,6 +69,7 @@ struct PBRWater : Feature
 		// Shore
 		bool EnableShoreWaves = true;      ///< waves shoal, break and run up beaches
 		bool WetShores = true;             ///< the swash wets the sand and whatever it reaches (Wetness Effects)
+		int SurfQuality = 1;               ///< the surf and swash simulation: 0 off (the train runs to the waterline), 1 low (34 cm cells), 2 high (17 cm)
 		float ShoreShortestPeriod = 2.5f;  ///< s: the periods within which the shore train follows the sea
 		float ShoreLongestPeriod = 3.5f;
 		float ShoreTrainCycles = 7.0f;    ///< how many waves out from the shore the train reaches

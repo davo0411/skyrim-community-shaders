@@ -1485,8 +1485,9 @@ namespace PBRWaterModel
 			return nullptr;
 
 		// Exposure to the swell: open water upwind along its direction. Shores facing away from it, and water behind
-		// islands and headlands, see little of it (diffraction fills in over a few wavelengths, hence the soft ramp from
-		// 100 m to 10 km of open water).
+		// islands, reefs and headlands, see little of it (diffraction fills in over a few wavelengths, hence the soft ramp
+		// from 300 m to 3 km of open water). Measured on the map's own distances, not the fetch's compressed ones (Fetch
+		// Scale): counted 15 times over, a 100 m gap between two islands let 70 % of the swell into the cove behind them.
 		field->exposure.assign(n, 0.0f);
 		for (uint32_t y = 0; y < h; ++y) {
 			for (uint32_t x = 0; x < w; ++x) {
@@ -1498,8 +1499,8 @@ namespace PBRWaterModel
 					continue;
 				const float wx = in.minX + static_cast<float>(x) * in.step;
 				const float wy = in.minY + static_cast<float>(y) * in.step;
-				const float fetchMetres = in.fetch && in.fetch->Valid() ? in.fetch->SampleMetres(wx, wy, in.swellDirection) * in.fetchScale : 5.0e5f;
-				field->exposure[i] = Smoothstep(2.0f, 4.0f, std::log10(std::max(fetchMetres, 1.0f)));
+				const float fetchMetres = in.fetch && in.fetch->Valid() ? in.fetch->SampleMetres(wx, wy, in.swellDirection) : 5.0e5f;
+				field->exposure[i] = Smoothstep(2.5f, 3.5f, std::log10(std::max(fetchMetres, 1.0f)));
 			}
 		}
 		// Diffraction fills the shadow behind a headland over tens of metres (sqrt(lambda r)); the ray-marched fetch has
