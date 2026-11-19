@@ -573,7 +573,7 @@ private:
 	void DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height, const OccluderCB& cb, ID3D11Buffer* indices, DXGI_FORMAT indexFormat, UINT indexCount);
 
 	// The waves' heightfield around the eye, which the water marches towards the sun through for their sun shadows (render thread)
-	static constexpr uint32_t SunMapQuads = 512;    ///< grid quads per side
+	static constexpr uint32_t SunMapQuads = 256;    ///< grid quads per side (23 cm: shorter waves' shadows are left to the march's bias)
 	static constexpr float SunMapExtent = 4096.0f;  ///< units across, centred on the eye
 	static constexpr uint32_t SunMapSize = 1024;    ///< texels per side
 	static constexpr float SunMapRange = 4096.0f;   ///< height range either side of the reference level (units)
