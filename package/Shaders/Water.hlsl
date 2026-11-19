@@ -993,12 +993,81 @@ float ToksvigVariance(float3 n, Texture2D<float4> map, float2 uv)
 }
 #			endif
 
+#			if defined(WETNESS_EFFECTS)
+/**
+ * Wetness Effects' raindrops on the water: ripple rings and splashes reoriented onto `finalNormal`, and their colour
+ * information in `result.rippleInfo`.
+ * @param parallaxOffset Water Effects' parallax offset of the normal maps (0 without it)
+ */
+float3 AddRaindrops(PS_INPUT input, float3 finalNormal, float2 parallaxOffset, float wetnessOcclusion, inout WaterNormalData result)
+{
+	// Wetness Effects Debug System:
+	// DEBUG_WETNESS_EFFECTS Color Legend:
+	// - BRIGHT MAGENTA: Ripples, BRIGHT GREEN: Splashes, CYAN: Both effects
+	float4 raindropInfo = float4(0, 0, 1, 0);
+	float maxRainDropDistance = SharedData::wetnessEffectsSettings.RaindropFxRange * SharedData::wetnessEffectsSettings.RaindropFxRange * 3;
+	float rainDropDistance = dot(input.WPosition.xyz, input.WPosition.xyz);
+	float distanceFadeout = saturate((1 - saturate(rainDropDistance / maxRainDropDistance)) * 3);
+	if (finalNormal.z > 0 && SharedData::wetnessEffectsSettings.Raining > 0.0f && SharedData::wetnessEffectsSettings.EnableRaindropFx &&
+		(rainDropDistance < maxRainDropDistance) && wetnessOcclusion > 0.05) {
+		float rippleStrengthModifier = (wetnessOcclusion * wetnessOcclusion) * distanceFadeout;
+		float3 rippleWPosition = input.WPosition.xyz + finalNormal * 16;
+		rippleWPosition.xy += parallaxOffset;
+#				if defined(FLOWMAP)
+		// Flow-following ripple enhancement: Makes raindrops follow water current
+		FlowmapData worldFlowData = GetFlowmapDataWorldSpace(input, float2(0, 0));
+
+		// Calculate flow-aware ripple offset using centralized timing logic
+		// Parameters: avgFlowmapMultiplier=9.26 (average of GetWaterNormal flowmap normal multipliers: 9.92, 10.64, 8, 8.48)
+		// uvToWorldScale=0.125 (1/8 - relates to 64× texture coordinate scaling factor)
+		float2 flowOffset = WetnessEffects::GetFlowAwareRippleOffset(
+			worldFlowData.flowVector,
+			worldFlowData.color.w,      // Flow strength from flowmap alpha
+			0.001 * ReflectionColor.w,  // Reflection timing scale (matches GetFlowmapNormal)
+			9.26,                       // Average flowmap normal multiplier
+			0.125                       // UV-to-world scale factor (1/8)
+		);
+
+		rippleWPosition.xy += flowOffset;
+#				endif
+		raindropInfo = WetnessEffects::GetRainDrops(rippleWPosition + FrameBuffer::CameraPosAdjust.xyz, SharedData::wetnessEffectsSettings.Time, finalNormal, rippleStrengthModifier);
+
+		// Calculate ripple and splash color intensities
+		float rippleIntensity = length(raindropInfo.xy) * rippleStrengthModifier;
+		float splashIntensity = raindropInfo.w * distanceFadeout;
+
+		// Store ripple and splash information for color effects
+		result.rippleInfo.xyz = raindropInfo.xyz * rippleIntensity;
+		result.rippleInfo.w = splashIntensity;
+	}
+	float3 rippleNormal = normalize(raindropInfo.xyz);
+	finalNormal = ReorientNormal(rippleNormal, finalNormal);
+	return finalNormal;
+}
+#			endif
+
 WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float depth, float wetnessOcclusion)
 {
 	WaterNormalData result;
 	result.rippleInfo = float4(0, 0, 0, 0);
 #			if defined(PBR_WATER)
 	result.detailVariance = 0.0;
+#			endif
+
+#			if defined(PBR_WATER) && !defined(FLOWMAP) && !defined(LOD)
+	// Vanilla Normal Maps off: with the FFT waves running, the waves' own cascades carry the fine detail, and the three
+	// normal map reads (each with its Toksvig derivatives) are skipped. Rivers (FLOWMAP) keep theirs: the current flattens
+	// the waves there and the flowmap normals are what shows the water flowing.
+	[branch] if (PBRWater::SkipVanillaNormals())
+	{
+#				if defined(WETNESS_EFFECTS)
+		float3 raindropNormal = AddRaindrops(input, float3(0, 0, 1), 0.0, wetnessOcclusion, result);
+		result.normal = raindropNormal;
+#				else
+		result.normal = float3(0, 0, 1);
+#				endif
+		return result;
+	}
 #			endif
 
 	float3 normalScalesRcp = rcp(input.NormalsScale.xyz);
@@ -1171,49 +1240,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			endif
 
 #			if defined(WETNESS_EFFECTS)
-	// Wetness Effects Debug System:
-	// DEBUG_WETNESS_EFFECTS Color Legend:
-	// - BRIGHT MAGENTA: Ripples, BRIGHT GREEN: Splashes, CYAN: Both effects
-	float4 raindropInfo = float4(0, 0, 1, 0);
-	float maxRainDropDistance = SharedData::wetnessEffectsSettings.RaindropFxRange * SharedData::wetnessEffectsSettings.RaindropFxRange * 3;
-	float rainDropDistance = dot(input.WPosition.xyz, input.WPosition.xyz);
-	float distanceFadeout = saturate((1 - saturate(rainDropDistance / maxRainDropDistance)) * 3);
-	if (finalNormal.z > 0 && SharedData::wetnessEffectsSettings.Raining > 0.0f && SharedData::wetnessEffectsSettings.EnableRaindropFx &&
-		(rainDropDistance < maxRainDropDistance) && wetnessOcclusion > 0.05) {
-		float rippleStrengthModifier = (wetnessOcclusion * wetnessOcclusion) * distanceFadeout;
-		float3 rippleWPosition = input.WPosition.xyz + finalNormal * 16;
 #				if defined(WATER_PARALLAX)
-		rippleWPosition.xy += parallaxOffset;
+	finalNormal = AddRaindrops(input, finalNormal, parallaxOffset, wetnessOcclusion, result);
+#				else
+	finalNormal = AddRaindrops(input, finalNormal, 0.0, wetnessOcclusion, result);
 #				endif
-#				if defined(FLOWMAP)
-		// Flow-following ripple enhancement: Makes raindrops follow water current
-		FlowmapData worldFlowData = GetFlowmapDataWorldSpace(input, float2(0, 0));
-
-		// Calculate flow-aware ripple offset using centralized timing logic
-		// Parameters: avgFlowmapMultiplier=9.26 (average of GetWaterNormal flowmap normal multipliers: 9.92, 10.64, 8, 8.48)
-		// uvToWorldScale=0.125 (1/8 - relates to 64× texture coordinate scaling factor)
-		float2 flowOffset = WetnessEffects::GetFlowAwareRippleOffset(
-			worldFlowData.flowVector,
-			worldFlowData.color.w,      // Flow strength from flowmap alpha
-			0.001 * ReflectionColor.w,  // Reflection timing scale (matches GetFlowmapNormal)
-			9.26,                       // Average flowmap normal multiplier
-			0.125                       // UV-to-world scale factor (1/8)
-		);
-
-		rippleWPosition.xy += flowOffset;
-#				endif
-		raindropInfo = WetnessEffects::GetRainDrops(rippleWPosition + FrameBuffer::CameraPosAdjust.xyz, SharedData::wetnessEffectsSettings.Time, finalNormal, rippleStrengthModifier);
-
-		// Calculate ripple and splash color intensities
-		float rippleIntensity = length(raindropInfo.xy) * rippleStrengthModifier;
-		float splashIntensity = raindropInfo.w * distanceFadeout;
-
-		// Store ripple and splash information for color effects
-		result.rippleInfo.xyz = raindropInfo.xyz * rippleIntensity;
-		result.rippleInfo.w = splashIntensity;
-	}
-	float3 rippleNormal = normalize(raindropInfo.xyz);
-	finalNormal = ReorientNormal(rippleNormal, finalNormal);
 #			endif
 
 	result.normal = finalNormal;

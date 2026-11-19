@@ -57,6 +57,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		VanillaFresnel,
 		RefractionDistortion,
 		WindRoughness,
+		VanillaNormalMaps,
 		DetailNormalCalm,
 		DetailNormalGale,
 		Visibility,
@@ -120,6 +121,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		EnableOceanWaves,
 		EnableWaveShadows,
 		EnablePointLightSpecular,
+		EnableSkyOcclusion,
 		EnableClarity,
 		EnableSubsurface,
 		EnableFoam,
@@ -177,6 +179,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		VanillaFresnel,
 		RefractionDistortion,
 		WindRoughness,
+		VanillaNormalMaps,
 		DetailNormalCalm,
 		DetailNormalGale,
 		Visibility,
@@ -240,6 +243,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		EnableOceanWaves,
 		EnableWaveShadows,
 		EnablePointLightSpecular,
+		EnableSkyOcclusion,
 		EnableClarity,
 		EnableSubsurface,
 		EnableFoam,
@@ -646,7 +650,7 @@ void PBRWater::DrawSettings()
 			T(TKEY("enable_shore_waves_tooltip"), "Waves roll in towards the shore, slow down and close up over the shoaling bed, steepen, pitch forward and break into foaming bores, and each one runs up the beach and drains back, leaving wet sand. Only on beaches where waves break: they surge against rock faces and cliffs instead."));
 		if (s.EnableShoreWaves) {
 			Util::CheckboxTip(T(TKEY("wet_shores"), "Wet Shores"), &s.WetShores,
-				T(TKEY("wet_shores_tooltip"), "Sand, rocks and anything else the swash reaches turn wet and slowly dry out (Wetness Effects)."));
+				T(TKEY("wet_shores_tooltip"), "Sand, rocks and anything else the swash reaches turn wet and slowly dry out (Wetness Effects). Off: the wetness grid is not updated, and the caustics on the shore follow the still water instead of the waves."));
 			const char* surfQualities[] = { T(TKEY("surf_quality_off"), "Off"), T(TKEY("surf_quality_low"), "Low (34 cm)"), T(TKEY("surf_quality_high"), "High (17 cm)") };
 			ImGui::Combo(T(TKEY("surf_quality"), "Surf Simulation"), &s.SurfQuality, surfQualities, IM_ARRAYSIZE(surfQualities));
 			Util::HoverTip(T(TKEY("surf_quality_tooltip"), "Simulates the broken waves' water through the inner surf and up the beach: bores, uprush, backwash and the foam they carry. Off: the shore waves end at the waterline, with no swash and no foam left on the water, and the whole simulation costs nothing. Low simulates a quarter of the cells at half the steps of High."));
@@ -689,10 +693,14 @@ void PBRWater::DrawSettings()
 			T(TKEY("enable_wave_shadows_tooltip"), "Waves shade the water behind them from the sun, and the glint is hidden by the crests in front. Off: skips the wave heightfield pass and its per-pixel march."));
 		Util::CheckboxTip(T(TKEY("enable_point_light_specular"), "Point Light Reflections"), &s.EnablePointLightSpecular,
 			T(TKEY("enable_point_light_specular_tooltip"), "Torches and other lights glint in the water. Off: the per-pixel light loop is skipped."));
+		Util::CheckboxTip(T(TKEY("enable_sky_occlusion"), "Wave Sky Occlusion"), &s.EnableSkyOcclusion,
+			T(TKEY("enable_sky_occlusion_tooltip"), "The waves occlude the sky in Skylighting's probes, so troughs see less of it than crests. Off: the displaced water grid is not drawn into the probes' occlusion map. Needs Skylighting."));
 		Util::SliderFloatTip(T(TKEY("roughness"), "Surface Roughness"), &s.Roughness, 0.02f, 0.5f, "%.3f",
 			T(TKEY("roughness_tooltip"), "Base roughness of the calm water surface. Default 0.06."));
 		Util::SliderFloatTip(T(TKEY("wind_roughness"), "Wind Roughness"), &s.WindRoughness, 0.0f, 3.0f, "%.2f",
 			T(TKEY("wind_roughness_tooltip"), "Scales the roughness the wind adds with its tiny ripples (Cox and Munk). Default 1."));
+		Util::CheckboxTip(T(TKEY("vanilla_normal_maps"), "Vanilla Normal Maps"), &s.VanillaNormalMaps,
+			T(TKEY("vanilla_normal_maps_tooltip"), "Reads the water form's own normal maps on top of the simulated waves. Off: where the ocean waves run, their finest cascade carries the small ripples and the three normal map reads are skipped. Rivers and water without waves always keep them."));
 		Util::SliderFloatTip(T(TKEY("detail_normal_calm"), "Normal Map Strength (Calm)"), &s.DetailNormalCalm, 0.0f, 2.0f, "%.2f",
 			T(TKEY("detail_normal_calm_tooltip"), "Strength of the water form's normal maps on top of the simulated waves in calm air. They carry the fine ripple texture. Default 0.75."));
 		Util::SliderFloatTip(T(TKEY("detail_normal_gale"), "Normal Map Strength (Windy)"), &s.DetailNormalGale, 0.0f, 2.0f, "%.2f",
@@ -1555,7 +1563,12 @@ void PBRWater::UpdateSwash(float dt)
 	gpuBuffer->Update(d);
 	ID3D11ShaderResourceView* swashSrv = d.Foam2.w > 0.5f ? swash.GetFoamSRV() : nullptr;
 	context->CSSetShaderResources(WaterSRVBase + 17, 1, &swashSrv);
-	swash.Update(cameraPos.x, cameraPos.y, dt, swashSettings);
+	// The wet grid: how far up the shore it is wet, and the water's height for the lit objects' caustics. Without Wet
+	// Shores nothing reads the wetness, and the caustics follow the still water.
+	if (settings.WetShores)
+		swash.Update(cameraPos.x, cameraPos.y, dt, swashSettings);
+	else
+		PBRWaterProfiling::Skipped("PBRWater::ShoreWetness");
 
 	ID3D11ShaderResourceView* nullSrvs[13] = {};
 	context->CSSetShaderResources(WaterSRVBase, 13, nullSrvs);
@@ -1567,11 +1580,11 @@ void PBRWater::UpdateSwash(float dt)
 	context->CSSetSamplers(WaterSamplerBase, 2, nullSamplers);
 
 	// The draws read the wet state the simulation just wrote.
-	frameData.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), swash.IsReady() ? 1.0f : 0.0f };
+	frameData.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), settings.WetShores && swash.IsReady() ? 1.0f : 0.0f };
 	frameData.Foam2 = d.Foam2;
 
 	// Lit terrain and objects read the wet sand, the foam on it and the water height from it.
-	ID3D11ShaderResourceView* wetSrv = swash.IsReady() ? swash.GetWetSRV() : nullptr;
+	ID3D11ShaderResourceView* wetSrv = frameData.Swash0.w > 0.5f ? swash.GetWetSRV() : nullptr;
 	context->PSSetShaderResources(SwashWetSlot, 1, &wetSrv);
 }
 
@@ -1739,7 +1752,7 @@ void PBRWater::DrawSkylightingOccluder(Texture2D& occlusion, const REX::W32::XMF
 {
 	PBRWaterProfiling::SkipUnlessRun row("PBRWater::SkylightingOccluder");
 	ID3D11DepthStencilView* dsv = occlusion.dsv.get();
-	if (!loaded || !dsv || !occluderVS || !occluderIndices || !occluderCB || !occluderDepthState || !occluderRasterizer || !gpuBuffer || !globals::shaderCache->IsEnabled())
+	if (!loaded || !settings.EnableSkyOcclusion || !dsv || !occluderVS || !occluderIndices || !occluderCB || !occluderDepthState || !occluderRasterizer || !gpuBuffer || !globals::shaderCache->IsEnabled())
 		return;
 	// Calm water is the flat plane the probes are lifted above anyway: only waves need drawing.
 	const auto snap = snapshot.load(std::memory_order_acquire);
@@ -2020,7 +2033,7 @@ void PBRWater::UpdateFrameConstants()
 			if (blending)
 				d.Shore6 = fieldMap(*snap->shorePrevious);
 			// Last frame's wet and foam grids, until this frame's step (UpdateSwash) replaces them.
-			d.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), swash.IsReady() ? 1.0f : 0.0f };
+			d.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), settings.WetShores && swash.IsReady() ? 1.0f : 0.0f };
 			d.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), settings.SurfQuality > 0 && swash.IsFoamReady() ? 1.0f : 0.0f };
 		}
 
@@ -2123,7 +2136,7 @@ void PBRWater::UpdateFrameConstants()
 		// w is set once this frame's bake has run.
 		d.Noise0 = { originX, originY, settings.EnableClarity ? 1.0f / (texel * static_cast<float>(SurfaceNoiseSize)) : 0.0f, 0.0f };
 	}
-	d.Surface1 = { 0.0f, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, 0.0f };
+	d.Surface1 = { 0.0f, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, settings.VanillaNormalMaps ? 0.0f : 1.0f };
 
 	// The artistic scales the shaders read (PBRWater.hlsli Tune0..Tune5).
 	d.Tune0 = { settings.RiverCurrentSpeed, settings.FlowPeriodScale, settings.FlowPeriodMin, settings.FlowPeriodMax };

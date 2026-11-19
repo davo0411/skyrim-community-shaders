@@ -89,6 +89,7 @@ struct PBRWater : Feature
 		// Surface and light
 		bool EnableWaveShadows = true;       ///< the waves shade the water behind them from the sun (the heightfield pass and its per-pixel march)
 		bool EnablePointLightSpecular = true;  ///< lamps and torches glint in the water (the per-pixel light loop)
+		bool EnableSkyOcclusion = true;        ///< the waves occlude the sky in Skylighting's probes (the occluder grid pass)
 		float Roughness = 0.06f;
 		float SunSpecular = 1.0f;
 		float PointLightSpecular = 1.0f;
@@ -98,6 +99,7 @@ struct PBRWater : Feature
 		float VanillaFresnel = 0.0f;
 		float RefractionDistortion = 1.0f;
 		float WindRoughness = 1.0f;      ///< scales the wind-driven micro-roughness (Cox-Munk)
+		bool VanillaNormalMaps = false;  ///< read the water form's normal maps on top of the FFT waves (always read without them, and on rivers)
 		float DetailNormalCalm = 0.75f;  ///< strength of the vanilla normal maps on top of the waves in calm air
 		float DetailNormalGale = 1.3f;   ///< and at 8 m/s of wind and over
 

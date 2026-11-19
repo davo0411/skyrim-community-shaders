@@ -73,7 +73,7 @@ namespace PBRWater
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, yz unused, w rain intensity (0..1)
-		float4 Surface1;                 // x unused, y sediment on (Enable Water Clarity), z fetch scale, w unused
+		float4 Surface1;                 // x unused, y sediment on (Enable Water Clarity), z fetch scale, w vanilla normal maps skipped under the FFT waves
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
@@ -129,6 +129,8 @@ namespace PBRWater
 	bool OceanActive() { return Params0.x > 0.5; }
 	bool FoamEnabled() { return Light1.y > 0.5; }
 	bool ClarityEnabled() { return Surface1.y > 0.5; }
+	/// Vanilla Normal Maps off and the FFT waves running: the water form's normal maps are not read (Water.hlsl GetWaterNormal).
+	bool SkipVanillaNormals() { return Surface1.w > 0.5 && OceanActive(); }
 	float Gravity() { return Params0.w; }
 
 	// ------------------------------------------------------------------------
