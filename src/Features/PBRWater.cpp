@@ -114,6 +114,8 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		DisplacementFadeEnd,
 		EnableTessellation,
 		DeferredSurface,
+		DistantHalfRate,
+		DistantHalfRateDistance,
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
@@ -228,6 +230,8 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		DisplacementFadeEnd,
 		EnableTessellation,
 		DeferredSurface,
+		DistantHalfRate,
+		DistantHalfRateDistance,
 		WaveResolution,
 		EnableShoreWaves,
 		WetShores,
@@ -332,6 +336,7 @@ void PBRWater::SanitizeSettings()
 	};
 	static const Settings d{};  // the defaults, built once (this runs every frame)
 	clamp(s.TessellationTriangleSize, 1.0f, Huge, d.TessellationTriangleSize);
+	clamp(s.DistantHalfRateDistance, 1.0f, Huge, d.DistantHalfRateDistance);
 	clamp(s.WindSpeedCalm, 0.0f, Huge, d.WindSpeedCalm);
 	clamp(s.WindSpeedStorm, 0.1f, Huge, d.WindSpeedStorm);
 	clamp(s.WaveHeight, 0.0f, Huge, d.WaveHeight);
@@ -741,23 +746,23 @@ void PBRWater::DrawSettings()
 	if (ImGui::BeginTabItem(T(TKEY("tab_foam"), "Foam"))) {
 		IdScope id("foam");
 		Util::SliderFloatTip(T(TKEY("foam_amount"), "Foam Amount"), &s.FoamAmount, 0.0f, 3.0f, "%.2f",
-			T(TKEY("foam_amount_tooltip"), "Foam is made only where waves break, in the open sea and in the surf. Scales how much foam the open sea's crests add each moment. Default 1."));
+			T(TKEY("foam_amount_tooltip"), "Foam is made only where waves break, in the open sea and in the surf. Scales how much foam the open sea's crests add each moment, and the surf's foam with it. Default 1."));
+		Util::SliderFloatTip(T(TKEY("foam_bias"), "Foam Coverage"), &s.FoamBias, -1.0f, 2.0f, "%.2f",
+			T(TKEY("foam_bias_tooltip"), "The wave compression (Jacobian) below which the surface starts to foam. Higher foams on gentler waves and thickens the surf's foam. Default 0.85."));
+		Util::SliderFloatTip(T(TKEY("foam_fade_distance"), "Foam Fade Distance"), &s.FoamFadeDistance, 100.0f, 5000.0f, "%.0f m",
+			T(TKEY("foam_fade_distance_tooltip"), "Distance at which all foam has faded out. Default 1000 m."), ImGuiSliderFlags_Logarithmic);
+		Util::SliderFloatTip(T(TKEY("foam_depth_falloff"), "Foam Distance Falloff"), &s.FoamDepthFalloff, 0.1f, 4.0f, "%.2f",
+			T(TKEY("foam_depth_falloff_tooltip"), "Exponent of the foam's fade with distance. Higher fades it sooner. Default 1."));
+		Util::SliderFloatTip(T(TKEY("foam_roughness_modifier"), "Foam Roughness"), &s.FoamRoughnessModifier, 0.0f, 2.0f, "%.2f",
+			T(TKEY("foam_roughness_modifier_tooltip"), "Roughness added to the surface per unit of foam. Default 0."));
 
 		ImGui::SeparatorText(T(TKEY("open_sea_foam"), "Open Sea"));
-		Util::SliderFloatTip(T(TKEY("foam_bias"), "Foam Coverage"), &s.FoamBias, -1.0f, 2.0f, "%.2f",
-			T(TKEY("foam_bias_tooltip"), "The wave compression (Jacobian) below which the surface starts to foam. Higher foams on gentler waves. Default 0.85."));
 		Util::SliderFloatTip(T(TKEY("foam_threshold"), "Foam Threshold"), &s.FoamThreshold, 0.0f, 1.0f, "%.2f",
 			T(TKEY("foam_threshold_tooltip"), "Foam is added only above this amount of compression past the coverage point. Default 0."));
 		Util::SliderFloatTip(T(TKEY("foam_add"), "Foam Growth"), &s.FoamAdd, 0.0f, 1.0f, "%.3f",
 			T(TKEY("foam_add_tooltip"), "Foam added per 1/60 s per unit of compression. Default 0.1."));
 		Util::SliderFloatTip(T(TKEY("foam_decay_rate"), "Foam Fade Rate"), &s.FoamDecayRate, 0.0f, 0.2f, "%.4f",
 			T(TKEY("foam_decay_rate_tooltip"), "How quickly foam decays: it fades by exp(-rate) per 1/60 s. Default 0.0175."));
-		Util::SliderFloatTip(T(TKEY("foam_fade_distance"), "Foam Fade Distance"), &s.FoamFadeDistance, 100.0f, 5000.0f, "%.0f m",
-			T(TKEY("foam_fade_distance_tooltip"), "Distance at which the open sea's foam has faded out. Default 1000 m."), ImGuiSliderFlags_Logarithmic);
-		Util::SliderFloatTip(T(TKEY("foam_depth_falloff"), "Foam Distance Falloff"), &s.FoamDepthFalloff, 0.1f, 4.0f, "%.2f",
-			T(TKEY("foam_depth_falloff_tooltip"), "Exponent of the foam's fade with distance. Higher fades it sooner. Default 1."));
-		Util::SliderFloatTip(T(TKEY("foam_roughness_modifier"), "Foam Roughness"), &s.FoamRoughnessModifier, 0.0f, 2.0f, "%.2f",
-			T(TKEY("foam_roughness_modifier_tooltip"), "Roughness added to the surface per unit of open-sea foam. Default 0."));
 
 		ImGui::SeparatorText(T(TKEY("foam_pattern"), "Pattern"));
 		Util::SliderFloatTip(T(TKEY("foam_bubble_size"), "Bubble Size"), &s.FoamBubbleSize, 0.01f, 1.0f, "%.3f m",
@@ -862,6 +867,12 @@ void PBRWater::DrawSettings()
 			Util::DisableGuard disable(!s.EnableTessellation);
 			Util::CheckboxTip(T(TKEY("deferred_surface"), "Deferred Surface"), &s.DeferredSurface,
 				T(TKEY("deferred_surface_tooltip"), "Shades each pixel of the tessellated water once, from what the depth pass recorded there, instead of once per triangle touching it. Small triangles then cost no extra shading. Turn off only to compare."));
+			Util::DisableGuard disableDistant(!s.DeferredSurface);
+			Util::CheckboxTip(T(TKEY("distant_half_rate"), "Half-Rate Distant Water"), &s.DistantHalfRate,
+				T(TKEY("distant_half_rate_tooltip"), "Shades distant water at a quarter of its pixels and fills in the rest from them; temporal anti-aliasing recovers the detail. Distant water is often half the cost of the surface."));
+			Util::DisableGuard disableDistance(!s.DistantHalfRate);
+			Util::SliderFloatTip(T(TKEY("distant_half_rate_distance"), "Distant Water From"), &s.DistantHalfRateDistance, 50.0f, 1000.0f, "%.0f m",
+				T(TKEY("distant_half_rate_distance_tooltip"), "Distance beyond which water is shaded at half rate, decided per 8x8 pixel tile by its nearest water. Lower is faster and softer. Default 60 m."));
 		}
 		Util::SliderFloatTip(T(TKEY("tessellation_triangle_size"), "Target Triangle Size"), &s.TessellationTriangleSize, 4.0f, 40.0f, "%.0f px",
 			T(TKEY("tessellation_triangle_size_tooltip"), "Smaller values give smoother waves at a higher GPU cost. Scales automatically with the render resolution. Default 10 px."));
@@ -2056,8 +2067,9 @@ void PBRWater::UpdateFrameConstants()
 
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, 0.0f, settings.RefractionDistortion, settings.PointLightSpecular };
-	// The open sea's foam test, also applied to the shore waves' crests (PBRWater::EvaluateWavesFiltered).
-	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, 0.0f, settings.RiverWaveDamping };
+	// The open sea's foam test, also applied to the shore waves' crests and folds (PBRWater::EvaluateWavesFiltered); z the
+	// same Amount and Coverage as a gain on the shore's foam coverages, which have no Jacobian (1 at the defaults).
+	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, settings.FoamAmount * std::max(settings.FoamBias, 0.0f) / 0.85f, settings.RiverWaveDamping };
 
 	// Water clarity and the light in the water.
 	d.Clarity0 = { settings.SedimentDensity / UnitsPerMetre, settings.Turbidity, settings.TurbidityPatchiness, settings.TurbidityPatchSize * UnitsPerMetre };
@@ -2402,10 +2414,26 @@ bool PBRWater::EnsureDeferredRecords()
 		deferredShoreFrame = UINT32_MAX;
 	}
 
-	// The tile lists: DrawInstancedIndirect's arguments per mesh, and room for every tile of the screen per mesh.
+	// The distant tiles shaded at half rate (DeferredFar.hlsl): one pixel of every 2x2, and which one, at half size.
+	{
+		D3D11_TEXTURE2D_DESC farDesc = desc;
+		farDesc.Width = (desc.Width + 1) / 2;
+		farDesc.Height = (desc.Height + 1) / 2;
+		farDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		D3D11_SHADER_RESOURCE_VIEW_DESC farSrv = srvDesc;
+		farSrv.Format = farDesc.Format;
+		D3D11_RENDER_TARGET_VIEW_DESC farRtv = rtvDesc;
+		farRtv.Format = farDesc.Format;
+		deferredFar = std::make_unique<Texture2D>(farDesc, "PBRWater::DeferredFar");
+		deferredFar->CreateSRV(farSrv);
+		deferredFar->CreateRTV(farRtv);
+		deferredFarFrame = UINT32_MAX;
+	}
+
+	// The tile lists: DrawInstancedIndirect's arguments per list, and room for every tile of the screen per list.
 	deferredMaxTiles = ((desc.Width + DeferredTile - 1) / DeferredTile) * ((desc.Height + DeferredTile - 1) / DeferredTile);
 	D3D11_BUFFER_DESC argsDesc{};
-	argsDesc.ByteWidth = DeferredMeshes * 4 * sizeof(uint32_t);
+	argsDesc.ByteWidth = DeferredLists * 4 * sizeof(uint32_t);
 	argsDesc.Usage = D3D11_USAGE_DEFAULT;
 	argsDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
 	argsDesc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
@@ -2416,12 +2444,12 @@ bool PBRWater::EnsureDeferredRecords()
 	D3D11_UNORDERED_ACCESS_VIEW_DESC argsUav{};
 	argsUav.Format = DXGI_FORMAT_R32_TYPELESS;
 	argsUav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-	argsUav.Buffer.NumElements = DeferredMeshes * 4;
+	argsUav.Buffer.NumElements = DeferredLists * 4;
 	argsUav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
 	DX::ThrowIfFailed(device->CreateUnorderedAccessView(deferredArgs.get(), &argsUav, deferredArgsUAV.put()));
 
 	D3D11_BUFFER_DESC tilesDesc{};
-	tilesDesc.ByteWidth = DeferredMeshes * deferredMaxTiles * sizeof(uint32_t);
+	tilesDesc.ByteWidth = DeferredLists * deferredMaxTiles * sizeof(uint32_t);
 	tilesDesc.Usage = D3D11_USAGE_DEFAULT;
 	tilesDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
 	tilesDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
@@ -2430,12 +2458,12 @@ bool PBRWater::EnsureDeferredRecords()
 	D3D11_SHADER_RESOURCE_VIEW_DESC tilesSrv{};
 	tilesSrv.Format = DXGI_FORMAT_UNKNOWN;
 	tilesSrv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-	tilesSrv.Buffer.NumElements = DeferredMeshes * deferredMaxTiles;
+	tilesSrv.Buffer.NumElements = DeferredLists * deferredMaxTiles;
 	deferredTiles->CreateSRV(tilesSrv);
 	D3D11_UNORDERED_ACCESS_VIEW_DESC tilesUav{};
 	tilesUav.Format = DXGI_FORMAT_UNKNOWN;
 	tilesUav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-	tilesUav.Buffer.NumElements = DeferredMeshes * deferredMaxTiles;
+	tilesUav.Buffer.NumElements = DeferredLists * deferredMaxTiles;
 	deferredTiles->CreateUAV(tilesUav);
 
 	deferredMeshes.clear();
@@ -2576,9 +2604,8 @@ void PBRWater::EndDeferredBatch()
 			context->OMSetBlendState(batch.engineBlend.get(), batch.blendFactor, batch.sampleMask);
 		ID3D11Buffer* nullCb = nullptr;
 		context->PSSetConstantBuffers(13, 1, &nullCb);
-		// Which tiles each recorded mesh is in, for the surface and point light passes: GPU work only.
-		if (deferredMeshesFrame == globals::state->frameCount && !deferredMeshes.empty())
-			ClassifyDeferredTiles();
+		// The tiles are listed by the first surface draw (DrawDeferredSurface): sorting them by distance reads the depth,
+		// which the stencil pass still has bound for writing here.
 		batch.recording = false;
 		batch.recordBlend = nullptr;
 		batch.engineBlend = nullptr;
@@ -2652,10 +2679,14 @@ void PBRWater::ClassifyDeferredTiles()
 	const UINT zero[4] = {};
 	context->ClearUnorderedAccessViewUint(deferredArgsUAV.get(), zero);
 
+	// Distant tiles only where the surface pass can shade them at half rate.
+	const bool distant = settings.DistantHalfRate && !deferredFarFailed && deferredFar;
 	struct alignas(16) TilesCB
 	{
-		uint32_t width, height, maxTiles, pad;
-	} tilesData{ deferredTags->desc.Width, deferredTags->desc.Height, deferredMaxTiles, 0 };
+		uint32_t width, height, maxTiles;
+		float farDistance;
+	} tilesData{ deferredTags->desc.Width, deferredTags->desc.Height, deferredMaxTiles,
+		distant ? settings.DistantHalfRateDistance * static_cast<float>(PBRWaterModel::UnitsPerMetre) : 0.0f };
 	if (!deferredTilesCB)
 		deferredTilesCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<TilesCB>(), "PBRWater::DeferredTilesCB");
 	deferredTilesCB->Update(tilesData);
@@ -2664,28 +2695,38 @@ void PBRWater::ClassifyDeferredTiles()
 	context->CSGetShader(savedShader.put(), nullptr, nullptr);
 	ID3D11Buffer* savedCb = nullptr;
 	context->CSGetConstantBuffers(0, 1, &savedCb);
-	ID3D11ShaderResourceView* savedSrv = nullptr;
-	context->CSGetShaderResources(0, 1, &savedSrv);
+	ID3D11Buffer* savedFrameCb = nullptr;
+	context->CSGetConstantBuffers(12, 1, &savedFrameCb);
+	ID3D11ShaderResourceView* savedSrvs[2] = {};
+	context->CSGetShaderResources(0, 2, savedSrvs);
 	ID3D11UnorderedAccessView* savedUavs[2] = {};
 	context->CSGetUnorderedAccessViews(0, 2, savedUavs);
 
 	ID3D11Buffer* cb = deferredTilesCB->CB();
-	ID3D11ShaderResourceView* srv = deferredTags->srv.get();
+	ID3D11Buffer* frameCb = *globals::game::perFrame.get();
+	ID3D11ShaderResourceView* depthSRV = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	ID3D11ShaderResourceView* srvs[2] = { deferredTags->srv.get(), depthSRV };
 	ID3D11UnorderedAccessView* uavs[2] = { deferredArgsUAV.get(), deferredTiles->uav.get() };
 	context->CSSetShader(deferredTilesCS.get(), nullptr, 0);
 	context->CSSetConstantBuffers(0, 1, &cb);
-	context->CSSetShaderResources(0, 1, &srv);
+	context->CSSetConstantBuffers(12, 1, &frameCb);
+	context->CSSetShaderResources(0, 2, srvs);
 	context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
 	context->Dispatch((tilesData.width + DeferredTile - 1) / DeferredTile, (tilesData.height + DeferredTile - 1) / DeferredTile, 1);
 
 	context->CSSetShader(savedShader.get(), nullptr, 0);
 	context->CSSetConstantBuffers(0, 1, &savedCb);
-	context->CSSetShaderResources(0, 1, &savedSrv);
+	context->CSSetConstantBuffers(12, 1, &savedFrameCb);
+	context->CSSetShaderResources(0, 2, savedSrvs);
 	context->CSSetUnorderedAccessViews(0, 2, savedUavs, nullptr);
 	if (savedCb)
 		savedCb->Release();
-	if (savedSrv)
-		savedSrv->Release();
+	if (savedFrameCb)
+		savedFrameCb->Release();
+	for (auto* view : savedSrvs) {
+		if (view)
+			view->Release();
+	}
 	for (auto* uav : savedUavs) {
 		if (uav)
 			uav->Release();
@@ -2771,13 +2812,13 @@ bool PBRWater::DrawDeferredSurface()
 			DeferredFallback(!bound.dsv ? "the surface pass has no depth target" : "the surface pass's depth target is not the main depth buffer");
 			return false;
 		}
-		// Normally listed at the end of the stencil pass (EndDeferredBatch).
-		if (deferredTilesFrame != frame)
-			ClassifyDeferredTiles();
 		if (readOnly != bound.dsv) {
 			context->OMSetRenderTargets(bound.count, bound.rtv, readOnly);
 			batch.engineDSV.copy_from(engineDSV);
 		}
+		// Listed once a frame, with the depth bound read-only (DeferredTilesCS reads it to find the distant tiles).
+		if (deferredTilesFrame != frame)
+			ClassifyDeferredTiles();
 		ID3D11ShaderResourceView* flowmap = frameData.Flow0.x != 0.0f ? worldFlowmap : nullptr;
 		if (deferredShoreFrame != frame && deferredShoreCS && frameData.Shore0.x > 0.5f)
 			BakeDeferredShore(depth.depthSRV, flowmap);
@@ -2822,8 +2863,105 @@ bool PBRWater::DrawDeferredSurface()
 	ID3D11Buffer* tileCb = deferredDrawBuffer->CB();
 	context->VSSetConstantBuffers(7, 1, &tileCb);
 	context->PSSetConstantBuffers(7, 1, &tileCb);
+	// The near tiles, then the distant ones: at half rate in the surface pass, at full rate in the point light passes
+	// (and wherever the half-rate pass cannot run).
+	data.mode[0] = slot;
+	data.mode[1] = DeferredFull;
+	deferredCB->Update(data);
 	context->DrawInstancedIndirect(deferredArgs.get(), slot * 4 * sizeof(uint32_t));
+	if (!(cachedDrawTechnique == 0 && DrawDistantHalfRate(slot, data))) {
+		data.mode[0] = DeferredMeshes + slot;
+		deferredCB->Update(data);
+		context->DrawInstancedIndirect(deferredArgs.get(), (DeferredMeshes + slot) * 4 * sizeof(uint32_t));
+	}
 	++drawStats.deferredShaded;
+	return true;
+}
+
+bool PBRWater::DrawDistantHalfRate(uint32_t slot, DeferredDrawCB data)
+{
+	if (!settings.DistantHalfRate || deferredFarFailed || !deferredFar)
+		return false;
+	auto context = globals::d3d::context;
+	BoundTargets bound(context);
+	// Only the main view's surface: its targets are the record's size.
+	if (bound.count == 0 || !bound.rtv[0])
+		return false;
+	{
+		winrt::com_ptr<ID3D11Resource> resource;
+		bound.rtv[0]->GetResource(resource.put());
+		auto texture = resource.try_as<ID3D11Texture2D>();
+		if (!texture)
+			return false;
+		D3D11_TEXTURE2D_DESC desc{};
+		texture->GetDesc(&desc);
+		if (desc.Width != deferredTags->desc.Width || desc.Height != deferredTags->desc.Height)
+			return false;
+	}
+	if (!deferredFarVS || !deferredFarPS) {
+		deferredFarVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\DeferredFar.hlsl", { { "VSHADER", "" } }, "vs_5_0")));
+		deferredFarPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\DeferredFar.hlsl", { { "PSHADER", "" } }, "ps_5_0")));
+		if (!deferredFarVS || !deferredFarPS) {
+			deferredFarFailed = true;  // from the next frame on the distant tiles are not listed apart
+			return false;
+		}
+	}
+	const uint32_t frame = globals::state->frameCount;
+	if (deferredFarFrame != frame) {
+		// Nothing shaded yet this frame: the upsampling reads a key of 0 where no mesh shaded.
+		deferredFarFrame = frame;
+		const float zero[4] = {};
+		context->ClearRenderTargetView(deferredFar->rtv.get(), zero);
+	}
+	const uint32_t list = DeferredMeshes + slot;
+	const UINT argsOffset = list * 4 * sizeof(uint32_t);
+
+	// One pixel of every 2x2 into the half-size target, with the surface's own shaders: no depth (the record decides which
+	// pixels are this mesh's water) and no blending (the key rides in alpha).
+	D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+	UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+	context->RSGetViewports(&viewportCount, viewports);
+	winrt::com_ptr<ID3D11BlendState> blend;
+	float blendFactor[4] = {};
+	UINT sampleMask = 0xFFFFFFFF;
+	context->OMGetBlendState(blend.put(), blendFactor, &sampleMask);
+
+	ID3D11RenderTargetView* farRtv = deferredFar->rtv.get();
+	context->OMSetRenderTargets(1, &farRtv, nullptr);
+	const D3D11_VIEWPORT half{ 0.0f, 0.0f, static_cast<float>(deferredFar->desc.Width), static_cast<float>(deferredFar->desc.Height), 0.0f, 1.0f };
+	context->RSSetViewports(1, &half);
+	context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+	data.viewport = { half.Width, half.Height, 0.0f, 0.0f };
+	data.mode[0] = list;
+	data.mode[1] = DeferredHalf;
+	data.mode[2] = frame & 3;
+	deferredCB->Update(data);
+	context->DrawInstancedIndirect(deferredArgs.get(), argsOffset);
+
+	context->OMSetRenderTargets(bound.count, bound.rtv, bound.dsv);
+	context->RSSetViewports(viewportCount, viewports);
+	context->OMSetBlendState(blend.get(), blendFactor, sampleMask);
+
+	// The distant tiles at full size, with the surface draw's blend, depth and stencil state: each pixel from the samples
+	// around it.
+	winrt::com_ptr<ID3D11VertexShader> engineVS;
+	winrt::com_ptr<ID3D11PixelShader> enginePS;
+	context->VSGetShader(engineVS.put(), nullptr, nullptr);
+	context->PSGetShader(enginePS.put(), nullptr, nullptr);
+	context->VSSetShader(deferredFarVS.get(), nullptr, 0);
+	context->PSSetShader(deferredFarPS.get(), nullptr, 0);
+	ID3D11ShaderResourceView* farSrv = deferredFar->srv.get();
+	context->PSSetShaderResources(DeferredFarSlot, 1, &farSrv);
+	data.viewport = { std::max(viewports[0].Width, 1.0f), std::max(viewports[0].Height, 1.0f), 0.0f, 0.0f };
+	data.mode[1] = DeferredFull;
+	data.mode[2] = 0;
+	deferredCB->Update(data);
+	context->DrawInstancedIndirect(deferredArgs.get(), argsOffset);
+
+	ID3D11ShaderResourceView* nullSrv = nullptr;
+	context->PSSetShaderResources(DeferredFarSlot, 1, &nullSrv);
+	context->VSSetShader(engineVS.get(), nullptr, 0);
+	context->PSSetShader(enginePS.get(), nullptr, 0);
 	return true;
 }
 

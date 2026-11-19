@@ -9,8 +9,9 @@
 // the coverage falls the bubbles in the foam grow and merge and dense foam thins into lace and then specks. The
 // texture (t125, baked at start-up: src/Features/PBRWater/FoamPattern.cpp) stores the coverage at which each texel
 // whitens, equalised, so the thresholded share equals the coverage. The water shader samples it still, where the surface
-// is, projected from the side as well on steep faces (triplanar): at the rest position the waves' horizontal displacement
-// drew it out into streaks over every breaker's face, and from above alone it ran down a rising face.
+// is, projected from above (at the rest position the waves' horizontal displacement drew it out into streaks over every
+// breaker's face); steep faces, where it would run down the face, are drawn as the coverage. Every foam (the open sea's,
+// the breakers', the shore's) is one coverage drawn through here, so all of it has the same bubbles, edge and translucency.
 // ============================================================================
 
 // The shore foam's anti-tiling is Terrain Variation's (it defines TERRAIN_VARIATION for the water shaders when it is
@@ -53,8 +54,10 @@ namespace PBRWaterFoam
 	 * @param tile size of the foam texture's tile (units): BubblesPerTile bubbles across
 	 * @param Feather how far the white share of the pattern is feathered, in the texture's values (0.12 by default)
 	 * @param s    sampler (wrap, anisotropic)
+	 * @param detail 0..1 how much of the pattern is shown, as for distance: the pattern is projected from above, so steep
+	 *               faces (where it would stretch) take 0 and are drawn as the coverage, with the same translucency
 	 */
-	float SurfaceFoam(float2 p, float foam, float tile, float Feather, SamplerState s)
+	float SurfaceFoam(float2 p, float foam, float tile, float Feather, SamplerState s, float detail)
 	{
 		float amount = saturate(foam);
 		// The gradients are taken first, in uniform control flow; most of the water has no foam and skips the rest.
@@ -67,7 +70,7 @@ namespace PBRWaterFoam
 			float footprint = max(sqrt(max(dot(gx, gx), dot(gy, gy))), 1e-4);
 			float bubblePixels = tile / BubblesPerTile / footprint;
 			float3 scales = tile * float3(1.0, 3.0, 9.0);
-			float3 shown = saturate((bubblePixels * float3(1.0, 3.0, 9.0) - 2.0) / 4.0);
+			float3 shown = saturate((bubblePixels * float3(1.0, 3.0, 9.0) - 2.0) / 4.0) * saturate(detail);
 			// Anti-tiling, with Terrain Variation installed: its two-tap stochastic lattice. Each read is shifted by a random
 			// offset per cell of a skewed triangle grid a tile across, and the two blend by the cells' weights. The blend keeps
 			// a single read's contrast (variance-preserving, Heitz & Neyret 2018), or the foam would thin out between the

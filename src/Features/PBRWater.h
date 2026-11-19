@@ -2,7 +2,6 @@
 
 #include "Feature.h"
 #include "PBRWater/BisectionTessellator.h"
-#include "PBRWater/WaterMeshes.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
 #include "PBRWater/OceanSimulation.h"
@@ -10,6 +9,7 @@
 #include "PBRWater/ShoreSimulation.h"
 #include "PBRWater/SprayParticles.h"
 #include "PBRWater/WaterEnvironment.h"
+#include "PBRWater/WaterMeshes.h"
 #include "PBRWater/WaveModel.h"
 
 #include <array>
@@ -116,8 +116,8 @@ struct PBRWater : Feature
 		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
 
 		// Foam
-		float FoamAmount = 1.0f;        ///< multiplier on the foam the open sea's crests add (FoamAdd)
-		float FoamBias = 0.85f;         ///< the Jacobian below which a texel foams
+		float FoamAmount = 1.0f;        ///< multiplier on the foam the open sea's crests add (FoamAdd), and on the shore's foam coverages (Foam1.z)
+		float FoamBias = 0.85f;         ///< the Jacobian below which a texel foams; also moves the breakers' fold and scales the shore's foam (Foam1.z)
 		float FoamThreshold = 0.0f;     ///< foam is added only above this biased Jacobian
 		float FoamAdd = 0.1f;           ///< foam added per 1/60 s per unit of biased Jacobian
 		float FoamDecayRate = 0.0175f;  ///< foam decays by exp(-rate) per 1/60 s
@@ -127,7 +127,7 @@ struct PBRWater : Feature
 		float FoamOffset3 = -0.38f;
 		float FoamCascadeWeightFull = 1.0f;  ///< a cascade counts fully in the foam from this share of its amplitude
 		float FoamDepthFalloff = 1.0f;       ///< exponent of the foam's fade with distance
-		float FoamFadeDistance = 1000.0f;    ///< m: distance at which the open sea's foam has faded out
+		float FoamFadeDistance = 1000.0f;    ///< m: distance at which all foam has faded out
 		float FoamRoughnessModifier = 0.0f;  ///< roughness added per unit of foam
 		float FoamFeather = 0.12f;           ///< how soft the edge of the foam pattern is
 		float FoamBubbleSize = 0.03f;        ///< m: the bubbles of the foam pattern (surf foam is a microfoam of centimetre bubbles)
@@ -165,6 +165,8 @@ struct PBRWater : Feature
 		// Performance
 		bool EnableTessellation = true;
 		bool DeferredSurface = true;             ///< shade the tessellated water once per pixel (PBRWater/Deferred.hlsli)
+		bool DistantHalfRate = true;             ///< shade the deferred surface's distant tiles at a quarter of the pixels (DeferredFar.hlsl)
+		float DistantHalfRateDistance = 60.0f;   ///< metres: where the distant tiles start
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
 		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
 		float DisplacementFadeStart = 16384.0f;  ///< units
@@ -417,12 +419,18 @@ private:
 	/// Mirrors DeferredCommon.hlsli: the tiles' size (pixels) and the most meshes recorded a frame (one bit each per tile).
 	static constexpr uint32_t DeferredTile = 8;
 	static constexpr uint32_t DeferredMeshes = 32;
+	/// Each mesh has two tile lists: list m its near tiles, DeferredMeshes + m its distant ones (DeferredTilesCS).
+	static constexpr uint32_t DeferredLists = 2 * DeferredMeshes;
+	/// Mirrors DeferredCommon.hlsli: what a deferred draw does (DeferredDrawCB::mode[1]).
+	static constexpr uint32_t DeferredFull = 0;
+	static constexpr uint32_t DeferredHalf = 1;
 	struct alignas(16) DeferredDrawCB
 	{
-		uint32_t tag[4] = {};  ///< x the mesh's tag (1..DeferredMeshes), y the tile list's room per mesh, z texture coordinates recorded
+		uint32_t tag[4] = {};  ///< x the mesh's tag (1..DeferredMeshes), y the tile list's room per list, z texture coordinates recorded
 		float4 viewport{};     ///< xy the viewport's size (pixels)
 		float4 uvMapU{};       ///< the mesh's texture coordinates over its model-space xy (WaterMeshes::AffineTexCoords)
 		float4 uvMapV{};
+		uint32_t mode[4] = {};  ///< x the tile list drawn, y DeferredFull or DeferredHalf, z the half-rate pass's sample rotation
 	};
 	/// A tessellated mesh the stencil pass recorded this frame.
 	struct DeferredMesh
@@ -440,9 +448,9 @@ private:
 	std::unique_ptr<ConstantBuffer> deferredCB;           ///< b13 (DeferredDrawCB)
 	winrt::com_ptr<ID3D11ComputeShader> deferredTilesCS;  ///< DeferredTilesCS: sorts the tiles by mesh
 	std::unique_ptr<ConstantBuffer> deferredTilesCB;
-	winrt::com_ptr<ID3D11Buffer> deferredArgs;  ///< per mesh: DrawInstancedIndirect's arguments
+	winrt::com_ptr<ID3D11Buffer> deferredArgs;  ///< per list: DrawInstancedIndirect's arguments
 	winrt::com_ptr<ID3D11UnorderedAccessView> deferredArgsUAV;
-	std::unique_ptr<Buffer> deferredTiles;  ///< per mesh: its tiles (t101 of the vertex stage)
+	std::unique_ptr<Buffer> deferredTiles;  ///< per list: its tiles (t101 of the vertex stage)
 	uint32_t deferredMaxTiles = 0;
 	std::vector<DeferredMesh> deferredMeshes;  ///< this frame's recorded meshes, by tag - 1
 	uint32_t deferredMeshesFrame = UINT32_MAX;
@@ -452,6 +460,16 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> deferredShoreCS;  ///< null when it failed to compile: the pixels evaluate the train
 	std::unique_ptr<ConstantBuffer> deferredShoreCB;
 	uint32_t deferredShoreFrame = UINT32_MAX;
+	// The distant tiles' half-rate shading (PBRWater/DeferredFar.hlsl): the surface pass shades one pixel of every 2x2 into
+	// deferredFar, then upsamples it into the tiles with the surface draw's own state.
+	std::unique_ptr<Texture2D> deferredFar;            ///< R16G16B16A16_FLOAT at half the record's size: colour, 1 + the shaded pixel
+	winrt::com_ptr<ID3D11VertexShader> deferredFarVS;  ///< the distant tiles at full size
+	winrt::com_ptr<ID3D11PixelShader> deferredFarPS;   ///< the upsampling
+	bool deferredFarFailed = false;                    ///< the upsampling failed to compile: the distant tiles are shaded at full rate
+	uint32_t deferredFarFrame = UINT32_MAX;            ///< the frame deferredFar was last cleared
+	static constexpr UINT DeferredFarSlot = 49;        ///< the half-rate target in the upsampling's pixel stage (DeferredFar.hlsl t49)
+	/** @brief Render thread, DrawDeferredSurface: shades the slot's distant tiles at half rate and upsamples them; false to shade them at full rate. */
+	bool DrawDistantHalfRate(uint32_t slot, DeferredDrawCB data);
 	/** @brief Render thread, the first deferred surface draw of a frame: evaluates the shore train per 2x2 pixels of the record. */
 	void BakeDeferredShore(ID3D11ShaderResourceView* depthSRV, ID3D11ShaderResourceView* flowmap);
 	/** @brief Render thread: (re)creates the stencil pass's records at the depth buffer's size; false when there is none. */
@@ -477,7 +495,7 @@ private:
 	};
 	DeferredBatchState deferredBatch;
 	std::unique_ptr<ConstantBuffer> deferredZeroCB;  ///< b13 between the recorded draws: tag 0, no record
-	/** @brief Render thread, EndDrawBatch: puts back the engine's state and lists the recorded meshes' tiles. */
+	/** @brief Render thread, EndDrawBatch: puts back the engine's state. */
 	void EndDeferredBatch();
 	/// The water meshes the tessellated draws drew, for the tessellator to subdivide.
 	WaterMeshes waterMeshes;

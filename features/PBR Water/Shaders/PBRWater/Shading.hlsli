@@ -220,7 +220,7 @@ namespace PBRWater
 	{
 		float3 normal;
 		float roughness;
-		float fftFoam;       // 0..1 the open sea's foam here (FftFoam): drawn raw, never through the shore foam's pattern
+		float fftFoam;       // 0..1 the open sea's foam here (FftFoam): drawn with the rest of the foam (Water.hlsl)
 		float foam;          // 0..1 the shore waves' white water at this pixel
 		float swashSurface;  // the surf simulation's surface at this pixel (units above the still water; SurfSheet)
 		float swashDepth;    // its depth (units; 0 where dry)
@@ -228,7 +228,7 @@ namespace PBRWater
 		float simShare;      // 0..1 share of the surf simulation in the surface here (ComposeSurf)
 		float3 waveInfo;     // the shore wave here, for the debug view
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
-		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat: drawn raw, like fftFoam
+		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat
 		float surfFoam;      // 0..1 the foam the surf left on the water here (ShoreFoamAt)
 		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
@@ -320,7 +320,10 @@ namespace PBRWater
 		// and turned the roughness into blocks (the ripples are magnified, never sub-pixel, so they need no term).
 		float windVariance = 0.5 * (WindMeanSquareSlope(wind) * (1.0 - 0.8 * slick) + RainMeanSquareSlope());
 		float mapVariance = detailVariance * detailScale * detailScale;
-		o.roughness = CombinedRoughness(Light0.x + waves.fftFoam * Tune2.w, waves.slopeVariance + windVariance + mapVariance);
+		// Foam Roughness from all the foam, as Water.hlsl gathers it (there gated by flatness), faded with distance like it.
+		float shoreCover = saturate(max(max(waves.shoreFoam * waves.bore, o.surfFoam), waves.sheetFoam * waves.surf) * Foam1.z);
+		float foamCover = max(max(waves.fftFoam, waves.breakerFoam), shoreCover) * FoamFade(length(waveParam.xyz));
+		o.roughness = CombinedRoughness(Light0.x + foamCover * Tune2.w, waves.slopeVariance + windVariance + mapVariance);
 		o.windSpeed = wind;
 		o.fftFoam = waves.fftFoam;
 

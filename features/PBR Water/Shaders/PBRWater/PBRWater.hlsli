@@ -67,7 +67,7 @@ namespace PBRWater
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y unused, z refraction distortion scale, w point light specular intensity
-		float4 Foam1;                    // x the open sea's foam bias (Jacobian), y its threshold, z unused, w flow wave damping
+		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w flow wave damping
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
@@ -1805,15 +1805,20 @@ namespace PBRWater
 	// Acerola counts all), _FoamDepthAttenuation, Acerola's depth 1 - Linear01Depth and the roughness modifier.
 
 	/**
-	 * The open sea's foam, 0..1: the weighted sum of the cascades' foam plus their offsets, clamped, and faded with the
-	 * camera distance: lerp(0, saturate(sum), pow(depth, FoamDepthFalloff)) of FFTWater.shader.
+	 * The open sea's foam, 0..1: the weighted sum of the cascades' foam plus their offsets, clamped. Its fade with
+	 * distance is FoamFade, applied to all the foam together.
 	 * @param sum      the cascades' weighted foam and offsets
+	 */
+	float FftFoam(float sum) { return saturate(sum); }
+
+	/**
+	 * The fade of every foam with the camera distance, 0..1: pow(depth, FoamDepthFalloff) of FFTWater.shader.
 	 * @param distance camera distance of the pixel (units)
 	 */
-	float FftFoam(float sum, float distance)
+	float FoamFade(float distance)
 	{
 		float depth = 1.0 - saturate(distance * MetresPerUnit / max(Tune2.z, 1.0));
-		return saturate(sum) * pow(depth, Tune2.y);
+		return pow(depth, Tune2.y);
 	}
 
 	/// Running sums of the cascades' fields.
@@ -1862,12 +1867,13 @@ namespace PBRWater
 	 * the crest and tumbles down the face. The Jacobian is read from the train's compression (the displacement gradient the
 	 * normal is built from) and thresholded as the sea's is, a coverage from where it falls below FoldStart; it counts only
 	 * where the wave is breaking. The profile's own foam slice (ShoreProfileAt, slice 1) supplies the white water the fold
-	 * has not yet reached, the lip's tip and the spill. Like the sea's foam it is blended in raw: the foam texture is kept
-	 * for the flattened bore (Water.hlsl).
+	 * has not yet reached, the lip's tip and the spill. It is drawn with the sea's foam (Water.hlsl), the foam texture's
+	 * bubbles fading off steep faces.
 	 */
 	float BreakerFoam(ShoreTrain train)
 	{
-		static const float FoldStart = 0.6;  // Jacobian at which the surface starts to count as folding (the sea's bias)
+		// Jacobian at which the surface starts to count as folding: 0.6 at the sea's default bias, moved with it (Foam Coverage).
+		float FoldStart = max(0.6 / 0.85 * Foam1.x, 1e-3);
 		float3 compression = train.compression + train.lipCompression;
 		float jacobian = (1.0 + compression.x) * (1.0 + compression.y) - compression.z * compression.z;
 		float fold = saturate((FoldStart - jacobian) / FoldStart);
@@ -1885,15 +1891,14 @@ namespace PBRWater
 	 * (ctx.sea) count, so the pattern is there in the surf, where the train carries the long waves; the cascades the
 	 * hand-over turned off entirely are not read, and where none is (no FFT sea), the coverage is drawn as it is.
 	 * A coverage of its own, smooth or broken up by a noise, drew every breaker as white blobs unlike the sea's foam.
-	 * @param distance camera distance of the pixel (units)
 	 */
-	float BreakerFoamDrawn(float coverage, WaveSums sums, float distance)
+	float BreakerFoamDrawn(float coverage, WaveSums sums)
 	{
 		static const float ShoreBreakerFoamLift = 1.2;  // offset added to each cascade's at full coverage: every texel passes
 		float drawn = 0.0;
 		[branch] if (coverage > 0.0)
 		{
-			float sea = FftFoam(sums.seaFoam + ShoreBreakerFoamLift * coverage * sums.seaFoamWeight, distance);
+			float sea = FftFoam(sums.seaFoam + ShoreBreakerFoamLift * coverage * sums.seaFoamWeight);
 			drawn = lerp(coverage, sea, saturate(sums.seaFoamWeight / 0.5));
 		}
 		return drawn;
@@ -2163,29 +2168,30 @@ namespace PBRWater
 						d = OceanDisplacement.SampleGrad(OceanSampler, uv, gx, gy);
 						g = OceanDerivatives.SampleGrad(OceanSampler, uv, gx, gy);
 						m = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
-						foam = OceanFoam.SampleGrad(OceanSampler, uv, gx, gy);
+						// The breakers' white water is drawn with this foam (BreakerFoamDrawn), thickened until whole stretches
+						// of the tile pass: there its repeats showed along every beach. In the shore train's water it is read with
+						// Terrain Variation's two-tap stochastic lattice instead, when it is installed (a random offset per cell a
+						// tile across), the blend's contrast kept (variance-preserving about no foam). The sea's foam and the
+						// breakers' share this one read: read apart, the surf showed two different laces over each other.
+#if defined(TERRAIN_VARIATION)
+						[branch] if (ctx.train > 0.0)
+						{
+							float2 cell1, cell2;
+							StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv.xy, 1.0, 0.0, cell1, cell2);
+							float a = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset1, c), gx, gy);
+							float b = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset2, c), gx, gy);
+							float w = taps.tap1Weight;
+							foam = lerp(b, a, w) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5));
+						}
+						else
+#endif
+							foam = OceanFoam.SampleGrad(OceanSampler, uv, gx, gy);
 					}
 					float horizontal = vertical * steepnessScale;
 					AddCascade(sums, c, vertical, horizontal, d, g);
 					sums.foam += saturate(vertical / max(Tune2.x, 0.01)) * (foam + Tune1[c]);
 					float seaShare = saturate(ctx.sea[c] / max(Tune2.x, 0.01));
-					// The breakers' white water is drawn with this foam (BreakerFoamDrawn), thickened until whole stretches of
-					// the tile pass: there its repeats showed along every beach. In the shore train's water it is read with
-					// Terrain Variation's two-tap stochastic lattice instead, when it is installed (a random offset per cell a tile
-					// across), the blend's contrast kept (variance-preserving about no foam). The open sea's own foam is left as it is.
-					float shoreFoam = foam;
-#if defined(TERRAIN_VARIATION)
-					[branch] if (ctx.train > 0.0 && !any(ctx.flow))
-					{
-						float2 cell1, cell2;
-						StochasticOffsets taps = ComputeStochasticOffsetsScaledPeriodic(uv.xy, 1.0, 0.0, cell1, cell2);
-						float a = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset1, c), gx, gy);
-						float b = OceanFoam.SampleGrad(OceanSampler, float3(uv.xy + taps.offset2, c), gx, gy);
-						float w = taps.tap1Weight;
-						shoreFoam = lerp(b, a, w) * rsqrt(max(w * w + (1.0 - w) * (1.0 - w), 0.5));
-					}
-#endif
-					sums.seaFoam += seaShare * (shoreFoam + Tune1[c]);
+					sums.seaFoam += seaShare * (foam + Tune1[c]);
 					sums.seaFoamWeight += seaShare;
 					float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
 					float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
@@ -2217,14 +2223,15 @@ namespace PBRWater
 		// A face about to plunge is clear water: the sea's foam is drawn off it (ShoreClearFace). What the surf left on the
 		// water stays: it lies on the surface and rides up the face (cleared too, it left a bare band ahead of every plunger).
 		float clear = 1.0 - o.clearFace;
-		float distance = length(positionWS);
-		o.fftFoam = FftFoam(sums.foam, distance) * clear;
+		o.fftFoam = FftFoam(sums.foam) * clear;
 		// The breaker's own white water, drawn with the sea's foam; once the bore lies flat the foam texture takes over.
 		// The surf's leftover foam rides the water up every rising face: there it is drawn with the sea's foam too, as
 		// thickened lace. Added raw, as a coverage with no pattern, it laid a flat grey veil over every breaker's face.
 		float flatness = smoothstep(0.80, 0.95, o.normal.z);
 		float boreFlat = o.bore * flatness;
-		o.breakerFoam = BreakerFoamDrawn(max(max(o.breakerFoam * (1.0 - boreFlat), crestFoam), saturate(surfFoam) * (1.0 - flatness)), sums, distance);
+		// Foam Amount and Foam Coverage scale it as they do the sea's (Foam1.z); crestFoam is the sea's own test already.
+		float breakerCoverage = saturate(max(o.breakerFoam * (1.0 - boreFlat), saturate(surfFoam) * (1.0 - flatness)) * Foam1.z);
+		o.breakerFoam = BreakerFoamDrawn(max(breakerCoverage, crestFoam), sums);
 		// The churned water (the crushed tube, the splash-up, the roller) is in BreakerFoam's coverage and drawn with the sea's
 		// foam, thickened to solid where it is densest. Drawn opaque on top with no pattern, it laid a smooth white band along
 		// every breaking crest that cut off hard against the lace around it.

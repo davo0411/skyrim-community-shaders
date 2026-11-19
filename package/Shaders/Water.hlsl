@@ -1894,8 +1894,8 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrEdge = smoothstep(0.0, 0.12 * PBRWater::UnitsPerMetre, pbrFilm);
 	pbrEdge *= pbrEdge * (3.0 - 2.0 * pbrEdge);
 
-	// Foam (PBRWater.hlsli): the shore waves' and the swash's, drawn with the foam texture below; and the open sea's
-	// (pbrSurface.fftFoam, the accumulated cascade foam of GarrettGunnell/Water), blended in raw as a coverage.
+	// Foam (PBRWater.hlsli): the shore waves', the swash's and the open sea's
+	// (pbrSurface.fftFoam, the accumulated cascade foam of GarrettGunnell/Water), drawn together below.
 	// Nothing is drawn from what the depth buffer shows through the water:
 	// that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from below. It is drawn
 	// with the foam texture (Crest's black-point fade) where the surface is, a diffuse scatterer
@@ -1905,12 +1905,12 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrTipGap = pbrSurface.swashDepth > PBRWater::SwashMinDepth ? pbrSurface.swashSurface - pbrBed : -PBRWater::UnitsPerMetre;
 	// Antialiased over the pixel: a hard step drew the uprush's edge in stairs.
 	float pbrSheet = saturate(pbrTipGap / max(fwidth(pbrTipGap), 0.01) + 0.5) * pbrSurface.simShare;
-	// Two foams. The breaking wave's own white water (pbrSurface.breakerFoam: the folding of its surface and the profile's
-	// foam, BreakerFoam) is drawn the way the open sea's is, as a raw coverage with no texture, so there is nothing on the
-	// face, crest, lip and tumbling white water to stretch. The foam texture is kept for the flat white water: the bore once
-	// it has formed and lies near horizontal, what the surf left on the water where it lies flat (on a rising face that
-	// joins the breaker's, drawn with the sea's foam), and the surf simulation's. The two cross-fade by
-	// how flat the surface is, and for the wave itself by its stage (bore), so the pattern takes over as the wave rolls flat.
+	// One foam, one draw. Its coverage is the most of: the open sea's lace (fftFoam) and the breaking wave's white water
+	// (breakerFoam: the folding of its surface and the profile's foam, made of the same lace), and the flat white water
+	// the lace does not reach (the bore once it lies near horizontal, what the surf left where it lies flat, the surf
+	// simulation's). All of it takes the foam texture's bubbles where the surface is flat; on steep faces (crest, lip,
+	// tumbling white water) the pattern would stretch, so it fades to the coverage there, as it does with distance. Drawn
+	// apart (the lace raw, the shore foam patterned) the sea, breakers and shore read as three different foams.
 	// The pattern holds still where the surface is, projected from above: the foam moves over it, as its coverage.
 	// SurfaceFoam takes screen derivatives and skips the pattern where it gets no foam, so it is called unconditionally.
 	float3 pbrFoamPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
@@ -1926,10 +1926,13 @@ PS_OUTPUT main(PS_INPUT input)
 	// water's edge, where the sheet thins over the sand. Without it the water past the last of the bores' foam ended in a
 	// clean line on the sand.
 	float pbrEdgeLace = 0.4 * pbrSurface.simShare * (1.0 - smoothstep(0.02 * PBRWater::UnitsPerMetre, 0.10 * PBRWater::UnitsPerMetre, pbrFilm));
-	float pbrPatternCoverage = max(max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
+	float pbrFlatCoverage = max(max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
 	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
-	float pbrRawCoverage = pbrSurface.breakerFoam;
-	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);
+	// The foam settings reach all of it: Foam Amount and Foam Coverage scale the shore's coverages as they do the sea's
+	// (Foam1.z; the breakers' in BreakerFoamDrawn), and the distance fade is applied to the whole.
+	pbrFlatCoverage = saturate(pbrFlatCoverage * PBRWater::Foam1.z);
+	float pbrFoamCoverage = max(max(saturate(pbrSurface.fftFoam), pbrSurface.breakerFoam), pbrFlatCoverage) * PBRWater::FoamFade(length(input.WaveParam.xyz));
+	float pbrFoamPattern = PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrFoamCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler, pbrFlat);
 
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
@@ -1940,7 +1943,7 @@ PS_OUTPUT main(PS_INPUT input)
 #							endif
 	pbrSunGlint *= pbrEdge;
 	float pbrFilmFoam = smoothstep(0.0, 0.04 * PBRWater::UnitsPerMetre, pbrFilm);
-	float pbrFoam = max(pbrFoamPattern * pbrFilmFoam, saturate(pbrSurface.fftFoam) * pbrFilmFoam);
+	float pbrFoam = pbrFoamPattern * pbrFilmFoam;
 	// Lit only where there is foam: most of the water has none.
 	[branch] if (pbrFoam > 0.0)
 	{
@@ -2063,6 +2066,12 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #			endif
 	psout.Lighting = float4(finalColor, isSpecular);
+#			if defined(PBRW_DEFERRED)
+	// The half-rate pass's target carries which of its 2x2 pixels was shaded (DeferredFar.hlsl), not the blend's alpha:
+	// only the surface technique draws it, whose alpha is 0 (isSpecular).
+	if (PBRWaterDeferred::HalfRateKey > 0.0)
+		psout.Lighting.w = PBRWaterDeferred::HalfRateKey;
+#			endif
 #		endif
 
 #		if defined(STENCIL)

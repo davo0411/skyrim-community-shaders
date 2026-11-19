@@ -33,7 +33,11 @@ namespace PBRWaterDeferred
 		float4 Viewport;  // xy the viewport's size (pixels)
 		float4 UVMapU;    // the mesh's texture coordinate u over its model-space xy: x d/dx, y d/dy, z at the origin
 		float4 UVMapV;
+		uint4 Mode;  // x the tile list drawn (DeferredCommon.hlsli), y PBRWATER_DEFERRED_FULL or _HALF, z the frame's sample rotation (_HALF)
 	};
+
+	/// The half-rate pass's key for the pixel it shaded (DeferredFar.hlsl): 1 + which of its 2x2 pixels, 0 none.
+	static float HalfRateKey = 0.0;
 
 	/// The stencil pass's record of a pixel (SV_Target2-5).
 	struct Record
@@ -66,12 +70,14 @@ namespace PBRWaterDeferred
 #if defined(VSHADER)
 	StructuredBuffer<uint> Tiles : register(t101);  // DeferredTilesCS: each mesh's tiles
 
-	/// One corner of one of this mesh's tiles (instance), as two triangles (vertices 0-5).
+	/// One corner of one of the drawn list's tiles (instance), as two triangles (vertices 0-5). The half-rate pass draws
+	/// them over the half-size target, whose Viewport is half the screen's.
 	float4 TileVertex(uint vertexID, uint instanceID)
 	{
-		uint packed = Tiles[(Tag.x - 1) * Tag.y + instanceID];
+		uint packed = Tiles[Mode.x * Tag.y + instanceID];
 		static const float2 Corners[6] = { float2(0, 0), float2(1, 0), float2(0, 1), float2(0, 1), float2(1, 0), float2(1, 1) };
-		float2 pixel = (float2(packed & 0xFFFF, packed >> 16) + Corners[vertexID % 6]) * PBRWATER_DEFERRED_TILE;
+		float tile = Mode.y == PBRWATER_DEFERRED_HALF ? PBRWATER_DEFERRED_TILE / 2 : PBRWATER_DEFERRED_TILE;
+		float2 pixel = (float2(packed & 0xFFFF, packed >> 16) + Corners[vertexID % 6]) * tile;
 		float2 ndc = min(pixel / Viewport.xy, 1.0) * 2.0 - 1.0;
 		return float4(ndc.x, -ndc.y, 0.0, 1.0);
 	}
@@ -115,6 +121,30 @@ namespace PBRWaterDeferred
 	bool Resolve(inout VS_OUTPUT input)
 	{
 		int2 px = int2(input.HPosition.xy);
+		// The half-rate pass: this pixel of the half-size target stands for 2x2 pixels of the screen and shades one of them
+		// that is this mesh's, starting from a different one each frame so the temporal filter gathers all four. The
+		// screen-space reads then use that pixel's position, and the screen derivatives span two pixels: the footprint the
+		// coarser sampling has.
+		[branch] if (Mode.y == PBRWATER_DEFERRED_HALF)
+		{
+			uint width, height;
+			Tags.GetDimensions(width, height);
+			int2 corner = px * 2;
+			int2 chosen = min(corner, int2(width, height) - 1);
+			HalfRateKey = 0.0;
+			[unroll] for (uint i = 0; i < 4; i++)
+			{
+				uint index = (i + Mode.z) & 3;
+				int2 candidate = min(corner + int2(index & 1, index >> 1), int2(width, height) - 1);
+				Pixel c = Read(candidate);
+				if (HalfRateKey == 0.0 && c.water && c.tag == Tag.x) {
+					chosen = candidate;
+					HalfRateKey = 1.0 + index;
+				}
+			}
+			px = chosen;
+			input.HPosition.xy = px + 0.5;
+		}
 		Pixel p = Read(px);
 		bool owned = p.water && p.tag == Tag.x;
 		int2 source = px;
@@ -179,7 +209,8 @@ namespace PBRWaterDeferred
 		o.SurfaceNoise = float2(recordNoise.x, 0.35 + 1.3 * recordNoise.y);
 		o.HPosition = float4(input.HPosition.xy, p.depth, input.HPosition.w);
 		input = o;
-		return owned;
+		// A half-rate pixel whose 2x2 holds none of this mesh's water writes nothing (the upsampling reads its key 0).
+		return owned && (Mode.y != PBRWATER_DEFERRED_HALF || HalfRateKey > 0.0);
 	}
 #endif
 }
