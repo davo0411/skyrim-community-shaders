@@ -55,6 +55,7 @@ struct PBRWater : Feature
 		// Waves
 		float WindSpeedCalm = 3.0f;    ///< m/s when the weather has no wind
 		float WindSpeedStorm = 22.0f;  ///< m/s at the strongest weather wind
+		bool EnableOceanWaves = true;  ///< the FFT sea; off: no spectrum, FFT, mips or gameplay mirror (shore waves and ripples are separate)
 		float WaveHeight = 1.0f;
 		float SwellHeight = 0.5f;      ///< metres, significant height of the swell from distant storms
 		float SwellPeriod = 10.0f;     ///< seconds
@@ -88,10 +89,13 @@ struct PBRWater : Feature
 		float SwashChurnSpeed = 1.7f;     ///< how fast the lumps boil, relative to the waves' clock
 
 		// Surface and light
+		bool EnableWaveShadows = true;       ///< the waves shade the water behind them from the sun (the heightfield pass and its per-pixel march)
+		bool EnablePointLightSpecular = true;  ///< lamps and torches glint in the water (the per-pixel light loop)
 		float Roughness = 0.06f;
 		float SunSpecular = 1.0f;
 		float PointLightSpecular = 1.0f;
 		float PointLightEmitterRadius = 8.0f;  ///< units (~a torch flame): Skyrim lights have no emitter size
+		bool EnableSubsurface = true;  ///< sunlight scattered through the water (off: not evaluated)
 		float Subsurface = 1.0f;
 		float VanillaFresnel = 0.0f;
 		float RefractionDistortion = 1.0f;
@@ -100,6 +104,7 @@ struct PBRWater : Feature
 		float DetailNormalGale = 1.3f;   ///< and at 8 m/s of wind and over
 
 		// Water clarity
+		bool EnableClarity = true;  ///< sediment: turbidity, shallows stirring, silt, storms; off: the water form's own clarity
 		float Visibility = 1.0f;
 		float Turbidity = 0.15f;  ///< suspended sediment everywhere (0 = crystal clear)
 		float3 SedimentColor = { 0.34f, 0.29f, 0.2f };
@@ -116,6 +121,7 @@ struct PBRWater : Feature
 		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
 
 		// Foam
+		bool EnableFoam = true;         ///< white water: the sea's, the breakers' and the surf's, in the pixel shader and the foam mips
 		float FoamAmount = 1.0f;        ///< multiplier on the foam the open sea's crests add (FoamAdd), and on the shore's foam coverages (Foam1.z)
 		float FoamBias = 0.85f;         ///< the Jacobian below which a texel foams; also moves the breakers' fold and scales the shore's foam (Foam1.z)
 		float FoamThreshold = 0.0f;     ///< foam is added only above this biased Jacobian
@@ -344,7 +350,10 @@ struct PBRWater : Feature
 	};
 
 private:
-	static constexpr uint32_t WaterSRVCount = 18;        ///< t110-t127
+	static constexpr uint32_t WaterSRVBase = 80;         ///< first slot of the water textures (t80-t97 in the vertex, pixel and compute stages)
+	static constexpr uint32_t WaterSRVCount = 18;        ///< t80-t97
+	static constexpr uint32_t WaterSamplerBase = 14;     ///< s14 (linear clamp) and s15 (ocean, anisotropic wrap)
+	static constexpr uint32_t SwashWetSlot = 104;        ///< t104, pixel stage: the swash's wet sand for Lighting (PBRWaterShore)
 	static constexpr uint32_t WaveHeightfieldSlot = 27;  ///< t27, pixel stage: the waves' heightfield (sunMapTexture)
 	static constexpr uint32_t SurfaceNoiseSize = 128;    ///< texels per side of the surface noise bake
 
@@ -362,7 +371,7 @@ private:
 	PBRWaterModel::SpectrumParams CurrentSpectrumParams(float windSpeed, bool exterior) const;
 	/** @brief FFT size for the WaveResolution setting. */
 	uint32_t WaveResolutionSize() const;
-	/** @brief Render thread: the SRVs of slots t110-t126. */
+	/** @brief Render thread: the SRVs of slots t80-t96. */
 	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[WaterSRVCount]) const;
 	/// False for a water tile wholly outside the waves' reach: flat, so it needs no tessellation.
 	bool WavesReach(const RE::NiAVObject& geometry) const;

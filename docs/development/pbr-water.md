@@ -14,7 +14,7 @@ main thread (Main::Update)                         render thread
 --------------------------                         -------------
 weather wind + swell -> OceanSpectrum (WaveModel)  Prepass: FFT ocean CS (spectrum, FFT, assemble, mips),
 wave clock (double), CPU mirror frames (worker) -> ripple sim CS, fetch / shore field upload, frame
-WaterEnvironment: fetch bake + bathymetry,           constants, swash CS (ShoreSimCS), t123 for Lighting
+WaterEnvironment: fetch bake + bathymetry,           constants, swash CS (ShoreSimCS), t104 for Lighting
   shore field (worker)                              b7 PBRWaterData (cascades, fetch, terrain, shore, swash)
 gather ripple sources, Havok buoyancy               BSWaterShader::SetupGeometry: per-draw constants,
 TESObjectCELL::GetWaterHeight += wave height          HS/DS/GS binding for that draw's descriptor
@@ -148,7 +148,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
     under water, with a bias of -18.6 m there. So a marsh 0.6 m deep shaded as deep sea, and wherever exact data ended
     the depth had a cliff that broke the waves, the breaking and the shore field's slopes. A worker reads every
     active plugin in load order instead, keeping the last LAND of each cell, into one grid of the terrain's vertices (a
-    texel per vertex, 128 units apart): `t112`, R16_UNORM, about 2 cm per step. Records are found by walking the
+    texel per vertex, 128 units apart): `t82`, R16_UNORM, about 2 cm per step. Records are found by walking the
     file's groups, and compressed records are inflated only as far as the heights (`VHGT`), so a LAND costs a fraction
     of its size. Nothing depends on what has loaded: depth, shore field and gameplay read the same exact heights
     everywhere, and they only change with the land itself. They are kept while the player stays on the same land,
@@ -162,7 +162,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
         (phase 0.32, `ShoreCrestReference`), a third of a wave away at most, so all of it agrees: its height (the sea's
         `Hrms = Hs / sqrt(2)`, its set, Green's law shoaling over the crest depth, up to the breaking limit `H = gamma h`
         and no steeper than Miche's `H / L = 0.142`) and its life stage. The _crest depth_ (`ShoreField::crestDepth`,
-        baked with the coastline map, t124.y, `ShoreCrestDepth`) is the depth averaged along the crest (a LAND quad at
+        baked with the coastline map, t94.y, `ShoreCrestDepth`) is the depth averaged along the crest (a LAND quad at
         least, a quarter wave at most either way) and never more than the least the wave crossed on its way in, carried
         shorewards along the rays: breaking is not undone, so a wave's stage only ever advances. Read from the bed under
         the crest (five terrain lookups per vertex), the stage followed every crease and dip of the terrain, backwards as
@@ -178,7 +178,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
         while the depth fell to a third of the breaking depth, tens of metres on a gentle beach. So a wave peaks where it
         shoals, breaks where it reaches its limit, on a sandbar as on the beach, and sooner if it is a big one; several
         waves at different stages stand along a ray at once.
-    -   _Shape_ (`ShoreProfile.cpp`, t114; `ShoreShapeAt` / `ShoreHump` in the shaders): Fluid Flux draws its waves from
+    -   _Shape_ (`ShoreProfile.cpp`, t84; `ShoreShapeAt` / `ShoreHump` in the shaders): Fluid Flux draws its waves from
         a canned profile animation, a texture by position across the wave and life. This one is computed at start-up
         (256 x 64, two RGBA16F slices): forward and upward displacement, their derivatives, the white water and each
         stage's forward scale. The wave is one hump through all of its life: a sinusoid narrows into a peaked crest over
@@ -204,7 +204,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
         period gave one wave as long as the beach is deep.
         The clock runs at that frequency, so the crests travel at the waves' own celerity (a slower clock, the former
         `ShoreTimeScale`, held a broken wave's rolled lump on the water for seconds).
-    -   _Surf foam_ (`ShoreFoamCS`, `ShoreSimulation::UpdateFoam`, t127 `ShoreFoamAt`): the bores' white water rides the
+    -   _Surf foam_ (`ShoreFoamCS`, `ShoreSimulation::UpdateFoam`, t97 `ShoreFoamAt`): the bores' white water rides the
         wave (the profile); what the breakers leave behind is simulated on a camera-centred grid (1024 x 1024, 17 cm, in
         the water's rest coordinates). Foam is a tracer on the surface: the profile's white water is its source (a share
         `ShoreResidualFoam`, "Foam Left Behind", of it), the water carries it semi-Lagrangian (as Crest 4 moves its foam)
@@ -288,7 +288,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
         divides the target triangle size by `ShoreCurlDetail` (default 2) in the surf zone, where a curl can show
         (`ShoreCurlDepth`: deeper than a large wave of a set can curl in, no wave curls).
         Geometry only: the CPU mirror rides the table's uncurled wave.
--   **Room for the train** (`ShoreField::room`, `t124`): a train of shoaling, breaking waves needs open water
+-   **Room for the train** (`ShoreField::room`, `t94`): a train of shoaling, breaking waves needs open water
     a few wavelengths across. Each water texel gets the width of the largest disc of water around it (twice
     the distance to the waterline at that disc's centre, propagated by raster sweeps) against the shore waves'
     wavelength in the local depth: `room = smoothstep(0.1, 0.6, width / L)`. It scales the train's share
@@ -354,7 +354,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
         counted); the roller's dense foam thins within 0.4 s to what lingers (`ShoreResidualFoam`), which decays over
         `ShoreFoamLifetime` on the water and within a few seconds stranded on the sand (the swash mark).
     -   _Drawn_: `SwashOutCS` packs the simulation's surface (the bed where dry, so it is continuous across the water's
-        edge), depth and foam with the surf's foam into `ShoreFoamTexture` (t127). `ComposeSurf` reads it for the
+        edge), depth and foam with the surf's foam into `ShoreFoamTexture` (t97). `ComposeSurf` reads it for the
         geometry (averaged over the vertex spacing where the mesh is coarser than the grid: a bore's front is two cells
         wide and stepped from vertex to vertex) and for the pixels (exact, with its gradient for the normal; where it is
         dry the pixel is not water). Past the grid (about 80 m, faded over its outer tenth) the train runs to the
@@ -388,7 +388,7 @@ in the inner surf, and the drawn surface passes from the one to the other across
 -   **Wet shores** (`ShoreSimulation`, `ShoreSimCS.hlsl`, a camera-centred grid scrolled in whole texels):
     the highest water each point saw lately (the swash on beaches, the waves against rocks, piers and hulls),
     sinking slowly as it drains, and the water surface height. Lighting reads them through
-    `t123` and `SharedData::pbrWaterSettings` (`PBRWater/ShoreWetness.hlsli`): Wetness Effects' shore wetness
+    `t104` and `SharedData::pbrWaterSettings` (`PBRWater/ShoreWetness.hlsli`): Wetness Effects' shore wetness
     follows what the waves reached, and caustics and underwater wetness follow the moving surface.
 
 ## Tessellation
@@ -436,8 +436,8 @@ pass (836 at the Solitude docks), and nearly all of them flat. Setting each one 
 uploaded, 17 views bound, samplers saved and restored) cost 8.6 ms of the water's 16.4 ms there while the GPU executed
 almost nothing. Now a tile wholly outside the waves' reach (`WavesReach`: outside the loaded cells or past the
 displacement fade) is drawn untessellated, the constants are uploaded once per frame into one buffer per vertex shader
-mode that the draws swap between, and the views stay bound for the frame (only the pixel stage's t110-t111, which
-Landscape Seams shares, is checked per draw). The water's draws went from 16.4 to 10.9 ms there.
+mode that the draws swap between, and the views stay bound for the frame (the pixel stage's t80-t97, which
+True PBR and Terrain Helper bind for lit geometry, are checked per draw). The water's draws went from 16.4 to 10.9 ms there.
 
 ### Vertex program cost
 
@@ -450,7 +450,7 @@ and its texture operations):
 | Before                                                                                                                            | 2815 (46) | 3001 (51) |
 | The swash's wave groups: 3 value noises per evaluation instead of 12 (`ShoreGroupSlices`; the stencil pass evaluates it twice)    | -441      | -753      |
 | The exact terrain and its gradient from one 4 x 4 block of texels (`BilinearLoadGrad`: 12 loads and 1 `GetDimensions`, not 20, 5) | -45 (-8)  | -46 (-8)  |
-| Surface noise baked once per frame (`SurfaceNoiseCS`, t126): one bilinear lookup instead of ~30 value noises (433 slots)          | (433)     | -         |
+| Surface noise baked once per frame (`SurfaceNoiseCS`, t96): one bilinear lookup instead of ~30 value noises (433 slots)          | (433)     | -         |
 | After                                                                                                                             | 2343 (39) | 2202 (43) |
 
 The noise's direct evaluation stays as the fallback beyond the bake, so it still counts statically. The bake is a
@@ -497,7 +497,7 @@ What the research says, and what it means here:
     evaluating it themselves beyond the bake) and the pixels interpolate it.
 -   **Foam** is made only where waves break, and lit as a diffuse scatterer. One setting, Foam Amount (1 = as measured).
     -   _Open sea_ (`OceanAssembleCS`, `PBRWater::FftFoam`): a direct port of the foam of GarrettGunnell/Water (Acerola, MIT).
-        Every texel of every cascade keeps a foam value (`OceanFoam`, t121, mip-mapped). Each frame, from the Jacobian
+        Every texel of every cascade keeps a foam value (`OceanFoam`, t91, mip-mapped). Each frame, from the Jacobian
         `J = (1 + dDx/dx)(1 + dDy/dy) - (dDx/dy)^2` of that cascade's own displacement (choppiness is already in the
         spectrum): `foam *= exp(-decay)`, `foam = saturate(foam)`, `biased = max(0, bias - J)`, and
         `if (biased > threshold) foam += add * biased`. Acerola steps once per frame; here the decay exponent and the add
@@ -518,7 +518,7 @@ What the research says, and what it means here:
         how real the breakers are (`BreakerStrength`); the water's edge is a thin line of lace where the swash sheet is
         about to end (Water.hlsl).
     -   _Pattern_ (`PBRWater/Foam.hlsli`, shore foam only): the "black point fade" of Crest: the foam texture is thresholded so dense
-        foam thins into lace and then specks; thin foam is also translucent. The texture (`FoamPattern.cpp`, t125, 512^2
+        foam thins into lace and then specks; thin foam is also translucent. The texture (`FoamPattern.cpp`, t95, 512^2
         R8 with mips, baked at start-up) holds round bubbles of random size, histogram-equalised so a coverage `C`
         whitens a share `C`. It is sampled at three scales four times apart, which gives the edge irregular lace at every
         size (one scale drew smooth spots), and the scales follow the pixel: as the finest would turn sub-pixel it fades
@@ -557,7 +557,7 @@ What the research says, and what it means here:
         wavelength the grid holds, two texels (Crest: deep-water `g / k` at the same wavelength), clamped so the leapfrog
         scheme stays stable (Courant `C^2 = (c dt / dx)^2 <= 0.45`; the limit is 0.5). The viscous term is kept. At the
         default 64 m grid (12.5 cm texels) that is about 0.6 m/s.
-    -   _Terrain awareness_: the depth per texel is the still water level minus the terrain height (`TerrainTexture`, t112,
+    -   _Terrain awareness_: the depth per texel is the still water level minus the terrain height (`TerrainTexture`, t82,
         mapped by `Terrain0` / `Terrain1`). The level comes from the exterior cells around the eye
         (`PBRWater::GatherWaterLevels`: `GetExteriorWaterHeight` of a 5 x 5 cell table, the eye's own cell from
         `GetWaterHeight` at the eye so a lake or river at another height than the cell default is followed), the same

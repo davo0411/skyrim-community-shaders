@@ -7,7 +7,7 @@
 // Foam is a coverage (0..1, how much of the surface is foam) turned into a pattern by the "black point fade" of Crest
 // (wave-harmonic/crest, MIT, OceanFoam.hlsl WhiteFoamTexture): the foam texture is thresholded at 1 - coverage, so as
 // the coverage falls the bubbles in the foam grow and merge and dense foam thins into lace and then specks. The
-// texture (t125, baked at start-up: src/Features/PBRWater/FoamPattern.cpp) stores the coverage at which each texel
+// texture (t95, baked at start-up: src/Features/PBRWater/FoamPattern.cpp) stores the coverage at which each texel
 // whitens, equalised, so the thresholded share equals the coverage. The water shader samples it still, where the surface
 // is, projected from above (at the rest position the waves' horizontal displacement drew it out into streaks over every
 // breaker's face); steep faces, where it would run down the face, are drawn as the coverage. Every foam (the open sea's,
@@ -22,7 +22,7 @@
 
 namespace PBRWaterFoam
 {
-	Texture2D<float> FoamTexture : register(t125);
+	Texture2D<float> FoamTexture : register(t95);
 
 	static const float BubblesPerTile = 12.0;  // PBRWaterFoam::BubblesPerTile (FoamPattern.h)
 

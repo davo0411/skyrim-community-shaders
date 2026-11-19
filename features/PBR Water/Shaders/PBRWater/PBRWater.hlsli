@@ -66,14 +66,14 @@ namespace PBRWater
 		float4 Ripple1;                  // x displacement scale (units), y normal strength, z unused, w texel size (uv)
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
-		float4 Light1;                   // x visibility scale, y unused, z refraction distortion scale, w point light specular intensity
+		float4 Light1;                   // x visibility scale, y foam on (Enable Foam), z refraction distortion scale, w point light specular intensity
 		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w flow wave damping
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, y gust strength, z gust size (units), w rain intensity (0..1)
-		float4 Surface1;                 // x wind slick strength, y unused, z fetch scale, w unused
+		float4 Surface1;                 // x wind slick strength, y sediment on (Enable Water Clarity), z fetch scale, w unused
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
@@ -96,24 +96,24 @@ namespace PBRWater
 		float4 Swash1;                   // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
 	}
 
-	Texture2D<float4> RippleTexture : register(t110);                   // x height, y height one step earlier, w silt
-	Texture2DArray<float> FetchTexture : register(t111);                // fetch in km, one slice per upwind direction
-	Texture2D<float> TerrainTexture : register(t112);                   // the worldspace's terrain: its LAND vertices, normalised to Terrain1.xy
-	Texture2D<float4> RipplePreviousTexture : register(t113);           // the ripple state as displayed last frame (motion vectors)
-	Texture2DArray<float4> OceanDisplacement : register(t115);          // xyz displacement (units), w dDx/dy, one slice per cascade
-	Texture2DArray<float4> OceanDerivatives : register(t116);           // xy height slopes, zw compression dDx/dx, dDy/dy
-	Texture2DArray<float2> OceanSurface : register(t117);               // squared slopes (LEAN moments)
-	Texture2DArray<float4> OceanPreviousDisplacement : register(t118);  // last frame's displacement (motion vectors)
-	Texture2DArray<float4> ShoreProfileTexture : register(t114);        // the shore wave through its life (ShoreProfile.h): slice 0 forward, up, their d/dphase; slice 1 foam
-	Texture2DArray<float> OceanFoam : register(t121);                   // the FFT foam, one persistent slice per cascade (OceanAssembleCS)
-	Texture2D<float4> ShoreField0 : register(t119);                     // x travel time to the waterline tau (s; up the beach: the waterline's), y signed distance to it (units), z offset of the crests along the coast (wave cycles), w still water level (absolute z, < -1e6: none)
-	Texture2D<float4> ShoreField1 : register(t120);                     // xy grad tau (s/m, seaward; up the beach: the waterline's), z beach slope (tan) at the waterline, w exposure to the swell
-	Texture2D<float4> ShoreFieldPrevious : register(t122);              // ShoreField0 of the field being replaced (Shore0.y < 1)
-	Texture2D<float2> ShoreRoomTexture : register(t124);                // x 0..1 room for the shore wave train: the width of the water against the wavelength, y the depth a wave's crest answers to (m; ShoreCrestDepth)
-	Texture2D<float2> SurfaceNoiseTexture : register(t126);             // x TurbidityPatches, y WindGust around the camera (SurfaceNoiseCS)
-	Texture2D<float4> ShoreFoamTexture : register(t127);                // SwashOutCS: x the foam the surf left on the water, y the surf simulation's surface (units above the still water; the bed where dry), z its depth (units), w its foam
-	SamplerState LinearClampSampler : register(s12);
-	SamplerState OceanSampler : register(s13);  // anisotropic, wrap
+	Texture2D<float4> RippleTexture : register(t80);                   // x height, y height one step earlier, w silt
+	Texture2DArray<float> FetchTexture : register(t81);                // fetch in km, one slice per upwind direction
+	Texture2D<float> TerrainTexture : register(t82);                   // the worldspace's terrain: its LAND vertices, normalised to Terrain1.xy
+	Texture2D<float4> RipplePreviousTexture : register(t83);           // the ripple state as displayed last frame (motion vectors)
+	Texture2DArray<float4> OceanDisplacement : register(t85);          // xyz displacement (units), w dDx/dy, one slice per cascade
+	Texture2DArray<float4> OceanDerivatives : register(t86);           // xy height slopes, zw compression dDx/dx, dDy/dy
+	Texture2DArray<float2> OceanSurface : register(t87);               // squared slopes (LEAN moments)
+	Texture2DArray<float4> OceanPreviousDisplacement : register(t88);  // last frame's displacement (motion vectors)
+	Texture2DArray<float4> ShoreProfileTexture : register(t84);        // the shore wave through its life (ShoreProfile.h): slice 0 forward, up, their d/dphase; slice 1 foam
+	Texture2DArray<float> OceanFoam : register(t91);                   // the FFT foam, one persistent slice per cascade (OceanAssembleCS)
+	Texture2D<float4> ShoreField0 : register(t89);                     // x travel time to the waterline tau (s; up the beach: the waterline's), y signed distance to it (units), z offset of the crests along the coast (wave cycles), w still water level (absolute z, < -1e6: none)
+	Texture2D<float4> ShoreField1 : register(t90);                     // xy grad tau (s/m, seaward; up the beach: the waterline's), z beach slope (tan) at the waterline, w exposure to the swell
+	Texture2D<float4> ShoreFieldPrevious : register(t92);              // ShoreField0 of the field being replaced (Shore0.y < 1)
+	Texture2D<float2> ShoreRoomTexture : register(t94);                // x 0..1 room for the shore wave train: the width of the water against the wavelength, y the depth a wave's crest answers to (m; ShoreCrestDepth)
+	Texture2D<float2> SurfaceNoiseTexture : register(t96);             // x TurbidityPatches, y WindGust around the camera (SurfaceNoiseCS)
+	Texture2D<float4> ShoreFoamTexture : register(t97);                // SwashOutCS: x the foam the surf left on the water, y the surf simulation's surface (units above the still water; the bed where dry), z its depth (units), w its foam
+	SamplerState LinearClampSampler : register(s14);
+	SamplerState OceanSampler : register(s15);  // anisotropic, wrap
 
 	static const float UnitsPerMetre = METRES_TO_UNITS;
 	static const float MetresPerUnit = 1.0 / METRES_TO_UNITS;
@@ -127,6 +127,8 @@ namespace PBRWater
 	}
 
 	bool OceanActive() { return Params0.x > 0.5; }
+	bool FoamEnabled() { return Light1.y > 0.5; }
+	bool ClarityEnabled() { return Surface1.y > 0.5; }
 	float Gravity() { return Params0.w; }
 
 	// ------------------------------------------------------------------------
@@ -2151,7 +2153,7 @@ namespace PBRWater
 				{
 					float4 d, g;
 					float2 m;
-					float foam;
+					float foam = 0.0;  // Enable Foam off: the foam reads below are skipped
 					[branch] if (any(ctx.flow))
 					{
 						// The same two reads as the geometry's (FlowPhases), so the normals and moments match the mesh.
@@ -2161,7 +2163,8 @@ namespace PBRWater
 						d = b.weight0 * OceanDisplacement.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDisplacement.SampleGrad(OceanSampler, uv1, gx, gy);
 						g = b.weight0 * OceanDerivatives.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDerivatives.SampleGrad(OceanSampler, uv1, gx, gy);
 						m = b.weight0 * OceanSurface.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanSurface.SampleGrad(OceanSampler, uv1, gx, gy);
-						foam = b.weight0 * OceanFoam.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanFoam.SampleGrad(OceanSampler, uv1, gx, gy);
+						[branch] if (FoamEnabled())
+							foam = b.weight0 * OceanFoam.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanFoam.SampleGrad(OceanSampler, uv1, gx, gy);
 					}
 					else
 					{
@@ -2173,6 +2176,10 @@ namespace PBRWater
 						// Terrain Variation's two-tap stochastic lattice instead, when it is installed (a random offset per cell a
 						// tile across), the blend's contrast kept (variance-preserving about no foam). The sea's foam and the
 						// breakers' share this one read: read apart, the surf showed two different laces over each other.
+						[branch] if (!FoamEnabled())
+						{
+						}
+						else
 #if defined(TERRAIN_VARIATION)
 						[branch] if (ctx.train > 0.0)
 						{

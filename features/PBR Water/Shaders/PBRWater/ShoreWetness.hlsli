@@ -12,7 +12,7 @@
 
 namespace PBRWaterShore
 {
-	Texture2D<float4> SwashWetTexture : register(t123);  // x wet level, yz unused, w water surface (units above the still water)
+	Texture2D<float4> SwashWetTexture : register(t104);  // x wet level, yz unused, w water surface (units above the still water)
 
 	struct Shore
 	{
@@ -40,7 +40,7 @@ namespace PBRWaterShore
 	 * The shore water at camera-relative `positionWS`.
 	 * @param stillWater the still water level here (camera-relative, SharedData::GetWaterData)
 	 */
-	Shore Sample(float3 positionWS, float stillWater)
+	Shore Sample(float3 positionWS, float stillWater, float range)
 	{
 		Shore s;
 		s.valid = false;
@@ -50,7 +50,9 @@ namespace PBRWaterShore
 
 		const float4 grid = SharedData::pbrWaterSettings.SwashGrid;
 		float2 uv = (positionWS.xy + FrameBuffer::CameraPosAdjust.xy - grid.xy) * grid.z;
-		[branch] if (grid.w > 0.5 && stillWater > -1e6 && all(uv > 0.0) && all(uv < 1.0))
+		// Above the highest the water reaches plus the wetness fade, nothing here is wet or lifted: skip the 4 loads.
+		const bool reachable = positionWS.z < stillWater + SharedData::pbrWaterSettings.Wetness.y + max(range, 1.0);
+		[branch] if (grid.w > 0.5 && stillWater > -1e6 && reachable && all(uv > 0.0) && all(uv < 1.0))
 		{
 			float4 wet = BilinearLoad(uv);
 			// The grid scrolls with the camera: its edge fades out so newly covered ground never pops.

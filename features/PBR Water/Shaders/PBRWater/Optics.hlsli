@@ -113,8 +113,14 @@ namespace PBRWater
 	Turbidity GetTurbidity(float3 positionWS, float patches, float depthUnits, float fetchRatio, float damping, float shoreBreak, float flow)
 	{
 		Turbidity t;
-		t.mixed = MixedTurbidity(patches, flow);
-		t.bottom = ResuspensionTurbidity(depthUnits, fetchRatio, damping, shoreBreak) + Clarity2.z * RippleSilt(positionWS);
+		t.mixed = 0.0;
+		t.bottom = 0.0;
+		// Enable Water Clarity off: the water is as clear as its form colours make it.
+		[branch] if (ClarityEnabled())
+		{
+			t.mixed = MixedTurbidity(patches, flow);
+			t.bottom = ResuspensionTurbidity(depthUnits, fetchRatio, damping, shoreBreak) + Clarity2.z * RippleSilt(positionWS);
+		}
 		return t;
 	}
 
@@ -195,16 +201,15 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Sunlight transmitted through thin wave crests. Light refracts into the far face of the crest,
+	 * Sunlight transmitted through the water. Light refracts into the far face of the wave,
 	 * scatters once towards the viewer and refracts out of the near face. Its colour is what survives
-	 * the path through the crest: clear sea water glows green-blue, murky water dimly in its sediment
+	 * the path through the water: clear sea water glows green-blue, murky water dimly in its sediment
 	 * colour. Multiply by the sun irradiance.
-	 * @param crest     0..1 height of the point within the wave amplitude
-	 * @param thickness crest thickness scale (units)
+	 * @param thickness wave thickness scale (units)
 	 * @param sunPath   water the sunlight crosses to reach the point (units; SunPathThroughWaves), < 0: estimated from
-	 *                  the height within the crest
+	 *                  half the thickness
 	 */
-	float3 WaveTranslucency(float3 N, float3 toEye, float3 toLight, float crest, WaterOptics o, float thickness, float sunPath)
+	float3 WaveTranslucency(float3 N, float3 toEye, float3 toLight, WaterOptics o, float thickness, float sunPath)
 	{
 		float3 viewIn = refract(-toEye, N, 1.0 / WaterIOR);
 		if (dot(viewIn, viewIn) < 1e-6)
@@ -217,10 +222,9 @@ namespace PBRWater
 		float phase = PhaseHG(dot(lightIn, -viewIn), Optics0.x);
 		float transmission = (1.0 - FresnelDielectric(dot(backNormal, toLight), 1.0 / WaterIOR)) *
 		                     (1.0 - FresnelDielectric(dot(N, toEye), 1.0 / WaterIOR));
-		float tip = saturate(crest);
-		sunPath = sunPath < 0.0 ? thickness * (1.1 - tip) : sunPath;
+		sunPath = sunPath < 0.0 ? 0.5 * thickness : sunPath;
 		float3 scattered = o.scattering / max(o.extinction, 1e-8) * (1.0 - exp(-o.extinction * thickness)) * exp(-o.extinction * sunPath);
-		return scattered * phase * transmission * tip;
+		return scattered * phase * transmission;
 	}
 }
 

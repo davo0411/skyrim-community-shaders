@@ -231,7 +231,8 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 		context->GenerateMips(displacement->srv.get());
 		context->GenerateMips(derivatives->srv.get());
 		context->GenerateMips(surface->srv.get());
-		context->GenerateMips(foam->srv.get());
+		if (settings.foamMips)
+			context->GenerateMips(foam->srv.get());
 	}
 
 	if (!hasHistory) {

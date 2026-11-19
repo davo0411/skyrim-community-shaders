@@ -270,11 +270,21 @@ namespace PBRWater
 		float footprint = max(length(ddx_fine(waveParam.xy)), length(ddy_fine(waveParam.xy)));
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
-		o.surfFoam = ShoreFoamAt(absXY);
+		o.surfFoam = 0.0;
+		[branch] if (FoamEnabled())
+			o.surfFoam = ShoreFoamAt(absXY);
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w);
 		ctx.flow = flowVelocity;
 		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam, footprint);
+		// Enable Foam off: no foam of any kind reaches the roughness or Water.hlsl's foam pass.
+		[branch] if (!FoamEnabled())
+		{
+			waves.fftFoam = 0.0;
+			waves.breakerFoam = 0.0;
+			waves.shoreFoam = 0.0;
+			waves.sheetFoam = 0.0;
+		}
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
 		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.

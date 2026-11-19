@@ -2367,7 +2367,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 #	if defined(PBR_WATER)
 	// PBR Water: the water at the shore rises and falls with the waves, and leaves the shore wet where it reached.
-	PBRWaterShore::Shore shoreWater = PBRWaterShore::Sample(input.WorldPosition.xyz, waterHeight);
+	PBRWaterShore::Shore shoreWater = PBRWaterShore::Sample(input.WorldPosition.xyz, waterHeight, SharedData::wetnessEffectsSettings.ShoreRange);
 	float stillWaterHeight = waterHeight;
 	waterHeight += shoreWater.surface;
 	waterData.w = waterHeight;

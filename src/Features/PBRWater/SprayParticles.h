@@ -107,7 +107,7 @@ public:
 	/** @brief Render thread: kills every particle. */
 	void Reset();
 
-	/** @brief What the emit pass needs beyond PBR Water's own bindings (b7, b12, t110-t127, s12-s13), which the caller makes. */
+	/** @brief What the emit pass needs beyond PBR Water's own bindings (b7, b12, t80-t97, s14-s15), which the caller makes. */
 	struct FrameInput
 	{
 		float dt = 0.0f;         ///< s, 0 while paused

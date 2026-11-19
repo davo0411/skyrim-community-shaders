@@ -25,7 +25,6 @@
 #include "Features/TerrainBlending.h"
 #include "Features/TerrainShadows.h"
 #include "Features/TerrainVariation.h"
-#include "Features/WaterEffects.h"
 #include "Features/ViewAtmosphere.h"
 #include "Features/WetnessEffects.h"
 #include "TruePBR.h"
@@ -75,7 +74,6 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::pbrWater.GetCommonBufferData(),
 		globals::features::physicalSky.cbData,
 		globals::features::rainRefraction.GetCommonBufferData(),
-		globals::features::waterEffects.GetCommonBufferData(),
 		globals::features::viewAtmosphere.settings,
 		globals::features::proceduralSun.GetCommonBufferData(),
 		globals::features::proceduralAurora.GetCommonBufferData());

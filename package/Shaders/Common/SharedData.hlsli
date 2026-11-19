@@ -609,12 +609,6 @@ namespace SharedData
 		float2 pad1;
 	};
 
-	struct WaterEffectsSettings
-	{
-		float4 Caustics0;  // x projection divisor along the light, y lowest sun elevation (sine) it follows, z focal depth (m), w depth of field (m)
-		float4 Caustics1;  // x most mip levels of defocus blur, yzw unused
-	};
-
 	struct ProceduralSunSettings
 	{
 		uint enabled;
@@ -676,7 +670,6 @@ namespace SharedData
 		PBRWaterSettings pbrWaterSettings;
 		PhysSkyData physSkyData;
 		RainRefractionSettings rainRefractionSettings;
-		WaterEffectsSettings waterEffectsSettings;
 		ViewAtmosphereSettings viewAtmosphereSettings;
 		ProceduralSunSettings proceduralSunSettings;
 		ProceduralAuroraSettings proceduralAuroraSettings;

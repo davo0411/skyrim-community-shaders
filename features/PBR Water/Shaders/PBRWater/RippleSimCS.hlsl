@@ -19,7 +19,7 @@
 //
 // Ported from Crest 4 (wave-harmonic/crest, MIT) UpdateDynWaves.compute:
 //  - Terrain awareness: the water depth per texel is the still water level of the cell (CellLevels) minus the
-//    terrain height (PBR terrain texture t112). Dry texels hold 0 and shallow water damps the waves
+//    terrain height (PBR terrain texture t82). Dry texels hold 0 and shallow water damps the waves
 //    (depthMul), so ripples no longer propagate under beaches.
 //  - Flow: both leapfrog levels (and the silt) are advected semi-Lagrangian, sampled at p - dt * velocity from the
 //    worldspace flowmap, so wakes drift downstream on rivers.

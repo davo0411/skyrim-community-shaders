@@ -67,7 +67,7 @@ public:
 
 	/**
 	 * @brief Builds this frame's subdivision from the meshes `meshes` had registered (WaterMeshes::Register). The caller
-	 * binds what the wave program reads in the compute stage (b7, b12, t8, t110-t127, s8, s12, s13).
+	 * binds what the wave program reads in the compute stage (b7, b12, t8, t80-t97, s8, s14, s15).
 	 */
 	void Build(const FrameParams& params, WaterMeshes& meshes);
 

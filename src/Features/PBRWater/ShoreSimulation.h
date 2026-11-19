@@ -11,7 +11,7 @@
  * back; the draws pass from the train's surface to the simulation's over a fixed band of depths (PBRWater::ComposeSurf).
  * ShoreFoamCS.hlsl lays out what the waves bring each frame and carries the foam they leave on the water; SwashOutCS.hlsl
  * packs both for the draws. A coarser grid (ShoreSimCS.hlsl) keeps how far up the shore it is still wet, which the lit
- * terrain and objects read (t123 through SharedData's SwashGrid). All grids scroll with the camera in whole texels, so
+ * terrain and objects read (t104 through SharedData's SwashGrid). All grids scroll with the camera in whole texels, so
  * no state is ever resampled.
  */
 class ShoreSimulation
@@ -34,7 +34,7 @@ public:
 
 	/**
 	 * @brief Render thread: moves the wet level to the camera and updates it. PBR Water's constants (b7), frame constants
-	 * (b12), textures (t110-t127) and samplers (s12-s13) are bound for the compute shader by the caller.
+	 * (b12), textures (t80-t97) and samplers (s14-s15) are bound for the compute shader by the caller.
 	 * @param dt game-time seconds since the last update (0 while paused)
 	 */
 	void Update(float cameraX, float cameraY, float dt, const Settings& settings);

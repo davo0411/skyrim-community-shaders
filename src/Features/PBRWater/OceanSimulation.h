@@ -20,6 +20,7 @@ public:
 		uint32_t resolution = 256;  ///< FFT size per cascade (128, 256 or 512)
 		float deltaTime = 0.0f;     ///< seconds since the last frame; 0 while the game is paused
 		/// The foam accumulation of GarrettGunnell/Water (MIT), per 1/60 s: see OceanAssembleCS.hlsl.
+		bool foamMips = true;  ///< false: the foam's mip chain is not rebuilt (Enable Foam off)
 		float foamBias = 0.0f;
 		float foamThreshold = 0.0f;
 		float foamAdd = 0.0f;

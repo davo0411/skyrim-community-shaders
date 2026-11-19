@@ -2,7 +2,7 @@
 // PBR Water - hands the surf simulation to the draws.
 //
 // Packs the foam the surf left on the water (ShoreFoamCS) and the surf simulation (SwashStepCS) into the one texture
-// the water reads (ShoreFoamTexture, t127): x the surf's foam, y the simulation's surface (units above the still water:
+// the water reads (ShoreFoamTexture, t97): x the surf's foam, y the simulation's surface (units above the still water:
 // the bed where it is dry, so the surface is continuous across the water's edge), z its depth (units), w its foam.
 // Where the draws show it is theirs to decide (PBRWater::ComposeSurf).
 // ============================================================================
