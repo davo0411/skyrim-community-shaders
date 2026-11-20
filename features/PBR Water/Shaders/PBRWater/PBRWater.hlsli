@@ -60,7 +60,7 @@ namespace PBRWater
 		float4 Fetch1;                   // x enabled, y direction count, z wind slice coordinate, w fetch outside the grid (m)
 		float4 Terrain0;                 // xy terrain uv scale, zw terrain uv offset
 		float4 Terrain1;                 // x terrain z at texel value 0, y at 1, z enabled, w vertex spacing (units)
-		float4 Shore0;                   // x shore waves on (shore field ready), y blend from the previous shore field (0) to the current one (1), z unused, w largest run-up (units)
+		float4 Shore0;                   // x shore waves on (shore field ready), y blend from the previous shore field (0) to the current one (1), z the surf's output slices' blend (SurfSample), w largest run-up (units)
 		float4 Shore1;                   // x crest wobble (waves), y curl tessellation multiplier, z swell Hs (units), w open-sea wind sea Hs (units)
 		float4 Ripple0;                  // xy simulation origin (absolute world units), z 1 / simulation extent (units), w enabled
 		float4 Ripple1;                  // x displacement scale (units), y normal strength, z unused, w texel size (uv)
@@ -78,7 +78,7 @@ namespace PBRWater
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Swash0;                   // xy wet grid corner (absolute units), z 1 / its extent (units), w enabled (ShoreSimCS; read by the lit terrain and objects)
-		float4 Shore2;                   // x wave clock (rad, wrapped after ShoreClockCycles waves), y the clock last frame, z unused, w peak period Tp (s)
+		float4 Shore2;                   // x wave clock (rad, wrapped after ShoreClockCycles waves), y the clock last frame, z the surf grid's scroll between its slices (SurfSample), w peak period Tp (s)
 		float4 Shore3;                   // x swash linger (the bed's drag on the surf simulation, times), y undular bore whelps strength, z breaker curl, w deep-water wavelength L0 (units)
 		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, zw unused
 		float4 Shore6;                   // xy previous shore field corner (absolute units), zw 1 / its extent (units)
@@ -111,7 +111,7 @@ namespace PBRWater
 	Texture2D<float4> ShoreFieldPrevious : register(t92);              // ShoreField0 of the field being replaced (Shore0.y < 1)
 	Texture2D<float2> ShoreRoomTexture : register(t94);                // x 0..1 room for the shore wave train: the width of the water against the wavelength, y the depth a wave's crest answers to (m; ShoreCrestDepth)
 	Texture2D<float2> SurfaceNoiseTexture : register(t96);             // x TurbidityPatches around the camera (SurfaceNoiseCS), y unused
-	Texture2D<float4> ShoreFoamTexture : register(t97);                // SwashOutCS: x the foam the surf left on the water, y the surf simulation's surface (units above the still water; the bed where dry), z its depth (units), w its foam
+	Texture2DArray<float4> ShoreFoamTexture : register(t97);           // two slices, the surf's last two outputs (SurfSample); SwashOutCS: x the foam the surf left on the water, y the surf simulation's surface (units above the still water; the bed where dry), z its depth (units), w its foam
 	SamplerState LinearClampSampler : register(s14);
 	SamplerState OceanSampler : register(s15);  // anisotropic, wrap
 
@@ -1711,6 +1711,34 @@ namespace PBRWater
 		return o;
 	}
 
+	/**
+	 * The surf's output (SwashOutCS) at grid `uv`. At high frame rates the surf runs every other frame and the last two
+	 * outputs are blended (ShoreSimulation::GetFoamBlendCode): Shore0.z is the newest slice * 2 + its weight, Shore2.z the
+	 * texels the grid scrolled from the older one, packed (x + 2048) * 4096 + (y + 2048).
+	 */
+	float4 SurfSample(float2 uv)
+	{
+		float slice = Shore0.z >= 2.0 ? 1.0 : 0.0;
+		float weight = Shore0.z - 2.0 * slice;
+		float4 result = ShoreFoamTexture.SampleLevel(LinearClampSampler, float3(uv, slice), 0);
+		[branch] if (weight < 0.999)
+		{
+			uint w, h, slices;
+			ShoreFoamTexture.GetDimensions(w, h, slices);
+			uint code = (uint)Shore2.z;
+			float2 shift = float2(code / 4096u, code % 4096u) - 2048.0;
+			float4 older = ShoreFoamTexture.SampleLevel(LinearClampSampler, float3(uv + shift / float2(w, h), 1.0 - slice), 0);
+			result = lerp(older, result, weight);
+		}
+		return result;
+	}
+
+	/// The surf's newest output at texel `c`.
+	float4 SurfLoad(int2 c)
+	{
+		return ShoreFoamTexture.Load(int4(c, Shore0.z >= 2.0 ? 1 : 0, 0));
+	}
+
 	/// The surf simulation's grid coordinates of absolute `absXY` (Foam2), and whether they are inside it.
 	bool ShoreGridUV(float2 absXY, out float2 uv)
 	{
@@ -1742,16 +1770,17 @@ namespace PBRWater
 		[branch] if (ShoreGridUV(absXY, uv))
 		{
 			uint w, h;
-			ShoreFoamTexture.GetDimensions(w, h);
+			uint slices;
+			ShoreFoamTexture.GetDimensions(w, h, slices);
 			float2 texel = 1.0 / float2(w, h);
-			float3 sheet = ShoreFoamTexture.SampleLevel(LinearClampSampler, uv, 0).yzw;
+			float3 sheet = SurfSample(uv).yzw;
 			float2 reach = 0.35 * spacing * Foam2.z;
 			[branch] if (reach.x > 0.5 * texel.x)
 			{
-				sheet = 0.25 * (ShoreFoamTexture.SampleLevel(LinearClampSampler, uv + reach, 0).yzw +
-								   ShoreFoamTexture.SampleLevel(LinearClampSampler, uv - reach, 0).yzw +
-								   ShoreFoamTexture.SampleLevel(LinearClampSampler, uv + float2(reach.x, -reach.y), 0).yzw +
-								   ShoreFoamTexture.SampleLevel(LinearClampSampler, uv + float2(-reach.x, reach.y), 0).yzw);
+				sheet = 0.25 * (SurfSample(uv + reach).yzw +
+								   SurfSample(uv - reach).yzw +
+								   SurfSample(uv + float2(reach.x, -reach.y)).yzw +
+								   SurfSample(uv + float2(-reach.x, reach.y)).yzw);
 			}
 			o.surface = sheet.x;
 			o.depth = sheet.y;
@@ -1759,10 +1788,10 @@ namespace PBRWater
 			o.share = BorderFade(uv);
 			[branch] if (withSlope)
 			{
-				float east = ShoreFoamTexture.SampleLevel(LinearClampSampler, uv + float2(texel.x, 0.0), 0).y;
-				float west = ShoreFoamTexture.SampleLevel(LinearClampSampler, uv - float2(texel.x, 0.0), 0).y;
-				float north = ShoreFoamTexture.SampleLevel(LinearClampSampler, uv + float2(0.0, texel.y), 0).y;
-				float south = ShoreFoamTexture.SampleLevel(LinearClampSampler, uv - float2(0.0, texel.y), 0).y;
+				float east = SurfSample(uv + float2(texel.x, 0.0)).y;
+				float west = SurfSample(uv - float2(texel.x, 0.0)).y;
+				float north = SurfSample(uv + float2(0.0, texel.y)).y;
+				float south = SurfSample(uv - float2(0.0, texel.y)).y;
 				o.slope = float2(east - west, north - south) * (0.5 * Foam2.z / texel);
 			}
 		}
@@ -2463,7 +2492,8 @@ namespace PBRWater
 		[branch] if (ShoreGridUV(absXY, uv))
 		{
 			uint w, h;
-			ShoreFoamTexture.GetDimensions(w, h);
+			uint slices;
+			ShoreFoamTexture.GetDimensions(w, h, slices);
 			float2 size = float2(w, h);
 			float2 q = uv * size - 0.5;
 			float2 base = floor(q);
@@ -2479,10 +2509,10 @@ namespace PBRWater
 			// Texel b sits at uv (b + 0.5) / size: the two reads fall between texels base-1 and base, and base+1 and base+2.
 			float2 h0 = (base - 0.5 + w1 / g0) / size;
 			float2 h1 = (base + 1.5 + w3 / g1) / size;
-			float s00 = ShoreFoamTexture.SampleLevel(LinearClampSampler, float2(h0.x, h0.y), 0).x;
-			float s10 = ShoreFoamTexture.SampleLevel(LinearClampSampler, float2(h1.x, h0.y), 0).x;
-			float s01 = ShoreFoamTexture.SampleLevel(LinearClampSampler, float2(h0.x, h1.y), 0).x;
-			float s11 = ShoreFoamTexture.SampleLevel(LinearClampSampler, float2(h1.x, h1.y), 0).x;
+			float s00 = SurfSample(float2(h0.x, h0.y)).x;
+			float s10 = SurfSample(float2(h1.x, h0.y)).x;
+			float s01 = SurfSample(float2(h0.x, h1.y)).x;
+			float s11 = SurfSample(float2(h1.x, h1.y)).x;
 			foam = saturate((g0.y * (g0.x * s00 + g1.x * s10) + g1.y * (g0.x * s01 + g1.x * s11)) * BorderFade(uv));
 		}
 		return foam;

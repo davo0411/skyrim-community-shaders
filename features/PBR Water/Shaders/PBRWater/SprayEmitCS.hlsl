@@ -139,7 +139,7 @@ float CellWaterLevel(float2 absXY)
 	int3 c = int3(id.xy, 0);
 	float4 source = SpraySource.Load(c);
 	// The surf simulation's white water (SwashOutCS: z its depth (units), w its foam).
-	float4 sheet = PBRWater::ShoreFoamTexture.Load(c);
+	float4 sheet = PBRWater::SurfLoad(c.xy);
 	float surf = sheet.w * saturate(sheet.z * PBRWater::MetresPerUnit / 0.2);
 	if (source.x + source.y < 1e-3 && surf < 1e-3)
 		return;

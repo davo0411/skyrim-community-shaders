@@ -182,6 +182,7 @@ struct PBRWater : Feature
 		float DisplacementFadeEnd = 32768.0f;
 		int WaveResolution = 1;  ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
 		bool CheapOffscreenWater = true;  ///< reflections, cubemaps and the map draw the water without shore waves, foam, clarity or lights
+		int EngineReflections = 1;        ///< the engine's water reflection cubemap: 0 full scene, 1 sky only, 2 off (needs Dynamic Cubemaps, no Cloud Shadows)
 		float TriangleBudget = 1500.0f;   ///< thousands of tessellated triangles a frame before the target size grows (0: none)
 		bool LongWaveHalfRate = false;    ///< the two longest cascades' FFTs alternate frames
 
@@ -332,6 +333,15 @@ struct PBRWater : Feature
 	 * which every water shader property takes its kUnderwater flag (the underwater technique). The engine also calls it
 	 * from the player: touching the water with the camera above drew the surface as seen from below, a mirror.
 	 */
+	/** @brief Trims or skips the engine's water reflection cubemap render (Settings::EngineReflections). */
+	struct TESWaterReflections_UpdateActor
+	{
+		static bool thunk(RE::TESWaterReflections* reflections);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	/** @brief The engine reflection mode in effect: the setting, limited by what the other features need from the cubemap. */
+	int EffectiveEngineReflections() const;
+
 	struct TESWaterSystem_SetUnderwater
 	{
 		static void thunk(RE::TESWaterSystem* waterSystem, bool underwater, float height);

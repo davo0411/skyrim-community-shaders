@@ -1,6 +1,8 @@
 #include "PBRWater.h"
 #include "PBRWater/Profiling.h"
 
+#include "Features/CloudShadows.h"
+#include "Features/DynamicCubemaps.h"
 #include "Features/UnifiedWater.h"
 #include "Features/Upscaling.h"
 #include "I18n/I18n.h"
@@ -114,6 +116,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		TessellationErrorPixels,
 		TessellationMaxCoarsening,
 		CheapOffscreenWater,
+		EngineReflections,
 		TriangleBudget,
 		LongWaveHalfRate,
 		DisplacementFadeStart,
@@ -242,6 +245,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		TessellationErrorPixels,
 		TessellationMaxCoarsening,
 		CheapOffscreenWater,
+		EngineReflections,
 		TriangleBudget,
 		LongWaveHalfRate,
 		DisplacementFadeStart,
@@ -464,6 +468,7 @@ void PBRWater::SanitizeSettings()
 	s.SurfQuality = std::clamp(s.SurfQuality, 0, 2);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
 	s.DebugView = std::clamp(s.DebugView, 0, 14);
+	s.EngineReflections = std::clamp(s.EngineReflections, 0, 2);
 }
 
 void PBRWater::SaveSettings(json& o_json)
@@ -903,6 +908,11 @@ void PBRWater::DrawSettings()
 			T(TKEY("long_wave_half_rate_tooltip"), "The two longest wave cascades update on alternate frames, saving about half their FFT. Their waves move in steps of two frames. Cascades no water near the camera can show are skipped either way."));
 		Util::CheckboxTip(T(TKEY("cheap_offscreen_water"), "Cheap Reflected Water"), &s.CheapOffscreenWater,
 			T(TKEY("cheap_offscreen_water_tooltip"), "Water seen in reflections, cubemaps and the map is drawn without shore waves, foam, sediment, subsurface light or point lights: it is small or blurred there."));
+		{
+			const char* modes[] = { T(TKEY("engine_reflections_full"), "Full Scene"), T(TKEY("engine_reflections_sky"), "Sky Only"), T(TKEY("engine_reflections_off"), "Off") };
+			ImGui::Combo(T(TKEY("engine_reflections"), "Engine Reflections"), &s.EngineReflections, modes, IM_ARRAYSIZE(modes));
+			Util::HoverTip(T(TKEY("engine_reflections_tooltip"), "What the game renders into its own water reflection cubemap each frame. PBR water reflects Dynamic Cubemaps and screen-space reflections, so the game's mirrored scene is mostly unseen. Sky Only keeps the sky (Cloud Shadows and Dynamic Cubemaps fill from it); Off skips the render and needs Dynamic Cubemaps without Cloud Shadows, else it acts as Sky Only."));
+		}
 		Util::CheckboxTip(T(TKEY("enable_tessellation"), "Tessellation"), &s.EnableTessellation,
 			T(TKEY("enable_tessellation_tooltip"), "Subdivides the water mesh adaptively once a frame so waves are real geometry, and evaluates each vertex's waves once for every pass that draws the water. Without it, waves are limited by the mesh resolution."));
 		{
@@ -1634,6 +1644,8 @@ void PBRWater::UpdateSwash(float dt)
 	}
 	const bool foamReady = surf && swash.IsFoamReady();
 	d.Foam2 = { swash.GetFoamOriginX(), swash.GetFoamOriginY(), 1.0f / swash.GetFoamExtent(), foamReady ? 1.0f : 0.0f };
+	d.Shore0.z = foamReady ? swash.GetFoamBlendCode() : 1.0f;
+	d.Shore2.z = swash.GetFoamShiftCode();
 	gpuBuffer->Update(d);
 	ID3D11ShaderResourceView* swashSrv = d.Foam2.w > 0.5f ? swash.GetFoamSRV() : nullptr;
 	context->CSSetShaderResources(WaterSRVBase + 17, 1, &swashSrv);
@@ -1656,6 +1668,8 @@ void PBRWater::UpdateSwash(float dt)
 	// The draws read the wet state the simulation just wrote.
 	frameData.Swash0 = { swash.GetOriginX(), swash.GetOriginY(), 1.0f / swash.GetExtent(), settings.WetShores && swash.IsReady() ? 1.0f : 0.0f };
 	frameData.Foam2 = d.Foam2;
+	frameData.Shore0.z = d.Shore0.z;
+	frameData.Shore2.z = d.Shore2.z;
 
 	// Lit terrain and objects read the wet sand, the foam on it and the water height from it.
 	ID3D11ShaderResourceView* wetSrv = frameData.Swash0.w > 0.5f ? swash.GetWetSRV() : nullptr;
@@ -2103,7 +2117,7 @@ void PBRWater::UpdateFrameConstants()
 		const auto& shore = snap->shore;
 		const bool shoreReady = shore.enabled && snap->shoreField && shoreTextures.field == snap->shoreField;
 		const bool blending = shoreReady && snap->shoreBlend < 1.0f && snap->shorePrevious && previousShoreTextures.field == snap->shorePrevious;
-		d.Shore0 = { shoreReady ? 1.0f : 0.0f, blending ? snap->shoreBlend : 1.0f, 0.0f, shore.enabled ? shore.maxRunup : 0.0f };
+		d.Shore0 = { shoreReady ? 1.0f : 0.0f, blending ? snap->shoreBlend : 1.0f, 1.0f, shore.enabled ? shore.maxRunup : 0.0f };
 		d.Shore1 = { shore.crestWobble, settings.ShoreCurlDetail, shore.swellHeight, shore.windSeaHeight };
 		// The clock now and as last frame drew it (motion vectors); the first frame has no motion.
 		const float shoreClock = static_cast<float>(shore.phase);
@@ -3469,6 +3483,39 @@ void PBRWater::UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snap, bool e
 	TESWaterSystem_SetUnderwater::func(waterSystem, eye.z < surface, surface);
 }
 
+int PBRWater::EffectiveEngineReflections() const
+{
+	int mode = settings.EngineReflections;
+	// Without Dynamic Cubemaps the water reflects the engine's cubemap itself; Cloud Shadows draws its clouds into it.
+	if (!globals::features::dynamicCubemaps.loaded)
+		return 0;
+	if (mode == 2 && globals::features::cloudShadows.loaded)
+		mode = 1;
+	return mode;
+}
+
+bool PBRWater::TESWaterReflections_UpdateActor::thunk(RE::TESWaterReflections* reflections)
+{
+	auto& feature = globals::features::pbrWater;
+	const int mode = feature.loaded ? feature.EffectiveEngineReflections() : 0;
+	if (mode == 0 || !reflections)
+		return func(reflections);
+	using Flags = RE::TESWaterReflections::Flags;
+	if (mode == 2) {
+		// The engine skips this frame's render and clears the flag itself (as it does for static cubemaps).
+		reflections->flags.set(Flags::kDontUpdate);
+		return func(reflections);
+	}
+	// Sky only, for this call: the scene bits are put back so the setting can be switched off at any time.
+	constexpr auto scene = static_cast<uint16_t>(std::to_underlying(Flags::kLODScene) | std::to_underlying(Flags::kFullScene) | std::to_underlying(Flags::kLand) |
+												 std::to_underlying(Flags::kExplosions) | std::to_underlying(Flags::kSilhouette) | std::to_underlying(Flags::kSelective));
+	const uint16_t original = reflections->flags.underlying();
+	reflections->flags = static_cast<Flags>(original & ~scene);
+	const bool result = func(reflections);
+	reflections->flags = static_cast<Flags>((reflections->flags.underlying() & ~scene) | (original & scene));
+	return result;
+}
+
 void PBRWater::TESWaterSystem_SetUnderwater::thunk(RE::TESWaterSystem* waterSystem, bool underwater, float height)
 {
 	// Out of the engine's own calls, the camera decides, against the displaced surface over it.
@@ -3757,6 +3804,7 @@ void PBRWater::PostPostLoad()
 	stl::write_vfunc<0x3, BSWaterShader_RestoreTechnique>(RE::VTABLE_BSWaterShader[0]);
 
 	stl::detour_thunk<TESObjectCELL_GetWaterHeight>(REL::RelocationID(18543, 19002));
+	stl::detour_thunk<TESWaterReflections_UpdateActor>(REL::RelocationID(31373, 32160));
 	// SE 31409 sits with its neighbours AddWater (31406 / 32213) and AddRipple (31410 / 32217).
 	stl::detour_thunk<TESWaterSystem_SetUnderwater>(REL::RelocationID(31409, 32216));
 

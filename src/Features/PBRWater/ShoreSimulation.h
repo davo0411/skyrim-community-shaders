@@ -71,7 +71,14 @@ public:
 	bool IsReady() const { return ready && hasOrigin; }
 
 	/** @brief x the surf's foam, y the surf simulation's surface (units above the still water), z its depth (units), w its foam. */
-	ID3D11ShaderResourceView* GetFoamSRV() const { return foamReady ? foam[foamCurrent]->srv.get() : nullptr; }
+	ID3D11ShaderResourceView* GetFoamSRV() const { return foamReady ? foamPair->srv.get() : nullptr; }
+	/**
+	 * @brief The draws' blend of the two output slices (PBRWater::SurfSample): newest slice * 2 + its weight (0.5 or 1; the
+	 * other slice takes the rest).
+	 */
+	float GetFoamBlendCode() const { return 2.0f * static_cast<float>(foamCurrent) + foamBlend; }
+	/** @brief Texels the grid scrolled from the older slice to the newest, packed (x + 2048) * 4096 + (y + 2048). */
+	float GetFoamShiftCode() const { return static_cast<float>((foamShiftX + 2048) * 4096 + (foamShiftY + 2048)); }
 	float GetFoamOriginX() const { return static_cast<float>(foamOriginX) * GetFoamTexelSize(); }
 	float GetFoamOriginY() const { return static_cast<float>(foamOriginY) * GetFoamTexelSize(); }
 	float GetFoamExtent() const { return FoamExtent; }
@@ -108,6 +115,8 @@ private:
 	std::unique_ptr<ConstantBuffer> simCB;
 	winrt::com_ptr<ID3D11ComputeShader> simCS;
 	uint32_t current = 0;
+	uint32_t wetPhase = 0;      ///< Update runs on alternate frames
+	float wetPendingDt = 0.0f;  ///< time since the last update (s)
 
 	int64_t originTexelX = 0;
 	int64_t originTexelY = 0;
@@ -115,7 +124,15 @@ private:
 	bool hasOrigin = false;
 	bool ready = false;
 
-	std::unique_ptr<Texture2D> foam[2];      ///< ping-pong, read by the draws (layout owned by SwashOutCS)
+	std::unique_ptr<Texture2D> foamPair;     ///< two slices, ping-pong, read by the draws (layout owned by SwashOutCS)
+	winrt::com_ptr<ID3D11ShaderResourceView> foamSliceSRV[2];
+	winrt::com_ptr<ID3D11UnorderedAccessView> foamSliceUAV[2];
+	/** @brief Render thread: (re)creates foamPair and its slice views at foamGridSize. */
+	void CreateFoamPair();
+	uint32_t foamPhase = 0;      ///< half rate: 1 on the frame that skips
+	float foamPendingDt = 0.0f;  ///< time since the last update (s)
+	float foamBlend = 1.0f;      ///< weight of the newest slice
+	int32_t foamShiftX = 0, foamShiftY = 0;
 	std::unique_ptr<Texture2D> stage;        ///< ShoreFoamCS: its foam, the waves' direction and the white water they carry
 	std::unique_ptr<Texture2D> prep;         ///< ShoreFoamCS: the bed, the hand-over's shares and the train's level
 	std::unique_ptr<Texture2D> surf;         ///< the surf simulation's state (layout owned by SwashStepCS)
