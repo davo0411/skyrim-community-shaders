@@ -82,8 +82,7 @@ public:
 		float MotionStretch = 0.0f;      ///< s of travel the particle is drawn out over
 	};
 	using Emitters = std::array<Emitter, EmitterCount>;
-	/// The layout and emission saved emitters were tuned for: 3 = procedural shapes, the breakers' spray thrown from the
-	/// surf's grid. Saved emitters of another version start over from the defaults.
+	/// The layout and emission saved emitters were tuned for. Saved emitters of another version start over from the defaults.
 	static constexpr int EmitterVersion = 5;
 
 	/** @brief The emitters the feature ships with. */
@@ -186,6 +185,8 @@ private:
 	uint32_t poolSize = 0;
 	uint32_t frameIndex = 0;
 	bool hasParticles = false;  ///< anything may be alive (else the draw is skipped)
+	float maxLife = 0.0f;       ///< longest life any emission has had (s)
+	float idleTime = 0.0f;      ///< simulated time since the last emission (s)
 	bool ready = false;
 };
 

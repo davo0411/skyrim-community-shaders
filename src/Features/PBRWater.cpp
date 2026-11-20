@@ -7,6 +7,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/ActorUtils.h"
+#include "Utils/DebugSection.h"
 #include "Utils/UI.h"
 #include "Utils/VersionedRelocation.h"
 
@@ -937,64 +938,75 @@ void PBRWater::DrawSettings()
 		ImGui::EndTabItem();
 	}
 
-	if (ImGui::BeginTabItem(T(TKEY("tab_debug"), "Debug"))) {
-		IdScope id("debug");
-		const char* wireModes[] = { T(TKEY("wireframe_off"), "Off"), T(TKEY("wireframe_overlay"), "Overlay"), T(TKEY("wireframe_only"), "Wireframe Only") };
-		ImGui::Combo(T(TKEY("wireframe"), "Wireframe"), &s.WireframeMode, wireModes, IM_ARRAYSIZE(wireModes));
-		const char* views[] = {
-			T(TKEY("debug_off"), "Off"),
-			T(TKEY("debug_normal"), "Normal"),
-			T(TKEY("debug_foam"), "Foam"),
-			T(TKEY("debug_depth"), "Depth / Shore"),
-			T(TKEY("debug_cascade_foam"), "Cascade Foam"),
-			T(TKEY("debug_roughness"), "Roughness"),
-			T(TKEY("debug_height"), "Wave Height"),
-			T(TKEY("debug_fetch"), "Fetch"),
-			T(TKEY("debug_clarity"), "Water Clarity"),
-			T(TKEY("debug_wind"), "Local Wind"),
-			T(TKEY("debug_shore_field"), "Shore Field"),
-			T(TKEY("debug_wave_direction"), "Wave Direction"),
-			T(TKEY("debug_shore_level"), "Shore Field Level"),
-			T(TKEY("debug_shore_wave"), "Shore Wave"),
-			T(TKEY("debug_wave_sun"), "Wave Sun Shadows"),
-		};
-		ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &s.DebugView, views, IM_ARRAYSIZE(views));
-
-		if (const auto snap = snapshot.load(std::memory_order_acquire); snap && snap->ocean) {
-			const auto& o = *snap->ocean;
-			ImGui::Text("Wind %.1f m/s, peak period %.1f s, Hs %.2f m, choppiness %.2f", o.windSpeed, TwoPi / o.peakOmega, o.significantHeight / UnitsPerMetre, o.choppiness);
-			ImGui::Text("Mean square slope %.3f", o.meanSquareSlope);
-			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
-		}
-		ImGui::Text("Water draws last frame: %u, %u of them from the tessellated mesh", lastDrawStats.draws, lastDrawStats.computeDraws);
-		{
-			const auto& b = bisection.GetStats();
-			ImGui::Text("Bisection tessellation: %u meshes, %u base triangles, %u shared root edges, %u bisectors (%u in view), %u of %u iterations (CPU %.3f ms), budget coarsening %.2fx", b.meshes, b.roots, b.twins,
-				b.bisectors, b.listed, b.iterations, b.iterationCap, b.cpuMs, budgetCoarsening); // i18n-ignore: debug readout
-		}
-		{
-			const auto& ds = lastDrawStats;
-			ImGui::Text("Deferred surface: %u meshes recorded, %u draws shaded from the record, %u drawn forward%s%s%s", ds.deferredRecorded, ds.deferredShaded, ds.deferredForward,
-				ds.deferredReason ? " (last: " : "", ds.deferredReason ? ds.deferredReason : "", ds.deferredReason ? ")" : "");
-		}
-		{
-			const auto& n = lastDrawStats.byTechnique;
-			ImGui::Text("  surface %u, point lights %u, underwater %u, LOD %u, stencil %u, simple %u", n[0], n[1], n[2], n[3], n[4], n[5]);
-		}
-		ImGui::Text("Main thread update: %.3f ms (peak %.3f ms)", mainUpdateMs.load(std::memory_order_relaxed), mainUpdatePeakMs.load(std::memory_order_relaxed));
-		ImGui::Text("Last builds: fetch and terrain %.0f ms, shore field %.0f ms (worker threads)", environment.GetLastBuildMs(), environment.GetLastShoreBuildMs());
-		ImGui::Text("Steps last frame: ripples %u, swash %u", settings.EnableRipples ? ripples.GetLastSteps() : 0u, frameData.Shore0.x > 0.5f ? swash.GetLastSwashSteps() : 0u);
-		ImGui::TextUnformatted("GPU and CPU timings per pass: Profiling menu, PBRWater::");
-		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
-		ImGui::Text("Shore field: %s%s, swash: %s%s", environment.GetShore() ? "ready" : "none", environment.IsBuildingShore() ? " (building)" : "",  // i18n-ignore: debug readout
-			frameData.Swash0.w > 0.5f ? "running" : "idle", surfAsleep ? ", surf asleep" : "");
-		const auto floatingStats = floating.GetStats();
-		ImGui::Text("Floating: %u hulls, %u attached, %u actors on board, %u small objects riding the water", floatingStats.floaters, floatingStats.parts, floatingStats.carried, floatingStats.riders);
-		ImGui::TextUnformatted(floating.GetSelectionReport().c_str());
-		ImGui::EndTabItem();
-	}
-
 	ImGui::EndTabBar();
+}
+
+void PBRWater::DrawDebugSection()
+{
+	Util::DebugSection section;
+	if (!section)
+		return;
+	auto& s = settings;
+	const char* wireModes[] = { T(TKEY("wireframe_off"), "Off"), T(TKEY("wireframe_overlay"), "Overlay"), T(TKEY("wireframe_only"), "Wireframe Only") };
+	ImGui::Combo(T(TKEY("wireframe"), "Wireframe"), &s.WireframeMode, wireModes, IM_ARRAYSIZE(wireModes));
+	const char* views[] = {
+		T(TKEY("debug_off"), "Off"),
+		T(TKEY("debug_normal"), "Normal"),
+		T(TKEY("debug_foam"), "Foam"),
+		T(TKEY("debug_depth"), "Depth / Shore"),
+		T(TKEY("debug_cascade_foam"), "Cascade Foam"),
+		T(TKEY("debug_roughness"), "Roughness"),
+		T(TKEY("debug_height"), "Wave Height"),
+		T(TKEY("debug_fetch"), "Fetch"),
+		T(TKEY("debug_clarity"), "Water Clarity"),
+		T(TKEY("debug_wind"), "Local Wind"),
+		T(TKEY("debug_shore_field"), "Shore Field"),
+		T(TKEY("debug_wave_direction"), "Wave Direction"),
+		T(TKEY("debug_shore_level"), "Shore Field Level"),
+		T(TKEY("debug_shore_wave"), "Shore Wave"),
+		T(TKEY("debug_wave_sun"), "Wave Sun Shadows"),
+	};
+	ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &s.DebugView, views, IM_ARRAYSIZE(views));
+
+	const char* ready = T(TKEY("stat_ready"), "ready");
+	const char* none = T(TKEY("stat_none"), "none");
+	const char* running = T(TKEY("stat_running"), "running");
+	const char* idle = T(TKEY("stat_idle"), "idle");
+	const char* building = T(TKEY("stat_building"), " (building)");
+	if (const auto snap = snapshot.load(std::memory_order_acquire); snap && snap->ocean) {
+		const auto& o = *snap->ocean;
+		ImGui::Text(T(TKEY("stat_ocean"), "Wind %.1f m/s, peak period %.1f s, Hs %.2f m, choppiness %.2f"), o.windSpeed, TwoPi / o.peakOmega, o.significantHeight / UnitsPerMetre, o.choppiness);
+		ImGui::Text(T(TKEY("stat_slope"), "Mean square slope %.3f"), o.meanSquareSlope);
+		ImGui::Text(T(TKEY("stat_fft"), "FFT %u x %u cascades: %s, gameplay mirror: %s"), o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? running : T(TKEY("stat_unavailable"), "unavailable"), snap->mirror0 ? running : idle);
+	}
+	ImGui::Text(T(TKEY("stat_draws"), "Water draws last frame: %u, %u of them from the tessellated mesh"), lastDrawStats.draws, lastDrawStats.computeDraws);
+	{
+		const auto& b = bisection.GetStats();
+		ImGui::Text(T(TKEY("stat_bisection"), "Bisection tessellation: %u meshes, %u base triangles, %u shared root edges, %u bisectors (%u in view), %u of %u iterations (CPU %.3f ms), budget coarsening %.2fx"), b.meshes, b.roots, b.twins,
+			b.bisectors, b.listed, b.iterations, b.iterationCap, b.cpuMs, budgetCoarsening);
+	}
+	{
+		const auto& ds = lastDrawStats;
+		ImGui::Text(T(TKEY("stat_deferred"), "Deferred surface: %u meshes recorded, %u draws shaded from the record, %u drawn forward"), ds.deferredRecorded, ds.deferredShaded, ds.deferredForward);
+		if (ds.deferredReason) {
+			ImGui::SameLine();
+			ImGui::TextUnformatted(ds.deferredReason);  // i18n-ignore: internal diagnostic tag
+		}
+	}
+	{
+		const auto& n = lastDrawStats.byTechnique;
+		ImGui::Text(T(TKEY("stat_techniques"), "  surface %u, point lights %u, underwater %u, LOD %u, stencil %u, simple %u"), n[0], n[1], n[2], n[3], n[4], n[5]);
+	}
+	ImGui::Text(T(TKEY("stat_main_thread"), "Main thread update: %.3f ms (peak %.3f ms)"), mainUpdateMs.load(std::memory_order_relaxed), mainUpdatePeakMs.load(std::memory_order_relaxed));
+	ImGui::Text(T(TKEY("stat_builds"), "Last builds: fetch and terrain %.0f ms, shore field %.0f ms (worker threads)"), environment.GetLastBuildMs(), environment.GetLastShoreBuildMs());
+	ImGui::Text(T(TKEY("stat_steps"), "Steps last frame: ripples %u, swash %u"), settings.EnableRipples ? ripples.GetLastSteps() : 0u, frameData.Shore0.x > 0.5f ? swash.GetLastSwashSteps() : 0u);
+	ImGui::TextUnformatted(T(TKEY("stat_profiling_hint"), "GPU and CPU timings per pass: Profiling menu, PBRWater::"));
+	ImGui::Text(T(TKEY("stat_fetch"), "Fetch: %s, bathymetry: %s%s"), environment.GetFetch() ? ready : none, environment.GetBathymetry() ? ready : none, environment.IsBuilding() ? building : "");
+	ImGui::Text(T(TKEY("stat_shore"), "Shore field: %s%s, swash: %s%s"), environment.GetShore() ? ready : none, environment.IsBuildingShore() ? building : "",
+		frameData.Swash0.w > 0.5f ? running : idle, surfAsleep ? T(TKEY("stat_surf_asleep"), ", surf asleep") : "");
+	const auto floatingStats = floating.GetStats();
+	ImGui::Text(T(TKEY("stat_floating"), "Floating: %u hulls, %u attached, %u actors on board, %u small objects riding the water"), floatingStats.floaters, floatingStats.parts, floatingStats.carried, floatingStats.riders);
+	ImGui::TextUnformatted(floating.GetSelectionReport().c_str());  // i18n-ignore: diagnostic report built from form names
 }
 
 // ============================================================================
@@ -1038,6 +1050,7 @@ void PBRWater::SetupResources()
 	}
 	flatDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::FlatDrawConstants");
 	offscreenDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::OffscreenDrawConstants");
+	spacingDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SpacingDrawConstants");
 	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
 	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
 	deferredCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DeferredDrawCB>(), "PBRWater::DeferredDrawCB");
@@ -1837,6 +1850,12 @@ void PBRWater::DrawSkylightingOccluder(Texture2D& occlusion, const REX::W32::XMF
 
 bool PBRWater::FillOccluderLevels(OccluderCB& cb, float eyeCellX, float eyeCellY) const
 {
+	// Called by up to three passes a frame around the same cell: the 25 lookups are done once.
+	const uint32_t frame = globals::state->frameCount;
+	if (levelCache.frame == frame && levelCache.cellX == eyeCellX && levelCache.cellY == eyeCellY) {
+		std::copy(std::begin(levelCache.levels), std::end(levelCache.levels), std::begin(cb.cellLevels));
+		return levelCache.anyWater;
+	}
 	auto* tes = RE::TES::GetSingleton();
 	if (!tes)
 		return false;
@@ -1856,6 +1875,11 @@ bool PBRWater::FillOccluderLevels(OccluderCB& cb, float eyeCellX, float eyeCellY
 			cb.cellLevels[(i + 2) + 5 * (j + 2)] = { level, 0.0f, 0.0f, 0.0f };
 		}
 	}
+	std::copy(std::begin(cb.cellLevels), std::end(cb.cellLevels), std::begin(levelCache.levels));
+	levelCache.frame = frame;
+	levelCache.cellX = eyeCellX;
+	levelCache.cellY = eyeCellY;
+	levelCache.anyWater = anyWater;
 	return anyWater;
 }
 
@@ -2324,6 +2348,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		// Costly gates off for other views (CheapOffscreenWater); always uploaded so toggling the setting never binds stale data.
 		CheapOffscreenGates(drawData);
 		offscreenDrawBuffer->Update(drawData);
+		uploadedSpacing = -1.0f;
 		GatherWaterSRVs(d, drawSRVs);
 		drawResourcesFrame = UINT32_MAX;
 	}
@@ -2333,13 +2358,18 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	const bool cheap = !mainView && settings.CheapOffscreenWater;
 	ID3D11Buffer* cb = cached ? drawBuffer->CB() : (cheap ? offscreenDrawBuffer->CB() : flatDrawBuffer->CB());
 	if (spacing > 0.0f) {
-		GpuData drawData = d;
-		drawData.Tess0.x = 0.0f;
-		drawData.Draw0.x = spacing;
-		if (cheap)
-			CheapOffscreenGates(drawData);
-		gpuBuffer->Update(drawData);
-		cb = gpuBuffer->CB();
+		// Neighbouring tiles share a spacing: upload only when it (or the view's gates) changes.
+		if (spacing != uploadedSpacing || cheap != uploadedSpacingCheap) {
+			GpuData drawData = d;
+			drawData.Tess0.x = 0.0f;
+			drawData.Draw0.x = spacing;
+			if (cheap)
+				CheapOffscreenGates(drawData);
+			spacingDrawBuffer->Update(drawData);
+			uploadedSpacing = spacing;
+			uploadedSpacingCheap = cheap;
+		}
+		cb = spacingDrawBuffer->CB();
 	}
 	ID3D11Buffer* vertexCb = cached ? swallowDrawBuffer->CB() : cb;
 	context->VSSetConstantBuffers(7, 1, &vertexCb);
@@ -2583,6 +2613,7 @@ bool PBRWater::EnsureDeferredRecords()
 	argsUav.Buffer.NumElements = DeferredLists * 4;
 	argsUav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
 	DX::ThrowIfFailed(device->CreateUnorderedAccessView(deferredArgs.get(), &argsUav, deferredArgsUAV.put()));
+	Util::SetResourceName(deferredArgsUAV.get(), "PBRWater::DeferredTileArgs UAV");
 
 	D3D11_BUFFER_DESC tilesDesc{};
 	tilesDesc.ByteWidth = DeferredLists * deferredMaxTiles * sizeof(uint32_t);

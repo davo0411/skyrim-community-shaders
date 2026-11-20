@@ -193,6 +193,8 @@ struct PBRWater : Feature
 	Settings settings;
 
 	virtual void DrawSettings() override;
+	bool HasDebugSection() const override { return true; }
+	void DrawDebugSection() override;
 	/** @brief The Spray tab: the spray's switches and every emitter's parameters. */
 	void DrawSpraySettings();
 	virtual void LoadSettings(json& o_json) override;
@@ -427,6 +429,7 @@ private:
 	std::unique_ptr<ConstantBuffer> drawBuffer;          ///< this frame's constants for the tessellated mesh (Tess0.x = 1: BisectionTessellator)
 	std::unique_ptr<ConstantBuffer> flatDrawBuffer;      ///< for the untessellated draws (Tess0.x = 0)
 	std::unique_ptr<ConstantBuffer> offscreenDrawBuffer; ///< for the untessellated draws of other views (reflections, cubemaps, the map) with CheapOffscreenWater: Tess0.x = 0 and the costly gates off
+	std::unique_ptr<ConstantBuffer> spacingDrawBuffer;   ///< untessellated draws filtered to their vertex spacing (Draw0.x)
 	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;   ///< for the engine's own draw of a mesh the tessellator draws instead (Tess0.x = 2: culled)
 	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;  ///< for the deferred surface's rectangle around a tessellated mesh (Tess0.x = 3)
 
@@ -574,6 +577,14 @@ private:
 	uint32_t occluderFrame = UINT32_MAX;  ///< State frame the occluder was last drawn in
 	/** @brief Render thread: the still water level of the 5x5 exterior cells around the eye; false when none has water. */
 	bool FillOccluderLevels(OccluderCB& cb, float eyeCellX, float eyeCellY) const;
+	struct LevelCache
+	{
+		uint32_t frame = UINT32_MAX;
+		float cellX = 0.0f, cellY = 0.0f;
+		bool anyWater = false;
+		float4 levels[25]{};
+	};
+	mutable LevelCache levelCache;  ///< FillOccluderLevels' last scan
 	/** @brief Render thread: draws the displaced water grid `cb` describes, depth only, into `dsv`; restores the state it changes. */
 	void DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height, const OccluderCB& cb, ID3D11Buffer* indices, DXGI_FORMAT indexFormat, UINT indexCount);
 
@@ -649,6 +660,8 @@ private:
 	/** @brief Render thread: the blend state for recording under `engineState` (recordBlendStates). */
 	ID3D11BlendState* RecordBlendState(ID3D11BlendState* engineState);
 	GpuData uploadedDrawData{};                              ///< what the draw buffers hold
+	float uploadedSpacing = -1.0f;                           ///< the spacing spacingDrawBuffer holds
+	bool uploadedSpacingCheap = false;                       ///< whether spacingDrawBuffer holds CheapOffscreenGates
 	ID3D11ShaderResourceView* drawSRVs[WaterSRVCount] = {};  ///< the views for those constants
 	uint32_t drawResourcesFrame = UINT32_MAX;                ///< the frame the views were last bound in
 	DrawStats drawStats;                                     ///< this frame so far

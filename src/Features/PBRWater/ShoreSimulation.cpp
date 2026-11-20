@@ -292,10 +292,10 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	auto context = globals::d3d::context;
 
 	// Whole texels, so scrolling never resamples (and never smears) the foam and the surf.
-	const float texelSize = GetFoamTexelSize();
+	const float foamTexel = GetFoamTexelSize();
 	const int64_t gridSize = foamGridSize;
-	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / texelSize)) - gridSize / 2;
-	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / texelSize)) - gridSize / 2;
+	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / foamTexel)) - gridSize / 2;
+	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / foamTexel)) - gridSize / 2;
 	bool fresh = false;
 	if (!foamHasOrigin || std::abs(newOriginX - foamOriginX) >= gridSize || std::abs(newOriginY - foamOriginY) >= gridSize) {
 		const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -315,9 +315,9 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	cb.gridSize = foamGridSize;
 	// A long hitch must not carry the foam off in one step.
 	cb.dt = std::clamp(dt, 0.0f, 0.1f);
-	cb.originX = static_cast<float>(newOriginX) * texelSize;
-	cb.originY = static_cast<float>(newOriginY) * texelSize;
-	cb.texelSize = texelSize;
+	cb.originX = static_cast<float>(newOriginX) * foamTexel;
+	cb.originY = static_cast<float>(newOriginY) * foamTexel;
+	cb.texelSize = foamTexel;
 	simCB->Update(cb);
 
 	ID3D11Buffer* cbs[1] = { simCB->CB() };
@@ -345,11 +345,11 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	// cell, which keeps every depth positive. The frame's first step takes the grid's scroll; a fresh grid starts with the
 	// water at rest. A step reads one of `surf` and `surfMoved` and writes the other; the first (over the whole grid) is
 	// copied back into `surf`, so cells the later steps' tiles leave out are this frame's in both, and the frame ends in
-	// `surf`.
+	// `surf` (swapped in when the last step wrote `surfMoved`).
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::SwashStep");
 		// The stability limit grows with the cell (the Courant number is speed x step / cell): 4 ms at 17 cm, 8 ms at 34.
-		const float maxStep = 0.004f * texelSize / 12.0f;  // s
+		const float maxStep = 0.004f * foamTexel / 12.0f;  // s
 		// The surf keeps the waves' time down to 10 fps, as the foam does: held to fewer steps a frame it ran slower than
 		// the waves feeding it at low frame rates, and each uprush followed its bore late.
 		const float stepDt = std::clamp(dt, 0.0f, 0.1f);
@@ -365,7 +365,9 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 				stepCb.shiftX = stepCb.shiftY = 0;
 			else if (fresh)
 				stepCb.shiftX = static_cast<int32_t>(foamGridSize) * 4;
-			simCB->Update(stepCb);
+			// Only the first step's constants differ (the scroll).
+			if (i < 2)
+				simCB->Update(stepCb);
 			Texture2D* from = (i % 2 == 0) ? surf.get() : surfMoved.get();
 			Texture2D* to = (i % 2 == 0) ? surfMoved.get() : surf.get();
 			ID3D11ShaderResourceView* srvs[4] = { from->srv.get(), prep->srv.get(), stage->srv.get(), tiled ? tileListSRV.get() : nullptr };
@@ -384,9 +386,9 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 				context->CopyResource(surf->resource.get(), surfMoved->resource.get());
 			}
 		}
-		// An even number of later steps ends in `surfMoved`.
+		// An even number of later steps ends in `surfMoved`: swap the two rather than copy the grid back.
 		if (steps > 1 && (steps - 1) % 2 == 0)
-			context->CopyResource(surf->resource.get(), surfMoved->resource.get());
+			std::swap(surf, surfMoved);
 		if (tiled) {
 			ID3D11ShaderResourceView* nullSrv = nullptr;
 			context->CSSetShaderResources(3, 1, &nullSrv);

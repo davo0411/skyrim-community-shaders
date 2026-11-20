@@ -554,6 +554,7 @@ void SprayParticles::Reset()
 	if (particles)
 		context->ClearUnorderedAccessViewUint(particles->uav.get(), zero);
 	hasParticles = false;
+	idleTime = 0.0f;
 }
 
 // ============================================================================
@@ -575,8 +576,10 @@ void SprayParticles::Update(const FrameInput& input, const Settings& settings)
 	if (settings.emitters) {
 		std::array<EmitterGpu, EmitterCount> data{};
 		for (uint32_t i = 0; i < EmitterCount; ++i) {
-			data[i] = ToGpu((*settings.emitters)[i], settings.amount);
+			const auto& e = (*settings.emitters)[i];
+			data[i] = ToGpu(e, settings.amount);
 			anyEmitter = anyEmitter || data[i].source.y > 0.0f;
+			maxLife = std::max(maxLife, e.LifeSpan * (1.0f + e.LifeVariation));  // SprayEmitCS p.life
 		}
 		D3D11_MAPPED_SUBRESOURCE mapped{};
 		if (SUCCEEDED(context->Map(emitters->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
@@ -628,8 +631,16 @@ void SprayParticles::Update(const FrameInput& input, const Settings& settings)
 			context->CSSetShaderResources(0, 4, nullSrvs);
 		}
 		hasParticles = true;
+		idleTime = 0.0f;
 	} else {
 		PBRWaterProfiling::Skipped("PBRWater::SprayEmit");
+		// Once the last emission has aged out the pool is empty: stop simulating and drawing it.
+		idleTime += std::min(input.dt, 0.1f);
+		if (idleTime > maxLife + 0.5f) {
+			hasParticles = false;
+			PBRWaterProfiling::Skipped("PBRWater::SpraySim");
+			return;
+		}
 	}
 	++frameIndex;
 
@@ -687,6 +698,7 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 	ID3D11Buffer* savedVSCb = nullptr;
 	ID3D11Buffer* savedVSShared = nullptr;
 	ID3D11Buffer* savedPSCbs[3] = {};
+	ID3D11Buffer* savedPSPerFrame = nullptr;
 	winrt::com_ptr<ID3D11BlendState> savedBlend;
 	FLOAT savedBlendFactor[4]{};
 	UINT savedSampleMask = 0;
@@ -708,6 +720,7 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 	context->VSGetConstantBuffers(12, 1, &savedVSCb);
 	context->VSGetConstantBuffers(5, 1, &savedVSShared);
 	context->PSGetConstantBuffers(4, 3, savedPSCbs);
+	context->PSGetConstantBuffers(12, 1, &savedPSPerFrame);
 	context->OMGetBlendState(savedBlend.put(), savedBlendFactor, &savedSampleMask);
 	context->OMGetDepthStencilState(savedDepth.put(), &savedStencilRef);
 	context->RSGetState(savedRasterizer.put());
@@ -762,6 +775,7 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 	context->VSSetConstantBuffers(12, 1, &savedVSCb);
 	context->VSSetConstantBuffers(5, 1, &savedVSShared);
 	context->PSSetConstantBuffers(4, 3, savedPSCbs);
+	context->PSSetConstantBuffers(12, 1, &savedPSPerFrame);
 	context->OMSetBlendState(savedBlend.get(), savedBlendFactor, savedSampleMask);
 	context->OMSetDepthStencilState(savedDepth.get(), savedStencilRef);
 	context->RSSetState(savedRasterizer.get());
@@ -778,6 +792,8 @@ void SprayParticles::Draw(ID3D11ShaderResourceView* sceneDepth)
 		savedVSCb->Release();
 	if (savedVSShared)
 		savedVSShared->Release();
+	if (savedPSPerFrame)
+		savedPSPerFrame->Release();
 	for (auto*& b : savedPSCbs)
 		if (b)
 			b->Release();
