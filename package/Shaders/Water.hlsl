@@ -1551,6 +1551,21 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #		endif
 
+#		if defined(PBR_WATER) && defined(SPECULAR) && (NUM_SPECULAR_LIGHTS != 0) && defined(LIGHT_LIMIT_FIX) && !(defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS))
+	// The engine's point light passes: with Light Limit Fix the surface pass already lit the water with every clustered
+	// light, so this pass adds nothing (finalColor stays 0 below; alpha 1 marks it additive). Written straight away, with
+	// the same discards above, instead of after the whole wave and surface program it used to run per pixel and per pass.
+	[branch] if (PBRWater::Draw0.y <= 0.5)
+	{
+		psout.Lighting = float4(PreExposure::EncodeScene(0.0.xxx), 1.0);
+#			if defined(PBRW_DEFERRED)
+		if (PBRWaterDeferred::HalfRateKey > 0.0)
+			psout.Lighting.w = PBRWaterDeferred::HalfRateKey;
+#			endif
+		return psout;
+	}
+#		endif
+
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)

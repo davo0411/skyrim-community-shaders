@@ -40,7 +40,10 @@ wave train.
     standard complex Gaussian from a hash of the lattice index (no textures, and the CPU can reproduce it).
     Eight real fields (choppy displacement, height, shear, slopes, compression) are packed two per complex
     transform. The FFT is a radix-2 Stockham kernel in group shared memory (one group per line; 128, 256 or
-    512 per the Wave Detail setting).
+    512 per the Wave Detail setting). `h0(k)` and `h0(-k)` are baked into their own array (`OceanSpectrumCS`
+    with `INITIAL`) only when what the amplitudes read changes (wind, swell, spreading, bands, Wave Detail):
+    the per-frame pass only turns their phases. The cascades a frame does not update (the update mask) keep
+    their mip chains and their motion-vector copy: only the updated slices are rebuilt and copied.
 -   **Outputs** (texture arrays, one slice per cascade, full mip chains): displacement + shear, slopes +
     compression, and `slope^2` (RG16F). Last frame's displacement is kept for
     motion vectors. The open sea's foam is a persistent R32F array beside them, one slice per cascade, updated in place (see Foam).

@@ -3,6 +3,8 @@
 #include "Buffer.h"
 #include "WaveModel.h"
 
+#include <array>
+
 /**
  * @brief GPU half of the FFT ocean.
  *
@@ -66,14 +68,22 @@ private:
 	void CompileShaders();
 
 	std::unique_ptr<Texture2D> spectrum[2];  ///< packed complex fields, ping-pong through the FFT passes
+	std::unique_ptr<Texture2D> initial;      ///< h0(k) and h0(-k) per cascade (OceanSpectrumCS with INITIAL): rebuilt when initialKey changes
 	std::unique_ptr<Texture2D> displacement;
 	std::unique_ptr<Texture2D> derivatives;
 	std::unique_ptr<Texture2D> surface;
 	std::unique_ptr<Texture2D> previousDisplacement;
 	std::unique_ptr<Texture2D> foam;  ///< persistent foam, one slice per cascade, updated in place by the assemble pass
+	/// One cascade's slice of the displacement, derivatives, surface and foam, all mips: the mip chains of the cascades a
+	/// frame updated are rebuilt alone (GenerateMips works on the view's slices).
+	winrt::com_ptr<ID3D11ShaderResourceView> sliceSRV[4][PBRWaterModel::NumCascades];
+	/// The cascades last frame updated (Settings::cascadeMask): only their slices of last frame's displacement differ from
+	/// the copy kept for motion vectors.
+	uint32_t lastUpdateMask = 0xF;
 	std::unique_ptr<ConstantBuffer> constants;
 
 	winrt::com_ptr<ID3D11ComputeShader> spectrumCS;
+	winrt::com_ptr<ID3D11ComputeShader> initialCS;
 	winrt::com_ptr<ID3D11ComputeShader> fftRowsCS;
 	winrt::com_ptr<ID3D11ComputeShader> fftColumnsCS;
 	winrt::com_ptr<ID3D11ComputeShader> assembleCS;
@@ -82,5 +92,9 @@ private:
 	uint32_t mipCount = 1;
 	bool hasHistory = false;
 	bool foamClear = true;  ///< the foam texture has to be emptied before the next step
+	/// What the spectrum's amplitudes read of OceanCB (Wind, Spread.xzw, Swell.xyz, Band, SwellShape.xy) when `initial`
+	/// was baked; the time, the choppiness, the loop frequency, the foam and the mask only enter the per-frame pass.
+	std::array<float, 30> initialKey{};
+	bool initialValid = false;
 	bool ready = false;
 };

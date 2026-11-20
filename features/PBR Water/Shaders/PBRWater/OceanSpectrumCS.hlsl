@@ -10,35 +10,56 @@
 // Every one of them is Hermitian, so each packed transform yields both fields as its real and imaginary
 // parts. The lattice is in standard FFT order (index i >= N/2 is frequency i - N), so the inverse
 // transform needs no shift. Units: metres; the assembly pass converts to game units.
+//
+// Compiled twice. With INITIAL it bakes h0(k) and h0(-k) (the spectrum's amplitudes times their random coefficients)
+// into Initial, which OceanSimulation runs only when the sea state the amplitudes depend on changes; without it, the
+// per-frame pass reads them back and only turns their phases. The baked values are the same 32-bit floats the pass
+// computed for itself every frame before, so the waves are unchanged.
 // ============================================================================
 
 #include "PBRWater/OceanSpectrum.hlsli"
 
+#if defined(INITIAL)
+RWTexture2DArray<float4> Initial : register(u0);  // xy h0(k), zw h0(-k), per cascade
+#else
+Texture2DArray<float4> Initial : register(t0);
 RWTexture2DArray<float4> Spectrum : register(u0);
+#endif
 
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	uint size = (uint)Time.y;
 	if (any(id.xy >= size))
 		return;
 	uint cascade = id.z;
-	if (((uint)SwellShape.z >> cascade & 1) == 0)
-		return;
 	int half = (int)(size >> 1);
 	int m = id.x < (uint)half ? (int)id.x : (int)id.x - (int)size;
 	int n = id.y < (uint)half ? (int)id.y : (int)id.y - (int)size;
-
-	float4 first = 0.0;
-	float4 second = 0.0;
 	// The Nyquist row and column have no conjugate partner on the lattice; leave them (and k = 0) empty.
-	if (m != -half && n != -half && (m != 0 || n != 0)) {
-		float dk = Math::TAU / Band[cascade].x;
-		float2 k = float2(m, n) * dk;
+	bool onLattice = m != -half && n != -half && (m != 0 || n != 0);
+	float dk = Math::TAU / Band[cascade].x;
+	float2 k = float2(m, n) * dk;
+
+#if defined(INITIAL)
+	// Every cascade, whatever this frame's update mask: a cascade skipped now reads them when it next updates.
+	float4 initial = 0.0;
+	if (onLattice) {
 		float a = OceanAmplitude(k, dk, cascade);
 		float am = OceanAmplitude(-k, dk, cascade);
-		if (a > 0.0 || am > 0.0) {
+		if (a > 0.0 || am > 0.0)
+			initial = float4(OceanNoise(m, n, cascade) * a, OceanNoise(-m, -n, cascade) * am);
+	}
+	Initial[id] = initial;
+#else
+	if (((uint)SwellShape.z >> cascade & 1) == 0)
+		return;
+	float4 first = 0.0;
+	float4 second = 0.0;
+	if (onLattice) {
+		float4 initial = Initial.Load(int4(id, 0));
+		if (any(initial != 0.0)) {
 			float kl = length(k);
-			float2 h0 = OceanNoise(m, n, cascade) * a;
-			float2 h0m = OceanNoise(-m, -n, cascade) * am;
+			float2 h0 = initial.xy;
+			float2 h0m = initial.zw;
 
 			// Frequency quantised to the loop period: the phase is a whole number of turns per loop.
 			float phase = Math::TAU * frac(OceanDispersionSteps(kl) * Time.x);
@@ -58,4 +79,5 @@ RWTexture2DArray<float4> Spectrum : register(u0);
 	}
 	Spectrum[uint3(id.xy, cascade * 2)] = first;
 	Spectrum[uint3(id.xy, cascade * 2 + 1)] = second;
+#endif
 }

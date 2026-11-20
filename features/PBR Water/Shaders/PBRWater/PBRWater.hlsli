@@ -2272,8 +2272,12 @@ namespace PBRWater
 				else if (vertical > 0.0)
 				{
 					float4 d, g;
-					float2 m;
+					float2 m = 0.0;
 					float foam = 0.0;  // Enable Foam off: the foam reads below are skipped
+					// The slope moments only count where the cascade is minified (LEAN variance the pixel filters out): a magnified
+					// cascade (the long ones over most of the screen, every one close to the camera) skips their read.
+					float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
+					float minified = MinifiedShare(gx * texelsPerUV, gy * texelsPerUV);
 					[branch] if (any(ctx.flow))
 					{
 						// The same two reads as the geometry's (FlowPhases), so the normals and moments match the mesh.
@@ -2282,7 +2286,8 @@ namespace PBRWater
 						float3 uv1 = float3(CascadeUV(positionWS.xy - b.offset1, c), c);
 						d = b.weight0 * OceanDisplacement.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDisplacement.SampleGrad(OceanSampler, uv1, gx, gy);
 						g = b.weight0 * OceanDerivatives.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDerivatives.SampleGrad(OceanSampler, uv1, gx, gy);
-						m = b.weight0 * OceanSurface.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanSurface.SampleGrad(OceanSampler, uv1, gx, gy);
+						[branch] if (minified > 0.0)
+							m = b.weight0 * OceanSurface.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanSurface.SampleGrad(OceanSampler, uv1, gx, gy);
 						[branch] if (FoamEnabled())
 							foam = b.weight0 * OceanFoam.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanFoam.SampleGrad(OceanSampler, uv1, gx, gy);
 					}
@@ -2290,7 +2295,8 @@ namespace PBRWater
 					{
 						d = OceanDisplacement.SampleGrad(OceanSampler, uv, gx, gy);
 						g = OceanDerivatives.SampleGrad(OceanSampler, uv, gx, gy);
-						m = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
+						[branch] if (minified > 0.0)
+							m = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
 						// The breakers' white water is drawn with this foam (BreakerFoamDrawn): one read for the sea's foam and the
 						// breakers', the same everywhere. (Read through a stochastic lattice in the shore train's water only, the foam
 						// there had another look from the open sea's, with a seam where the train began.)
@@ -2306,8 +2312,6 @@ namespace PBRWater
 					sums.seaFoam += seaShare * (foam * kept + Tune1[c]);
 					sums.seaFoamWeight += seaShare;
 					float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
-					float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
-					float minified = MinifiedShare(gx * texelsPerUV, gy * texelsPerUV);
 					sums.slopeVariance += (variance * minified * kept + Cascade1[c].w * filtered) * vertical * vertical;
 				}
 			}

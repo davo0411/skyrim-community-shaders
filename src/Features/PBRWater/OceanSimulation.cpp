@@ -4,6 +4,7 @@
 #include "Utils/D3D.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 
@@ -81,6 +82,8 @@ void OceanSimulation::CreateTextures(uint32_t size)
 
 	for (uint32_t i = 0; i < 2; ++i)
 		spectrum[i] = CreateArray(size, Cascades * 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, true, i == 0 ? "PBRWater::OceanSpectrum0" : "PBRWater::OceanSpectrum1");
+	initial = CreateArray(size, Cascades, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, true, "PBRWater::OceanInitialSpectrum");
+	initialValid = false;
 	displacement = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanDisplacement");
 	derivatives = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanDerivatives");
 	surface = CreateArray(size, Cascades, DXGI_FORMAT_R16G16_FLOAT, mipCount, true, "PBRWater::OceanSurface");
@@ -89,6 +92,24 @@ void OceanSimulation::CreateTextures(uint32_t size)
 	// Persistent, written and read by the assemble pass (typed UAV load: R32_FLOAT is the format every device supports).
 	foam = CreateArray(size, Cascades, DXGI_FORMAT_R32_FLOAT, mipCount, true, "PBRWater::OceanFoam");
 	foamClear = true;
+
+	// Per-cascade views of the mip-mapped arrays (GenerateMips).
+	Texture2D* mipped[4] = { displacement.get(), derivatives.get(), surface.get(), foam.get() };
+	static constexpr const char* sliceNames[4] = { "Displacement", "Derivatives", "Surface", "Foam" };
+	for (uint32_t t = 0; t < 4; ++t) {
+		for (uint32_t c = 0; c < Cascades; ++c) {
+			D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+			srv.Format = mipped[t]->desc.Format;
+			srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+			srv.Texture2DArray.MostDetailedMip = 0;
+			srv.Texture2DArray.MipLevels = mipCount;
+			srv.Texture2DArray.FirstArraySlice = c;
+			srv.Texture2DArray.ArraySize = 1;
+			sliceSRV[t][c] = nullptr;
+			if (SUCCEEDED(globals::d3d::device->CreateShaderResourceView(mipped[t]->resource.get(), &srv, sliceSRV[t][c].put())))
+				Util::SetResourceName(sliceSRV[t][c].get(), "PBRWater::Ocean%s Cascade %u SRV", sliceNames[t], c);
+		}
+	}
 	Reset();
 }
 
@@ -102,10 +123,12 @@ void OceanSimulation::CompileShaders()
 		return shader;
 	};
 	spectrumCS = compile(L"Data\\Shaders\\PBRWater\\OceanSpectrumCS.hlsl", {});
+	initialCS = compile(L"Data\\Shaders\\PBRWater\\OceanSpectrumCS.hlsl", { { "INITIAL", "" } });
+	initialValid = false;
 	fftRowsCS = compile(L"Data\\Shaders\\PBRWater\\OceanFFTCS.hlsl", { { "FFT_SIZE", size.c_str() }, { "FFT_LOG2", log2.c_str() } });
 	fftColumnsCS = compile(L"Data\\Shaders\\PBRWater\\OceanFFTCS.hlsl", { { "FFT_SIZE", size.c_str() }, { "FFT_LOG2", log2.c_str() }, { "VERTICAL", "" } });
 	assembleCS = compile(L"Data\\Shaders\\PBRWater\\OceanAssembleCS.hlsl", {});
-	ready = spectrumCS && fftRowsCS && fftColumnsCS && assembleCS && displacement && foam && constants;
+	ready = spectrumCS && initialCS && initial && fftRowsCS && fftColumnsCS && assembleCS && displacement && foam && constants;
 	if (!ready)
 		logger::warn("[PBR Water] FFT ocean shaders failed to compile; open water stays flat");
 }
@@ -141,6 +164,7 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 	if (ocean.calm) {
 		// Nothing to displace (indoors, still air): the shaders skip the cascades, so skip building them.
 		hasHistory = false;
+		lastUpdateMask = (1u << Cascades) - 1;
 		foamClear = true;
 		skipped();
 		return;
@@ -172,9 +196,24 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 		foamClear = false;
 	}
 
-	// What was displayed last frame becomes the motion-vector reference for this frame.
-	if (hasHistory)
-		context->CopyResource(previousDisplacement->resource.get(), displacement->resource.get());
+	// What was displayed last frame becomes the motion-vector reference for this frame. A cascade last frame did not
+	// update still holds what the copy already has.
+	const uint32_t updateMask = settings.cascadeMask & ((1u << Cascades) - 1);
+	if (hasHistory) {
+		if (lastUpdateMask == (1u << Cascades) - 1) {
+			context->CopyResource(previousDisplacement->resource.get(), displacement->resource.get());
+		} else {
+			for (uint32_t c = 0; c < Cascades; ++c) {
+				if (((lastUpdateMask >> c) & 1u) == 0)
+					continue;
+				for (uint32_t mip = 0; mip < mipCount; ++mip) {
+					const UINT sub = D3D11CalcSubresource(mip, c, mipCount);
+					context->CopySubresourceRegion(previousDisplacement->resource.get(), sub, 0, 0, 0, displacement->resource.get(), sub, nullptr);
+				}
+			}
+		}
+	}
+	lastUpdateMask = updateMask;
 
 	ID3D11Buffer* cbs[1] = { constants->CB() };
 	context->CSSetConstantBuffers(0, 1, cbs);
@@ -182,14 +221,31 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 	ID3D11UnorderedAccessView* nullUavs[4] = {};
 	const uint32_t groups = (resolution + 7) / 8;
 
-	// 1. Spectrum at the current time.
+	// 1. Spectrum at the current time: the amplitudes (JONSWAP, the spreading's normalisation, the random coefficients)
+	// only when the sea state changed, then their phases turned to this frame.
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::OceanSpectrum");
+		const std::array<float, 30> key{ cb.Wind.x, cb.Wind.y, cb.Wind.z, cb.Wind.w, cb.Spread.x, cb.Spread.z, cb.Spread.w, cb.Swell.x, cb.Swell.y, cb.Swell.z,
+			cb.Band[0].x, cb.Band[0].y, cb.Band[0].z, cb.Band[0].w, cb.Band[1].x, cb.Band[1].y, cb.Band[1].z, cb.Band[1].w,
+			cb.Band[2].x, cb.Band[2].y, cb.Band[2].z, cb.Band[2].w, cb.Band[3].x, cb.Band[3].y, cb.Band[3].z, cb.Band[3].w,
+			cb.SwellShape.x, cb.SwellShape.y, cb.Time.y, 0.0f };
+		if (!initialValid || key != initialKey) {
+			ID3D11UnorderedAccessView* uav = initial->uav.get();
+			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+			context->CSSetShader(initialCS.get(), nullptr, 0);
+			context->Dispatch(groups, groups, Cascades);
+			context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+			initialKey = key;
+			initialValid = true;
+		}
+		ID3D11ShaderResourceView* initialSrv = initial->srv.get();
 		ID3D11UnorderedAccessView* uav = spectrum[0]->uav.get();
+		context->CSSetShaderResources(0, 1, &initialSrv);
 		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 		context->CSSetShader(spectrumCS.get(), nullptr, 0);
 		context->Dispatch(groups, groups, Cascades);
 		context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+		context->CSSetShaderResources(0, 1, nullSrvs);
 	}
 
 	// 2. Inverse FFT: rows (0 -> 1), then columns (1 -> 0).
@@ -228,11 +284,23 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::OceanMips");
-		context->GenerateMips(displacement->srv.get());
-		context->GenerateMips(derivatives->srv.get());
-		context->GenerateMips(surface->srv.get());
-		if (settings.foamMips)
-			context->GenerateMips(foam->srv.get());
+		const uint32_t textures = settings.foamMips ? 4u : 3u;
+		if (updateMask == (1u << Cascades) - 1) {
+			context->GenerateMips(displacement->srv.get());
+			context->GenerateMips(derivatives->srv.get());
+			context->GenerateMips(surface->srv.get());
+			if (settings.foamMips)
+				context->GenerateMips(foam->srv.get());
+		} else {
+			// Only the cascades this frame updated: the others' chains still match their unchanged top level.
+			for (uint32_t c = 0; c < Cascades; ++c) {
+				if (((updateMask >> c) & 1u) == 0)
+					continue;
+				for (uint32_t t = 0; t < textures; ++t)
+					if (sliceSRV[t][c])
+						context->GenerateMips(sliceSRV[t][c].get());
+			}
+		}
 	}
 
 	if (!hasHistory) {
