@@ -530,6 +530,22 @@ private:
 	WaterMeshes waterMeshes;
 	BisectionTessellator bisection;
 	float budgetCoarsening = 1.0f;  ///< render thread: the target size's growth that holds the tessellated triangles to TriangleBudget (Draw0.w)
+	/// Render thread: what the tessellator's split test reads of the view and the settings, to keep the subdivision while
+	/// they stay as they were (BisectionTessellator::FrameParams::reuseSubdivision).
+	struct TessellationView
+	{
+		float camera[3] = {};
+		float viewProj[4][4] = {};  ///< unjittered: TAA moves the jittered one every frame
+		float4 tess0{};
+		float4 surface0{};
+		float budget = 0.0f;
+	};
+	TessellationView lastTessView;     ///< last frame's
+	TessellationView refinedTessView;  ///< the last refined subdivision's
+	uint32_t tessStillFrames = 0;      ///< frames the view has stayed as lastTessView
+	uint32_t tessReusedFrames = 0;     ///< frames since the subdivision was last refined
+	/** @brief Whether `a` and `b` are the same view for the split test: within a unit and a hair of rotation, the same settings. */
+	static bool SameTessellationView(const TessellationView& a, const TessellationView& b);
 	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh. */
 	void DrawCachedMesh();
 	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */

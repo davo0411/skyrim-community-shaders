@@ -382,11 +382,12 @@ void BisectionTessellator::Build(const FrameParams& params, WaterMeshes& meshes)
 	context->CSSetConstantBuffers(0, 1, cbs);
 	ID3D11ShaderResourceView* srv = roots->srv.get();
 	context->CSSetShaderResources(0, 1, &srv);
-	const UINT zero[4] = {};
-	context->ClearUnorderedAccessViewUint(meshCountsUAV.get(), zero);
 	ReadBackState();
+	// A still view keeps last frame's subdivision, its culling and its draw lists (ScatterCS left it ready for the next
+	// refinement): only the vertices are evaluated again, for this frame's waves and camera.
+	const bool reuse = !reset && params.reuseSubdivision;
 	// Starting over takes a level an iteration (and the forced chains); following the view, an iteration or two.
-	const uint32_t iterations = reset ? MaxIterations : iterationCap;
+	const uint32_t iterations = reuse ? 0 : (reset ? MaxIterations : iterationCap);
 
 	auto bind = [&] {
 		ID3D11UnorderedAccessView* uavs[8] = { bisectors[current]->uav.get(), bisectors[1 - current]->uav.get(), childB->uav.get(), stateUAV.get(),
@@ -412,8 +413,12 @@ void BisectionTessellator::Build(const FrameParams& params, WaterMeshes& meshes)
 	};
 
 	bind();
-	{
+	if (reuse) {
+		PBRWaterProfiling::Skipped("PBRWater::BisectionRefine");
+	} else {
 		PBRWaterProfiling::Scope refine("PBRWater::BisectionRefine");
+		const UINT zero[4] = {};
+		context->ClearUnorderedAccessViewUint(meshCountsUAV.get(), zero);
 		if (reset) {
 			context->CSSetShader(initCS.get(), nullptr, 0);
 			context->Dispatch((stats.roots + 63) / 64, 1, 1);
@@ -473,4 +478,5 @@ void BisectionTessellator::Build(const FrameParams& params, WaterMeshes& meshes)
 	stats.listed = gpuStats.listed;
 	stats.iterations = gpuStats.iterations;
 	stats.iterationCap = iterations;
+	stats.reused = reuse;
 }

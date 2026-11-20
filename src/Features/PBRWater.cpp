@@ -994,6 +994,8 @@ void PBRWater::DrawDebugSection()
 		const auto& b = bisection.GetStats();
 		ImGui::Text(T(TKEY("stat_bisection"), "Bisection tessellation: %u meshes, %u base triangles, %u shared root edges, %u bisectors (%u in view), %u of %u iterations (CPU %.3f ms), budget coarsening %.2fx"), b.meshes, b.roots, b.twins,
 			b.bisectors, b.listed, b.iterations, b.iterationCap, b.cpuMs, budgetCoarsening);
+		if (b.reused)
+			ImGui::Text("%s", T(TKEY("stat_bisection_reused"), "Still view: subdivision kept, only its vertices evaluated"));
 	}
 	{
 		const auto& ds = lastDrawStats;
@@ -1507,9 +1509,35 @@ void PBRWater::UpdateTessellation()
 	const float shoreReach = shoreWaves * std::max(1.0f, d.Tune4.y / 1.55f);
 	p.cullMarginXY = 0.7f * oceanReach + shoreReach + 32.0f;
 	p.cullMarginZ = 0.8f * oceanReach / choppy + shoreReach + std::max(d.Shore0.w, 0.0f) + 4.0f * std::max(d.Ripple1.x, 0.0f) + 32.0f;
+	// A still view keeps the subdivision: the split test reads the camera-relative position and slowly moving constants
+	// only (TessellationSpacing), so refining it again changes nothing until the camera moves. It still refines every
+	// TessReuseFrames, for the sea state, the shore field's blend and the ripple grid's origin. The view must have been
+	// still for TessStillFrames first, so the refinements that followed the last movement have converged.
+	TessellationView view;
+	view.camera[0] = camera.x;
+	view.camera[1] = camera.y;
+	view.camera[2] = camera.z;
+	const auto& unjittered = globals::game::frameBufferCached.GetCameraViewProjUnjittered();
+	for (int r = 0; r < 4; ++r)
+		for (int c = 0; c < 4; ++c)
+			view.viewProj[r][c] = unjittered.m[r][c];
+	view.tess0 = d.Tess0;
+	view.surface0 = d.Surface0;
+	view.budget = budgetCoarsening;
+	tessStillFrames = SameTessellationView(view, lastTessView) ? tessStillFrames + 1 : 0;
+	lastTessView = view;
+	constexpr uint32_t TessStillFrames = 4;
+	constexpr uint32_t TessReuseFrames = 8;
+	p.reuseSubdivision = tessStillFrames >= TessStillFrames && tessReusedFrames < TessReuseFrames && SameTessellationView(view, refinedTessView);
 	// The meshes registered last frame.
 	bisection.Build(p, waterMeshes);
 	frameData.Draw0.w = budgetCoarsening;
+	if (bisection.GetStats().reused) {
+		++tessReusedFrames;
+	} else {
+		tessReusedFrames = 0;
+		refinedTessView = view;
+	}
 
 	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
 	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, nullSrvs);
@@ -1519,6 +1547,23 @@ void PBRWater::UpdateTessellation()
 	ID3D11SamplerState* nullSamplers[2] = { nullptr, nullptr };
 	context->CSSetSamplers(WaterSamplerBase, 2, nullSamplers);
 	context->CSSetSamplers(8, 1, nullSamplers);
+}
+
+bool PBRWater::SameTessellationView(const TessellationView& a, const TessellationView& b)
+{
+	// A unit (1.4 cm) of camera movement and 1e-4 of the view-projection (about 0.006 degrees) change no split: the
+	// spacing follows the distance, and the frustum test has the waves' reach as its margin.
+	for (int i = 0; i < 3; ++i)
+		if (std::abs(a.camera[i] - b.camera[i]) > 1.0f)
+			return false;
+	for (int r = 0; r < 4; ++r)
+		for (int c = 0; c < 4; ++c)
+			if (std::abs(a.viewProj[r][c] - b.viewProj[r][c]) > 1e-4f)
+				return false;
+	// The target size, the finest factor and the projection (Tess0.yzw) and the adaptive tolerance and coarsening
+	// (Surface0.yz); not Surface0.w, the rain, which the split test does not read.
+	return a.tess0.y == b.tess0.y && a.tess0.z == b.tess0.z && a.tess0.w == b.tess0.w && a.surface0.y == b.surface0.y && a.surface0.z == b.surface0.z &&
+	       std::abs(a.budget - b.budget) <= 0.01f * b.budget;
 }
 
 void PBRWater::UpdateShoreTextures()

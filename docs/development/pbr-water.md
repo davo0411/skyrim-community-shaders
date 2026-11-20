@@ -418,6 +418,11 @@ at the waves' slope), never finer than 128 units over Maximum Tessellation. The 
 the curl's mesh spacing all read it. The frustum test's margin is the waves' analytic reach (not the hard clamp
 `DisplacementLimit`, a storm's worst crest everywhere, which kept everything near the camera, behind it too).
 
+While the view holds still (camera within a unit, the unjittered view-projection within 1e-4, the same tessellation
+settings and budget, for four frames) the subdivision is kept as it is: only `VertexCS` runs, for this frame's waves.
+The split test reads the camera-relative position and slow constants only, so refining it again would change nothing;
+it still refines every eighth frame for the sea state, the shore field's blend and the ripple grid's origin.
+
 ### Why the old branches broke on STENCIL and with DLSS / frame generation
 
 1. **Motion vectors described the flat plane.** An early domain shader interpolated `WorldPosition` /

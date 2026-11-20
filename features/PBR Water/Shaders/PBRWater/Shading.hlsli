@@ -172,6 +172,25 @@ namespace PBRWater
 		return D * Vis * FresnelDielectric(VdotH, eta) * NdotL;
 	}
 
+	/**
+	 * An upper bound of SpecularGGX for the same arguments, without its visibility and Fresnel terms: the distribution
+	 * times NdotL * Vis_SmithJointApprox <= 0.5 / (NdotV (1 - alpha) + alpha), Fresnel <= 1. On calm water the lobe is
+	 * narrow, so most lights of a cluster reflect nowhere near a given pixel: the light loop skips them on this.
+	 */
+	float SpecularGGXBound(float3 N, float3 toEye, float3 toLight, float roughness, float sourceAngularRadius)
+	{
+		float NdotL = dot(N, toLight);
+		float NdotV = saturate(abs(dot(N, toEye)) + 1e-4);
+		float3 H = SafeNormalize(toEye + toLight, N);
+		float NdotH = saturate(dot(N, H));
+
+		float alpha = roughness * roughness;
+		float a2 = alpha * alpha + sourceAngularRadius * sourceAngularRadius / (4.0 * NdotV);
+		float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+		float D = a2 / (Math::PI * d * d);
+		return NdotL > 0.0 ? D * 0.5 / (NdotV * (1.0 - alpha) + alpha) : 0.0;
+	}
+
 	/// Size of the foam texture's tile (units): FoamPattern bakes PBRWaterFoam::BubblesPerTile large bubbles of 20 cm
 	/// across it, with bubbles 2.7 times smaller in the walls between them.
 	float FoamTile() { return Tune5.z * UnitsPerMetre * PBRWaterFoam::BubblesPerTile; }

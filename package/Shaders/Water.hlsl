@@ -1788,10 +1788,14 @@ PS_OUTPUT main(PS_INPUT input)
 			float3 normalizedLightDirection = normalize(lightDirection);
 
 #					if defined(PBR_WATER)
-			float3 lightColor = Color::PointLight(light.color.xyz) * light.fade *
-			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
-									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius(), lightDist)) *
-			                    PBRWater::Light1.w * intensityMultiplier;
+			float3 pbrToLight = PBRWater::SafeNormalize(lightDirection, normal);
+			float pbrEmitter = PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius(), lightDist);
+			float3 pbrLightColor = Color::PointLight(light.color.xyz) * light.fade * PBRWater::Light1.w * intensityMultiplier;
+			// The lobe cannot reach this pixel (the light reflects elsewhere, or is behind the surface): no visibility,
+			// Fresnel or shadow. The same threshold as the shadow's below, on a bound of the lobe.
+			if (max(pbrLightColor.x, max(pbrLightColor.y, pbrLightColor.z)) * PBRWater::SpecularGGXBound(normal, -viewDirection, pbrToLight, pbrRoughness, pbrEmitter) <= 1e-4)
+				continue;
+			float3 lightColor = pbrLightColor * PBRWater::SpecularGGX(normal, -viewDirection, pbrToLight, pbrRoughness, 1.0 / PBRWater::WaterIOR, pbrEmitter);
 			// Water lights only with its specular lobe, which a lamp's reflection fills on a few pixels: the local shadow
 			// (a filtered cube map lookup) is only worth reading where it does. Read for every pixel in a lit cluster it was
 			// the costliest part of the surface pass in a lit town on the coast (1.4 of 5.3 ms at Dawnstar).

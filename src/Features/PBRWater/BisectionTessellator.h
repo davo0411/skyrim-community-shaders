@@ -46,6 +46,9 @@ public:
 		float viewProj[4][4] = {};                           ///< camera-relative view-projection (row-major, mul(M, v))
 		float cullMarginXY = 0.0f;                           ///< how far the waves can move the surface sideways (units)
 		float cullMarginZ = 0.0f;                            ///< and up or down
+		/// The view and what the spacing reads are as when the subdivision was last refined: keep it as it is and only
+		/// evaluate its vertices (ignored when the roots changed).
+		bool reuseSubdivision = false;
 	};
 
 	struct Stats
@@ -59,6 +62,7 @@ public:
 		uint32_t listed = 0;        ///< of them in view (drawn)
 		uint32_t iterations = 0;    ///< refinement iterations that changed anything
 		uint32_t iterationCap = 0;  ///< iterations issued this frame
+		bool reused = false;        ///< this frame kept the last refined subdivision (FrameParams::reuseSubdivision)
 	};
 
 	void SetupResources();
