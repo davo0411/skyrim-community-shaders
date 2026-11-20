@@ -163,7 +163,7 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 	}
 	cb.Time.w = std::clamp(settings.deltaTime, 0.0f, 0.25f) * 60.0f;
 	cb.Foam = { settings.foamBias, settings.foamThreshold, settings.foamAdd, settings.foamDecayRate };
-	cb.SwellShape = { ocean.swellGamma, ocean.swellSpread, 0.0f, 0.0f };
+	cb.SwellShape = { ocean.swellGamma, ocean.swellSpread, static_cast<float>(settings.cascadeMask), 0.0f };
 	constants->Update(cb);
 
 	if (foamClear) {

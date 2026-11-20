@@ -29,6 +29,9 @@ RWTexture2DArray<float> FoamField : register(u3);  // persistent: read, decayed 
 	if (any(id.xy >= size))
 		return;
 	uint cascade = id.z;
+	// Skipped cascades keep last frame's displacement, derivatives, surface and foam.
+	if (((uint)SwellShape.z >> cascade & 1) == 0)
+		return;
 	float4 first = Spatial.Load(int4(id.xy, cascade * 2, 0));
 	float4 second = Spatial.Load(int4(id.xy, cascade * 2 + 1, 0));
 

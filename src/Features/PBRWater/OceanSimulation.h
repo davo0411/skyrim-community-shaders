@@ -25,6 +25,7 @@ public:
 		float foamThreshold = 0.0f;
 		float foamAdd = 0.0f;
 		float foamDecayRate = 0.0f;
+		uint32_t cascadeMask = 0xF;  ///< cascades to update this frame (bit c); the others keep last frame's waves
 	};
 
 	void SetupResources();

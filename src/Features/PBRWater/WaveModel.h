@@ -29,6 +29,8 @@
  * Frequencies are quantised to multiples of 2 pi / LoopPeriod, so the whole sea repeats exactly every
  * LoopPeriod seconds and the GPU only ever sees time as a fraction of that period.
  */
+struct PBRWater;
+
 namespace PBRWaterModel
 {
 	inline constexpr double Gravity = 9.81;        // m/s^2
@@ -482,6 +484,8 @@ namespace PBRWaterModel
 		float VerticalBound() const;
 
 	private:
+		friend struct ::PBRWater;  ///< the main thread's surf sleep probe (BuildContext, ShoreAt)
+
 		struct Context
 		{
 			std::array<float, NumCascades> weight;  ///< vertical amplitude multiplier per cascade (fetch, shoaling, breaking, train hand-over)

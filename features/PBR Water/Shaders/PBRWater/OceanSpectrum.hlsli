@@ -23,7 +23,7 @@ cbuffer OceanCB : register(b0)
 	float4 Time;     // x loop fraction (0..1), y fft size, z units per metre, w frame time in 1/60 s (foam)
 	float4 Band[4];  // x tile size (m), y band start, z band end, w anti-aliasing fade start (rad/m, 0 = none)
 	float4 Foam;     // x Jacobian bias, y threshold, z amount added per 1/60 s, w decay rate per 1/60 s (OceanAssembleCS)
-	float4 SwellShape;  // x swell JONSWAP peak enhancement gamma, y swell Mitsuyasu exponent (directional spread)
+	float4 SwellShape;  // x swell JONSWAP peak enhancement gamma, y swell Mitsuyasu exponent (directional spread), z cascade update mask (bit c: cascade c is recomputed, other bits keep last frame's output), w unused
 };
 
 static const float OceanJonswapAlpha = 0.0081;

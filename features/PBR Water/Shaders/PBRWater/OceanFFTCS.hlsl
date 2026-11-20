@@ -11,7 +11,7 @@
 // FFT_SIZE and FFT_LOG2 are compile-time defines (128, 256 or 512).
 // ============================================================================
 
-#include "Common/Math.hlsli"
+#include "PBRWater/OceanSpectrum.hlsli"
 
 #ifndef FFT_SIZE
 #	define FFT_SIZE 256
@@ -44,6 +44,9 @@ uint3 Address(uint index, uint lineIndex, uint slice)
 	uint t = thread.x;
 	uint lineIndex = group.y;
 	uint slice = group.z;
+	// Slices come in pairs per cascade (2c, 2c + 1): skip the whole pair when the cascade is not updated.
+	if (((uint)SwellShape.z >> (slice >> 1) & 1) == 0)
+		return;
 
 	Line[0][t] = Source.Load(int4(Address(t, lineIndex, slice), 0));
 	Line[0][t + FFT_HALF] = Source.Load(int4(Address(t + FFT_HALF, lineIndex, slice), 0));

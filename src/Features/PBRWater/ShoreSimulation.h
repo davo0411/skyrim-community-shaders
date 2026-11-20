@@ -59,6 +59,9 @@ public:
 	 */
 	void UpdateFoam(float cameraX, float cameraY, float dt);
 
+	/** @brief Render thread: the surf's grids start over at rest on the next UpdateFoam. */
+	void ResetFoam() { foamHasOrigin = false; }
+
 	/** @brief x wet level, yz unused, w water surface height (units above the still water). */
 	ID3D11ShaderResourceView* GetWetSRV() const { return ready ? wet[current]->srv.get() : nullptr; }
 	/** @brief Absolute world position of the grid's corner. */

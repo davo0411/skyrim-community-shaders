@@ -21,6 +21,8 @@ RWTexture2DArray<float4> Spectrum : register(u0);
 	if (any(id.xy >= size))
 		return;
 	uint cascade = id.z;
+	if (((uint)SwellShape.z >> cascade & 1) == 0)
+		return;
 	int half = (int)(size >> 1);
 	int m = id.x < (uint)half ? (int)id.x : (int)id.x - (int)size;
 	int n = id.y < (uint)half ? (int)id.y : (int)id.y - (int)size;

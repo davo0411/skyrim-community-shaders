@@ -181,6 +181,9 @@ struct PBRWater : Feature
 		float DisplacementFadeStart = 16384.0f;  ///< units
 		float DisplacementFadeEnd = 32768.0f;
 		int WaveResolution = 1;  ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
+		bool CheapOffscreenWater = true;  ///< reflections, cubemaps and the map draw the water without shore waves, foam, clarity or lights
+		float TriangleBudget = 1500.0f;   ///< thousands of tessellated triangles a frame before the target size grows (0: none)
+		bool LongWaveHalfRate = false;    ///< the two longest cascades' FFTs alternate frames
 
 		// Debug
 		int WireframeMode = 0;
@@ -423,6 +426,7 @@ private:
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
 	std::unique_ptr<ConstantBuffer> drawBuffer;          ///< this frame's constants for the tessellated mesh (Tess0.x = 1: BisectionTessellator)
 	std::unique_ptr<ConstantBuffer> flatDrawBuffer;      ///< for the untessellated draws (Tess0.x = 0)
+	std::unique_ptr<ConstantBuffer> offscreenDrawBuffer; ///< for the untessellated draws of other views (reflections, cubemaps, the map) with CheapOffscreenWater: Tess0.x = 0 and the costly gates off
 	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;   ///< for the engine's own draw of a mesh the tessellator draws instead (Tess0.x = 2: culled)
 	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;  ///< for the deferred surface's rectangle around a tessellated mesh (Tess0.x = 3)
 
@@ -512,6 +516,7 @@ private:
 	/// The water meshes the tessellated draws drew, for the tessellator to subdivide.
 	WaterMeshes waterMeshes;
 	BisectionTessellator bisection;
+	float budgetCoarsening = 1.0f;  ///< render thread: the target size's growth that holds the tessellated triangles to TriangleBudget (Draw0.w)
 	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh. */
 	void DrawCachedMesh();
 	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */
@@ -599,11 +604,16 @@ private:
 	float shoreResetDelay = -1.0f;                  ///< s until the shore train resets after a settings change (< 0: none pending)
 	bool shoreHardSwap = false;                     ///< the next shore field replaces the current one at once instead of blending in
 	std::atomic_bool swashResetRequested{ false };  ///< render thread: clear the swash history on its next step
+	std::atomic<bool> surfNearby{ true };  ///< main thread -> render thread: a breaking beach lies within the surf grid
+	float surfIdleTime = 0.0f;             ///< main thread: s since the last beach seen near the camera
+	bool surfAsleep = false;               ///< render thread: the surf passes are skipped
 	float smoothedWindSpeed = -1.0f;
 	float smoothedWindDirX = 1.0f;
 	float smoothedWindDirY = 0.0f;
 	std::atomic<std::shared_ptr<const PBRWaterModel::WaveSnapshot>> snapshot;
 	std::atomic<float> renderDelta{ 0.0f };
+	std::atomic<uint32_t> neededCascades{ 0xF };  ///< main thread: cascades with any weight in the water around the camera
+	uint32_t cascadeMaskCalls = 0;                ///< main thread: MainThreadUpdate calls, the mask is sampled every 10th
 	std::atomic<float> weatherTurbidity{ 0.0f };
 	float smoothedWeatherTurbidity = 0.0f;
 	std::atomic<float> rainIntensity{ 0.0f };

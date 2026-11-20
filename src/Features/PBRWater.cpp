@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 #define I18N_KEY_PREFIX "feature.pbr_water."
 
@@ -111,6 +112,9 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		AdaptiveTessellation,
 		TessellationErrorPixels,
 		TessellationMaxCoarsening,
+		CheapOffscreenWater,
+		TriangleBudget,
+		LongWaveHalfRate,
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
@@ -236,6 +240,9 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		AdaptiveTessellation,
 		TessellationErrorPixels,
 		TessellationMaxCoarsening,
+		CheapOffscreenWater,
+		TriangleBudget,
+		LongWaveHalfRate,
 		DisplacementFadeStart,
 		DisplacementFadeEnd,
 		EnableTessellation,
@@ -441,6 +448,7 @@ void PBRWater::SanitizeSettings()
 	clamp(s.TessellationMaxFactor, 1.0f, 64.0f, d.TessellationMaxFactor);
 	clamp(s.TessellationErrorPixels, 0.05f, 100.0f, d.TessellationErrorPixels);
 	clamp(s.TessellationMaxCoarsening, 1.0f, 64.0f, d.TessellationMaxCoarsening);
+	clamp(s.TriangleBudget, 0.0f, 100000.0f, d.TriangleBudget);
 	clamp(s.DisplacementFadeStart, 0.0f, 10000000.0f, d.DisplacementFadeStart);
 	clamp(s.DisplacementFadeEnd, 1.0f, 10000000.0f, d.DisplacementFadeEnd);
 	clamp(s.SedimentColor.x, 0.0f, Huge, d.SedimentColor.x);
@@ -890,6 +898,10 @@ void PBRWater::DrawSettings()
 			ImGui::Combo(T(TKEY("wave_resolution"), "Wave Detail"), &s.WaveResolution, sizes, IM_ARRAYSIZE(sizes));
 			Util::HoverTip(T(TKEY("wave_resolution_tooltip"), "Resolution of each FFT wave cascade. Higher values add finer ripples close up at a small GPU cost; gameplay is unaffected."));
 		}
+		Util::CheckboxTip(T(TKEY("long_wave_half_rate"), "Half-Rate Long Waves"), &s.LongWaveHalfRate,
+			T(TKEY("long_wave_half_rate_tooltip"), "The two longest wave cascades update on alternate frames, saving about half their FFT. Their waves move in steps of two frames. Cascades no water near the camera can show are skipped either way."));
+		Util::CheckboxTip(T(TKEY("cheap_offscreen_water"), "Cheap Reflected Water"), &s.CheapOffscreenWater,
+			T(TKEY("cheap_offscreen_water_tooltip"), "Water seen in reflections, cubemaps and the map is drawn without shore waves, foam, sediment, subsurface light or point lights: it is small or blurred there."));
 		Util::CheckboxTip(T(TKEY("enable_tessellation"), "Tessellation"), &s.EnableTessellation,
 			T(TKEY("enable_tessellation_tooltip"), "Subdivides the water mesh adaptively once a frame so waves are real geometry, and evaluates each vertex's waves once for every pass that draws the water. Without it, waves are limited by the mesh resolution."));
 		{
@@ -907,6 +919,8 @@ void PBRWater::DrawSettings()
 			T(TKEY("tessellation_triangle_size_tooltip"), "Smaller values give smoother waves at a higher GPU cost. Scales automatically with the render resolution. Default 10 px."));
 		Util::SliderFloatTip(T(TKEY("tessellation_max_factor"), "Maximum Tessellation"), &s.TessellationMaxFactor, 4.0f, 64.0f, "%.0f",
 			T(TKEY("tessellation_max_factor_tooltip"), "Caps how finely the water is subdivided near the camera: the smallest triangle is the water mesh's grid (about 1.8 m) divided by this. Higher values make waves smoother up close but cost more. Default 32."));
+		Util::SliderFloatTip(T(TKEY("triangle_budget"), "Triangle Budget"), &s.TriangleBudget, 0.0f, 8000.0f, "%.0fk",
+			T(TKEY("triangle_budget_tooltip"), "The most tessellated water triangles a frame, in thousands. Above it the target triangle size grows until the count fits, so the worst views cost no more than this. 0: no budget. Default 1500k."));
 		Util::CheckboxTip(T(TKEY("adaptive_tessellation"), "Adaptive Tessellation"), &s.AdaptiveTessellation,
 			T(TKEY("adaptive_tessellation_tooltip"), "Sizes the open water's triangles by how much the waves there move, not by distance alone: calm seas, lakes and ponds take large triangles, a storm keeps the fine mesh. The shore band and the ripples around the player always keep the target size."));
 		{
@@ -955,8 +969,8 @@ void PBRWater::DrawSettings()
 		ImGui::Text("Water draws last frame: %u, %u of them from the tessellated mesh", lastDrawStats.draws, lastDrawStats.computeDraws);
 		{
 			const auto& b = bisection.GetStats();
-			ImGui::Text("Bisection tessellation: %u meshes, %u base triangles, %u shared root edges, %u bisectors (%u in view), %u of %u iterations (CPU %.3f ms)", b.meshes, b.roots, b.twins,
-				b.bisectors, b.listed, b.iterations, b.iterationCap, b.cpuMs);
+			ImGui::Text("Bisection tessellation: %u meshes, %u base triangles, %u shared root edges, %u bisectors (%u in view), %u of %u iterations (CPU %.3f ms), budget coarsening %.2fx", b.meshes, b.roots, b.twins,
+				b.bisectors, b.listed, b.iterations, b.iterationCap, b.cpuMs, budgetCoarsening); // i18n-ignore: debug readout
 		}
 		{
 			const auto& ds = lastDrawStats;
@@ -972,8 +986,8 @@ void PBRWater::DrawSettings()
 		ImGui::Text("Steps last frame: ripples %u, swash %u", settings.EnableRipples ? ripples.GetLastSteps() : 0u, frameData.Shore0.x > 0.5f ? swash.GetLastSwashSteps() : 0u);
 		ImGui::TextUnformatted("GPU and CPU timings per pass: Profiling menu, PBRWater::");
 		ImGui::Text("Fetch: %s, bathymetry: %s%s", environment.GetFetch() ? "ready" : "none", environment.GetBathymetry() ? "ready" : "none", environment.IsBuilding() ? " (building)" : "");
-		ImGui::Text("Shore field: %s%s, swash: %s", environment.GetShore() ? "ready" : "none", environment.IsBuildingShore() ? " (building)" : "",
-			frameData.Swash0.w > 0.5f ? "running" : "idle");
+		ImGui::Text("Shore field: %s%s, swash: %s%s", environment.GetShore() ? "ready" : "none", environment.IsBuildingShore() ? " (building)" : "",  // i18n-ignore: debug readout
+			frameData.Swash0.w > 0.5f ? "running" : "idle", surfAsleep ? ", surf asleep" : "");
 		const auto floatingStats = floating.GetStats();
 		ImGui::Text("Floating: %u hulls, %u attached, %u actors on board, %u small objects riding the water", floatingStats.floaters, floatingStats.parts, floatingStats.carried, floatingStats.riders);
 		ImGui::TextUnformatted(floating.GetSelectionReport().c_str());
@@ -1023,6 +1037,7 @@ void PBRWater::SetupResources()
 		}
 	}
 	flatDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::FlatDrawConstants");
+	offscreenDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::OffscreenDrawConstants");
 	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
 	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
 	deferredCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DeferredDrawCB>(), "PBRWater::DeferredDrawCB");
@@ -1358,6 +1373,10 @@ void PBRWater::Prepass()
 		oceanSettings.foamThreshold = settings.FoamThreshold;
 		oceanSettings.foamAdd = settings.FoamAdd * settings.FoamAmount;
 		oceanSettings.foamDecayRate = settings.FoamDecayRate;
+		oceanSettings.cascadeMask = neededCascades.load(std::memory_order_relaxed);
+		// Half-rate long waves: the two longest cascades alternate frames (even frames skip cascade 1, odd frames cascade 0).
+		if (settings.LongWaveHalfRate)
+			oceanSettings.cascadeMask &= ~(1u << ((globals::state->frameCount & 1u) == 0 ? 1u : 0u));
 		ocean.Update(*snap, oceanSettings);
 	}
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
@@ -1399,8 +1418,27 @@ void PBRWater::UpdateTessellation()
 	if (!gpuBuffer || !settings.EnableTessellation || !bisection.IsReady() || !globals::shaderCache->IsEnabled()) {
 		waterMeshes.Reset();
 		bisection.Clear();
+		budgetCoarsening = 1.0f;
 		PBRWaterProfiling::Skipped("PBRWater::Tessellate");
 		return;
+	}
+
+	// The triangle budget: last frame's read-back (a few frames late) sets how far the target size grows. Triangles fall
+	// with 1/size^2, so the size follows the square root of the count, and it moves slowly so the lag does not overshoot.
+	{
+		const auto& stats = bisection.GetStats();
+		if (settings.TriangleBudget <= 0.0f) {
+			budgetCoarsening = 1.0f;
+		} else if (stats.listed > 0) {
+			const float trianglesK = float(stats.listed) * BisectionTessellator::GridTriangles / 1000.0f;
+			const float budget = settings.TriangleBudget;
+			const float target = budgetCoarsening * std::sqrt(trianglesK / budget);
+			if (trianglesK > budget)
+				budgetCoarsening = std::min(target, budgetCoarsening * 1.1f);
+			else if (trianglesK < 0.8f * budget)
+				budgetCoarsening = std::max(target, budgetCoarsening / 1.03f);
+			budgetCoarsening = std::clamp(budgetCoarsening, 1.0f, 8.0f);
+		}
 	}
 
 	// The vertices are evaluated as the tessellated draws evaluate them: this frame's constants (tessellated: Tess0.x
@@ -1409,7 +1447,7 @@ void PBRWater::UpdateTessellation()
 	GpuData d = frameData;
 	d.Tess0.x = 1.0f;
 	d.Draw0.x = 0.0f;
-	d.Draw0.w = 1.0f;
+	d.Draw0.w = budgetCoarsening;
 	gpuBuffer->Update(d);
 	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
 	context->CSSetConstantBuffers(7, 1, cbs);
@@ -1448,7 +1486,7 @@ void PBRWater::UpdateTessellation()
 	p.cullMarginZ = 0.8f * oceanReach / choppy + shoreReach + std::max(d.Shore0.w, 0.0f) + 4.0f * std::max(d.Ripple1.x, 0.0f) + 32.0f;
 	// The meshes registered last frame.
 	bisection.Build(p, waterMeshes);
-	frameData.Draw0.w = 1.0f;
+	frameData.Draw0.w = budgetCoarsening;
 
 	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
 	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, nullSrvs);
@@ -1566,11 +1604,17 @@ void PBRWater::UpdateSwash(float dt)
 	// The swash runs wherever the waves are still at full height (about a metre per texel at the default fade).
 	swashSettings.extent = std::clamp(2.0f * settings.DisplacementFadeStart, 8960.0f, 32768.0f);
 	// The surf simulation first: the wet level follows it. Off, the train runs to the waterline (Foam2.w = 0).
-	const bool surf = settings.SurfQuality > 0;
+	// Asleep while no breaking beach is near the camera (MainThreadUpdate): the surf's grids then sit still.
+	const bool surfWanted = settings.SurfQuality > 0;
+	const bool surf = surfWanted && surfNearby.load(std::memory_order_acquire);
 	if (surf) {
+		if (surfAsleep)
+			swash.ResetFoam();
+		surfAsleep = false;
 		swash.SetQuality(static_cast<uint32_t>(settings.SurfQuality - 1));
 		swash.UpdateFoam(cameraPos.x, cameraPos.y, dt);
 	} else {
+		surfAsleep = surfWanted;
 		PBRWaterProfiling::Skipped("PBRWater::ShoreFoam");
 		PBRWaterProfiling::Skipped("PBRWater::SwashStep");
 		PBRWaterProfiling::Skipped("PBRWater::SwashOut");
@@ -2179,6 +2223,25 @@ void PBRWater::UpdateFrameConstants()
 // Per-draw (render thread)
 // ============================================================================
 
+namespace
+{
+	/// Other views' water (CheapOffscreenWater): no shore waves, surf, foam, sediment, subsurface, point lights, ripples or
+	/// wave shadows. They see it small or blurred.
+	void CheapOffscreenGates(PBRWater::GpuData& d)
+	{
+		d.Shore0.x = 0.0f;
+		d.Foam2.w = 0.0f;
+		d.Swash0.w = 0.0f;
+		d.Light1.y = 0.0f;
+		d.Surface1.y = 0.0f;
+		d.Light0.y = 0.0f;
+		d.Light1.w = 0.0f;
+		d.Ripple0.w = 0.0f;
+		d.SunMap0.w = 0.0f;
+		d.Draw0.z = 0.0f;
+	}
+}
+
 void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 {
 	if (!gpuBuffer || !waterShader || !pass || !pass->geometry)
@@ -2258,17 +2321,23 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		deferredDrawBuffer->Update(drawData);
 		drawData.Tess0.x = 0.0f;
 		flatDrawBuffer->Update(drawData);
+		// Costly gates off for other views (CheapOffscreenWater); always uploaded so toggling the setting never binds stale data.
+		CheapOffscreenGates(drawData);
+		offscreenDrawBuffer->Update(drawData);
 		GatherWaterSRVs(d, drawSRVs);
 		drawResourcesFrame = UINT32_MAX;
 	}
 	// The engine's own draw of a mesh the tessellator draws runs the vertex shader in its culling mode (Tess0.x = 2): it
 	// rasterises nothing, and RestoreDraw draws the mesh with the tessellated mode's constants, which the pixel stage gets
 	// now.
-	ID3D11Buffer* cb = cached ? drawBuffer->CB() : flatDrawBuffer->CB();
+	const bool cheap = !mainView && settings.CheapOffscreenWater;
+	ID3D11Buffer* cb = cached ? drawBuffer->CB() : (cheap ? offscreenDrawBuffer->CB() : flatDrawBuffer->CB());
 	if (spacing > 0.0f) {
 		GpuData drawData = d;
 		drawData.Tess0.x = 0.0f;
 		drawData.Draw0.x = spacing;
+		if (cheap)
+			CheapOffscreenGates(drawData);
 		gpuBuffer->Update(drawData);
 		cb = gpuBuffer->CB();
 	}
@@ -3054,6 +3123,34 @@ PBRWaterModel::SpectrumParams PBRWater::CurrentSpectrumParams(float windSpeed, b
 	return params;
 }
 
+// Cascades with any fetch-limited weight in the water within `range` of the eye (WaveSnapshot::BuildContext before depth and
+// shoaling, so it keeps a cascade that shoaling would later thin out: conservative).
+static uint32_t NeededCascadeMask(const PBRWaterModel::WaveSnapshot& snap, float eyeX, float eyeY, float range)
+{
+	constexpr int Grid = 5;
+	const float windSpeed = snap.ocean->windSpeed;
+	const float openPeak = snap.ocean->peakOmega;
+	uint32_t mask = 0;
+	for (int j = 0; j < Grid; ++j) {
+		for (int i = 0; i < Grid; ++i) {
+			const float x = eyeX + range * (2.0f * static_cast<float>(i) / (Grid - 1) - 1.0f);
+			const float y = eyeY + range * (2.0f * static_cast<float>(j) / (Grid - 1) - 1.0f);
+			const float fetchMetres = snap.fetch->SampleMetres(x, y, snap.windDirection) * snap.fetchScale;
+			const float peakOmega = PBRWaterModel::FetchPeakOmega(fetchMetres, windSpeed, openPeak);
+			const float energyGain = PBRWaterModel::FetchEnergyGain(fetchMetres, windSpeed);
+			for (uint32_t c = 0; c < PBRWaterModel::NumCascades; ++c) {
+				const auto& band = snap.ocean->cascades[c];
+				const float r = peakOmega / band.meanOmega;
+				const float r2 = r * r;
+				const float weight = std::clamp(std::exp(-1.25f * r2 * r2) / std::max(band.pmWeightOpenSea, 1e-4f), 0.0f, 1.0f) * energyGain;
+				if (weight > 0.01f)
+					mask |= 1u << c;
+			}
+		}
+	}
+	return mask;
+}
+
 void PBRWater::MainThreadUpdate()
 {
 	auto player = RE::PlayerCharacter::GetSingleton();
@@ -3159,6 +3256,52 @@ void PBRWater::MainThreadUpdate()
 	next->shoreField = currentShore;
 	next->shorePrevious = previousShore;
 	next->shoreBlend = shoreBlend;
+
+	// Cascades nothing near the camera can see are skipped on the GPU. Sampled every 10th call; without a fetch or ocean, all are needed.
+	if (cascadeMaskCalls++ % 10 == 0) {
+		const bool sampled = next->ocean && next->fetch;
+		neededCascades.store(sampled ? NeededCascadeMask(*next, eye.x, eye.y, settings.DisplacementFadeEnd) : 0xF, std::memory_order_relaxed);
+	}
+
+	// Surf sleep: every 15th frame, look for a breaking beach within the surf grid around the camera. Frames between
+	// still add up the time, so the surf sleeps after 3 s without one.
+	static uint32_t surfProbeCalls = 0;
+	static float surfProbeElapsed = 0.0f;
+	surfProbeElapsed += dt;
+	if (!shoreEnabled || !next->shoreField || !next->shoreField->Valid()) {
+		surfNearby.store(true, std::memory_order_release);
+		surfIdleTime = 0.0f;
+		surfProbeElapsed = 0.0f;
+	} else if (++surfProbeCalls % 15 == 0) {
+		const auto& field = *next->shoreField;
+		// The still water at the nearest texel of the field (NaN: no water there).
+		auto levelAt = [&field](float x, float y) {
+			const float ix = std::round((x - field.minX) / field.step);
+			const float iy = std::round((y - field.minY) / field.step);
+			if (ix < 0.0f || iy < 0.0f || ix > static_cast<float>(field.width - 1) || iy > static_cast<float>(field.height - 1))
+				return std::numeric_limits<float>::quiet_NaN();
+			return field.level[static_cast<size_t>(iy) * field.width + static_cast<size_t>(ix)];
+		};
+		const float half = ShoreSimulation::FoamExtent * 0.5f;
+		bool beach = false;
+		// 11 m apart: the beach share runs out along the rays over the whole breaking zone, wider than that.
+		for (int j = 0; j < 17 && !beach; ++j) {
+			for (int i = 0; i < 17 && !beach; ++i) {
+				const float x = eye.x - half + 2.0f * half * static_cast<float>(i) / 16.0f;
+				const float y = eye.y - half + 2.0f * half * static_cast<float>(j) / 16.0f;
+				if (next->ShoreAt(x, y).weight <= 0.0f)
+					continue;
+				const float level = levelAt(x, y);
+				if (!std::isfinite(level) || level < -1.0e6f)  // < -1e6: no water (ShoreField::level)
+					continue;
+				if (next->BuildContext(x, y, level).train.beach > 0.01f)
+					beach = true;
+			}
+		}
+		surfIdleTime = beach ? 0.0f : surfIdleTime + surfProbeElapsed;
+		surfProbeElapsed = 0.0f;
+		surfNearby.store(surfIdleTime < 3.0f, std::memory_order_release);
+	}
 
 	std::shared_ptr<const PBRWaterModel::WaveSnapshot> published = next;
 	snapshot.store(published, std::memory_order_release);
