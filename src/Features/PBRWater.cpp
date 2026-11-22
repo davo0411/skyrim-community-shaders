@@ -58,7 +58,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		PointLightSpecular,
 		PointLightEmitterRadius,
 		Subsurface,
-		VanillaFresnel,
 		RefractionDistortion,
 		WindRoughness,
 		VanillaNormalMaps,
@@ -133,6 +132,12 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		EnableWaveShadows,
 		EnablePointLightSpecular,
 		EnableSkyOcclusion,
+		EnableWaterline,
+		EnableEnvReflections,
+		EnableSSR,
+		EnableSunShadows,
+		EnableSkylighting,
+		EnableFog,
 		EnableClarity,
 		EnableSubsurface,
 		EnableFoam,
@@ -187,7 +192,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		PointLightSpecular,
 		PointLightEmitterRadius,
 		Subsurface,
-		VanillaFresnel,
 		RefractionDistortion,
 		WindRoughness,
 		VanillaNormalMaps,
@@ -262,6 +266,12 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		EnableWaveShadows,
 		EnablePointLightSpecular,
 		EnableSkyOcclusion,
+		EnableWaterline,
+		EnableEnvReflections,
+		EnableSSR,
+		EnableSunShadows,
+		EnableSkylighting,
+		EnableFog,
 		EnableClarity,
 		EnableSubsurface,
 		EnableFoam,
@@ -398,7 +408,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.PointLightSpecular, 0.0f, Huge, d.PointLightSpecular);
 	clamp(s.PointLightEmitterRadius, 0.1f, 1000.0f, d.PointLightEmitterRadius);
 	clamp(s.Subsurface, 0.0f, Huge, d.Subsurface);
-	clamp(s.VanillaFresnel, 0.0f, 1.0f, d.VanillaFresnel);
 	clamp(s.RefractionDistortion, 0.0f, Huge, d.RefractionDistortion);
 	clamp(s.WindRoughness, 0.0f, Huge, d.WindRoughness);
 	clamp(s.DetailNormalCalm, 0.0f, 10.0f, d.DetailNormalCalm);
@@ -717,12 +726,24 @@ void PBRWater::DrawSettings()
 			T(TKEY("enable_point_light_specular_tooltip"), "Torches and other lights glint in the water. Off: the per-pixel light loop is skipped."));
 		Util::CheckboxTip(T(TKEY("enable_sky_occlusion"), "Wave Sky Occlusion"), &s.EnableSkyOcclusion,
 			T(TKEY("enable_sky_occlusion_tooltip"), "The waves occlude the sky in Skylighting's probes, so troughs see less of it than crests. Off: the displaced water grid is not drawn into the probes' occlusion map. Needs Skylighting."));
+		Util::CheckboxTip(T(TKEY("enable_waterline"), "Per-Pixel Waterline"), &s.EnableWaterline,
+			T(TKEY("enable_waterline_tooltip"), "With waves, the water's mesh is held on the sand near the shore and where the water ends is found per pixel against the ground, so the edge follows the terrain instead of the triangles. Off: skips its terrain reads in the vertex, stencil and surface passes; the waves' triangles cut through the shore and the swash can show gaps. Without any waves it is skipped anyway."));
+		Util::CheckboxTip(T(TKEY("enable_env_reflections"), "Environment Reflections"), &s.EnableEnvReflections,
+			T(TKEY("enable_env_reflections_tooltip"), "The water reflects the sky and surroundings from the cubemap. Off: it reflects the water form's flat reflection colour and no cubemap is read."));
+		Util::CheckboxTip(T(TKEY("enable_ssr"), "Screen-Space Reflections"), &s.EnableSSR,
+			T(TKEY("enable_ssr_tooltip"), "What is on screen is reflected in the water. Off: the screen-space reflection targets are not read."));
+		Util::CheckboxTip(T(TKEY("enable_sun_shadows"), "Sun Shadows"), &s.EnableSunShadows,
+			T(TKEY("enable_sun_shadows_tooltip"), "Shadows of terrain, objects and clouds fall on the water. Off: no shadow lookups; the water is lit as if nothing blocked the sun."));
+		Util::CheckboxTip(T(TKEY("enable_skylighting"), "Skylighting"), &s.EnableSkylighting,
+			T(TKEY("enable_skylighting_tooltip"), "Skylighting darkens the sky the water sees under cliffs, hulls and overhangs. Off: its probes are not read and the water sees the open sky."));
+		Util::CheckboxTip(T(TKEY("enable_fog"), "Fog"), &s.EnableFog,
+			T(TKEY("enable_fog_tooltip"), "Distance fog, height fog and the atmosphere fade distant water. Off: none of them are applied to the water."));
 		Util::SliderFloatTip(T(TKEY("roughness"), "Surface Roughness"), &s.Roughness, 0.02f, 0.5f, "%.3f",
 			T(TKEY("roughness_tooltip"), "Base roughness of the calm water surface. Default 0.06."));
 		Util::SliderFloatTip(T(TKEY("wind_roughness"), "Wind Roughness"), &s.WindRoughness, 0.0f, 3.0f, "%.2f",
 			T(TKEY("wind_roughness_tooltip"), "Scales the roughness the wind adds with its tiny ripples (Cox and Munk). Default 1."));
 		Util::CheckboxTip(T(TKEY("vanilla_normal_maps"), "Vanilla Normal Maps"), &s.VanillaNormalMaps,
-			T(TKEY("vanilla_normal_maps_tooltip"), "Reads the water form's own normal maps on top of the simulated waves. Off: where the ocean waves run, their finest cascade carries the small ripples and the three normal map reads are skipped. Rivers and water without waves always keep them."));
+			T(TKEY("vanilla_normal_maps_tooltip"), "Reads the water form's own normal maps on top of the simulated waves. Off: the three normal map reads are skipped; the waves, ripples and rain carry the detail, and water without any of them lies flat. Rivers always keep theirs."));
 		Util::SliderFloatTip(T(TKEY("detail_normal_calm"), "Normal Map Strength (Calm)"), &s.DetailNormalCalm, 0.0f, 2.0f, "%.2f",
 			T(TKEY("detail_normal_calm_tooltip"), "Strength of the water form's normal maps on top of the simulated waves in calm air. They carry the fine ripple texture. Default 0.75."));
 		Util::SliderFloatTip(T(TKEY("detail_normal_gale"), "Normal Map Strength (Windy)"), &s.DetailNormalGale, 0.0f, 2.0f, "%.2f",
@@ -737,8 +758,6 @@ void PBRWater::DrawSettings()
 			T(TKEY("enable_subsurface_tooltip"), "Sunlight scatters through all the water and back to the eye. Off: it is not evaluated at all, which saves a scattering evaluation per pixel."));
 		Util::SliderFloatTip(T(TKEY("subsurface"), "Subsurface Strength"), &s.Subsurface, 0.0f, 3.0f, "%.2f",
 			T(TKEY("subsurface_tooltip"), "Strength of the sunlight that shines through the water and scatters back to the eye, over all the water. Default 1."));
-		Util::SliderFloatTip(T(TKEY("vanilla_fresnel"), "Vanilla Fresnel Blend"), &s.VanillaFresnel, 0.0f, 1.0f, "%.2f",
-			T(TKEY("vanilla_fresnel_tooltip"), "Blends the game's own reflectivity curve into the physical Fresnel. 0 is fully physical. Default 0."));
 
 		if (ImGui::CollapsingHeader(T(TKEY("advanced"), "Advanced"))) {
 			Util::SliderFloatTip(T(TKEY("point_light_emitter_radius"), "Point Light Size"), &s.PointLightEmitterRadius, 1.0f, 40.0f, "%.1f units",
@@ -2106,9 +2125,7 @@ void PBRWater::UpdateFrameConstants()
 		const bool active = ocean.IsReady() && !o.calm;
 		d.Params0 = { active ? 1.0f : 0.0f, o.windSpeed, o.peakOmega, static_cast<float>(PBRWaterModel::Gravity) * UnitsPerMetre };
 		d.Params1 = { std::cos(snap->windDirection), std::sin(snap->windDirection), settings.DisplacementFadeStart, settings.DisplacementFadeEnd };
-		// y: with waves the surface is real geometry and Water Effects' parallax over the normal maps is skipped (Water.hlsl
-		// GetWaterNormal): its march cost a tenth of the surface pass for detail the waves already carry.
-		d.Params2 = { o.choppiness, settings.WaveHeight > 0.0f ? 1.0f : 0.0f, active ? o.displacementBound : 0.0f, static_cast<float>(std::max(ocean.GetMipCount(), 1u) - 1) };
+		d.Params2 = { o.choppiness, 0.0f, active ? o.displacementBound : 0.0f, static_cast<float>(std::max(ocean.GetMipCount(), 1u) - 1) };
 		d.RefCamPos = { static_cast<float>(snap->refX), static_cast<float>(snap->refY), static_cast<float>(snap->refZ), 0.0f };
 		// Shore waves need the coastline maps the snapshot blends between on the GPU. The clock runs at this frame's
 		// (eased) frequency, but each map's lag omega tau uses the frequency it was traced for: with the eased one, tau
@@ -2207,7 +2224,12 @@ void PBRWater::UpdateFrameConstants()
 		d.Ripple2 = { ripples.GetPreviousOriginX(), ripples.GetPreviousOriginY(), ripples.GetStepAlpha(), ripples.GetPreviousStepAlpha() };
 	}
 
-	d.Light0 = { settings.Roughness, settings.EnableSubsurface ? settings.Subsurface : 0.0f, settings.VanillaFresnel, settings.SunSpecular };
+	d.Light0 = { settings.Roughness, settings.EnableSubsurface ? settings.Subsurface : 0.0f, settings.EnableEnvReflections ? 1.0f : 0.0f, settings.SunSpecular };
+	// The surface's lighting inputs (Water.hlsl): set here, after the waves' constants, which share these vectors.
+	d.Params2.y = settings.EnableSSR ? 1.0f : 0.0f;
+	d.Shore4.z = settings.EnableSunShadows ? 1.0f : 0.0f;
+	d.Shore4.w = settings.EnableSkylighting ? 1.0f : 0.0f;
+	d.RefCamPos.w = settings.EnableFog ? 1.0f : 0.0f;
 	d.Light1 = { settings.Visibility, settings.EnableFoam ? 1.0f : 0.0f, settings.RefractionDistortion, settings.EnablePointLightSpecular ? settings.PointLightSpecular : 0.0f };
 	// The open sea's foam test, also applied to the shore waves' crests and folds (PBRWater::EvaluateWavesFiltered); z the
 	// same Amount and Coverage as a gain on the shore's foam coverages, which have no Jacobian (1 at the defaults).
@@ -2238,7 +2260,9 @@ void PBRWater::UpdateFrameConstants()
 		// w is set once this frame's bake has run.
 		d.Noise0 = { originX, originY, settings.EnableClarity ? 1.0f / (texel * static_cast<float>(SurfaceNoiseSize)) : 0.0f, 0.0f };
 	}
-	d.Surface1 = { 0.0f, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, settings.VanillaNormalMaps ? 0.0f : 1.0f };
+	// x: 0 no waves of any kind (the mesh stays flat and the pixels skip the wave program), 1 waves, 2 waves and the per-pixel waterline.
+	const bool anyWaves = d.Params0.x > 0.5f || d.Shore0.x > 0.5f || d.Ripple0.w > 0.5f;
+	d.Surface1 = { anyWaves ? (settings.EnableWaterline ? 2.0f : 1.0f) : 0.0f, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, settings.VanillaNormalMaps ? 0.0f : 1.0f };
 
 	// The artistic scales the shaders read (PBRWater.hlsli Tune0..Tune5).
 	d.Tune0 = { settings.RiverCurrentSpeed, settings.FlowPeriodScale, settings.FlowPeriodMin, settings.FlowPeriodMax };
@@ -2277,6 +2301,8 @@ namespace
 		d.Ripple0.w = 0.0f;
 		d.SunMap0.w = 0.0f;
 		d.Draw0.z = 0.0f;
+		if (d.Params0.x < 0.5f)
+			d.Surface1.x = 0.0f;  // the open sea was their only waves
 	}
 }
 
@@ -2288,8 +2314,6 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	auto context = globals::d3d::context;
 	auto state = globals::state;
 	auto shaderCache = globals::shaderCache;
-
-	UpdateFrameConstants();
 
 	const uint32_t vertexDescriptor = state->modifiedVertexDescriptor;
 	const uint32_t technique = WaterTechnique(vertexDescriptor);
@@ -2344,28 +2368,11 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		++drawStats.computeDraws;
 
 	// Most water is flat distant tiles, hundreds of them: anything done per draw is paid hundreds of times per pass. The
-	// constants differ between draws only in the vertex shader's mode (Tess0.x) and, without tessellation, the spacing: the
-	// modes are uploaded once and swapped by binding another buffer.
+	// constants, views and samplers are uploaded and bound once per batch (SetupBatch, BindDrawResources); a draw only binds
+	// another constant buffer when its mode (Tess0.x), its spacing or its view's gates differ from the last draw's.
 	GpuData& d = frameData;
-	if (std::memcmp(&uploadedDrawData, &d, sizeof(GpuData)) != 0) {
-		uploadedDrawData = d;
-		GpuData drawData = d;
-		// The tessellated mesh's vertex mode (BisectionTessellator::Draw).
-		drawData.Tess0.x = 1.0f;
-		drawBuffer->Update(drawData);
-		drawData.Tess0.x = 2.0f;
-		swallowDrawBuffer->Update(drawData);
-		drawData.Tess0.x = 3.0f;
-		deferredDrawBuffer->Update(drawData);
-		drawData.Tess0.x = 0.0f;
-		flatDrawBuffer->Update(drawData);
-		// Costly gates off for other views (CheapOffscreenWater); always uploaded so toggling the setting never binds stale data.
-		CheapOffscreenGates(drawData);
-		offscreenDrawBuffer->Update(drawData);
-		uploadedSpacing = -1.0f;
-		GatherWaterSRVs(d, drawSRVs);
-		drawResourcesFrame = UINT32_MAX;
-	}
+	if (drawResourcesFrame != state->frameCount)
+		BindDrawResources();
 	// The engine's own draw of a mesh the tessellator draws runs the vertex shader in its culling mode (Tess0.x = 2): it
 	// rasterises nothing, and RestoreDraw draws the mesh with the tessellated mode's constants, which the pixel stage gets
 	// now.
@@ -2386,40 +2393,14 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		cb = spacingDrawBuffer->CB();
 	}
 	ID3D11Buffer* vertexCb = cached ? swallowDrawBuffer->CB() : cb;
-	context->VSSetConstantBuffers(7, 1, &vertexCb);
-	context->PSSetConstantBuffers(7, 1, &cb);
-
-	// These slots are free in every stage of the water shaders (Physical Sky, View Atmosphere and Landscape Seams use
-	// the t110-t127 range, Lighting uses s12-s13).
-	ID3D11SamplerState* linearClamp = linearClampSampler.get();
-	ID3D11SamplerState* samplers[2] = { linearClamp, oceanSampler.get() };
-	if (drawResourcesFrame != state->frameCount) {
-		drawResourcesFrame = state->frameCount;
-		ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
-		context->VSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
-		context->PSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
-		context->VSSetSamplers(WaterSamplerBase, 2, samplers);
-		// The vertex program reads the worldspace flowmap to calm waves on rivers.
-		context->VSSetShaderResources(8, 1, &flowmap);
-		context->VSSetSamplers(8, 1, &linearClamp);
-	} else {
-		// True PBR and Terrain Helper bind their pixel textures in t80-t97, with the lit geometry drawn between.
-		ID3D11ShaderResourceView* bound[WaterSRVCount] = {};
-		context->PSGetShaderResources(WaterSRVBase, WaterSRVCount, bound);
-		bool intact = true;
-		for (uint32_t i = 0; i < WaterSRVCount; ++i)
-			intact = intact && bound[i] == drawSRVs[i];
-		if (!intact)
-			context->PSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
-		for (auto* view : bound) {
-			if (view)
-				view->Release();
-		}
+	if (vertexCb != boundVertexCb) {
+		context->VSSetConstantBuffers(7, 1, &vertexCb);
+		boundVertexCb = vertexCb;
 	}
-	context->PSSetSamplers(WaterSamplerBase, 2, samplers);
-	// The waves' heightfield is the pixel stage's alone, in a slot nothing else uses: bound with every draw.
-	ID3D11ShaderResourceView* heightfield = d.SunMap0.w > 0.5f && sunMapTexture ? sunMapTexture->srv.get() : nullptr;
-	context->PSSetShaderResources(WaveHeightfieldSlot, 1, &heightfield);
+	if (cb != boundPixelCb) {
+		context->PSSetConstantBuffers(7, 1, &cb);
+		boundPixelCb = cb;
+	}
 
 	// The renderer binds textures and constant buffers lazily, right before the draw call, so the
 	// device still holds the previous draw's state here: read this draw's from the shadow state.
@@ -2449,9 +2430,60 @@ void PBRWater::SetupBatch()
 	// Before the batch's pass and before the draws upload the constants, which say where the heightfield is.
 	const auto snap = snapshot.load(std::memory_order_acquire);
 	UpdateSunMap(settings.EnableWaveShadows && snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled) && globals::shaderCache->IsEnabled());
+	UploadDrawConstants();
+	// Bound with the batch's first draw: the lit geometry drawn between batches (True PBR, Terrain Helper) uses t80-t97.
+	drawResourcesFrame = UINT32_MAX;
 	// A batch the engine never closed (none should be) ends here rather than swallowing the next.
 	EndDrawBatch();
 	BeginDrawBatch(WaterTechnique(globals::state->modifiedVertexDescriptor));
+}
+
+void PBRWater::UploadDrawConstants()
+{
+	const GpuData& d = frameData;
+	if (std::memcmp(&uploadedDrawData, &d, sizeof(GpuData)) == 0)
+		return;
+	uploadedDrawData = d;
+	GpuData drawData = d;
+	// The tessellated mesh's vertex mode (BisectionTessellator::Draw).
+	drawData.Tess0.x = 1.0f;
+	drawBuffer->Update(drawData);
+	drawData.Tess0.x = 2.0f;
+	swallowDrawBuffer->Update(drawData);
+	drawData.Tess0.x = 3.0f;
+	deferredDrawBuffer->Update(drawData);
+	drawData.Tess0.x = 0.0f;
+	flatDrawBuffer->Update(drawData);
+	// Costly gates off for other views (CheapOffscreenWater); always uploaded so toggling the setting never binds stale data.
+	CheapOffscreenGates(drawData);
+	offscreenDrawBuffer->Update(drawData);
+	uploadedSpacing = -1.0f;
+	GatherWaterSRVs(d, drawSRVs);
+	drawResourcesFrame = UINT32_MAX;
+}
+
+void PBRWater::BindDrawResources()
+{
+	auto context = globals::d3d::context;
+	drawResourcesFrame = globals::state->frameCount;
+	const GpuData& d = frameData;
+	// These slots are free in every stage of the water shaders (Physical Sky, View Atmosphere and Landscape Seams use
+	// the t110-t127 range, Lighting uses s12-s13).
+	ID3D11SamplerState* linearClamp = linearClampSampler.get();
+	ID3D11SamplerState* samplers[2] = { linearClamp, oceanSampler.get() };
+	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
+	context->VSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
+	context->PSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
+	context->VSSetSamplers(WaterSamplerBase, 2, samplers);
+	context->PSSetSamplers(WaterSamplerBase, 2, samplers);
+	// The vertex program reads the worldspace flowmap to calm waves on rivers.
+	context->VSSetShaderResources(8, 1, &flowmap);
+	context->VSSetSamplers(8, 1, &linearClamp);
+	// The waves' heightfield is the pixel stage's alone, in a slot nothing else uses.
+	ID3D11ShaderResourceView* heightfield = d.SunMap0.w > 0.5f && sunMapTexture ? sunMapTexture->srv.get() : nullptr;
+	context->PSSetShaderResources(WaveHeightfieldSlot, 1, &heightfield);
+	boundVertexCb = nullptr;
+	boundPixelCb = nullptr;
 }
 
 void PBRWater::BeginDrawBatch(uint32_t technique)
@@ -2519,6 +2551,7 @@ void PBRWater::RestoreDraw()
 			DrawRecordedStencil();
 		else if (!(deferred && cachedDrawTechnique < 8 && DrawDeferredSurface()))
 			DrawCachedMesh();
+		drawResourcesFrame = UINT32_MAX;
 	}
 	if (geometryShaderBound) {
 		context->GSSetShader(nullptr, nullptr, 0);
@@ -3115,7 +3148,9 @@ bool PBRWater::DrawDistantHalfRate(uint32_t slot, DeferredDrawCB data)
 	data.viewport = { half.Width, half.Height, 0.0f, 0.0f };
 	data.mode[0] = list;
 	data.mode[1] = DeferredHalf;
-	data.mode[2] = frame & 3;
+	// A fixed sample: rotating it each frame moved every pixel's value (a 1-in-4 point sample of glints and foam, reweighted
+	// by DeferredFar.hlsl) on a 4-frame cycle, which the temporal filter cannot hide.
+	data.mode[2] = 0;
 	deferredCB->Update(data);
 	context->DrawInstancedIndirect(deferredArgs.get(), argsOffset);
 
@@ -3794,6 +3829,14 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 
 void PBRWater::PostPostLoad()
 {
+	// Unified Water places the water (one mesh everywhere, no LOD water): the shading assumes it and skips the vanilla paths it replaces.
+	if (!globals::features::unifiedWater.loaded) {
+		failedLoadedMessage = T("feature.pbr_water.unified_water_required", "Unified Water is required for PBR Water to function.");
+		loaded = false;
+		logger::warn("[PBR Water] {}", failedLoadedMessage);
+		return;
+	}
+
 	// Without the vanilla displacement (wading) mesh: it is a second water surface around the player
 	// that cannot follow the waves. Its job is done by the ripple simulation on the real surface.
 	stl::detour_thunk<TESWaterSystem_InitializeWater>(REL::RelocationID(31388, 32179));
@@ -3824,8 +3867,6 @@ void PBRWater::TESWaterSystem_InitializeWater::thunk(RE::TESWaterSystem* waterSy
 
 void PBRWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader, RE::BSRenderPass* pass, uint32_t renderFlags)
 {
-	// Closed in RestoreGeometry, which the engine always pairs with this call.
-	globals::state->BeginPerfEvent("PBR Water - Draw");
 	func(waterShader, pass, renderFlags);
 	globals::features::pbrWater.SetupDraw(waterShader, pass);
 }
@@ -3834,7 +3875,6 @@ void PBRWater::BSWaterShader_RestoreGeometry::thunk(RE::BSShader* waterShader, R
 {
 	globals::features::pbrWater.RestoreDraw();
 	func(waterShader, pass, renderFlags);
-	globals::state->EndPerfEvent();
 }
 
 bool PBRWater::TESObjectCELL_GetWaterHeight::thunk(RE::TESObjectCELL* cell, const RE::NiPoint3& position, float& waterHeight)
@@ -3879,8 +3919,14 @@ bool PBRWater::BSWaterShader_SetupTechnique::thunk(RE::BSShader* waterShader, ui
 	// After the original: its BeginTechnique sets the descriptors the batch is named by. Before any draw of the batch, so
 	// the batch's pass encloses every draw's own markers (Frame Annotations) instead of interleaving with them.
 	const bool ok = func(waterShader, technique);
-	if (ok)
-		globals::features::pbrWater.SetupBatch();
+	if (!ok)
+		return false;
+	// The game's underwater surface (the water seen from below) is not drawn: PBR Water will have its own.
+	if (WaterTechnique(globals::state->modifiedVertexDescriptor) == static_cast<uint32_t>(SC::WaterShaderTechniques::Underwater)) {
+		BSWaterShader_RestoreTechnique::func(waterShader, technique);
+		return false;
+	}
+	globals::features::pbrWater.SetupBatch();
 	return ok;
 }
 

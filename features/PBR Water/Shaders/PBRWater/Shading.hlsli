@@ -238,7 +238,10 @@ namespace PBRWater
 
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w, false);
 		ctx.flow = flowVelocity;
-		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam, footprint);
+		WaveResult waves = (WaveResult)0;
+		waves.normal = float3(0.0, 0.0, 1.0);
+		[branch] if (WavesActive())
+			waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam, footprint);
 		// Enable Foam off: no foam of any kind reaches the roughness or Water.hlsl's foam pass.
 		[branch] if (!FoamEnabled())
 		{
@@ -247,7 +250,9 @@ namespace PBRWater
 			waves.shoreFoam = 0.0;
 			waves.sheetFoam = 0.0;
 		}
-		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
+		float2 ripple = 0.0;
+		[branch] if (WavesActive())
+			ripple = RippleSlope(waveParam.xyz, ctx.depth);
 		float wind = LocalWindSpeed(ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm water turns glassy, wind ripples it. River currents and
 		// rain ripple it whatever the wind.

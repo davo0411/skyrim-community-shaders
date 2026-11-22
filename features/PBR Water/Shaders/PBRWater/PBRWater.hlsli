@@ -52,8 +52,8 @@ namespace PBRWater
 		float4 Cascade1[PBRW_CASCADES];  // x energy-weighted angular frequency (rad/s), y 1 / its Pierson-Moskowitz weight at unlimited fetch, z energy-weighted wavenumber (rad/unit), w the band's slope variance
 		float4 Params0;                  // x FFT ocean active, y wind speed (m/s), z peak omega at unlimited fetch, w gravity (units/s^2)
 		float4 Params1;                  // xy wind direction, z displacement fade start, w displacement fade end (units)
-		float4 Params2;                  // x choppiness, y Water Effects' parallax off (Wave Height above 0), z displacement bound (units), w highest mip level
-		float4 RefCamPos;                // xyz camera position the tile coordinates are relative to, w unused
+		float4 Params2;                  // x choppiness, y screen-space reflections on, z displacement bound (units), w highest mip level
+		float4 RefCamPos;                // xyz camera position the tile coordinates are relative to, w fog on
 		float4 Tess0;                    // x tessellation active for this draw, y target triangle size (px), z max factor, w pixels per unit at distance 1
 		float4 Draw0;                    // x vertex spacing of this draw (units), y wireframe mode, z debug view, w the tessellator's budget coarsening of the target size
 		float4 Fetch0;                   // xy grid origin (absolute world units), zw 1 / grid extent (units)
@@ -65,7 +65,7 @@ namespace PBRWater
 		float4 Ripple0;                  // xy simulation origin (absolute world units), z 1 / simulation extent (units), w enabled
 		float4 Ripple1;                  // x displacement scale (units), y normal strength, z unused, w texel size (uv)
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
-		float4 Light0;                   // x base roughness, y subsurface strength, z vanilla fresnel blend, w sun specular intensity
+		float4 Light0;                   // x base roughness, y subsurface strength, z environment reflections on, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y foam on (Enable Foam), z refraction distortion scale, w point light specular intensity
 		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w flow wave damping
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
@@ -73,14 +73,14 @@ namespace PBRWater
 		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, y adaptive tessellation's error tolerance (pixels; 0 off), z its largest coarsening, w rain intensity (0..1)
-		float4 Surface1;                 // x unused, y sediment on (Enable Water Clarity), z fetch scale, w vanilla normal maps skipped under the FFT waves
+		float4 Surface1;                 // x 0 no waves (ocean, shore or ripples), 1 waves, 2 waves and the per-pixel waterline, y sediment on (Enable Water Clarity), z fetch scale, w vanilla normal maps skipped (not on rivers)
 		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Swash0;                   // xy wet grid corner (absolute units), z 1 / its extent (units), w enabled (ShoreSimCS; read by the lit terrain and objects)
 		float4 Shore2;                   // x wave clock (rad, wrapped after ShoreClockCycles waves), y the clock last frame, z the surf grid's scroll between its slices (SurfSample), w peak period Tp (s)
 		float4 Shore3;                   // x swash linger (the bed's drag on the surf simulation, times), y undular bore whelps strength, z breaker curl, w deep-water wavelength L0 (units)
-		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, zw unused
+		float4 Shore4;                   // x angular frequency the current shore field was traced for (rad/s), y the previous field's, z sun shadows on, w skylighting on
 		float4 Shore6;                   // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                    // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                   // xy surface noise grid corner (absolute units), z 1 / its extent (units), w baked (SurfaceNoiseCS)
@@ -129,8 +129,19 @@ namespace PBRWater
 	bool OceanActive() { return Params0.x > 0.5; }
 	bool FoamEnabled() { return Light1.y > 0.5; }
 	bool ClarityEnabled() { return Surface1.y > 0.5; }
-	/// Vanilla Normal Maps off and the FFT waves running: the water form's normal maps are not read (Water.hlsl GetWaterNormal).
-	bool SkipVanillaNormals() { return Surface1.w > 0.5 && OceanActive(); }
+	/// Any waves at all (ocean, shore or ripples): without, the mesh stays flat and the wave program is skipped.
+	bool WavesActive() { return Surface1.x > 0.5; }
+	/// The mesh held on the bed near the shore and the waterline found per pixel (Per-Pixel Waterline, with waves only).
+	bool WaterlineActive() { return Surface1.x > 1.5; }
+	/// The surface's costly lighting inputs, each a setting (Water.hlsl): the cubemap reflection, screen-space reflections,
+	/// the sun's shadow, Skylighting's probes and the fog.
+	bool EnvReflectionsEnabled() { return Light0.z > 0.5; }
+	bool SSREnabled() { return Params2.y > 0.5; }
+	bool SunShadowsEnabled() { return Shore4.z > 0.5; }
+	bool SkylightingEnabled() { return Shore4.w > 0.5; }
+	bool FogEnabled() { return RefCamPos.w > 0.5; }
+	/// Vanilla Normal Maps off: the water form's normal maps are not read (Water.hlsl GetWaterNormal; rivers keep theirs).
+	bool SkipVanillaNormals() { return Surface1.w > 0.5; }
 	float Gravity() { return Params0.w; }
 
 	// ------------------------------------------------------------------------
@@ -2552,6 +2563,8 @@ namespace PBRWater
 	 */
 	bool AboveWaterline(float3 positionWS, float4 shoreState)
 	{
+		// The mesh is only lifted onto the bed with the waterline on (DisplaceSurface): otherwise the depth test keeps the ground.
+		[branch] if (!WaterlineActive()) return false;
 		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
 		float terrainZ = TerrainHeight(absXY);
 		if (terrainZ < -1e8)
@@ -2591,6 +2604,13 @@ namespace PBRWater
 	SurfaceDisplacement DisplaceSurface(float3 positionWS, float flowDamping, float2 flowVelocity, float spacing, bool motion)
 	{
 		SurfaceDisplacement o;
+		[branch] if (!WavesActive())
+		{
+			o.current = 0.0;
+			o.previous = 0.0;
+			o.shore = float4(0.0, 0.0, 0.0, positionWS.z);
+			return o;
+		}
 		float damping = DisplacementFade(positionWS) * flowDamping;
 
 		WaveContext ctx = BuildWaveContext(positionWS, damping, true);
@@ -2620,7 +2640,7 @@ namespace PBRWater
 		// the trough, the lip measured against the ground where it lands was lifted onto a ledge it plunges into; released
 		// from the hold instead (by the curl's weight), the whole trough under a curl sank into the sand with it, holes where
 		// the plunge met the swash.
-		if (ctx.hasTerrain > 0.5) {
+		[branch] if (WaterlineActive() && ctx.hasTerrain > 0.5) {
 			float3 base = o.current - now.lip;
 			float ceiling = TerrainCeiling(absXY + base.xy);
 			float bed = ceiling > -1e8 ? ceiling - (positionWS.z + FrameBuffer::CameraPosAdjust.z) : ctx.elevation;

@@ -950,7 +950,8 @@ FlowmapData GetFlowmapDataWorldSpace(FlowmapData textureSpaceData)
 #				undef WETNESS_EFFECTS
 #			endif
 
-#			if defined(WATER_EFFECTS) && !defined(VC)
+// PBR Water's waves are real geometry and its detail is in the shading: Water Effects' parallax is never marched.
+#			if defined(WATER_EFFECTS) && !defined(VC) && !defined(PBR_WATER)
 #				define WATER_PARALLAX
 #				include "WaterEffects/WaterParallax.hlsli"
 #			endif
@@ -996,10 +997,10 @@ float ToksvigVariance(float3 n, Texture2D<float4> map, float2 uv)
 #			if defined(WETNESS_EFFECTS)
 /**
  * Wetness Effects' raindrops on the water: ripple rings and splashes reoriented onto `finalNormal`, and their colour
- * information in `result.rippleInfo`.
+ * information in `rippleInfo`.
  * @param parallaxOffset Water Effects' parallax offset of the normal maps (0 without it)
  */
-float3 AddRaindrops(PS_INPUT input, float3 finalNormal, float2 parallaxOffset, float wetnessOcclusion, inout WaterNormalData result)
+float3 AddRaindrops(PS_INPUT input, float3 finalNormal, float2 parallaxOffset, float wetnessOcclusion, inout float4 rippleInfo)
 {
 	// Wetness Effects Debug System:
 	// DEBUG_WETNESS_EFFECTS Color Legend:
@@ -1037,8 +1038,8 @@ float3 AddRaindrops(PS_INPUT input, float3 finalNormal, float2 parallaxOffset, f
 		float splashIntensity = raindropInfo.w * distanceFadeout;
 
 		// Store ripple and splash information for color effects
-		result.rippleInfo.xyz = raindropInfo.xyz * rippleIntensity;
-		result.rippleInfo.w = splashIntensity;
+		rippleInfo.xyz = raindropInfo.xyz * rippleIntensity;
+		rippleInfo.w = splashIntensity;
 	}
 	float3 rippleNormal = normalize(raindropInfo.xyz);
 	finalNormal = ReorientNormal(rippleNormal, finalNormal);
@@ -1055,13 +1056,13 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			endif
 
 #			if defined(PBR_WATER) && !defined(FLOWMAP) && !defined(LOD)
-	// Vanilla Normal Maps off: with the FFT waves running, the waves' own cascades carry the fine detail, and the three
-	// normal map reads (each with its Toksvig derivatives) are skipped. Rivers (FLOWMAP) keep theirs: the current flattens
+	// Vanilla Normal Maps off: the three normal map reads (each with its Toksvig derivatives) are skipped; the waves, the
+	// ripples and the rain carry the detail, or the water lies flat. Rivers (FLOWMAP) keep theirs: the current flattens
 	// the waves there and the flowmap normals are what shows the water flowing.
 	[branch] if (PBRWater::SkipVanillaNormals())
 	{
 #				if defined(WETNESS_EFFECTS)
-		float3 raindropNormal = AddRaindrops(input, float3(0, 0, 1), 0.0, wetnessOcclusion, result);
+		float3 raindropNormal = AddRaindrops(input, float3(0, 0, 1), 0.0, wetnessOcclusion, result.rippleInfo);
 		result.normal = raindropNormal;
 #				else
 		result.normal = float3(0, 0, 1);
@@ -1080,8 +1081,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			if defined(WATER_PARALLAX)
 	float2 parallaxOffset = 0.0;
 #				if defined(PBR_WATER)
-	// With waves the surface is real geometry: the parallax over the normal maps is skipped (PBRWater::Params2.y).
-	const bool parallax = PBRWater::Params2.y < 0.5;
+	const bool parallax = true;
 	[branch] if (parallax)
 #				endif
 		parallaxOffset = WaterEffects::GetParallaxOffset(input, normalsAmplitude.xyz, normalScalesRcp);
@@ -1241,9 +1241,9 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 
 #			if defined(WETNESS_EFFECTS)
 #				if defined(WATER_PARALLAX)
-	finalNormal = AddRaindrops(input, finalNormal, parallaxOffset, wetnessOcclusion, result);
+	finalNormal = AddRaindrops(input, finalNormal, parallaxOffset, wetnessOcclusion, result.rippleInfo);
 #				else
-	finalNormal = AddRaindrops(input, finalNormal, 0.0, wetnessOcclusion, result);
+	finalNormal = AddRaindrops(input, finalNormal, 0.0, wetnessOcclusion, result.rippleInfo);
 #				endif
 #			endif
 
@@ -1271,6 +1271,17 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 	float pbrEnvironmentLevel = 0;
 #			endif
 
+#			if defined(PBR_WATER)
+	const bool envReflections = PBRWater::EnvReflectionsEnabled();
+	const bool ssrReflections = PBRWater::SSREnabled();
+#			else
+	const bool envReflections = true;
+	const bool ssrReflections = true;
+#			endif
+	// Environment Reflections off (PBR Water): the water form's reflection colour, no cubemap read.
+	float3 reflectionColor = ReflectionColor.xyz * VarAmounts.y;
+	[branch] if (envReflections)
+	{
 #			if defined(DYNAMIC_CUBEMAPS)
 	if (SharedData::InInterior)
 		return DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
@@ -1295,12 +1306,16 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #				endif
 	}
 
-	float3 reflectionColor = ColorManagement::SceneColor::LerpInLinear(workingSpecularIrradiance, workingSpecularIrradianceReflections, skylightingSpecular);
+	reflectionColor = ColorManagement::SceneColor::LerpInLinear(workingSpecularIrradiance, workingSpecularIrradianceReflections, skylightingSpecular);
 #			else
-	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, pbrCubeLevel).xyz;
+	reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, pbrCubeLevel).xyz;
 #			endif
+	}
 
 #			if !defined(LOD) && NUM_SPECULAR_LIGHTS == 0
+	// Screen-Space Reflections off (PBR Water): neither SSR target is read.
+	[branch] if (ssrReflections)
+	{
 	float pointingDirection = dot(viewDirection, R) * 0.5 + 0.5;
 	float pointingAlignment = dot(reflect(viewDirection, float3(0, 0, 1)), R) * 0.5 + 0.5;
 #				if defined(PBR_WATER)
@@ -1323,6 +1338,7 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 	float3 finalSsrReflectionColor = max(0, PreExposure::Decode(ssrReflectionColor.xyz));
 	float ssrFraction = saturate(ssrReflectionColor.w * distanceFactor * ssrAmount);
 	reflectionColor = lerp(reflectionColor, finalSsrReflectionColor, ssrFraction);
+	}
 #			endif
 
 	return reflectionColor;
@@ -1383,12 +1399,26 @@ struct DiffuseOutput
 
 DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDirection, inout float4 distanceMul, float refractionsDepthFactor, float fresnel, float3 viewPosition, float depth)
 {
-#			if defined(REFRACTIONS)
-#				if defined(PBR_WATER)
-	float refractionMagnitude = VarAmounts.w * PBRWater::Light1.z;
-#				else
-	float refractionMagnitude = VarAmounts.w;
+#			if defined(REFRACTIONS) && defined(PBR_WATER) && !defined(UNDERWATER)
+	// PBR Water takes only the scene behind, distorted by the normal: its water column (main) does the depth, the body
+	// colour and the transmission. None of the game's refraction-plane fog is worked out.
+	float4 refractionNormal = mul(transpose(TextureProj), float4((VarAmounts.w * PBRWater::Light1.z * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
+	float2 refractionUvRaw = float2(refractionNormal.x, refractionNormal.w - refractionNormal.y) / refractionNormal.ww;
+#				if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	// The distorted ray lands on something in front of the water (a leg, a hull): the undistorted scene instead.
+	float2 refractionScreenPosition = FrameBuffer::DynamicResolutionParams1.xy * (refractionUvRaw / VPOSOffset.xy);
+	if (GetScreenDepthWater(refractionScreenPosition) < viewPosition.z)
+		refractionUvRaw = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
 #				endif
+	DiffuseOutput output;
+	output.refractionColor = PreExposure::Decode(RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(refractionUvRaw)).xyz);
+	output.refractionDiffuseColor = DeepColor.xyz;  // the light an optically deep column scatters back
+	output.depth = depth;
+	output.refractionMul = 1.0;
+	output.refractedViewDirection = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
+	return output;
+#			elif defined(REFRACTIONS)
+	float refractionMagnitude = VarAmounts.w;
 	float4 refractionNormal = mul(transpose(TextureProj), float4((refractionMagnitude * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
 
 	float2 refractionUvRaw = float2(refractionNormal.x, refractionNormal.w - refractionNormal.y) / refractionNormal.ww;
@@ -1434,14 +1464,6 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 
 	float3 refractionDiffuseColor;
 
-#				if defined(PBR_WATER) && !defined(UNDERWATER)
-	// PBR Water: the body colour is the light an optically deep column scatters back, the water form's deep colour.
-	// Its shallow colour is the column's transmission tint (Beer-Lambert in the water column, Water.hlsl), not a colour
-	// of its own. Vanilla's blend by distanceMul left the body at the shallow colour wherever its refraction-plane test
-	// failed (water at the eye seen edge-on, anything just under the surface): an olive line along the horizon and
-	// olive shapes around everything in the water, the underwater fog's colour.
-	refractionDiffuseColor = DeepColor.xyz;
-#				else
 	if (SharedData::enbSettings.EnableWater) {
 		float3 shallowColor = ShallowColor.xyz;
 		float maxValue = max(shallowColor.x, max(shallowColor.y, shallowColor.z));
@@ -1456,7 +1478,6 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	} else {
 		refractionDiffuseColor = lerp(ShallowColor.xyz, DeepColor.xyz, distanceMul.y);
 	}
-#				endif
 
 	DiffuseOutput output;
 	output.refractionColor = refractionColor;
@@ -1617,7 +1638,10 @@ PS_OUTPUT main(PS_INPUT input)
 	// where a trough sees less of it past the crests around than a crest does. The water surface itself is never lifted
 	// out of the water (Skylighting::SampleNoBias).
 	positionMSSkylight.z += Skylighting::CELL_SIZE.z;
-	sh2 skylightingSH = Skylighting::SampleNoBias(positionMSSkylight, false);
+	// Skylighting off (PBR Water): the open sky, as Skylighting itself gives indoors; its probes are not read.
+	sh2 skylightingSH = Skylighting::UNIT_SH / 1e-10;
+	[branch] if (PBRWater::SkylightingEnabled())
+		skylightingSH = Skylighting::SampleNoBias(positionMSSkylight, false);
 #				else
 	sh2 skylightingSH = Skylighting::Sample(positionMSSkylight, float3(0, 0, 1));
 #				endif
@@ -1660,14 +1684,12 @@ PS_OUTPUT main(PS_INPUT input)
 	float skylightingSpecular = Skylighting::EvaluateSpecular(skylightingSH, specularLobe, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
 #			endif
 
-	float fresnel = GetFresnelValue(normal, viewDirection);
 #			if defined(PBR_WATER) && !defined(UNDERWATER)
-	{
-		// Roughness-aware environment Fresnel for F0 = 0.02 (air -> water).
-		float2 envBRDF = BRDF::EnvBRDF(pbrRoughness, saturate(dot(-viewDirection, normal)));
-		float pbrFresnel = saturate(0.02 * envBRDF.x + envBRDF.y);
-		fresnel = lerp(pbrFresnel, fresnel, PBRWater::Light0.z);
-	}
+	// Roughness-aware environment Fresnel for F0 = 0.02 (air -> water); the game's curve is not evaluated.
+	float2 pbrEnvBRDF = BRDF::EnvBRDF(pbrRoughness, saturate(dot(-viewDirection, normal)));
+	float fresnel = saturate(0.02 * pbrEnvBRDF.x + pbrEnvBRDF.y);
+#			else
+	float fresnel = GetFresnelValue(normal, viewDirection);
 #			endif
 
 #			if defined(SPECULAR) && (NUM_SPECULAR_LIGHTS != 0)
@@ -1719,8 +1741,16 @@ PS_OUTPUT main(PS_INPUT input)
 
 	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, viewPosition, depth);
 
+#				if defined(PBR_WATER)
+	// Sun Shadows off (PBR Water): nothing stands between the water and the sun, no shadow map or cloud shadow read.
+	float surfaceShadow = 1.0;
+	float dirShadow = 1.0;
+	[branch] if (PBRWater::SunShadowsEnabled())
+		dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
+#				else
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
+#				endif
 #				if defined(PBR_WATER) && !defined(UNDERWATER)
 	// The waves' own shadows: the water the sunlight crosses to get here (the engine's shadow map holds no water).
 	PBRWater::SunThroughWaves pbrWaveSun = PBRWater::SunPathThroughWaves(input.WPosition.xyz, SunDir.xyz, input.ShoreState.w, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
@@ -1993,8 +2023,9 @@ PS_OUTPUT main(PS_INPUT input)
 		float3 pbrSunLight, pbrSkyLight;
 		ShadowSampling::ExtractLighting(1.0.xxx, input.WPosition.xyz, pbrSunLight, pbrSkyLight);
 		float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
-		// Through the water's real thickness towards the sun where the heightfield reaches.
-		float pbrCrestSunPath = pbrWaveSun.valid ? pbrWaveSun.path : -1.0;
+		// Through the water's real thickness towards the sun where the heightfield reaches, but never less than the
+		// estimate without it: a sun-facing slope marches ~0 water, which would let the whole thickness glow unattenuated.
+		float pbrCrestSunPath = pbrWaveSun.valid ? max(pbrWaveSun.path, 0.5 * pbrCrestThickness) : -1.0;
 		pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrOptics, pbrCrestThickness, pbrCrestSunPath) * PBRWater::Light0.y;
 	}
 
@@ -2072,15 +2103,29 @@ PS_OUTPUT main(PS_INPUT input)
 	pbrSunGlint *= pbrEdge;
 	float pbrFilmFoam = smoothstep(0.0, 0.04 * PBRWater::UnitsPerMetre, pbrFilm);
 	float pbrFoam = pbrFoamPattern * pbrFilmFoam;
+	// The foam's relief: its coverage is a thickness (a few centimetres of bubbles), and the screen-space slope of that
+	// thickness tilts the water's normal (Mikkelsen's surface gradient), so the foam is lit as a layer with edges and
+	// bubbles on the water's own waves rather than a flat colour laid over them. Taken here, in uniform control flow.
+	float3 pbrFoamDpdx = ddx_fine(input.WPosition.xyz);
+	float3 pbrFoamDpdy = ddy_fine(input.WPosition.xyz);
+	float pbrFoamHeight = pbrFoam * 0.04 * PBRWater::UnitsPerMetre;
+	float pbrFoamDhdx = ddx_fine(pbrFoamHeight);
+	float pbrFoamDhdy = ddy_fine(pbrFoamHeight);
 	// Lit only where there is foam: most of the water has none.
 	[branch] if (pbrFoam > 0.0)
 	{
+		float3 pbrFoamR1 = cross(pbrFoamDpdy, normal);
+		float3 pbrFoamR2 = cross(normal, pbrFoamDpdx);
+		float pbrFoamDet = dot(pbrFoamDpdx, pbrFoamR1);
+		float3 pbrFoamGrad = sign(pbrFoamDet) * (pbrFoamDhdx * pbrFoamR1 + pbrFoamDhdy * pbrFoamR2);
+		float3 pbrBumpedNormal = PBRWater::SafeNormalize(abs(pbrFoamDet) * normal - pbrFoamGrad, normal);
 		// Whitewater is a layer of bubbles light scatters through, not a surface: it is lit about the normal bent halfway up,
 		// with the sun wrapping around it. Lit about the water's own normal, the foam on the underside of a curling lip (facing
 		// down, seeing neither the sun nor the sky) drew a dark line along every curling crest.
-		float3 pbrFoamNormal = PBRWater::SafeNormalize(normal + float3(0.0, 0.0, 1.0), float3(0.0, 0.0, 1.0));
+		// The water's normal (with the foam's relief) carries three parts in four, so the waves' own shading reads through.
+		float3 pbrFoamNormal = PBRWater::SafeNormalize(3.0 * pbrBumpedNormal + float3(0.0, 0.0, 1.0), float3(0.0, 0.0, 1.0));
 		float3 pbrFoamIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * (dirShadow * saturate((dot(pbrFoamNormal, SunDir.xyz) + 0.5) / 1.5)) * pbrWaveSunLight;
-		float3 pbrSkyIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting());
+		float3 pbrSkyIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting(input.WPosition.xyz));
 #							if defined(SKYLIGHTING)
 		pbrSkyIrradiance *= Skylighting::EvaluateDiffuse(skylightingSH, pbrFoamNormal, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
 #							endif
@@ -2106,8 +2151,14 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #						endif
 
+#						if defined(PBR_WATER)
+	// Fog off (PBR Water): no aerial perspective, height fog or distance fog on the water.
+	const bool waterFog = PBRWater::FogEnabled();
+#						else
+	const bool waterFog = true;
+#						endif
 #						if defined(PHYSICAL_SKY)
-	if (SharedData::physSkyData.enabled) {
+	if (waterFog && SharedData::physSkyData.enabled) {
 		const float3 waterViewDir = normalize(input.WPosition.xyz);
 		const float waterDist = length(input.WPosition.xyz);
 		const float4 apSample = PhysSky::SampleAp(waterViewDir, input.HPosition.xy, waterDist, ApSampler);
@@ -2117,7 +2168,7 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #						endif
 
-	if (!SharedData::PostWaterComposite) {
+	if (waterFog && !SharedData::PostWaterComposite) {
 #						if !defined(UNIFIED_WATER)
 		float fogDistanceFactor = input.FogParam.w;
 		float3 preFogColor = input.FogParam.xyz;
