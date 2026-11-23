@@ -1290,26 +1290,34 @@ namespace PBRWater
 	static const float TessellationCurlLipNear = 0.45 / 25.0;
 
 	bool RippleUV(float2 absXY, float2 origin, out float2 uv);
+	float RippleDisplayedAt(float2 uv, bool previous);
+
+	/// The most the adaptive tessellation refines the target where the waves need it (AdaptiveCoarsening).
+	static const float AdaptiveMaxRefinement = 2.0;
 
 	/**
-	 * Motion-adaptive tessellation: how many times coarser than `base` (units) the open water's mesh may be at absolute
-	 * `absXY`, from the geometric error the waves leave between its vertices. Screen-space error rather than distance alone
-	 * (the adaptive tessellation of Filmic Worlds' compute tessellation posts): a triangle leg h across a wave of amplitude
-	 * a and wavenumber k misses it by about a (k h)^2 / 8 (the chord's sag), and by all of a once the vertex filter drops
-	 * the wave (k h past pi / 2). Every band the base spacing resolves (the four cascades, at the fetch-limited height they
-	 * have here, and the shore train) must stay within the tolerance (Surface0.y pixels, split between the five so the sum
-	 * of their squares does): calm water, lakes and ponds take large triangles, a storm keeps the fine mesh. Bands the base
-	 * spacing already filters out set nothing: their detail is in the shading either way. Uses the position and the frame
-	 * only, like TessellationSpacing.
+	 * Motion-adaptive tessellation: how many times coarser than `base` (units) the mesh may be at camera-relative
+	 * `positionWS` (under 1: finer), from the geometric error the waves here leave between its vertices. Screen-space error
+	 * rather than distance alone (the adaptive tessellation of Filmic Worlds' compute tessellation posts): a triangle leg h
+	 * across a wave of amplitude a and wavenumber k misses it by about a (k h)^2 / 8 (the chord's sag), and by all of a once
+	 * the vertex filter drops the wave (k h past pi / 2). Every band the base spacing resolves (the four cascades and the
+	 * shore train and the ripples) must stay within the tolerance (Surface0.y pixels, split between the six so the sum of
+	 * their squares does). Each cascade's amplitude is its local one: the mean square slope of its waves around here
+	 * (OceanSurface, at the mip whose texel spans one of its waves or two base spacings) against its spectrum's mean, so the
+	 * mesh follows the wave groups as they travel, fine under the big waves and coarse in the lulls between them; calm
+	 * water, lakes and ponds take large triangles. The ripples count where they are, not over their whole grid around the
+	 * player. Bands the base spacing already filters out set nothing: their detail is in the shading either way. Uses the
+	 * position and the frame only, like TessellationSpacing.
 	 * @param size        the screen target's spacing here (units)
 	 * @param shoreWeight 0..1 the shore field's weight here (the train's waves)
+	 * @param ripple      the ripples' local amplitude here (units, TessellationSpacing)
 	 */
-	float AdaptiveCoarsening(float2 absXY, float distance, float base, float size, float shoreWeight)
+	float AdaptiveCoarsening(float3 positionWS, float distance, float base, float size, float shoreWeight, float ripple)
 	{
 		float coarsen = 1.0;
 		[branch] if (Surface0.y > 0.0 && Surface0.z > 1.0)
 		{
-			static const float Share = 0.4472136;  // 1 / sqrt(5): four cascades and the train
+			static const float Share = 0.4082483;  // 1 / sqrt(6): four cascades, the train and the ripples
 			float tolerance = size * Surface0.y / max(Tess0.y, 1.0) * Share;
 			float fade = DisplacementDistanceFade(distance);
 			// Vertical and choppy horizontal displacement together, at the band's amplitude (sqrt(2) its height std).
@@ -1318,7 +1326,7 @@ namespace PBRWater
 			[branch] if (OceanActive() && reach > 0.0)
 			{
 				// The fetch-limited sea here, as BuildWaveContext weights the cascades (FetchWeight), without the depth.
-				float fetchMetres = SampleFetchMetres(absXY);
+				float fetchMetres = SampleFetchMetres(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
 				float peak = FetchPeakOmega(fetchMetres);
 				float gain = FetchEnergyGain(fetchMetres);
 				[unroll] for (uint c = 0; c < PBRW_CASCADES; c++)
@@ -1327,8 +1335,17 @@ namespace PBRWater
 					float r2 = r * r;
 					float a = Cascade2[c].x * saturate(exp(-1.25 * r2 * r2) * Cascade1[c].y) * gain * reach;
 					float k = Cascade1[c].z;
-					if (a > tolerance && k * base < Math::PI)
-						spacing = min(spacing, min(sqrt(8.0 * tolerance / a), 0.5 * Math::PI) / k);
+					// Wave groups reach some three times the band's mean height: under the tolerance even then, the band sets
+					// nothing.
+					[branch] if (3.0 * a > tolerance && k * base < Math::PI)
+					{
+						float footprint = max(2.0 * Math::PI / max(k, 1e-6), 2.0 * base);
+						float lod = clamp(log2(footprint / Cascade0[c].w), 0.0, Params2.w);
+						float2 m = OceanSurface.SampleLevel(OceanSampler, float3(CascadeUV(positionWS.xy, c), c), lod);
+						a *= min(sqrt((m.x + m.y) / max(Cascade1[c].w, 1e-8)), 3.0);
+						if (a > tolerance)
+							spacing = min(spacing, min(sqrt(8.0 * tolerance / a), 0.5 * Math::PI) / k);
+					}
 				}
 			}
 			float omega = Shore4.x;
@@ -1339,7 +1356,11 @@ namespace PBRWater
 				if (k * base < Math::PI)
 					spacing = min(spacing, min(sqrt(8.0 * tolerance / train), 0.5 * Math::PI) / k);
 			}
-			coarsen = clamp(spacing / max(base, 1e-3), 1.0, Surface0.z);
+			// The ripples' waves are some three texels long (RippleDisplacement).
+			float rippleK = Math::TAU * Ripple0.z / (3.0 * Ripple1.w);
+			[branch] if (ripple > tolerance && rippleK * base < Math::PI)
+				spacing = min(spacing, min(sqrt(8.0 * tolerance / ripple), 0.5 * Math::PI) / rippleK);
+			coarsen = clamp(spacing / max(base, 1e-3), 1.0 / AdaptiveMaxRefinement, Surface0.z);
 		}
 		return coarsen;
 	}
@@ -1348,9 +1369,9 @@ namespace PBRWater
 	 * World spacing (units) the tessellated mesh has at camera-relative `positionWS`: the rule the bisection tessellator
 	 * splits by (BisectionCS), the waves' vertex filter and the curl share. The target size (Tess0.y) on screen at this
 	 * distance, twice it on open water and once in the shore band and the ripple grid, divided by the curl detail where
-	 * breakers curl, coarser on open water where the waves leave little to resolve (AdaptiveCoarsening), wider at grazing
-	 * angles (TessellationGrazingScale), never finer than 128 / Maximum Tessellation (Tess0.z). A function of the position
-	 * and the frame only, so the vertices and the pixels agree on it.
+	 * breakers curl, coarser where the waves leave little to resolve and finer under the big ones (AdaptiveCoarsening),
+	 * wider at grazing angles (TessellationGrazingScale), never finer than 128 / Maximum Tessellation (Tess0.z). A function
+	 * of the position and the frame only, so the vertices and the pixels agree on it.
 	 */
 	float TessellationSpacing(float3 positionWS)
 	{
@@ -1360,9 +1381,25 @@ namespace PBRWater
 		float curlDetail = max(Shore1.y, 1.0);
 
 		float detail = 0.0;
+		float rippleAmplitude = 0.0;
 		float2 uv;
-		if (RippleUV(absXY, Ripple0.xy, uv))
+		[branch] if (RippleUV(absXY, Ripple0.xy, uv))
+		{
 			detail = smoothstep(0.0, 0.1, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
+			// The ripples' local amplitude, their height and slope in quadrature (a ring h = a cos, |grad h| / k = a sin), so
+			// only the water a wake or splash has reached holds the fine mesh, not the whole grid around the player.
+			[branch] if (Surface0.y > 0.0)
+			{
+				float t = Ripple1.w;
+				float texelUnits = t / Ripple0.z;
+				float k = Math::TAU / (3.0 * texelUnits);
+				float h = RippleDisplayedAt(uv, false);
+				float gx = RippleDisplayedAt(uv + float2(t, 0), false) - RippleDisplayedAt(uv - float2(t, 0), false);
+				float gy = RippleDisplayedAt(uv + float2(0, t), false) - RippleDisplayedAt(uv - float2(0, t), false);
+				float2 grad = float2(gx, gy) / (2.0 * texelUnits);
+				rippleAmplitude = sqrt(h * h + dot(grad, grad) / (k * k)) * Ripple1.x * BorderFade(uv);
+			}
+		}
 		float curl = 0.0;
 		float shoreWeight = 0.0;
 		[branch] if (ShoreFieldUV(absXY, uv))
@@ -1380,9 +1417,10 @@ namespace PBRWater
 			}
 		}
 		float base = size * (2.0 - detail) / (1.0 + (curlDetail - 1.0) * curl);
-		// Only the open water coarsens: the shore band and the ripple grid keep the target.
-		[branch] if (detail < 1.0)
-			base *= lerp(AdaptiveCoarsening(absXY, distance, base, size, shoreWeight), 1.0, detail);
+		// The waves set the density everywhere; where breakers curl they only refine it (the lip needs the curl detail). In a
+		// storm the curl zone spans the whole sea off a coast.
+		float adaptive = AdaptiveCoarsening(positionWS, distance, base, size, shoreWeight, rippleAmplitude);
+		base *= lerp(adaptive, min(adaptive, 1.0), curl);
 		float spacing = base * TessellationGrazingScale(positionWS);
 		return max(spacing, 128.0 / max(Tess0.z, 1.0));
 	}

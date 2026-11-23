@@ -952,13 +952,13 @@ void PBRWater::DrawSettings()
 		Util::SliderFloatTip(T(TKEY("triangle_budget"), "Triangle Budget"), &s.TriangleBudget, 0.0f, 8000.0f, "%.0fk",
 			T(TKEY("triangle_budget_tooltip"), "The most tessellated water triangles a frame, in thousands. Above it the target triangle size grows until the count fits, so the worst views cost no more than this. 0: no budget. Default 1500k."));
 		Util::CheckboxTip(T(TKEY("adaptive_tessellation"), "Adaptive Tessellation"), &s.AdaptiveTessellation,
-			T(TKEY("adaptive_tessellation_tooltip"), "Sizes the open water's triangles by how much the waves there move, not by distance alone: calm seas, lakes and ponds take large triangles, a storm keeps the fine mesh. The shore band and the ripples around the player always keep the target size."));
+			T(TKEY("adaptive_tessellation_tooltip"), "Sizes the water's triangles by the waves at each spot, not by distance alone: finer (up to 2x) under the big waves as they travel, coarser in the lulls between them and on calm seas, lakes and ponds. Where breakers curl it only refines, and ripples count only where a wake or splash has reached."));
 		{
 			Util::DisableGuard disableAdaptive(!s.AdaptiveTessellation);
 			Util::SliderFloatTip(T(TKEY("tessellation_error_pixels"), "Allowed Wave Error"), &s.TessellationErrorPixels, 0.1f, 4.0f, "%.2f px",
 				T(TKEY("tessellation_error_pixels_tooltip"), "How far, in pixels, the mesh may miss the waves' true surface between its vertices before it subdivides. Higher is coarser and faster. Default 0.5 px."), ImGuiSliderFlags_Logarithmic);
 			Util::SliderFloatTip(T(TKEY("tessellation_max_coarsening"), "Largest Coarsening"), &s.TessellationMaxCoarsening, 1.0f, 16.0f, "%.0fx",
-				T(TKEY("tessellation_max_coarsening_tooltip"), "The most times larger than the target size the open water's triangles grow on calm water. Default 8x."));
+				T(TKEY("tessellation_max_coarsening_tooltip"), "The most times larger than the target size the water's triangles grow on calm water. Default 8x."));
 		}
 		Util::SliderFloatTip(T(TKEY("displacement_fade_start"), "Wave Fade Start"), &s.DisplacementFadeStart, 2000.0f, 60000.0f, "%.0f units",
 			T(TKEY("displacement_fade_start_tooltip"), "Distance at which the waves start to flatten towards the game's flat distant water (70 units are a metre). Default 16384 units."));
