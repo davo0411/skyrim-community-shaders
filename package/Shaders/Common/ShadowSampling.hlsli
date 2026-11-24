@@ -117,6 +117,21 @@ namespace ShadowSampling
 		return worldShadow;
 	}
 
+	/// The sun's shadow at a surface point only (terrain, clouds, one shadow map tap): PBR Water's surface and the light
+	/// under it, without the refracted ray's volume march of Get3DFilteredShadow.
+	float GetSurfaceShadow(float3 positionWS)
+	{
+		float shadow = GetWorldShadow(positionWS, FrameBuffer::CameraPosAdjust.xyz);
+#if defined(VOLUMETRIC_SHADOWS)
+		[branch] if (shadow > 0.0 && HasDirectionalShadows())
+		{
+			float detailedShadow;
+			shadow *= VolumetricShadows::GetVSMShadow2D(positionWS, detailedShadow);
+		}
+#endif
+		return shadow;
+	}
+
 	float GetLightingShadow(float3 worldPosition, out float detailedShadow)
 	{
 		if (!HasDirectionalShadows()) {

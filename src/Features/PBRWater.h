@@ -173,7 +173,7 @@ struct PBRWater : Feature
 		bool DeferredSurface = true;             ///< shade the tessellated water once per pixel (PBRWater/Deferred.hlsli)
 		bool DistantHalfRate = true;             ///< shade the deferred surface's distant tiles at a quarter of the pixels (DeferredFar.hlsl)
 		float DistantHalfRateDistance = 60.0f;   ///< metres: where the distant tiles start
-		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
+		float TessellationTriangleSize = 12.0f;  ///< target triangle edge on screen (pixels)
 		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
 		bool AdaptiveTessellation = true;        ///< coarsen the open water's mesh where the waves leave little to resolve (PBRWater::AdaptiveCoarsening)
 		float TessellationErrorPixels = 0.5f;    ///< the height error the adaptive tessellation allows (pixels)
@@ -183,7 +183,7 @@ struct PBRWater : Feature
 		int WaveResolution = 1;           ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
 		bool CheapOffscreenWater = true;  ///< reflections, cubemaps and the map draw the water without shore waves, foam, clarity or lights
 		int EngineReflections = 1;        ///< the engine's water reflection cubemap: 0 full scene, 1 sky only, 2 off (needs Dynamic Cubemaps, no Cloud Shadows)
-		float TriangleBudget = 1500.0f;   ///< thousands of tessellated triangles a frame before the target size grows (0: none)
+		float TriangleBudget = 1000.0f;   ///< thousands of tessellated triangles a frame before the target size grows (0: none)
 		bool LongWaveHalfRate = false;    ///< the two longest cascades' FFTs alternate frames
 
 		// Debug

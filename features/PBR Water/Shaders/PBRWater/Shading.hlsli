@@ -61,6 +61,9 @@ namespace PBRWater
 		// Fades out towards the heightfield's edge, past which the crests are missing.
 		float2 edge = abs(absPos.xy - SunMap0.xy) * (2.0 * SunMap0.z);
 		float fade = saturate((1.0 - max(edge.x, edge.y)) / 0.2);
+		// Only a low sun puts long stretches of water in its way (high sun: the crests' own shadows are a few pixels), and
+		// past 50 m they are sub-pixel: the march is skipped there (sun above 35 degrees, fading in below it to 25).
+		fade *= saturate((0.5736 - normalize(toSun).z) / (0.5736 - 0.4226)) * saturate(2.0 - length(positionWS) / (25.0 * UnitsPerMetre));
 		[branch] if (fade <= 0.0) return o;
 		o.valid = true;
 

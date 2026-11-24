@@ -1793,8 +1793,10 @@ PS_OUTPUT main(PS_INPUT input)
 	// Sun Shadows off (PBR Water): nothing stands between the water and the sun, no shadow map or cloud shadow read.
 	float surfaceShadow = 1.0;
 	float dirShadow = 1.0;
+	// The surface's own shadow only: the refracted ray's volume march (Get3DFilteredShadow) cost ~1 ms in the surface pass
+	// for light shafts under the surface that the water's turbidity mostly hides.
 	[branch] if (PBRWater::SunShadowsEnabled())
-		dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
+		dirShadow = surfaceShadow = ShadowSampling::GetSurfaceShadow(input.WPosition.xyz);
 #				else
 	float surfaceShadow;
 	float dirShadow = ShadowSampling::Get3DFilteredShadow(input.WPosition.xyz, diffuseOutput.refractedViewDirection, input.HPosition.xy, surfaceShadow);
@@ -1845,8 +1847,16 @@ PS_OUTPUT main(PS_INPUT input)
 	if (pbrPointLights && LightLimitFix::GetClusterIndex(screenUV, viewPosition.z, clusterIndex)) {
 		lightCount = LightLimitFix::lightGrid[clusterIndex].lightCount;
 		uint lightOffset = LightLimitFix::lightGrid[clusterIndex].offset;
+#					if defined(PBR_WATER)
+		// A lamp shows on water only as its reflection: four lights a pixel (the first in reach) are plenty.
+		uint pbrLightsShaded = 0;
+#					endif
 		[loop] for (uint i = 0; i < lightCount; i++)
 		{
+#					if defined(PBR_WATER)
+			if (pbrLightsShaded >= 4)
+				break;
+#					endif
 			uint clusteredLightIndex = LightLimitFix::lightList[lightOffset + i];
 			LightLimitFix::Light light = LightLimitFix::lights[clusteredLightIndex];
 			// Water has no engine shadow mask, so only shadow casters with a cached local shadow can light it.
@@ -1866,6 +1876,7 @@ PS_OUTPUT main(PS_INPUT input)
 			float3 normalizedLightDirection = normalize(lightDirection);
 
 #					if defined(PBR_WATER)
+			pbrLightsShaded++;
 			float3 lightColor = Color::PointLight(light.color.xyz) * light.fade *
 			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
 									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius(), lightDist)) *
