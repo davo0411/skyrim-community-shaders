@@ -35,7 +35,6 @@ public:
 		float halfLife = 1.5f;       ///< s, amplitude decay
 		float siltHalfLife = 20.0f;  ///< s, settling time of stirred-up sediment
 		float siltSpread = 0.3f;     ///< diffusion per step (0..1)
-		float flowSpeed = 0.0f;      ///< units/s: river current at full flow strength
 	};
 
 	/** @brief What the simulation reads from the rest of the water system; all optional. */
@@ -44,9 +43,6 @@ public:
 		ID3D11ShaderResourceView* terrain = nullptr;  ///< PBR terrain texture (R16_UNORM)
 		float4 terrain0{};                            ///< PBRWater::Terrain0
 		float4 terrain1{};                            ///< PBRWater::Terrain1
-		ID3D11ShaderResourceView* flowmap = nullptr;  ///< Unified Water's worldspace flowmap
-		float4 flow0{};                               ///< PBRWater::Flow0 (x = 0: none)
-		ID3D11SamplerState* sampler = nullptr;        ///< linear clamp
 	};
 
 	/** @brief Cells per side of the still-water-level table. */
@@ -125,12 +121,10 @@ private:
 		int32_t cellBaseY;
 		float4 terrain0;
 		float4 terrain1;
-		float4 flow0;
-		float4 flowParams;
 		float cellLevels[28];  // 7 registers: the 25 levels, padded
 	};
 	STATIC_ASSERT_ALIGNAS_16(SimCB);
-	static_assert(sizeof(SimCB) == 240);
+	static_assert(sizeof(SimCB) == 208);
 
 	void Step(int32_t shiftX, int32_t shiftY, uint32_t numSources, const SimCB& base, const Environment& environment);
 

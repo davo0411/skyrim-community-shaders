@@ -26,6 +26,7 @@ public:
 		const void* rendererData = nullptr;
 		uint32_t triangleCount = 0;
 		uint64_t vertexDesc = 0;
+		bool river = false;  ///< a river's mesh (IsRiver)
 	};
 
 	/// A base triangle of a registered water mesh.
@@ -56,6 +57,9 @@ public:
 
 	/// Forgets the draws registered for the next frame (tessellation off).
 	void Reset() { registered.clear(); }
+
+	/// Whether `geometry` is a river's mesh: its water shader property has the flowmap on (Unified Water sets it from the water form).
+	static bool IsRiver(RE::BSGeometry& geometry);
 
 	/// Whether `geometry` is still the mesh `source` was made from (its buffers and transform unchanged).
 	static bool StillSource(RE::BSGeometry& geometry, const Source& source);

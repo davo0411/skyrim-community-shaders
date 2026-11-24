@@ -34,9 +34,9 @@ public:
 	/// Mirrors PBRWaterTess::Vertex (ComputeTessellation.hlsli).
 	struct alignas(4) GpuVertex
 	{
-		float data[20];
+		float data[18];
 	};
-	static_assert(sizeof(GpuVertex) == 80);
+	static_assert(sizeof(GpuVertex) == 72);
 
 	/// What the subdivision needs of the frame (PBRWater::UpdateTessellation fills it).
 	struct FrameParams
@@ -67,7 +67,7 @@ public:
 
 	/**
 	 * @brief Builds this frame's subdivision from the meshes `meshes` had registered (WaterMeshes::Register). The caller
-	 * binds what the wave program reads in the compute stage (b7, b12, t8, t80-t97, s8, s14, s15).
+	 * binds what the wave program reads in the compute stage (b7, b12, t80-t97, s14, s15).
 	 */
 	void Build(const FrameParams& params, WaterMeshes& meshes);
 
@@ -100,7 +100,7 @@ private:
 		float uv2[2];
 		uint32_t mesh;
 		uint32_t order;
-		uint32_t neighbours[4];
+		uint32_t neighbours[4];  ///< xyz the root across each edge, w 1 on a river's mesh
 	};
 	static_assert(sizeof(GpuRoot) == 192);
 	/// Mirrors PBRWaterBisection::Bisector.

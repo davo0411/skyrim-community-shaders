@@ -9,17 +9,16 @@
 
 namespace PBRWaterTess
 {
-	/// One tessellated vertex, ready for the water vertex shader (Water.hlsl, CachedWaterVertex). 80 bytes.
+	/// One tessellated vertex, ready for the water vertex shader (Water.hlsl, CachedWaterVertex). 72 bytes.
 	struct Vertex
 	{
 		float3 position;  // undisplaced model-space position
-		float flowDamping;
+		float river;  // 1 on a river's mesh
 		float3 current;  // world-space displacement now (SurfaceDisplacement::current)
 		float texCoordX;
 		float3 previous;  // and last frame (motion vectors)
 		float texCoordY;
 		float4 shore;  // SurfaceDisplacement::shore
-		float2 flowVelocity;
 		uint2 color;  // the mesh's vertex colour, half floats
 	};
 

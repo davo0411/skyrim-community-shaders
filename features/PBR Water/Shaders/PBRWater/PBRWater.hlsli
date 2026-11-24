@@ -19,7 +19,7 @@
 // The CPU re-synthesises the long-wave cascades from the same coefficients (WaveModel.cpp), so swimming,
 // buoyancy and floating objects follow the rendered surface without any GPU readback.
 //
-// What varies over the map (fetch, depth, river flow) cannot change a cascade's content, so it weights
+// What varies over the map (fetch, depth) cannot change a cascade's content, so it weights
 // each cascade as a whole: the fetch-limited spectral peak removes long-wave cascades from sheltered water,
 // young seas get the JONSWAP energy gain, and tanh(kh) calms waves in the shallows.
 //
@@ -67,14 +67,13 @@ namespace PBRWater
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z environment reflections on, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y foam on (Enable Foam), z refraction distortion scale, w point light specular intensity
-		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w flow wave damping
+		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w unused
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
-		float4 Clarity2;                 // x river turbidity, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
+		float4 Clarity2;                 // x unused, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)
 		float4 Optics0;                  // x scattering anisotropy g, y downwelling attenuation scale, z clarity animation time (s, wrapped), w significant wave height (units)
 		float4 Surface0;                 // x wind roughness scale, y adaptive tessellation's error tolerance (pixels; 0 off), z its largest coarsening, w rain intensity (0..1)
 		float4 Surface1;                 // x 0 no waves (ocean, shore or ripples), 1 waves, 2 waves and the per-pixel waterline, y sediment on (Enable Water Clarity), z fetch scale, w vanilla normal maps skipped (not on rivers)
-		float4 Flow0;                    // worldspace flowmap UV = absXY * xz + yw (x = 0: no flowmap)
 		float4 Cascade2[PBRW_CASCADES];  // x height std of the band (units, open sea), yzw unused
 		float4 ShoreMap;                 // xy shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Swash0;                   // xy wet grid corner (absolute units), z 1 / its extent (units), w enabled (ShoreSimCS; read by the lit terrain and objects)
@@ -84,7 +83,6 @@ namespace PBRWater
 		float4 Shore6;                   // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                    // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                   // xy surface noise grid corner (absolute units), z 1 / its extent (units), w baked (SurfaceNoiseCS)
-		float4 Tune0;                    // x river current speed at full flow strength (m/s), y flow period per metre of a cascade's texel (s/m), z shortest flow period (s), w longest (s)
 		float4 Tune1;                    // foam offset of each cascade, longest waves first
 		float4 Tune2;                    // x share of a cascade's amplitude that counts fully in the foam, y exponent of the foam's distance falloff, z distance at which it has faded out (m), w roughness added per unit of foam
 		float4 Tune3;                    // x ripple horizontal displacement strength, y its clamp (simulation texels), z shore train reach (waves), w coverage of the surf's lingering foam
@@ -171,8 +169,7 @@ namespace PBRWater
 		float waterZ;        // the still water here (absolute z, units)
 		float depth;         // water depth below the undisplaced surface (units)
 		float elevation;     // bed height above the still water (units): -depth under water, > 0 on the beach
-		float damping;       // overall amplitude multiplier (distance fade, flow, ...)
-		float2 flow;         // the river current here (units/s, FlowVelocity); 0 on still water: the waves are carried along it (FlowPhases)
+		float damping;       // overall amplitude multiplier (distance fade, ...)
 		float2 terrainGrad;  // terrain height gradient (units/unit), points uphill i.e. towards the shore
 		float hasTerrain;    // 1 when depth and gradient come from the terrain
 		ShoreRay shore;      // how the shore waves reach here
@@ -513,8 +510,9 @@ namespace PBRWater
 	 * Everything that makes the sea vary over the map, at undisplaced camera-relative `positionWS`.
 	 * @param withGradient also work out the terrain's gradient (WaveContext::terrainGrad: eight more loads), which only the
 	 *                     geometry's hold over the bed reads (DisplaceSurface)
+	 * @param river        1 on a river's mesh (PBRWaterRiver): no FFT sea and no breakers, only the shore train's fetch-limited waves and the ripples
 	 */
-	WaveContext BuildWaveContext(float3 positionWS, float damping, bool withGradient)
+	WaveContext BuildWaveContext(float3 positionWS, float damping, bool withGradient, float river = 0.0)
 	{
 		WaveContext ctx;
 		float3 absPos = positionWS + FrameBuffer::CameraPosAdjust.xyz;
@@ -528,7 +526,6 @@ namespace PBRWater
 		ctx.terrainGrad = 0.0;
 		ctx.hasTerrain = 0.0;
 		ctx.damping = damping;
-		ctx.flow = 0.0;
 
 		// The undisplaced surface point is the water plane: its own z is the water height.
 		float z;
@@ -586,7 +583,7 @@ namespace PBRWater
 		float steepness = breakerHeight / (Math::TAU * GravityMetres / max(breakerOmega * breakerOmega, 1e-4));
 		float iribarren = ctx.shore.slope * rsqrt(max(steepness, 1e-4));
 		ctx.iribarren = iribarren;
-		ctx.beach = smoothstep(3.3, 2.0, iribarren) * ctx.shore.weight * ctx.shore.room * ctx.hasTerrain * saturate(ctx.deepHeight - 1.0);
+		ctx.beach = smoothstep(3.3, 2.0, iribarren) * ctx.shore.weight * ctx.shore.room * ctx.hasTerrain * saturate(ctx.deepHeight - 1.0) * (1.0 - river);
 
 		// Hand-over from the FFT to the shore wave train, counted in waves from the shore: Skyrim's beds fall away within a
 		// wave or two of the waterline, so a limit on the depth left room for one wave and never a train of them.
@@ -599,7 +596,7 @@ namespace PBRWater
 		// train's breakers take the energy from the random sea, longer and shorter, up to twice the train's frequency,
 		// and only the short chop rides on top (ShoreHandOver). Handing over wherever the train reached replaced a stormy
 		// FFT sea with the smooth train far out from the shore. Mirrors WaveModel's BuildContext.
-		ctx.sea = shoaledWeight * ctx.saturation * ctx.damping;
+		ctx.sea = shoaledWeight * ctx.saturation * ctx.damping * (1.0 - river);
 		ctx.cascade = ctx.sea;
 		// Away from the train (most water) there is nothing to hand over.
 		[branch] if (ctx.train > 0.0)
@@ -643,80 +640,6 @@ namespace PBRWater
 	{
 		float2 rel = p + (FrameBuffer::CameraPosAdjust.xy - RefCamPos.xy);
 		return rel * Cascade0[c].x + Cascade0[c].yz;
-	}
-
-	// ------------------------------------------------------------------------
-	// River currents
-	//
-	// After Crest 4 (wave-harmonic/crest, MIT, ShapeCombine.compute Flow() and its _FLOW_ON branch). The wave tiles cannot
-	// be advected (they are periodic textures), so a cascade is read twice, the position pushed back along the current by
-	// the two phases of a sawtooth clock half a period apart, and the reads are cross-faded with triangle weights: each
-	// copy is at its most displaced where its weight is 0 and the jump back goes unseen, so the waves travel downstream
-	// without stretching. A function of position and time only: every pass reads the same blend.
-	// ------------------------------------------------------------------------
-	// The current's speed, the flow clock's period per metre of texel and its shortest and longest periods are settings (Tune0).
-	static const float FlowFrameTime = 1.0 / 60.0;  // frame time assumed for last frame's flow offsets (motion vectors; the shader has no frame time) (s)
-
-	/// The current (units/s) from a sample of the worldspace flowmap (RG direction, B strength, A mask: as the damping reads it).
-	float2 FlowVelocity(float4 flowSample)
-	{
-		float2 direction = -(flowSample.xy * 2.0 - 1.0);  // the water's travel direction, as vanilla's world-space flow decodes it
-		float lengthSq = dot(direction, direction);
-		direction = lengthSq > 1e-4 ? direction * rsqrt(lengthSq) : 0.0;
-		return direction * (saturate(flowSample.z * flowSample.w) * Tune0.x * UnitsPerMetre);
-	}
-
-	/**
-	 * The river at absolute `absXY` from the worldspace flowmap `flowMap` (bound per stage: the vertex and pixel stages and
-	 * the occluder each have their own slot): returns how much the current calms the open-water waves (WaveParam.w), and
-	 * sets `velocity` to the current the waves are carried along (FlowVelocity). The flowmap is looked up by world
-	 * position, not by mesh UVs: the stencil pass is compiled without FLOWMAP and must displace the surface exactly like
-	 * the colour pass, and neighbouring meshes must agree on shared edges.
-	 */
-	float FlowDampingAt(Texture2D<float4> flowMap, SamplerState flowSampler, float2 absXY, out float2 velocity)
-	{
-		velocity = 0.0;
-		float damping = 1.0;
-		[branch] if (Flow0.x != 0.0)
-		{
-			float4 flow = flowMap.SampleLevel(flowSampler, absXY * Flow0.xz + Flow0.yw, 0);
-			velocity = FlowVelocity(flow);
-			damping = 1.0 - Foam1.w * saturate(flow.z * flow.w);
-		}
-		return damping;
-	}
-
-	/// The clock the flow phases run on (s, wraps at 86400; the game timer, so it stops with the game).
-	float FlowClock() { return Optics0.z; }
-
-	/// The two phases of a cascade's flow clock: read the cascade at `position - offset0` with weight `weight0`, and at `position - offset1` with `weight1`.
-	struct FlowBlend
-	{
-		float2 offset0;  // how far the first read lies back along the current (units)
-		float2 offset1;
-		float weight0;  // triangle weights: sum to 1
-		float weight1;
-	};
-
-	/**
-	 * Crest's Flow(): the period grows with the cascade's texel, the offsets are the clock modulo the period and half a
-	 * period later, and the weight of each falls to 0 as its offset wraps. Use the result for every field of the cascade
-	 * (displacement, derivatives, moments, foam) so they agree.
-	 * @param velocity the current (units/s); FlowVelocity
-	 * @param c        the cascade
-	 * @param time     the flow clock, FlowClock() (minus FlowFrameTime for last frame)
-	 */
-	FlowBlend FlowPhases(float2 velocity, uint c, float time)
-	{
-		float texelMetres = Cascade0[c].w * MetresPerUnit;
-		float period = exp2(round(log2(clamp(Tune0.y * texelMetres, Tune0.z, Tune0.w))));
-		float phase = frac(time / period);  // 0..1
-		FlowBlend b;
-		b.offset0 = velocity * (phase * period);
-		b.offset1 = velocity * (frac(phase + 0.5) * period);
-		b.weight0 = 1.0 - abs(2.0 * phase - 1.0);  // 0 as the first offset wraps, 1 half a period later
-		b.weight1 = 1.0 - b.weight0;
-		return b;
 	}
 
 	// ------------------------------------------------------------------------
@@ -2154,32 +2077,13 @@ namespace PBRWater
 					float3 uv = float3(CascadeUV(positionWS.xy, c), c);
 					float lod = spacing > 0.0 ? clamp(log2(spacing / Cascade0[c].w) - 0.5, 0.0, Params2.w) : 0.0;
 					float horizontal = vertical * steepnessScale;
-					float4 d, g, dp = 0.0;
-					[branch] if (any(ctx.flow))
-					{
-						// On a river the cascade is read twice, carried along the current (FlowPhases).
-						FlowBlend b = FlowPhases(ctx.flow, c, FlowClock());
-						float3 uv0 = float3(CascadeUV(positionWS.xy - b.offset0, c), c);
-						float3 uv1 = float3(CascadeUV(positionWS.xy - b.offset1, c), c);
-						d = b.weight0 * OceanDisplacement.SampleLevel(OceanSampler, uv0, lod) + b.weight1 * OceanDisplacement.SampleLevel(OceanSampler, uv1, lod);
-						g = b.weight0 * OceanDerivatives.SampleLevel(OceanSampler, uv0, lod) + b.weight1 * OceanDerivatives.SampleLevel(OceanSampler, uv1, lod);
-						if (previous) {
-							FlowBlend pb = FlowPhases(ctx.flow, c, FlowClock() - FlowFrameTime);
-							float3 puv0 = float3(CascadeUV(positionWS.xy - pb.offset0, c), c);
-							float3 puv1 = float3(CascadeUV(positionWS.xy - pb.offset1, c), c);
-							dp = pb.weight0 * OceanPreviousDisplacement.SampleLevel(OceanSampler, puv0, lod) + pb.weight1 * OceanPreviousDisplacement.SampleLevel(OceanSampler, puv1, lod);
-						}
-					}
-					else
-					{
-						d = OceanDisplacement.SampleLevel(OceanSampler, uv, lod);
-						g = OceanDerivatives.SampleLevel(OceanSampler, uv, lod);
-						if (previous)
-							dp = OceanPreviousDisplacement.SampleLevel(OceanSampler, uv, lod);
-					}
+					float4 d = OceanDisplacement.SampleLevel(OceanSampler, uv, lod);
+					float4 g = OceanDerivatives.SampleLevel(OceanSampler, uv, lod);
 					AddCascade(sums, c, vertical, horizontal, d, g);
-					if (previous)
+					if (previous) {
+						float4 dp = OceanPreviousDisplacement.SampleLevel(OceanSampler, uv, lod);
 						sums.previous += float3(dp.xy * horizontal, dp.z * vertical);
+					}
 				}
 			}
 		}
@@ -2323,21 +2227,8 @@ namespace PBRWater
 					// Two reads: the derivatives, and the rest the pixel needs (OceanSurface: height, shear, squared slope, foam).
 					// The horizontal displacement is the vertices' alone. (Four reads, the displacement's, the moments' and the
 					// foam's apart, the surface waited on them.)
-					float4 g, s;
-					[branch] if (any(ctx.flow))
-					{
-						// The same two reads as the geometry's (FlowPhases), so the normals and moments match the mesh.
-						FlowBlend b = FlowPhases(ctx.flow, c, FlowClock());
-						float3 uv0 = float3(CascadeUV(positionWS.xy - b.offset0, c), c);
-						float3 uv1 = float3(CascadeUV(positionWS.xy - b.offset1, c), c);
-						g = b.weight0 * OceanDerivatives.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDerivatives.SampleGrad(OceanSampler, uv1, gx, gy);
-						s = b.weight0 * OceanSurface.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanSurface.SampleGrad(OceanSampler, uv1, gx, gy);
-					}
-					else
-					{
-						g = OceanDerivatives.SampleGrad(OceanSampler, uv, gx, gy);
-						s = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
-					}
+					float4 g = OceanDerivatives.SampleGrad(OceanSampler, uv, gx, gy);
+					float4 s = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
 					float4 d = float4(0.0, 0.0, s.x, s.y);
 					// The breakers' white water is drawn with this foam (BreakerFoamDrawn): one read for the sea's foam and the
 					// breakers', the same everywhere. Enable Foam off: none.
@@ -2634,8 +2525,9 @@ namespace PBRWater
 		float4 shore;  // x share of the surf simulation in the surface (SurfSharesAt, before the grid's border fade), y unused, z the waves without it (units above the still water), w still water level (camera-relative z)
 	};
 
+	/// @param river  1 on a river's mesh (BuildWaveContext)
 	/// @param motion also work out last frame's surface: only the stencil pass writes motion vectors
-	SurfaceDisplacement DisplaceSurface(float3 positionWS, float flowDamping, float2 flowVelocity, float spacing, bool motion)
+	SurfaceDisplacement DisplaceSurface(float3 positionWS, float river, float spacing, bool motion)
 	{
 		SurfaceDisplacement o;
 		[branch] if (!WavesActive())
@@ -2645,10 +2537,9 @@ namespace PBRWater
 			o.shore = float4(0.0, 0.0, 0.0, positionWS.z);
 			return o;
 		}
-		float damping = DisplacementFade(positionWS) * flowDamping;
+		float damping = DisplacementFade(positionWS);
 
-		WaveContext ctx = BuildWaveContext(positionWS, damping, true);
-		ctx.flow = flowVelocity;
+		WaveContext ctx = BuildWaveContext(positionWS, damping, true, river);
 		WaveResult now = EvaluateWaves(positionWS, ctx, spacing, motion);
 
 		float rippleFade = damping * RippleDepthFade(ctx.depth);
