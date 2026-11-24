@@ -197,6 +197,11 @@ namespace PBRWater
 		float levelError;    // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
 #endif
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
+		float2 ripple;       // the interactive ripples' slope (ApplyDetail)
+		float baseVariance;  // slope variance of the waves and the wind's ripples (ApplyDetail adds the detail maps')
+		float detailScale;   // strength of the vanilla detail normal maps here (ApplyDetail)
+		float foamCover;     // 0..1 the foam that roughens the surface here (ApplyDetail)
+		float fetchRatio;    // FetchHeightRatio of the fetch here
 		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat
 		float surfFoam;      // 0..1 the foam the surf left on the water here (ShoreFoamAt)
 		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
@@ -220,17 +225,15 @@ namespace PBRWater
 	static const uint DebugWaveSun = 14;
 
 	/**
-	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
+	 * The waves at a pixel: everything of the surface the vanilla detail normal maps do not enter. The first half of
+	 * ShadeSurface; the deferred surface runs it in SurfaceMaterialCS and keeps what ApplyDetail and the lighting read
+	 * (Material.hlsli).
 	 * @param waveParam  xyz undisplaced camera-relative position, w 1 on a river's mesh
-	 * @param detailNormal vanilla normal-map normal (z up)
-	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
-	 *                       blended amplitude
+	 * @param footprint  the pixel's footprint on the water (units): the longer of its screen derivatives of the position
 	 */
-	SurfaceShading ShadeSurface(float4 waveParam, float3 detailNormal, float detailVariance)
+	SurfaceShading EvaluateSurface(float4 waveParam, float footprint)
 	{
-		SurfaceShading o;
-
-		float footprint = max(length(ddx_fine(waveParam.xy)), length(ddy_fine(waveParam.xy)));
+		SurfaceShading o = (SurfaceShading)0;
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
 		o.surfFoam = 0.0;
@@ -250,42 +253,18 @@ namespace PBRWater
 			waves.shoreFoam = 0.0;
 			waves.sheetFoam = 0.0;
 		}
-		float2 ripple = 0.0;
+		o.ripple = 0.0;
 		[branch] if (WavesActive())
-			ripple = RippleSlope(waveParam.xyz, ctx.depth);
+			o.ripple = RippleSlope(waveParam.xyz, ctx.depth);
 		float wind = LocalWindSpeed(ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm water turns glassy, wind ripples it. River currents and
 		// rain ripple it whatever the wind.
 		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
 		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
 		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
-		float detailScale = max(windDetail, max(waveParam.w, Surface0.w));
+		o.detailScale = max(windDetail, max(waveParam.w, Surface0.w));
 		// A breaker's face drawn up to plunge is stretched glassy: the wind's ripples on it are pulled out along the face.
-		detailScale *= 1.0 - 0.5 * waves.clearFace;
-
-		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
-		float2 slope = -waves.normal.xy / max(waves.normal.z, 0.05) + ripple;
-		float2 detailSlope = detailNormal.xy / max(detailNormal.z, 0.05) * detailScale;
-		slope += detailSlope;
-		o.normal = normalize(float3(-slope, 1.0));
-		// Slopes (a height field) cannot hold a surface turned vertical or past it: a breaker's face, and the lip of a curl whose
-		// underside faces down. There the ripples and the detail maps tilt the waves' own normal within its tangent plane
-		// instead. Both forms give the waves' own normal exactly, so blending them by how steep the surface is leaves no seam.
-		// (Blended by the curl's weight, which falls off sharply at the lip's edge, the two were averaged across a normal
-		// facing down and drew a line of normals along the crest.)
-		float steep = smoothstep(0.35, 0.1, waves.normal.z);
-		[branch] if (steep > 0.0)
-		{
-			// The detail's slopes laid onto the face: what runs along the crest tilts the normal along the crest, what runs
-			// along the way the face looks tilts it up or down the face. (Projected into the tangent plane as a horizontal
-			// tilt, all but the along-crest part was lost on a face near vertical, and breakers' faces shaded flat.)
-			float2 facing = SafeNormalize(float3(waves.normal.xy, 0.0), float3(1.0, 0.0, 0.0)).xy;
-			float3 alongCrest = float3(-facing.y, facing.x, 0.0);
-			float3 upFace = SafeNormalize(cross(waves.normal, alongCrest), float3(0.0, 0.0, 1.0));
-			float2 detail = ripple + detailSlope;
-			float3 tilted = SafeNormalize(waves.normal - alongCrest * dot(detail, alongCrest.xy) - upFace * dot(detail, facing), waves.normal);
-			o.normal = SafeNormalize(lerp(o.normal, tilted, steep), tilted);
-		}
+		o.detailScale *= 1.0 - 0.5 * waves.clearFace;
 
 		// Specular anti-aliasing: the normal varies within the pixel, so widen the lobe by that variance. Without it
 		// a mirror-like sun glint lands on single pixels at ~1e4x the sky radiance and blooms into blobs.
@@ -294,11 +273,10 @@ namespace PBRWater
 		// All of it comes from filtered textures, none from screen derivatives: those are shared by 2x2 pixel quads
 		// and turned the roughness into blocks (the ripples are magnified, never sub-pixel, so they need no term).
 		float windVariance = 0.5 * (WindMeanSquareSlope(wind) + RainMeanSquareSlope());
-		float mapVariance = detailVariance * detailScale * detailScale;
+		o.baseVariance = waves.slopeVariance + windVariance;
 		// Foam Roughness from all the foam, as Water.hlsl gathers it (there gated by flatness), faded with distance like it.
 		float shoreCover = saturate(max(max(waves.shoreFoam * waves.bore, o.surfFoam), waves.sheetFoam * waves.surf) * Foam1.z);
-		float foamCover = max(max(waves.fftFoam, waves.breakerFoam), shoreCover) * FoamFade(length(waveParam.xyz));
-		o.roughness = CombinedRoughness(Light0.x + foamCover * Tune2.w, waves.slopeVariance + windVariance + mapVariance);
+		o.foamCover = max(max(waves.fftFoam, waves.breakerFoam), shoreCover) * FoamFade(length(waveParam.xyz));
 		o.windSpeed = wind;
 		o.fftFoam = waves.fftFoam;
 
@@ -333,12 +311,67 @@ namespace PBRWater
 		o.height = waves.displacement.z;
 		o.elevation = ctx.hasTerrain > 0.5 ? ctx.elevation : -1e6;
 		o.fetchMetres = ctx.fetchMetres;
+		o.fetchRatio = FetchHeightRatio(ctx.fetchMetres);
 		o.turbidity = 0.0;
 		o.waveNormal = waves.normal;
 		o.breakerFoam = waves.breakerFoam;
 		o.bore = waves.bore;
 		o.crest = waves.crest;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
+		return o;
+	}
+
+	/**
+	 * Combines the waves' normal, the interactive ripples and the vanilla detail normal into the surface's normal and
+	 * roughness (from EvaluateSurface's waves, or the deferred surface's material).
+	 * @param detailNormal vanilla normal-map normal (z up)
+	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
+	 *                       blended amplitude
+	 */
+	void ApplyDetail(inout SurfaceShading o, float3 detailNormal, float detailVariance)
+	{
+		float3 waveNormal = o.waveNormal;
+
+		// Add surface slopes: waves + ripples + vanilla detail (partial-derivative blending).
+		float2 slope = -waveNormal.xy / max(waveNormal.z, 0.05) + o.ripple;
+		float2 detailSlope = detailNormal.xy / max(detailNormal.z, 0.05) * o.detailScale;
+		slope += detailSlope;
+		o.normal = normalize(float3(-slope, 1.0));
+		// Slopes (a height field) cannot hold a surface turned vertical or past it: a breaker's face, and the lip of a curl whose
+		// underside faces down. There the ripples and the detail maps tilt the waves' own normal within its tangent plane
+		// instead. Both forms give the waves' own normal exactly, so blending them by how steep the surface is leaves no seam.
+		// (Blended by the curl's weight, which falls off sharply at the lip's edge, the two were averaged across a normal
+		// facing down and drew a line of normals along the crest.)
+		float steep = smoothstep(0.35, 0.1, waveNormal.z);
+		[branch] if (steep > 0.0)
+		{
+			// The detail's slopes laid onto the face: what runs along the crest tilts the normal along the crest, what runs
+			// along the way the face looks tilts it up or down the face. (Projected into the tangent plane as a horizontal
+			// tilt, all but the along-crest part was lost on a face near vertical, and breakers' faces shaded flat.)
+			float2 facing = SafeNormalize(float3(waveNormal.xy, 0.0), float3(1.0, 0.0, 0.0)).xy;
+			float3 alongCrest = float3(-facing.y, facing.x, 0.0);
+			float3 upFace = SafeNormalize(cross(waveNormal, alongCrest), float3(0.0, 0.0, 1.0));
+			float2 detail = o.ripple + detailSlope;
+			float3 tilted = SafeNormalize(waveNormal - alongCrest * dot(detail, alongCrest.xy) - upFace * dot(detail, facing), waveNormal);
+			o.normal = SafeNormalize(lerp(o.normal, tilted, steep), tilted);
+		}
+
+		float mapVariance = detailVariance * o.detailScale * o.detailScale;
+		o.roughness = CombinedRoughness(Light0.x + o.foamCover * Tune2.w, o.baseVariance + mapVariance);
+	}
+
+	/**
+	 * The surface at a pixel of the forward path: the waves, then the detail normal maps over them.
+	 * @param waveParam  xyz undisplaced camera-relative position, w 1 on a river's mesh
+	 * @param detailNormal vanilla normal-map normal (z up)
+	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
+	 *                       blended amplitude
+	 */
+	SurfaceShading ShadeSurface(float4 waveParam, float3 detailNormal, float detailVariance)
+	{
+		float footprint = max(length(ddx_fine(waveParam.xy)), length(ddy_fine(waveParam.xy)));
+		SurfaceShading o = EvaluateSurface(waveParam, footprint);
+		ApplyDetail(o, detailNormal, detailVariance);
 		return o;
 	}
 

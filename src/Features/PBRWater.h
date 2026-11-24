@@ -500,6 +500,22 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> deferredShoreCS;  ///< null when it failed to compile: the pixels evaluate the train
 	std::unique_ptr<ConstantBuffer> deferredShoreCB;
 	uint32_t deferredShoreFrame = UINT32_MAX;
+	// The surface's material (PBRWater/SurfaceMaterialCS.hlsl, Material.hlsli): the waves, shore train and foam coverage of every
+	// recorded pixel, evaluated once after the stencil pass, so the surface and point light passes' pixel shader (the
+	// SIE::ShaderCache::WaterShaderFlags::DeferredMaterial permutation) holds only the lighting.
+	std::unique_ptr<Texture2D> surfaceMaterial[2];          ///< R32G32B32A32_UINT and R32G32_UINT at the record's size: t75 and t107 of the surface and point light passes (24 bytes a pixel)
+	winrt::com_ptr<ID3D11ComputeShader> surfaceMaterialCS;  ///< null when it failed to compile: the pixel shader evaluates the waves itself
+	std::unique_ptr<ConstantBuffer> surfaceMaterialCB;
+	uint32_t surfaceMaterialFrame = UINT32_MAX;        ///< the frame the material was last evaluated
+	bool surfaceMaterialFailed = false;                ///< the compute shader or its textures could not be made: never taken
+	static constexpr UINT SurfaceMaterialSlotA = 75;   ///< the material's first texture in the pixel stage (Deferred.hlsli)
+	static constexpr UINT SurfaceMaterialSlotB = 107;  ///< and its second
+	RE::BSShader* cachedDrawShader = nullptr;          ///< the water shader of the current draw (SetupDraw)
+	uint32_t cachedDrawPixelDescriptor = 0;            ///< its pixel shader's descriptor
+	/** @brief Render thread, the first deferred surface draw of a frame: evaluates the surface's material for the record's pixels; false if it could not. */
+	bool BakeSurfaceMaterial(ID3D11ShaderResourceView* depthSRV);
+	/** @brief Render thread, DrawDeferredSurface: the pixel shader of the current draw that reads the material, null while it compiles (or the material is not ready). */
+	ID3D11PixelShader* GetMaterialPixelShader();
 	// The distant tiles' half-rate shading (PBRWater/DeferredFar.hlsl): the surface pass shades one pixel of every 2x2 into
 	// deferredFar, then upsamples it into the tiles with the surface draw's own state.
 	std::unique_ptr<Texture2D> deferredFar;            ///< R16G16B16A16_FLOAT at half the record's size: colour, 1 + the shaded pixel

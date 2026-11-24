@@ -23,6 +23,9 @@
 // ============================================================================
 
 #include "PBRWater/DeferredCommon.hlsli"
+#if defined(PBRW_MATERIAL)
+#	include "PBRWater/Material.hlsli"
+#endif
 
 namespace PBRWaterDeferred
 {
@@ -88,6 +91,26 @@ namespace PBRWaterDeferred
 	Texture2D<float2> Noise : register(t40);
 	Texture2D<float2> TexCoords : register(t41);
 	Texture2D<float> SceneDepth : register(t42);
+#	if defined(PBRW_MATERIAL)
+	// The surface's material (SurfaceMaterialCS.hlsl), at the pixel Resolve took its record from.
+	Texture2D<uint4> MaterialA : register(t75);
+	Texture2D<uint2> MaterialB : register(t107);
+	static int2 MaterialPixel = 0;
+
+	/**
+	 * The material at the pixel Resolve took its record from.
+	 * @param later any value computed just before the words are wanted (compared with NaN, so the load can only follow it):
+	 *              the compiler would otherwise load and unpack every field early and keep them in registers through the lighting
+	 */
+	PBRWaterMaterial::Words ReadMaterial(float later)
+	{
+		int2 pixel = MaterialPixel + (later != later ? 1 : 0);
+		PBRWaterMaterial::Words w;
+		w.a = MaterialA.Load(int3(pixel, 0));
+		w.b = MaterialB.Load(int3(pixel, 0));
+		return w;
+	}
+#	endif
 
 	/// Whether a pixel holds a record, and its tag's fields: the record's waves and noise are loaded once a pixel is chosen.
 	struct Pixel
@@ -174,6 +197,10 @@ namespace PBRWaterDeferred
 			recordWaves = Waves.Load(int3(source, 0));
 			recordNoise = Noise.Load(int3(source, 0));
 		}
+
+#	if defined(PBRW_MATERIAL)
+		MaterialPixel = source;
+#	endif
 
 		// The displaced surface at this pixel, camera-relative, from its depth.
 		float2 screenUV = input.HPosition.xy * FrameBuffer::DynamicResolutionParams2.xy * VPOSOffset.xy;
