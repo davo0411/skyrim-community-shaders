@@ -2107,9 +2107,16 @@ namespace PBRWater
 		return saturate(0.5 * log2(max(max(dot(gx, gx), dot(gy, gy)), 1e-8)));
 	}
 
-#if defined(PSHADER)
+#if defined(PBRW_MATERIAL_CS)
+	// A compute shader has no screen derivatives: SurfaceMaterialCS sets how the undisplaced position (xy) changes from one
+	// pixel to the next one right and down (units); the cascades' texture coordinates follow it linearly (CascadeUV).
+	static float2 PositionDdx = 0.0;
+	static float2 PositionDdy = 0.0;
+#endif
+
+#if defined(PSHADER) || defined(PBRW_MATERIAL_CS)
 	// The shore train the deferred surface's pixels read back (DeferredShoreCS): set per pixel by
-	// PBRWaterDeferred::Resolve, t46-t48 bound with the record.
+	// PBRWaterDeferred::Resolve (or by SurfaceMaterialCS), t46-t48 bound with the record.
 	Texture2D<uint4> BakedShore0 : register(t46);
 	Texture2D<uint4> BakedShore1 : register(t47);
 	Texture2D<uint4> BakedShore2 : register(t48);
@@ -2208,8 +2215,13 @@ namespace PBRWater
 				float3 uv = float3(CascadeUV(positionWS.xy, c), c);
 				// The screen derivatives need uniform control flow; sampling with them as explicit gradients does not, so a
 				// cascade the context has turned off (the shore train's, the open sea's in a pond) costs no texture reads.
+#if defined(PBRW_MATERIAL_CS)
+				float2 gx = PositionDdx * Cascade0[c].x;
+				float2 gy = PositionDdy * Cascade0[c].x;
+#else
 				float2 gx = ddx_fine(uv.xy);
 				float2 gy = ddy_fine(uv.xy);
+#endif
 				// A pixel whose footprint covers half the tile or more reads the cascade's top mips, its mean: no displacement,
 				// slope or foam of its own, only its slope variance, which the band's statistics give (Cascade1.w). Its reads
 				// are skipped there (the short cascades over most distant water), faded in over the footprint before.
@@ -2249,7 +2261,7 @@ namespace PBRWater
 			}
 		}
 		ShoreTrain train = (ShoreTrain)0;
-#if defined(PSHADER)
+#if defined(PSHADER) || defined(PBRW_MATERIAL_CS)
 		// The deferred surface has the train once per 2x2 pixels (DeferredShoreCS).
 		bool baked = BakedShoreActive && BakedShoreTrain(train);
 		[branch] if (!baked)

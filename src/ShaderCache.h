@@ -845,6 +845,9 @@ namespace SIE
 			Cubemap = 1 << 8,           // 0x100
 			Flowmap = 1 << 9,           // 0x200
 			BlendNormals = 1 << 10,     // 0x400
+			// Not the engine's: PBR Water's deferred surface asks for the pixel shader that reads SurfaceMaterialCS's material
+			// instead of evaluating the waves (PBRWater::DrawDeferredSurface); the vertex shaders never carry it.
+			DeferredMaterial = 1 << 20,  // 0x100000
 		};
 
 		enum class EffectShaderFlags

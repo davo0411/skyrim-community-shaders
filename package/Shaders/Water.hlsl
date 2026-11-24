@@ -105,6 +105,13 @@ PS_OUTPUT main(PS_INPUT input)
 #	if defined(PBR_WATER) && defined(SPECULAR) && defined(PSHADER)
 #		define PBRW_DEFERRED
 #	endif
+// The deferred surface's lighting program (PBRWater::DrawDeferredSurface binds it: descriptor flag DeferredMaterial): the
+// waves, the shore train and the foam coverage are not evaluated here but read from SurfaceMaterialCS's material
+// (PBRWater/Material.hlsli), so the program holds none of that code. Every pixel it shades is a deferred one. The rivers
+// (FLOWMAP) and the debug views keep the inline evaluation.
+#	if defined(PBRW_MATERIAL) && (!defined(PBRW_DEFERRED) || defined(FLOWMAP) || defined(PBRW_DEBUG))
+#		undef PBRW_MATERIAL
+#	endif
 
 #	if defined(VSHADER) || defined(PBRW_DEFERRED)
 struct VS_INPUT
@@ -1596,7 +1603,12 @@ PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
 
-#		if defined(PBRW_DEFERRED)
+#		if defined(PBRW_MATERIAL)
+	// Only the deferred surface's tiles draw with this program (Deferred.hlsli).
+	if (!PBRWaterDeferred::Resolve(input))
+		discard;
+#		else
+#			if defined(PBRW_DEFERRED)
 	// The deferred surface's tiles (Deferred.hlsli): the pixels the stencil pass left to this mesh, already tested
 	// against the waterline there. The rest only lend their quad its derivatives (discard demotes them to helpers).
 	[branch] if (abs(PBRWater::Tess0.x - 3.0) < 0.5)
@@ -1605,19 +1617,20 @@ PS_OUTPUT main(PS_INPUT input)
 			discard;
 	}
 	else
-#		endif
-#		if defined(PBR_WATER)
+#			endif
+#			if defined(PBR_WATER)
 	{
 		// Dry: the bed rises above the waves and the surf, where DisplaceSurface held the mesh just above it. Both passes
 		// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
-#			if defined(STENCIL)
+#				if defined(STENCIL)
 		if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
 			discard;
-#			else
+#				else
 		if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
 			discard;
-#			endif
+#				endif
 	}
+#			endif
 #		endif
 
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
@@ -1709,7 +1722,13 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal = waterData.normal;
 
 #			if defined(PBR_WATER)
+#				if defined(PBRW_MATERIAL)
+	// The waves, shore train and foam coverage were evaluated in SurfaceMaterialCS: the detail normal maps go over them here.
+	PBRWater::SurfaceShading pbrSurface = PBRWaterMaterial::DecodeWaves(PBRWaterDeferred::ReadMaterial(waterData.detailVariance));
+	PBRWater::ApplyDetail(pbrSurface, normal, waterData.detailVariance);
+#				else
 	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, normal, waterData.detailVariance);
+#				endif
 	normal = pbrSurface.normal;
 	// A curling lip can turn its far side to the camera (seen from behind the wave, or where the lip passes through the
 	// water behind it). Shaded about a normal facing away, its reflection, sun and foam lighting turned odd along the crest:
@@ -2024,6 +2043,9 @@ PS_OUTPUT main(PS_INPUT input)
 	// crossing only the crest's thickness at that height, about three times the height still above it (a crest's back is
 	// about a third as steep as a breaking face). As a slab down to the bed far behind, every face shaded as the same deep
 	// body colour, a wall; through the crest the face is thin and bright near the top and deepens towards the trough.
+#							if defined(PBRW_MATERIAL)
+	PBRWaterMaterial::DecodeCrest(PBRWaterDeferred::ReadMaterial(normal.x), pbrSurface);
+#							endif
 	float pbrSteepFace = smoothstep(0.6, 0.2, abs(normal.z)) * saturate(pbrSurface.crest / (0.1 * PBRWater::UnitsPerMetre));
 	float pbrCrestPath = 3.0 * max(pbrSurface.crest - pbrSurface.height, 0.0) + 0.05 * PBRWater::UnitsPerMetre;
 	pbrWaterPath = lerp(pbrWaterPath, min(pbrWaterPath, pbrCrestPath), pbrSteepFace);
@@ -2047,8 +2069,11 @@ PS_OUTPUT main(PS_INPUT input)
 #							endif
 
 	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
+#							if defined(PBRW_MATERIAL)
+	PBRWaterMaterial::DecodeColumn(PBRWaterDeferred::ReadMaterial(pbrBottomDepth), pbrSurface);
+#							endif
 	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
-	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), 1.0, pbrSurface.breakStage);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, pbrSurface.fetchRatio, 1.0, pbrSurface.breakStage);
 	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
 	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
 
@@ -2092,6 +2117,9 @@ PS_OUTPUT main(PS_INPUT input)
 	// against the ground seen through it, so the edge follows the true bed - and rocks, piles and legs standing in the
 	// water - instead of the mesh's triangles cutting through the terrain. Over the last few centimetres the surface
 	// (reflection, body colour) fades into the ground; foam lies on the water, so it stays on the thin sheet.
+#							if defined(PBRW_MATERIAL)
+	PBRWaterMaterial::DecodeFoam(PBRWaterDeferred::ReadMaterial(pbrPathLength), pbrSurface);
+#							endif
 	float pbrBed = pbrSurface.elevation;
 #							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
 	if (pbrPathLength < 1e6) {
@@ -2138,12 +2166,19 @@ PS_OUTPUT main(PS_INPUT input)
 	if (pbrMeshAbove > 0.0 && viewDirection.z < -0.01)
 		pbrFoamPosition += viewDirection * min(pbrMeshAbove / -viewDirection.z, pbrPathLength);
 	float pbrFlat = smoothstep(0.80, 0.95, pbrSurface.waveNormal.z);
+#							if !defined(PBRW_MATERIAL)
 	float pbrBoreFlat = pbrSurface.bore * pbrFlat;
+#							endif
 	// The swash's edge carries a lace of foam: what each uprush pushes ahead of it and the backwash leaves along the
 	// water's edge, where the sheet thins over the sand. Without it the water past the last of the bores' foam ended in a
 	// clean line on the sand.
 	float pbrEdgeLace = 0.4 * pbrSurface.simShare * (1.0 - smoothstep(0.02 * PBRWater::UnitsPerMetre, 0.10 * PBRWater::UnitsPerMetre, pbrFilm));
+#							if defined(PBRW_MATERIAL)
+	// The bore's and the surf's shore foam gated by flatness come from the material (foam: Material.hlsli).
+	float pbrFlatCoverage = max(max(pbrSurface.foam, pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
+#							else
 	float pbrFlatCoverage = max(max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
+#							endif
 	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
 	// The foam settings reach all of it: Foam Amount and Foam Coverage scale the shore's coverages as they do the sea's
 	// (Foam1.z; the breakers' in BreakerFoamDrawn), and the distance fade is applied to the whole.

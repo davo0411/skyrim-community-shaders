@@ -2400,6 +2400,8 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	cachedDrawStart = cachedStart;
 	cachedDrawTechnique = technique;
 	cachedDrawGeometry = pass->geometry;
+	cachedDrawShader = waterShader;
+	cachedDrawPixelDescriptor = state->modifiedPixelDescriptor;
 
 	if (geometryShader) {
 		context->GSSetConstantBuffers(7, 1, &cb);
@@ -2611,6 +2613,43 @@ bool PBRWater::EnsureDeferredRecords()
 			deferredShore[i]->CreateUAV(halfUav);
 		}
 		deferredShoreFrame = UINT32_MAX;
+	}
+
+	// The surface's material (SurfaceMaterialCS): its shader failing to compile or the format not storing costs the
+	// pixel shader the split, not the water.
+	surfaceMaterial[0].reset();
+	surfaceMaterial[1].reset();
+	surfaceMaterialFrame = UINT32_MAX;
+	surfaceMaterialFailed = true;
+	if (!surfaceMaterialCS)
+		surfaceMaterialCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SurfaceMaterialCS.hlsl", {}, "cs_5_0")));
+	{
+		D3D11_FEATURE_DATA_FORMAT_SUPPORT2 support{ DXGI_FORMAT_R32G32_UINT, 0 };
+		const bool typedStore = SUCCEEDED(device->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &support, sizeof(support))) &&
+		                        (support.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE);
+		if (surfaceMaterialCS && typedStore) {
+			D3D11_TEXTURE2D_DESC materialDesc = desc;
+			materialDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+			const std::pair<DXGI_FORMAT, const char*> materials[2] = {
+				{ DXGI_FORMAT_R32G32B32A32_UINT, "PBRWater::Material A" },
+				{ DXGI_FORMAT_R32G32_UINT, "PBRWater::Material B" },
+			};
+			const UINT zeros[4] = {};
+			for (uint32_t i = 0; i < 2; ++i) {
+				materialDesc.Format = materials[i].first;
+				D3D11_SHADER_RESOURCE_VIEW_DESC materialSrv = srvDesc;
+				materialSrv.Format = materialDesc.Format;
+				D3D11_UNORDERED_ACCESS_VIEW_DESC materialUav{};
+				materialUav.Format = materialDesc.Format;
+				materialUav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+				surfaceMaterial[i] = std::make_unique<Texture2D>(materialDesc, materials[i].second);
+				surfaceMaterial[i]->CreateSRV(materialSrv);
+				surfaceMaterial[i]->CreateUAV(materialUav);
+				// Pixels no record covers keep this: the lighting's neighbours in a quad may read them.
+				context->ClearUnorderedAccessViewUint(surfaceMaterial[i]->uav.get(), zeros);
+			}
+			surfaceMaterialFailed = false;
+		}
 	}
 
 	// The distant tiles shaded at half rate (DeferredFar.hlsl): one pixel of every 2x2, and which one, at half size.
@@ -2976,6 +3015,73 @@ void PBRWater::BakeDeferredShore(ID3D11ShaderResourceView* depthSRV)
 	context->CSSetShader(nullptr, nullptr, 0);
 }
 
+bool PBRWater::BakeSurfaceMaterial(ID3D11ShaderResourceView* depthSRV)
+{
+	if (surfaceMaterialFailed || !surfaceMaterialCS || !surfaceMaterial[0] || !surfaceMaterial[1])
+		return false;
+	PBRWaterProfiling::Scope pass("PBRWater::SurfaceMaterial");
+	auto context = globals::d3d::context;
+	surfaceMaterialFrame = globals::state->frameCount;
+	// The tiles the surface pass shades at half rate (ClassifyDeferredTiles' test): their material is filtered over two pixels.
+	const bool distant = settings.DistantHalfRate && !deferredFarFailed && deferredFar;
+	struct alignas(16) MaterialCB
+	{
+		uint32_t width, height, shoreBaked;
+		float farDistance;
+	} materialData{ deferredTags->desc.Width, deferredTags->desc.Height, deferredShoreFrame == surfaceMaterialFrame ? 1u : 0u,
+		distant ? settings.DistantHalfRateDistance * static_cast<float>(PBRWaterModel::UnitsPerMetre) : 0.0f };
+	if (!surfaceMaterialCB)
+		surfaceMaterialCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<MaterialCB>(), "PBRWater::SurfaceMaterialCB");
+	surfaceMaterialCB->Update(materialData);
+
+	// As BakeDeferredShore: the deferred draws' constants and views, this pass's own, and the shore train it baked.
+	ID3D11Buffer* cbs[1] = { surfaceMaterialCB->CB() };
+	context->CSSetConstantBuffers(0, 1, cbs);
+	ID3D11Buffer* waveCb = deferredDrawBuffer->CB();
+	context->CSSetConstantBuffers(7, 1, &waveCb);
+	ID3D11Buffer* frameBuffers[1] = { *globals::game::perFrame.get() };
+	context->CSSetConstantBuffers(12, 1, frameBuffers);
+	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
+	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
+	context->CSSetSamplers(WaterSamplerBase, 2, samplers);
+	ID3D11ShaderResourceView* srvs[3] = { deferredTags->srv.get(), deferredWaves->srv.get(), depthSRV };
+	context->CSSetShaderResources(0, 3, srvs);
+	ID3D11ShaderResourceView* shoreSrvs[3] = {};
+	if (materialData.shoreBaked) {
+		for (uint32_t i = 0; i < 3; ++i)
+			shoreSrvs[i] = deferredShore[i]->srv.get();
+	}
+	context->CSSetShaderResources(46, 3, shoreSrvs);
+	ID3D11UnorderedAccessView* uavs[2] = { surfaceMaterial[0]->uav.get(), surfaceMaterial[1]->uav.get() };
+	context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+	context->CSSetShader(surfaceMaterialCS.get(), nullptr, 0);
+	context->Dispatch((materialData.width + 7) / 8, (materialData.height + 7) / 8, 1);
+
+	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
+	context->CSSetShaderResources(0, 3, nullSrvs);
+	context->CSSetShaderResources(46, 3, nullSrvs);
+	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, nullSrvs);
+	ID3D11UnorderedAccessView* nullUavs[2] = {};
+	context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+	ID3D11Buffer* nullCbs[1] = {};
+	context->CSSetConstantBuffers(0, 1, nullCbs);
+	context->CSSetConstantBuffers(7, 1, nullCbs);
+	ID3D11SamplerState* nullSamplers[2] = {};
+	context->CSSetSamplers(WaterSamplerBase, 2, nullSamplers);
+	context->CSSetShader(nullptr, nullptr, 0);
+	return true;
+}
+
+ID3D11PixelShader* PBRWater::GetMaterialPixelShader()
+{
+	if (surfaceMaterialFailed || !cachedDrawShader || debugCompiled)
+		return nullptr;
+	const auto descriptor = cachedDrawPixelDescriptor | static_cast<uint32_t>(SC::WaterShaderFlags::DeferredMaterial);
+	// null while it compiles, or when it failed: this draw's pixel shader evaluates the waves itself
+	const auto* shader = globals::shaderCache->GetPixelShader(*cachedDrawShader, descriptor);
+	return shader ? shader->shader : nullptr;
+}
+
 bool PBRWater::DrawDeferredSurface()
 {
 	const uint32_t frame = globals::state->frameCount;
@@ -3035,6 +3141,26 @@ bool PBRWater::DrawDeferredSurface()
 		batch.readOnly = readOnly;
 	}
 
+	// The pixel shader that lights from the surface's material, once it is compiled and the material is evaluated (the
+	// first draw of the frame evaluates it, after the shore train and the stencil pass's last record): otherwise the draw's
+	// own pixel shader evaluates the waves for itself.
+	ID3D11PixelShader* materialPS = GetMaterialPixelShader();
+	if (materialPS && surfaceMaterialFrame != frame) {
+		auto& depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+		BakeSurfaceMaterial(depth.depthSRV);
+	}
+	if (surfaceMaterialFrame != frame)
+		materialPS = nullptr;
+	winrt::com_ptr<ID3D11PixelShader> enginePS;
+	if (materialPS) {
+		context->PSGetShader(enginePS.put(), nullptr, nullptr);
+		context->PSSetShader(materialPS, nullptr, 0);
+		ID3D11ShaderResourceView* materialSrvA = surfaceMaterial[0]->srv.get();
+		ID3D11ShaderResourceView* materialSrvB = surfaceMaterial[1]->srv.get();
+		context->PSSetShaderResources(SurfaceMaterialSlotA, 1, &materialSrvA);
+		context->PSSetShaderResources(SurfaceMaterialSlotB, 1, &materialSrvB);
+	}
+
 	// The vertex program runs per pixel: the draw's vertex constants go to the pixel stage too (b8-b10).
 	ID3D11Buffer* vertexCbs[3] = {};
 	context->VSGetConstantBuffers(0, 3, vertexCbs);
@@ -3072,6 +3198,13 @@ bool PBRWater::DrawDeferredSurface()
 		data.mode[0] = DeferredMeshes + slot;
 		deferredCB->Update(data);
 		context->DrawInstancedIndirect(deferredArgs.get(), (DeferredMeshes + slot) * 4 * sizeof(uint32_t));
+	}
+	if (materialPS) {
+		// The engine's pixel shader back for its next draw, and the material off the pixel stage before the next frame writes it.
+		context->PSSetShader(enginePS.get(), nullptr, 0);
+		ID3D11ShaderResourceView* nullSrv = nullptr;
+		context->PSSetShaderResources(SurfaceMaterialSlotA, 1, &nullSrv);
+		context->PSSetShaderResources(SurfaceMaterialSlotB, 1, &nullSrv);
 	}
 	++drawStats.deferredShaded;
 	return true;
