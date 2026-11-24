@@ -2116,6 +2116,7 @@
     "feature.pbr_water.stat_builds": "Last builds: fetch and terrain %.0f ms, shore field %.0f ms (worker threads)",
     "feature.pbr_water.stat_deferred": "Deferred surface: %u meshes recorded, %u draws shaded from the record, %u drawn forward",
     "feature.pbr_water.stat_draws": "Water draws last frame: %u, %u of them from the tessellated mesh",
+    "feature.pbr_water.stat_engine_reflections": "Effective engine reflections: %d",
     "feature.pbr_water.stat_fetch": "Fetch: %s, bathymetry: %s%s",
     "feature.pbr_water.stat_fft": "FFT %u x %u cascades: %s, gameplay mirror: %s",
     "feature.pbr_water.stat_floating": "Floating: %u hulls, %u attached, %u actors on board, %u small objects riding the water",

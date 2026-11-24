@@ -1,4 +1,5 @@
 #include "PBRWater.h"
+#include "PBRWater/EngineWater.h"
 #include "PBRWater/Profiling.h"
 
 #include "Features/CloudShadows.h"
@@ -1000,6 +1001,7 @@ void PBRWater::DrawDebugSection()
 		T(TKEY("debug_wave_sun"), "Wave Sun Shadows"),
 	};
 	ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &s.DebugView, views, IM_ARRAYSIZE(views));
+	ImGui::Text(T(TKEY("stat_engine_reflections"), "Effective engine reflections: %d"), EffectiveEngineReflections());
 
 	const char* ready = T(TKEY("stat_ready"), "ready");
 	const char* none = T(TKEY("stat_none"), "none");
@@ -3874,6 +3876,9 @@ void PBRWater::PostPostLoad()
 
 	// The world's effects pass (Frame Annotations' "Effects"); Detours chains with its detour.
 	stl::detour_thunk<BSShaderAccumulator_RenderEffects>(REL::RelocationID(99940, 106585));
+
+	// The engine's ripples (list and rain meshes): the ripple simulation replaces them.
+	PBRWaterEngine::Install();
 
 	logger::info("[PBR Water] Installed hooks");
 }
