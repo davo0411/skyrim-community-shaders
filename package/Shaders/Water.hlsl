@@ -236,6 +236,12 @@ PBRW_VS_CBUFFER(PerGeometry, b2, b10)
 	float4 CellTexCoordOffset : packoffset(c13);
 };
 
+#		if defined(PBR_WATER) && defined(STENCIL) && defined(VSHADER)
+// Unified Water's far tiles in one instanced draw (PBRWater::FlushStencilInstances, Tess0.x = 5): each instance's absolute
+// translate (xyz) and uniform scale (w). The tiles are one mesh, turned no way, and beyond the waves' reach (flat).
+StructuredBuffer<float4> PBRWStencilInstances : register(t103);
+#		endif
+
 #		if defined(PBR_WATER)
 #			include "PBRWater/VertexWaves.hlsli"
 
@@ -531,6 +537,34 @@ uint BisectionVertexIndex(uint vertexID)
 
 VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
+#			if defined(STENCIL)
+	// Tess0.x 5: one of Unified Water's far tiles, drawn instanced (PBRWater::FlushStencilInstances).
+	[branch] if (PBRWater::Tess0.x > 4.5)
+	{
+		float4 instance = PBRWStencilInstances[instanceID];
+		float3 local = input.Position.xyz * instance.w;
+		VS_OUTPUT o = (VS_OUTPUT)0;
+		o.NormalsScale = NormalsScale;
+		o.WorldPosition = float4(local + instance.xyz - FrameBuffer::CameraPosAdjust.xyz, 1.0);
+		o.PreviousWorldPosition = float4(local + instance.xyz - FrameBuffer::CameraPreviousPosAdjust.xyz, 1.0);
+		float4 clip = mul(FrameBuffer::CameraViewProj, o.WorldPosition);
+		// As WaterVertexWith: the far water pushed back past 70000 units, and Horizon Fix's fold.
+		float heightMult = min((1.0 / 10000.0) * max(clip.z - 70000, 0), 1);
+		o.HPosition = float4(clip.xy, heightMult * 0.5 + clip.z, clip.w);
+#				if defined(HORIZON_FIX)
+		o.HPosition.z = min(o.HPosition.z, o.HPosition.w * HorizonFix::FoldedDepth);
+#				endif
+		// This projection differs from the engine's per-tile matrix in the last bits, and the colour pass tests its depth
+		// LessEqual against this pass's: the instanced tiles sit a few depth steps behind.
+		o.HPosition.z += 4.0 / 16777216.0 * o.HPosition.w;
+		o.ShoreState = float4(0.0, 0.0, 0.0, o.WorldPosition.z);
+		o.DeferredWave = 0.0;
+		o.DeferredUV = 0.0;
+		o.DeferredAlpha = 1.0;
+		o.DeferredNoise = PBRWater::SurfaceNoise(instance.xy + local.xy);
+		return o;
+	}
+#			endif
 	// Tess0.x: 0 an untessellated draw, 1 the tessellated mesh's vertices (PBRWater::RestoreDraw, BisectionTessellator::Draw),
 	// 2 the engine's own draw of a mesh the tessellator draws instead: every vertex outside the frustum, so it rasterises
 	// nothing; 3 the deferred surface's tiles of the mesh (PBRWater/Deferred.hlsli).

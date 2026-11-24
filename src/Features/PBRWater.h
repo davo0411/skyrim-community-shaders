@@ -95,6 +95,7 @@ struct PBRWater : Feature
 		bool EnableSunShadows = true;          ///< the shadow map and cloud shadows on the water
 		bool EnableSkylighting = true;         ///< Skylighting's probes darken the sky the water sees
 		bool EnableFog = true;                 ///< distance, height fog and aerial perspective on the water
+		bool BatchedStencil = true;            ///< Unified Water's far tiles drawn in one instanced stencil draw instead of one engine draw each
 		bool EnableWaterline = true;           ///< the mesh is held on the bed near the shore and the waterline found per pixel (terrain reads in the vertex, stencil and surface passes)
 		float Roughness = 0.06f;
 		float SunSpecular = 1.0f;
@@ -323,6 +324,14 @@ struct PBRWater : Feature
 	struct BSWaterShader_SetupTechnique
 	{
 		static bool thunk(RE::BSShader* waterShader, uint32_t technique);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/// Every pass the batch renderer draws: Unified Water's far stencil tiles are collected here instead (CollectStencilTile).
+	template <int N>
+	struct BSBatchRenderer_RenderPassImmediately
+	{
+		static void thunk(RE::BSRenderPass* pass, uint32_t technique, bool alphaTest, uint32_t renderFlags);
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
@@ -679,12 +688,34 @@ private:
 	bool uploadedSpacingCheap = false;                       ///< whether spacingDrawBuffer holds CheapOffscreenGates
 	ID3D11ShaderResourceView* drawSRVs[WaterSRVCount] = {};  ///< the views for those constants
 	uint32_t drawResourcesFrame = UINT32_MAX;                ///< the frame the views were last bound in
+	static constexpr uint32_t StencilInstanceSlot = 103;  ///< vertex stage view of the instanced stencil tiles (Water.hlsl)
+	static constexpr uint32_t MaxStencilInstances = 4096;
+	std::unique_ptr<ConstantBuffer> instancedDrawBuffer;   ///< the instanced stencil tiles' constants (Tess0.x = 5)
+	std::unique_ptr<StructuredBuffer> stencilInstanceBuffer;
+	std::vector<float4> stencilInstances;                  ///< collected tiles: absolute translate, scale
+	std::vector<float4> stencilUpload;                     ///< MaxStencilInstances entries, what the buffer upload copies
+	struct StencilBatch
+	{
+		bool ready = false;            ///< the engine's last draw was a far Unified Water stencil tile: its state draws the rest
+		uint32_t technique = 0;        ///< that draw's technique (the same permutation)
+		void* rendererData = nullptr;  ///< that draw's mesh (every Unified Water tile shares it)
+		uint32_t indexCount = 0;
+	} stencilBatch;
 	ID3D11Buffer* boundVertexCb = nullptr;                   ///< the vertex stage's b7 as the draws left it (BindDrawResources resets)
 	ID3D11Buffer* boundPixelCb = nullptr;                    ///< the pixel stage's b7 as the draws left it
 	DrawStats drawStats;                                     ///< this frame so far
 	bool drawBatchOpen = false;                              ///< a profiler pass is open for the current batch of water draws
 	/** @brief Render thread, a batch of water draws begins: the frame's wave heightfield, then the batch's pass. */
 	void SetupBatch();
+	/**
+	 * @brief Takes a far, flat Unified Water tile of the main view's stencil batch for the instanced draw.
+	 * @return true when the tile was taken and the engine must not draw it
+	 */
+	bool CollectStencilTile(RE::BSRenderPass* pass, uint32_t technique);
+	/** @brief After the engine drew a pass: whether its state can draw the collected tiles (one far Unified Water tile in the stencil batch). */
+	void AfterEnginePass(RE::BSRenderPass* pass, uint32_t technique);
+	/** @brief Draws the collected stencil tiles in one instanced draw with the state of the last tile the engine drew. */
+	void FlushStencilInstances();
 	/** @brief Uploads the draw constant buffers when this frame's constants changed (once per batch). */
 	void UploadDrawConstants();
 	/** @brief Binds the views and samplers every water draw reads, and forgets which constant buffers are bound. */

@@ -118,6 +118,9 @@ struct UnifiedWater : OverlayFeature
 	/** @brief Installs engine hooks for water mesh replacement and worldspace handling. */
 	virtual void PostPostLoad() override;
 
+	/** @brief The renderer data every Unified Water tile shares (its clones of one mesh), or nullptr before DataLoaded. */
+	void* GetTileRendererData() const { return waterMesh ? waterMesh->GetGeometryRuntimeData().rendererData : nullptr; }
+
 	/** @brief The water placement cache, or nullptr before DataLoaded or after a failed load. */
 	WaterCache* GetWaterCache() const { return waterCache; }
 
@@ -149,5 +152,7 @@ private:
 	bool IsWaterDataReady() const;
 	bool IsExteriorWorldspaceActive() const;
 	void UpdateWaterLODCull() const;
+	/** @brief Name of the LOD 4 tiles that cover several equal cells (BGSTerrainBlock_Attach), shown while none of them is loaded. */
+	static const RE::BSFixedString& MergedTileName();
 	static bool LoadOrderChanged();
 };

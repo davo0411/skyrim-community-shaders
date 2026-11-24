@@ -133,6 +133,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		EnablePointLightSpecular,
 		EnableSkyOcclusion,
 		EnableWaterline,
+		BatchedStencil,
 		EnableEnvReflections,
 		EnableSSR,
 		EnableSunShadows,
@@ -267,6 +268,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		EnablePointLightSpecular,
 		EnableSkyOcclusion,
 		EnableWaterline,
+		BatchedStencil,
 		EnableEnvReflections,
 		EnableSSR,
 		EnableSunShadows,
@@ -738,6 +740,8 @@ void PBRWater::DrawSettings()
 			T(TKEY("enable_skylighting_tooltip"), "Skylighting darkens the sky the water sees under cliffs, hulls and overhangs. Off: its probes are not read and the water sees the open sky."));
 		Util::CheckboxTip(T(TKEY("enable_fog"), "Fog"), &s.EnableFog,
 			T(TKEY("enable_fog_tooltip"), "Distance fog, height fog and the atmosphere fade distant water. Off: none of them are applied to the water."));
+		Util::CheckboxTip(T(TKEY("batched_stencil"), "Batched Stencil Pass"), &s.BatchedStencil,
+			T(TKEY("batched_stencil_tooltip"), "Unified Water's distant, flat tiles are drawn in one draw in the water's depth and mask pass, instead of the game setting up and drawing each tile. Saves CPU time with many water tiles in view. Turn off if distant water shows holes or flickers."));
 		Util::SliderFloatTip(T(TKEY("roughness"), "Surface Roughness"), &s.Roughness, 0.02f, 0.5f, "%.3f",
 			T(TKEY("roughness_tooltip"), "Base roughness of the calm water surface. Default 0.06."));
 		Util::SliderFloatTip(T(TKEY("wind_roughness"), "Wind Roughness"), &s.WindRoughness, 0.0f, 3.0f, "%.2f",
@@ -1082,6 +1086,11 @@ void PBRWater::SetupResources()
 	spacingDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SpacingDrawConstants");
 	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
 	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
+	instancedDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::InstancedStencilConstants");
+	stencilInstanceBuffer = std::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(MaxStencilInstances), MaxStencilInstances, "PBRWater::StencilInstances");
+	stencilInstanceBuffer->CreateSRV();
+	stencilUpload.assign(MaxStencilInstances, float4{});
+	stencilInstances.reserve(MaxStencilInstances);
 	deferredCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DeferredDrawCB>(), "PBRWater::DeferredDrawCB");
 	deferredZeroCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DeferredDrawCB>(), "PBRWater::DeferredZeroCB");
 	deferredZeroCB->Update(DeferredDrawCB{});
@@ -2431,6 +2440,7 @@ void PBRWater::SetupBatch()
 	const auto snap = snapshot.load(std::memory_order_acquire);
 	UpdateSunMap(settings.EnableWaveShadows && snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled) && globals::shaderCache->IsEnabled());
 	UploadDrawConstants();
+	stencilBatch.ready = false;
 	// Bound with the batch's first draw: the lit geometry drawn between batches (True PBR, Terrain Helper) uses t80-t97.
 	drawResourcesFrame = UINT32_MAX;
 	// A batch the engine never closed (none should be) ends here rather than swallowing the next.
@@ -2452,6 +2462,8 @@ void PBRWater::UploadDrawConstants()
 	swallowDrawBuffer->Update(drawData);
 	drawData.Tess0.x = 3.0f;
 	deferredDrawBuffer->Update(drawData);
+	drawData.Tess0.x = 5.0f;
+	instancedDrawBuffer->Update(drawData);
 	drawData.Tess0.x = 0.0f;
 	flatDrawBuffer->Update(drawData);
 	// Costly gates off for other views (CheapOffscreenWater); always uploaded so toggling the setting never binds stale data.
@@ -3854,6 +3866,12 @@ void PBRWater::PostPostLoad()
 	// Same Main::Update call site Grass Collision uses; write_thunk_call chains with it.
 	stl::write_thunk_call<MainUpdate>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
 
+	// The batch renderer's passes (the call sites Light Limit Fix hooks; each chains the hook already there): Unified Water's
+	// far stencil tiles become one instanced draw.
+	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<1>>(REL::RelocationID(100877, 107673).address() + REL::Relocate(0x1E5, 0x1EE));
+	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<2>>(REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
+	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<3>>(REL::RelocationID(100871, 107667).address() + REL::Relocate(0xEE, 0xED));
+
 	// The world's effects pass (Frame Annotations' "Effects"); Detours chains with its detour.
 	stl::detour_thunk<BSShaderAccumulator_RenderEffects>(REL::RelocationID(99940, 106585));
 
@@ -3916,6 +3934,8 @@ void PBRWater::MainUpdate::thunk()
 
 bool PBRWater::BSWaterShader_SetupTechnique::thunk(RE::BSShader* waterShader, uint32_t technique)
 {
+	// The tiles collected under the last technique are drawn with its state, before this one replaces it.
+	globals::features::pbrWater.FlushStencilInstances();
 	// After the original: its BeginTechnique sets the descriptors the batch is named by. Before any draw of the batch, so
 	// the batch's pass encloses every draw's own markers (Frame Annotations) instead of interleaving with them.
 	const bool ok = func(waterShader, technique);
@@ -3932,8 +3952,84 @@ bool PBRWater::BSWaterShader_SetupTechnique::thunk(RE::BSShader* waterShader, ui
 
 void PBRWater::BSWaterShader_RestoreTechnique::thunk(RE::BSShader* waterShader, uint32_t technique)
 {
+	globals::features::pbrWater.FlushStencilInstances();
+	globals::features::pbrWater.stencilBatch.ready = false;
 	func(waterShader, technique);
 	globals::features::pbrWater.EndDrawBatch();
+}
+
+template <int N>
+void PBRWater::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE::BSRenderPass* pass, uint32_t technique, bool alphaTest, uint32_t renderFlags)
+{
+	auto& feature = globals::features::pbrWater;
+	if (feature.CollectStencilTile(pass, technique))
+		return;
+	// Anything else the engine draws may change the state the collected tiles are drawn with.
+	feature.FlushStencilInstances();
+	func(pass, technique, alphaTest, renderFlags);
+	feature.AfterEnginePass(pass, technique);
+}
+
+bool PBRWater::CollectStencilTile(RE::BSRenderPass* pass, uint32_t technique)
+{
+	if (!stencilBatch.ready || technique != stencilBatch.technique || !settings.BatchedStencil || !pass || !pass->geometry)
+		return false;
+	if (pass->geometry->GetGeometryRuntimeData().rendererData != stencilBatch.rendererData || WavesReach(*pass->geometry))
+		return false;
+	if (stencilInstances.size() >= MaxStencilInstances)
+		FlushStencilInstances();
+	const auto& world = pass->geometry->world;
+	stencilInstances.push_back({ world.translate.x, world.translate.y, world.translate.z, world.scale });
+	return true;
+}
+
+void PBRWater::AfterEnginePass(RE::BSRenderPass* pass, uint32_t technique)
+{
+	stencilBatch.ready = false;
+	if (!loaded || !settings.BatchedStencil || settings.WireframeMode > 0 || !gpuBuffer || !pass || !pass->geometry || !pass->shader ||
+		pass->shader->shaderType.get() != RE::BSShader::Type::Water)
+		return;
+	const auto* state = globals::state;
+	auto* shaderCache = globals::shaderCache;
+	const bool mainView = state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections));
+	if (!mainView || !IsStencilTechnique(WaterTechnique(state->modifiedVertexDescriptor)) || !shaderCache->IsEnabled() ||
+		!shaderCache->GetVertexShader(*pass->shader, state->modifiedVertexDescriptor))
+		return;
+	// The tiles the waves reach are drawn as they are (displaced, tessellated, recorded): only the flat far water is batched.
+	const auto* triShape = pass->geometry->AsTriShape();
+	const auto& data = pass->geometry->GetGeometryRuntimeData();
+	if (!triShape || !data.rendererData || WavesReach(*pass->geometry))
+		return;
+	// Only Unified Water's tiles share a mesh (clones of one): its tiles are told apart by it.
+	auto* unifiedTile = globals::features::unifiedWater.GetTileRendererData();
+	if (!unifiedTile || data.rendererData != unifiedTile)
+		return;
+	stencilBatch.ready = true;
+	stencilBatch.technique = technique;
+	stencilBatch.rendererData = data.rendererData;
+	stencilBatch.indexCount = triShape->GetTrishapeRuntimeData().triangleCount * 3;
+}
+
+void PBRWater::FlushStencilInstances()
+{
+	if (stencilInstances.empty())
+		return;
+	auto context = globals::d3d::context;
+	const auto count = static_cast<UINT>(stencilInstances.size());
+	std::copy(stencilInstances.begin(), stencilInstances.end(), stencilUpload.begin());
+	stencilInstanceBuffer->Update(stencilUpload.data(), sizeof(float4) * MaxStencilInstances);
+	ID3D11ShaderResourceView* view = stencilInstanceBuffer->SRV();
+	context->VSSetShaderResources(StencilInstanceSlot, 1, &view);
+	ID3D11Buffer* cb = instancedDrawBuffer->CB();
+	context->VSSetConstantBuffers(7, 1, &cb);
+	context->PSSetConstantBuffers(7, 1, &cb);
+	boundVertexCb = nullptr;
+	boundPixelCb = nullptr;
+	// The last tile the engine drew left its mesh, shaders and targets bound: every Unified Water tile is that mesh.
+	context->DrawIndexedInstanced(stencilBatch.indexCount, count, 0, 0, 0);
+	ID3D11ShaderResourceView* none = nullptr;
+	context->VSSetShaderResources(StencilInstanceSlot, 1, &none);
+	stencilInstances.clear();
 }
 
 void PBRWater::BSShaderAccumulator_RenderEffects::thunk(RE::BSShaderAccumulator* accumulator, uint32_t renderFlags)

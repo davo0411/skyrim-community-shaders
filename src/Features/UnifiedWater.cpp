@@ -539,6 +539,60 @@ bool UnifiedWater::IsWaterDataReady() const
 	return waterCache && waterMesh;
 }
 
+namespace
+{
+	/** @brief A square of equal water cells in a LOD block (block-local cells). */
+	struct WaterSquare
+	{
+		int32_t x, y, size;
+		const WaterCache::Instruction* cell;  ///< form and height of every cell in it
+	};
+
+	/**
+	 * @brief Covers a block's water cells with squares of equal cells (same form and height), the largest first.
+	 * @param cells   block-local grid (n x n) of the instruction covering each cell, null where it has no water
+	 * @param minSize squares smaller than this are left out
+	 */
+	std::vector<WaterSquare> CoverWithSquares(const std::vector<const WaterCache::Instruction*>& cells, int32_t n, int32_t minSize)
+	{
+		std::vector<WaterSquare> squares;
+		std::vector<uint8_t> covered(cells.size(), 0);
+		auto matches = [&](int32_t x, int32_t y, const WaterCache::Instruction* a) {
+			const size_t i = static_cast<size_t>(y) * n + x;
+			const auto* b = cells[i];
+			return b && !covered[i] && b->form.ptr == a->form.ptr && b->waterHeight == a->waterHeight;
+		};
+		for (int32_t size = n; size >= minSize; --size) {
+			for (int32_t y = 0; y + size <= n; ++y) {
+				for (int32_t x = 0; x + size <= n; ++x) {
+					const auto* corner = cells[static_cast<size_t>(y) * n + x];
+					if (!corner || covered[static_cast<size_t>(y) * n + x])
+						continue;
+					bool fits = true;
+					for (int32_t yy = y; yy < y + size && fits; ++yy) {
+						for (int32_t xx = x; xx < x + size && fits; ++xx)
+							fits = matches(xx, yy, corner);
+					}
+					if (!fits)
+						continue;
+					for (int32_t yy = y; yy < y + size; ++yy) {
+						for (int32_t xx = x; xx < x + size; ++xx)
+							covered[static_cast<size_t>(yy) * n + xx] = 1;
+					}
+					squares.push_back({ x, y, size, corner });
+				}
+			}
+		}
+		return squares;
+	}
+}
+
+const RE::BSFixedString& UnifiedWater::MergedTileName()
+{
+	static const RE::BSFixedString name{ "UnifiedWater:MergedLOD4" };
+	return name;
+}
+
 bool UnifiedWater::IsExteriorWorldspaceActive() const
 {
 	// Interior cells may still inherit stale exterior worldspace state during transitions
@@ -601,36 +655,65 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 	const int32_t offsetY = tes->currentGridY - static_cast<int32_t>(gridCells->length >> 1);
 	const int32_t length = static_cast<int32_t>(gridCells->length);
 
+	// A loaded cell with water draws its own: the LOD tile over it hides.
+	auto loadedWithWater = [&](int32_t cellX, int32_t cellY) {
+		const int32_t x = cellX - offsetX;
+		const int32_t y = cellY - offsetY;
+		if (x < 0 || y < 0 || x >= length || y >= length)
+			return false;
+		RE::TESObjectCELL* cell = nullptr;
+		if (REL::Module::IsAE() && REL::Module::IsAtLeast(SKSE::RUNTIME_SSE_1_7_99)) {
+			// Skyrim 1.7 added a shared lock around the terrain-cell map lookup. Keep
+			// the guard scoped to the lookup, matching the native function.
+			static REL::Relocation<RE::BSReadWriteLock*> terrainCellMapLock{ REL::ID(564236) };
+			const RE::BSReadLockGuard lock(*terrainCellMapLock);
+			cell = gridCells->GetCell(x, y);
+		} else {
+			cell = gridCells->GetCell(x, y);
+		}
+		// Keep LOD visible when a loaded dry cell has no active water to replace it
+		return cell && cell->cellState.any(RE::TESObjectCELL::CellState::kAttached, static_cast<RE::TESObjectCELL::CellState>(6)) &&
+		       cell->cellFlags.any(RE::TESObjectCELL::Flag::kHasWater);
+	};
+
+	// The merged squares first (BGSTerrainBlock_Attach): one shows while none of its cells is loaded, and hides the cells'
+	// own tiles under it.
+	struct Square
+	{
+		int32_t x, y, size;
+	};
+	std::array<Square, 16> shown{};
+	uint32_t shownCount = 0;
 	for (const auto& child : waterParent->GetChildren()) {
-		if (!child)
+		if (!child || child->name != MergedTileName())
+			continue;
+		const int32_t size = std::max(1, static_cast<int32_t>(std::lround(child->local.scale)));
+		const float half = static_cast<float>(size) * 2048.0f;
+		int32_t x, y;
+		Util::WorldToCell(RE::NiPoint2{ child->world.translate.x - half + 1.0f, child->world.translate.y - half + 1.0f }, x, y);
+		bool loaded = false;
+		for (int32_t dy = 0; dy < size && !loaded; ++dy) {
+			for (int32_t dx = 0; dx < size && !loaded; ++dx)
+				loaded = loadedWithWater(x + dx, y + dy);
+		}
+		child->SetAppCulled(loaded);
+		if (!loaded && shownCount < shown.size())
+			shown[shownCount++] = { x, y, size };
+	}
+
+	for (const auto& child : waterParent->GetChildren()) {
+		if (!child || child->name == MergedTileName())
 			continue;
 
 		int32_t x, y;
 		Util::WorldToCell(child->world.translate, x, y);
 
-		x -= offsetX;
-		y -= offsetY;
-
-		bool cull = false;
-		if (x >= 0 && y >= 0 && x < length && y < length) {
-			RE::TESObjectCELL* cell = nullptr;
-			if (REL::Module::IsAE() && REL::Module::IsAtLeast(SKSE::RUNTIME_SSE_1_7_99)) {
-				// Skyrim 1.7 added a shared lock around the terrain-cell map lookup. Keep
-				// the guard scoped to the lookup, matching the native function.
-				static REL::Relocation<RE::BSReadWriteLock*> terrainCellMapLock{ REL::ID(564236) };
-				const RE::BSReadLockGuard lock(*terrainCellMapLock);
-				cell = gridCells->GetCell(x, y);
-			} else {
-				cell = gridCells->GetCell(x, y);
-			}
-
-			if (cell && cell->cellState.any(RE::TESObjectCELL::CellState::kAttached, static_cast<RE::TESObjectCELL::CellState>(6))) {
-				// Keep LOD visible when a loaded dry cell has no active water to replace it
-				cull = cell->cellFlags.any(RE::TESObjectCELL::Flag::kHasWater);
-			}
+		bool underSquare = false;
+		for (uint32_t s = 0; s < shownCount && !underSquare; ++s) {
+			const auto& square = shown[s];
+			underSquare = x >= square.x && y >= square.y && x < square.x + square.size && y < square.y + square.size;
 		}
-
-		child->SetAppCulled(cull);
+		child->SetAppCulled(underSquare || loadedWithWater(x, y));
 	}
 }
 
@@ -695,23 +778,60 @@ void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 			water->DetachChildAt(--count);
 		}
 
-		for (auto& instruction : *instructions) {
+		// The block's water cells, each pointing at the instruction (form and height) that covers it.
+		const int32_t blockCells = static_cast<int32_t>(lodLevel);
+		std::vector<const WaterCache::Instruction*> cells(static_cast<size_t>(blockCells) * blockCells, nullptr);
+		for (const auto& instruction : *instructions) {
 			if (!instruction.form.ptr)
 				continue;
+			const int32_t lx = instruction.x - node->baseCellX;
+			const int32_t ly = instruction.y - node->baseCellY;
+			const int32_t size = static_cast<int32_t>(std::max(instruction.size, 1u));
+			for (int32_t dy = 0; dy < size; ++dy) {
+				for (int32_t dx = 0; dx < size; ++dx) {
+					if (lx + dx >= 0 && ly + dy >= 0 && lx + dx < blockCells && ly + dy < blockCells)
+						cells[static_cast<size_t>(ly + dy) * blockCells + lx + dx] = &instruction;
+				}
+			}
+		}
 
+		auto place = [&](const WaterSquare& square, bool merged) {
 			RE::NiCloningProcess cloningProcess;
-
 			RE::BSTriShape* shape = singleton.waterMesh->CreateClone(cloningProcess)->AsTriShape();
-
-			const auto posX = (instruction.x - node->baseCellX) * 4096.0f + instruction.size * 2048.0f;
-			const auto posY = (instruction.y - node->baseCellY) * 4096.0f + instruction.size * 2048.0f;
-			shape->local.scale = static_cast<float>(instruction.size);
-			shape->local.translate = { posX, posY, instruction.waterHeight };
-
+			if (merged)
+				shape->name = MergedTileName();
+			shape->local.scale = static_cast<float>(square.size);
+			shape->local.translate = { square.x * 4096.0f + square.size * 2048.0f, square.y * 4096.0f + square.size * 2048.0f, square.cell->waterHeight };
 			water->AttachChild(shape, true);
-			built.emplace_back(shape, &instruction);
-
+			built.emplace_back(shape, square.cell);
 			block->waterAttached = true;
+			return shape;
+		};
+
+		if (lodLevel == 4) {
+			// LOD 4 keeps a tile per cell, which hides when its cell loads (BGSTerrainNode_UpdateWaterMeshSubVisibility). Every
+			// tile is a draw of its own in each water pass, and the LOD 4 ring holds a couple of hundred: equal cells are also
+			// covered by one square tile, up to the whole chunk, drawn while none of its cells is loaded, the cells' own tiles
+			// hidden under it.
+			std::vector<RE::BSTriShape*> cellTiles(cells.size(), nullptr);
+			for (int32_t y = 0; y < blockCells; ++y) {
+				for (int32_t x = 0; x < blockCells; ++x) {
+					if (const auto* cell = cells[static_cast<size_t>(y) * blockCells + x])
+						cellTiles[static_cast<size_t>(y) * blockCells + x] = place({ x, y, 1, cell }, false);
+				}
+			}
+			for (const auto& square : CoverWithSquares(cells, blockCells, 2)) {
+				place(square, true);
+				for (int32_t y = square.y; y < square.y + square.size; ++y) {
+					for (int32_t x = square.x; x < square.x + square.size; ++x)
+						cellTiles[static_cast<size_t>(y) * blockCells + x]->SetAppCulled(true);
+				}
+			}
+		} else {
+			// The cache grows each square from its corner, which leaves small tiles along every coast: the block is covered
+			// again with the fewest squares it can take, each a draw in every water pass.
+			for (const auto& square : CoverWithSquares(cells, blockCells, 1))
+				place(square, false);
 		}
 
 		if (built.empty()) {
