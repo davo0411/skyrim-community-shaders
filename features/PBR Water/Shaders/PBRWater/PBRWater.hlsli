@@ -102,7 +102,7 @@ namespace PBRWater
 	Texture2D<float4> RipplePreviousTexture : register(t83);           // the ripple state as displayed last frame (motion vectors)
 	Texture2DArray<float4> OceanDisplacement : register(t85);          // xyz displacement (units), w dDx/dy, one slice per cascade
 	Texture2DArray<float4> OceanDerivatives : register(t86);           // xy height slopes, zw compression dDx/dx, dDy/dy
-	Texture2DArray<float2> OceanSurface : register(t87);               // squared slopes (LEAN moments)
+	Texture2DArray<float4> OceanSurface : register(t87);               // x height (units), y shear dDx/dy, z |slope|^2 (LEAN), w foam (OceanAssembleCS)
 	Texture2DArray<float4> OceanPreviousDisplacement : register(t88);  // last frame's displacement (motion vectors)
 	Texture2DArray<float4> ShoreProfileTexture : register(t84);        // the shore wave through its life (ShoreProfile.h): slice 0 forward, up, their d/dphase; slice 1 foam
 	Texture2DArray<float> OceanFoam : register(t91);                   // the FFT foam, one persistent slice per cascade (OceanAssembleCS)
@@ -1341,8 +1341,8 @@ namespace PBRWater
 					{
 						float footprint = max(2.0 * Math::PI / max(k, 1e-6), 2.0 * base);
 						float lod = clamp(log2(footprint / Cascade0[c].w), 0.0, Params2.w);
-						float2 m = OceanSurface.SampleLevel(OceanSampler, float3(CascadeUV(positionWS.xy, c), c), lod);
-						a *= min(sqrt((m.x + m.y) / max(Cascade1[c].w, 1e-8)), 3.0);
+						float msq = OceanSurface.SampleLevel(OceanSampler, float3(CascadeUV(positionWS.xy, c), c), lod).z;
+						a *= min(sqrt(msq / max(Cascade1[c].w, 1e-8)), 3.0);
 						if (a > tolerance)
 							spacing = min(spacing, min(sqrt(8.0 * tolerance / a), 0.5 * Math::PI) / k);
 					}
@@ -2320,32 +2320,28 @@ namespace PBRWater
 				}
 				else if (vertical > 0.0)
 				{
-					float4 d, g;
-					float2 m;
-					float foam = 0.0;  // Enable Foam off: the foam reads below are skipped
+					// Two reads: the derivatives, and the rest the pixel needs (OceanSurface: height, shear, squared slope, foam).
+					// The horizontal displacement is the vertices' alone. (Four reads, the displacement's, the moments' and the
+					// foam's apart, the surface waited on them.)
+					float4 g, s;
 					[branch] if (any(ctx.flow))
 					{
 						// The same two reads as the geometry's (FlowPhases), so the normals and moments match the mesh.
 						FlowBlend b = FlowPhases(ctx.flow, c, FlowClock());
 						float3 uv0 = float3(CascadeUV(positionWS.xy - b.offset0, c), c);
 						float3 uv1 = float3(CascadeUV(positionWS.xy - b.offset1, c), c);
-						d = b.weight0 * OceanDisplacement.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDisplacement.SampleGrad(OceanSampler, uv1, gx, gy);
 						g = b.weight0 * OceanDerivatives.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanDerivatives.SampleGrad(OceanSampler, uv1, gx, gy);
-						m = b.weight0 * OceanSurface.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanSurface.SampleGrad(OceanSampler, uv1, gx, gy);
-						[branch] if (FoamEnabled())
-							foam = b.weight0 * OceanFoam.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanFoam.SampleGrad(OceanSampler, uv1, gx, gy);
+						s = b.weight0 * OceanSurface.SampleGrad(OceanSampler, uv0, gx, gy) + b.weight1 * OceanSurface.SampleGrad(OceanSampler, uv1, gx, gy);
 					}
 					else
 					{
-						d = OceanDisplacement.SampleGrad(OceanSampler, uv, gx, gy);
 						g = OceanDerivatives.SampleGrad(OceanSampler, uv, gx, gy);
-						m = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
-						// The breakers' white water is drawn with this foam (BreakerFoamDrawn): one read for the sea's foam and the
-						// breakers', the same everywhere. (Read through a stochastic lattice in the shore train's water only, the foam
-						// there had another look from the open sea's, with a seam where the train began.)
-						[branch] if (FoamEnabled())
-							foam = OceanFoam.SampleGrad(OceanSampler, uv, gx, gy);
+						s = OceanSurface.SampleGrad(OceanSampler, uv, gx, gy);
 					}
+					float4 d = float4(0.0, 0.0, s.x, s.y);
+					// The breakers' white water is drawn with this foam (BreakerFoamDrawn): one read for the sea's foam and the
+					// breakers', the same everywhere. Enable Foam off: none.
+					float foam = FoamEnabled() ? s.w : 0.0;
 					// Fading towards the mean: its share of the read, and the band's variance for the rest.
 					float kept = 1.0 - filtered;
 					float horizontal = vertical * steepnessScale;
@@ -2354,7 +2350,7 @@ namespace PBRWater
 					float seaShare = saturate(ctx.sea[c] / max(Tune2.x, 0.01));
 					sums.seaFoam += seaShare * (foam * kept + Tune1[c]);
 					sums.seaFoamWeight += seaShare;
-					float variance = max(m.x - g.x * g.x, 0.0) + max(m.y - g.y * g.y, 0.0);
+					float variance = max(s.z - dot(g.xy, g.xy), 0.0);
 					float texelsPerUV = rcp(Cascade0[c].x * Cascade0[c].w);
 					float minified = MinifiedShare(gx * texelsPerUV, gy * texelsPerUV);
 					sums.slopeVariance += (variance * minified * kept + Cascade1[c].w * filtered) * vertical * vertical;

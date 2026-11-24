@@ -83,7 +83,8 @@ void OceanSimulation::CreateTextures(uint32_t size)
 		spectrum[i] = CreateArray(size, Cascades * 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, true, i == 0 ? "PBRWater::OceanSpectrum0" : "PBRWater::OceanSpectrum1");
 	displacement = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanDisplacement");
 	derivatives = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanDerivatives");
-	surface = CreateArray(size, Cascades, DXGI_FORMAT_R16G16_FLOAT, mipCount, true, "PBRWater::OceanSurface");
+	// What the surface's pixels read besides the derivatives, in one fetch: height, shear, squared slope, foam (OceanAssembleCS).
+	surface = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanSurface");
 	// Same description as the displacement so the whole mip chain can be copied in one call.
 	previousDisplacement = CreateArray(size, Cascades, DXGI_FORMAT_R16G16B16A16_FLOAT, mipCount, true, "PBRWater::OceanPreviousDisplacement");
 	// Persistent, written and read by the assemble pass (typed UAV load: R32_FLOAT is the format every device supports).

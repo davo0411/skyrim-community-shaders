@@ -21,7 +21,7 @@ Texture2DArray<float4> Spatial : register(t0);  // after the inverse FFT, two sl
 
 RWTexture2DArray<float4> Displacement : register(u0);
 RWTexture2DArray<float4> Derivatives : register(u1);
-RWTexture2DArray<float2> Surface : register(u2);
+RWTexture2DArray<float4> Surface : register(u2);  // x height (units), y shear dDx/dy, z |slope|^2 (LEAN), w foam: the pixels' one read
 RWTexture2DArray<float> FoamField : register(u3);  // persistent: read, decayed and added to in place
 
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
@@ -43,10 +43,10 @@ RWTexture2DArray<float> FoamField : register(u3);  // persistent: read, decayed 
 
 	Displacement[id] = float4(displacement, shear);
 	Derivatives[id] = float4(slopes, compression);
-	Surface[id] = slopes * slopes;
 
 	// Jacobian of x -> x + D(x) from this cascade's own gradient (choppiness is already in the spectrum).
 	float steps = Time.w;  // frame time in 1/60 s: 0 while paused
+	float foamNow = FoamField[id];
 	[branch] if (steps > 0.0)
 	{
 		float jacobian = (1.0 + compression.x) * (1.0 + compression.y) - shear * shear;
@@ -56,5 +56,7 @@ RWTexture2DArray<float> FoamField : register(u3);  // persistent: read, decayed 
 		if (biasedJacobian > Foam.y)
 			foam += Foam.z * steps * biasedJacobian;
 		FoamField[id] = foam;
+		foamNow = foam;
 	}
+	Surface[id] = float4(displacement.z, shear, dot(slopes, slopes), foamNow);
 }
