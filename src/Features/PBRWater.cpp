@@ -3079,7 +3079,7 @@ ID3D11PixelShader* PBRWater::GetMaterialPixelShader()
 	const auto descriptor = cachedDrawPixelDescriptor | static_cast<uint32_t>(SC::WaterShaderFlags::DeferredMaterial);
 	// null while it compiles, or when it failed: this draw's pixel shader evaluates the waves itself
 	const auto* shader = globals::shaderCache->GetPixelShader(*cachedDrawShader, descriptor);
-	return shader ? shader->shader : nullptr;
+	return shader ? reinterpret_cast<ID3D11PixelShader*>(shader->shader) : nullptr;
 }
 
 bool PBRWater::DrawDeferredSurface()
