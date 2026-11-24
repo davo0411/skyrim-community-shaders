@@ -178,10 +178,9 @@ struct VS_OUTPUT
 	float4 NormalsScale : TEXCOORD8;
 
 #	if defined(PBR_WATER) && !defined(STENCIL)
-	float4 WaveParam : TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
+	float4 WaveParam : TEXCOORD9;      // xyz undisplaced camera-relative position, w 1 on a river's mesh
 	float2 SurfaceNoise : TEXCOORD10;  // x sediment patches (TurbidityPatches), y unused
 	float3 Barycentric : TEXCOORD11;
-	float2 FlowVelocity : TEXCOORD13;  // the river current (units/s, PBRWater::FlowVelocity), 0 on still water
 #	endif
 #	if defined(PBR_WATER)
 	float4 ShoreState : TEXCOORD12;  // x share of the surf simulation, y unused, z the waves without it (units above the still water), w still water level (camera-relative z; DisplaceSurface)
@@ -242,6 +241,14 @@ PBRW_VS_CBUFFER(PerGeometry, b2, b10)
 StructuredBuffer<float4> PBRWStencilInstances : register(t103);
 #		endif
 
+#		if defined(PBR_WATER) && defined(VSHADER)
+// 1 on a river's mesh, for the untessellated draws (PBRWater::SetupDraw); the tessellated mesh carries the bit per vertex.
+cbuffer PBRWaterRiverDraw : register(b8)
+{
+	float4 PBRWRiver;
+};
+#		endif
+
 #		if defined(PBR_WATER)
 #			include "PBRWater/VertexWaves.hlsli"
 
@@ -283,8 +290,7 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 		inputPosition.xyz += mul(worldToModel, waves.surface.current);
 		vsout.ShoreState = waves.surface.shore;
 #			if !defined(STENCIL)
-		vsout.WaveParam = float4(scrollWorldPos.xyz, waves.flowDamping);
-		vsout.FlowVelocity = waves.flowVelocity;
+		vsout.WaveParam = float4(scrollWorldPos.xyz, waves.river);
 #				if defined(PSHADER)
 		// The deferred surface's vertex program: the stencil pass recorded the noise (Deferred.hlsli).
 		vsout.SurfaceNoise = 0.0;
@@ -460,9 +466,9 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 #			if defined(PBR_WATER)
 	PBRW_PRECISE float4 scrollWorldPos = mul(World, float4(input.Position.xyz, 1.0));
 #				if defined(STENCIL)
-	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, spacing, true));
+	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, PBRWRiver.x, spacing, true));
 #				else
-	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, spacing, false));
+	return WaterVertexWith(input, PBRWater::EvaluateVertexWaves(scrollWorldPos.xyz, PBRWRiver.x, spacing, false));
 #				endif
 #			else
 	return WaterVertexWith(input);
@@ -496,8 +502,7 @@ VS_OUTPUT CachedWaterVertex(uint vertexID)
 	waves.surface.current = t.current;
 	waves.surface.previous = t.previous;
 	waves.surface.shore = t.shore;
-	waves.flowDamping = t.flowDamping;
-	waves.flowVelocity = t.flowVelocity;
+	waves.river = t.river;
 	VS_OUTPUT vsout = WaterVertexWith(v, waves);
 #			if defined(STENCIL)
 	// Whatever the stencil pass's own permutation reads of the mesh: the surface's may read more.
@@ -1695,7 +1700,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal = waterData.normal;
 
 #			if defined(PBR_WATER)
-	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.FlowVelocity, normal, waterData.detailVariance);
+	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, normal, waterData.detailVariance);
 	normal = pbrSurface.normal;
 	// A curling lip can turn its far side to the camera (seen from behind the wave, or where the lip passes through the
 	// water behind it). Shaded about a normal facing away, its reflection, sun and foam lighting turned odd along the crest:
@@ -2022,9 +2027,8 @@ PS_OUTPUT main(PS_INPUT input)
 #							endif
 
 	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
-	float pbrFlow = saturate((1.0 - input.WaveParam.w) / max(PBRWater::Foam1.w, 0.01));
 	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
-	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.breakStage, pbrFlow);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), 1.0, pbrSurface.breakStage);
 	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
 	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
 

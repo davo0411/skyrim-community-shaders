@@ -1,5 +1,6 @@
 #include "WaterMeshes.h"
 
+#include "Globals.h"
 #include "Utils/D3D.h"
 
 #include <DirectXPackedVector.h>
@@ -146,6 +147,14 @@ bool WaterMeshes::SameSource(const Source& a, const Source& b)
 	       std::memcmp(&a.world, &b.world, sizeof(RE::NiTransform)) == 0;
 }
 
+bool WaterMeshes::IsRiver(RE::BSGeometry& geometry)
+{
+	const auto prop = geometry.GetGeometryRuntimeData().shaderProperty.get();
+	if (!prop || prop->GetRTTI() != globals::rtti::BSWaterShaderPropertyRTTI.get())
+		return false;
+	return static_cast<RE::BSWaterShaderProperty*>(prop)->waterFlags.any(RE::BSWaterShaderProperty::WaterFlag::kEnableFlowmap);
+}
+
 bool WaterMeshes::MakeSource(RE::BSGeometry& geometry, Source& s)
 {
 	auto* triShape = geometry.AsTriShape();
@@ -156,6 +165,7 @@ bool WaterMeshes::MakeSource(RE::BSGeometry& geometry, Source& s)
 	s.rendererData = data.rendererData;
 	s.triangleCount = triShape->GetTrishapeRuntimeData().triangleCount;
 	s.vertexDesc = std::bit_cast<uint64_t>(data.vertexDesc);
+	s.river = IsRiver(geometry);
 	return s.triangleCount > 0 && s.triangleCount <= MaxMeshTriangles;
 }
 

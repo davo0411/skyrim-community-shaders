@@ -21,8 +21,6 @@
 //  - Terrain awareness: the water depth per texel is the still water level of the cell (CellLevels) minus the
 //    terrain height (PBR terrain texture t82). Dry texels hold 0 and shallow water damps the waves
 //    (depthMul), so ripples no longer propagate under beaches.
-//  - Flow: both leapfrog levels (and the silt) are advected semi-Lagrangian, sampled at p - dt * velocity from the
-//    worldspace flowmap, so wakes drift downstream on rivers.
 //  - Non-finite results are zeroed, so one bad value can never spread through the whole grid.
 //
 // A channel carries silt: feet dragging over the bed in shallow water kick sediment up into a
@@ -58,16 +56,12 @@ cbuffer RippleSimCB : register(b0)
 	int2 CellBase;        // absolute cell of CellLevels entry 0
 	float4 Terrain0;      // xy terrain uv scale, zw offset (PBRWater::Terrain0)
 	float4 Terrain1;      // x terrain z at texel value 0, y at 1, z enabled (water levels and terrain known), w unused
-	float4 Flow0;         // worldspace flowmap uv = absXY * xz + yw (x = 0: no flowmap)
-	float4 FlowParams;    // x current speed at full flow strength (units/s), yzw unused
 	float4 CellLevels[7]; // still water level (absolute z) of the 5 x 5 cells around the eye, at i + 5 j; < -1e8: no water
 };
 
 Texture2D<float4> PreviousState : register(t0);
 StructuredBuffer<RippleSource> Sources : register(t1);
 Texture2D<float> TerrainTexture : register(t2);
-Texture2D<float4> FlowMap : register(t3);
-SamplerState LinearClampSampler : register(s0);
 RWTexture2D<float4> CurrentState : register(u0);
 
 static const float CellSize = 4096.0;  // units: one exterior cell
@@ -83,29 +77,6 @@ float4 LoadState(int2 p)
 bool IsFinite(float x)
 {
 	return (asuint(x) & 0x7F800000u) != 0x7F800000u;
-}
-
-float4 Bilerp(float4 a, float4 b, float4 c, float4 d, float2 f)
-{
-	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
-}
-
-/**
- * Bilinear reads of the previous state at fractional texel `q` (texel centres at integers) and one texel either way along
- * each axis: `centre`, and the four neighbours' sum. The five reads share twelve texels, each loaded once.
- */
-void SampleStateCross(float2 q, out float4 centre, out float4 neighbours)
-{
-	float2 base = floor(q);
-	float2 f = q - base;
-	int2 i = int2(base);
-	float4 s00 = LoadState(i), s10 = LoadState(i + int2(1, 0)), s01 = LoadState(i + int2(0, 1)), s11 = LoadState(i + int2(1, 1));
-	float4 s20 = LoadState(i + int2(2, 0)), s21 = LoadState(i + int2(2, 1));
-	float4 sm0 = LoadState(i + int2(-1, 0)), sm1 = LoadState(i + int2(-1, 1));
-	float4 s02 = LoadState(i + int2(0, 2)), s12 = LoadState(i + int2(1, 2));
-	float4 s0m = LoadState(i + int2(0, -1)), s1m = LoadState(i + int2(1, -1));
-	centre = Bilerp(s00, s10, s01, s11, f);
-	neighbours = Bilerp(s10, s20, s11, s21, f) + Bilerp(sm0, s00, sm1, s01, f) + Bilerp(s01, s11, s02, s12, f) + Bilerp(s0m, s1m, s00, s10, f);
 }
 
 /// Water depth (units) at absolute `absXY`: the cell's still water level above the terrain. 1e6: deep or unknown.
@@ -143,21 +114,6 @@ float WaterDepth(float2 absXY)
 	return level - lerp(Terrain1.x, Terrain1.y, t);
 }
 
-/**
- * River current (units/s) at absolute `absXY` from Unified Water's worldspace flowmap, decoded like PBRWater::FlowVelocity
- * (the waves are carried by the same current): the water travels along -(rg * 2 - 1), at FlowParams.x at full strength b * a.
- */
-float2 FlowVelocity(float2 absXY)
-{
-	if (Flow0.x == 0.0)
-		return 0.0;
-	float4 flow = FlowMap.SampleLevel(LinearClampSampler, absXY * Flow0.xz + Flow0.yw, 0);
-	float2 direction = -(flow.xy * 2.0 - 1.0);
-	float lengthSq = dot(direction, direction);
-	direction = lengthSq > 1e-4 ? direction * rsqrt(lengthSq) : 0.0;
-	return direction * (saturate(flow.z * flow.w) * FlowParams.x);
-}
-
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	if (any(id.xy >= GridSize))
 		return;
@@ -172,20 +128,8 @@ float2 FlowVelocity(float2 absXY)
 		return;
 	}
 
-	// Semi-Lagrangian advection by the river current: every sample below is taken upstream, which carries both
-	// leapfrog levels (and the silt) downstream. Texel centres sit at integer coordinates of the previous grid.
-	float2 upstream = float2(p) - FlowVelocity(absXY) * (StepTime / TexelSize);
-	float4 centre;
-	float4 neighbours;
-	[branch] if (any(upstream != float2(p)))
-	{
-		SampleStateCross(upstream, centre, neighbours);
-	}
-	else
-	{
-		centre = LoadState(p);
-		neighbours = LoadState(p + int2(1, 0)) + LoadState(p - int2(1, 0)) + LoadState(p + int2(0, 1)) + LoadState(p - int2(0, 1));
-	}
+	float4 centre = LoadState(p);
+	float4 neighbours = LoadState(p + int2(1, 0)) + LoadState(p - int2(1, 0)) + LoadState(p + int2(0, 1)) + LoadState(p - int2(0, 1));
 	float h = centre.x;
 	float hPrev = centre.y;
 	float lap = neighbours.x - 4.0 * h;

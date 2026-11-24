@@ -216,7 +216,7 @@ float SeaJacobian(float3 positionWS, PBRWater::WaveContext ctx)
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, fade, false);
 	// Only the open sea's crests: the shore's breakers throw their spray from the surf's grid, and on rivers the sea's
 	// pattern is carried along the current (not sampled here).
-	if (ctx.elevation >= 0.0 || ctx.train >= 1.0 || any(ctx.flow))
+	if (ctx.elevation >= 0.0 || ctx.train >= 1.0)
 		return;
 	float bias = PBRWater::Foam1.x;
 	float whitecap = saturate((bias - SeaJacobian(positionWS, ctx)) / max(0.5 * bias, 0.05)) * (1.0 - ctx.train);

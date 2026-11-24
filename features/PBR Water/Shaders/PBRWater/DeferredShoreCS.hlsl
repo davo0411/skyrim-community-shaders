@@ -26,7 +26,6 @@ cbuffer DeferredShoreCB : register(b0)
 Texture2D<uint> Tags : register(t0);
 Texture2D<float4> Waves : register(t1);
 Texture2D<float> SceneDepth : register(t2);
-Texture2D<float4> WorldFlowMap : register(t3);
 RWTexture2D<uint4> Out0 : register(u0);
 RWTexture2D<uint4> Out1 : register(u1);
 RWTexture2D<uint4> Out2 : register(u2);
@@ -89,8 +88,6 @@ uint PackUnorm4(float4 v)
 	float2 centre = px + 0.5;
 	float3 displaced = Unproject(centre, depth);
 	float3 undisplaced = displaced - Waves.Load(int3(px, 0)).xyz;
-	float2 flowVelocity;
-	float flowDamping = PBRWater::FlowDampingAt(WorldFlowMap, PBRWater::LinearClampSampler, undisplaced.xy + FrameBuffer::CameraPosAdjust.xy, flowVelocity);
 
 	// The pixel's footprint on the still water (ShadeSurface's, from the derivatives of the undisplaced position there):
 	// the rays through the neighbouring pixels met with the plane of this point.
@@ -107,8 +104,7 @@ uint PackUnorm4(float4 v)
 	}
 	else footprint = length(displaced) * max(length(rayX - ray), length(rayY - ray)) / max(abs(ray.z), 0.02);
 
-	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(undisplaced, flowDamping, false);
-	ctx.flow = flowVelocity;
+	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(undisplaced, 1.0, false);
 	PBRWater::ShoreTrain t = PBRWater::ShoreWaves(undisplaced, ctx, footprint, false, true);
 
 	float distance = max(length(displaced), 1.0);

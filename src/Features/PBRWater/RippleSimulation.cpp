@@ -184,11 +184,6 @@ void RippleSimulation::Update(float cameraX, float cameraY, float dt, const Sett
 		for (size_t i = 0; i < levels.level.size(); ++i)
 			base.cellLevels[i] = levels.level[i];
 	}
-	// Flow: the current the waves ride (PBRWater::FlowVelocity) carries the ripples too.
-	if (environment.flowmap && environment.flow0.x != 0.0f && environment.sampler) {
-		base.flow0 = environment.flow0;
-		base.flowParams = { std::max(settings.flowSpeed, 0.0f), 0.0f, 0.0f, 0.0f };
-	}
 	base.damping = std::pow(0.5f, FixedStep / std::max(settings.halfLife, 0.05f));
 	base.siltDecay = std::pow(0.5f, FixedStep / std::max(settings.siltHalfLife, 0.5f));
 	base.siltDiffusion = std::clamp(settings.siltSpread, 0.0f, 1.0f);
@@ -231,25 +226,20 @@ void RippleSimulation::Step(int32_t shiftX, int32_t shiftY, uint32_t numSources,
 	simCB->Update(cb);
 
 	const uint32_t next = current ^ 1;
-	ID3D11ShaderResourceView* srvs[4] = { state[current]->srv.get(), sourceBuffer->SRV(0),
-		cb.terrain1.z > 0.5f ? environment.terrain : nullptr, cb.flow0.x != 0.0f ? environment.flowmap : nullptr };
-	ID3D11SamplerState* sampler = environment.sampler;
+	ID3D11ShaderResourceView* srvs[3] = { state[current]->srv.get(), sourceBuffer->SRV(0), cb.terrain1.z > 0.5f ? environment.terrain : nullptr };
 	ID3D11UnorderedAccessView* uav = state[next]->uav.get();
 	ID3D11Buffer* cbs[1] = { simCB->CB() };
 
 	context->CSSetShader(simCS.get(), nullptr, 0);
-	context->CSSetShaderResources(0, 4, srvs);
-	context->CSSetSamplers(0, 1, &sampler);
+	context->CSSetShaderResources(0, 3, srvs);
 	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	context->CSSetConstantBuffers(0, 1, cbs);
 	context->Dispatch(GridSize / 8, GridSize / 8, 1);
 
-	ID3D11ShaderResourceView* nullSrvs[4] = {};
-	ID3D11SamplerState* nullSampler = nullptr;
+	ID3D11ShaderResourceView* nullSrvs[3] = {};
 	ID3D11UnorderedAccessView* nullUav = nullptr;
 	ID3D11Buffer* nullCb = nullptr;
-	context->CSSetShaderResources(0, 4, nullSrvs);
-	context->CSSetSamplers(0, 1, &nullSampler);
+	context->CSSetShaderResources(0, 3, nullSrvs);
 	context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 	context->CSSetConstantBuffers(0, 1, &nullCb);
 	context->CSSetShader(nullptr, nullptr, 0);

@@ -14,8 +14,7 @@
 //
 // The record is what the vertex program cannot rebuild: the waves' displacement, the surface noise (procedural beyond its
 // bake), the vertex alpha and, for meshes whose texture coordinates are not one plane over the mesh, those. The displaced
-// position comes from the depth buffer, the undisplaced one from that minus the displacement, the river current from the
-// flowmap there. Writing it is bandwidth, so it is small: 14 bytes, 22 with texture coordinates.
+// position comes from the depth buffer, the undisplaced one from that minus the displacement. Writing it is bandwidth, so it is small: 14 bytes, 22 with texture coordinates.
 //
 // A record is this frame's where the stencil pass's depth is still what the depth buffer holds: nothing draws depth
 // between the two passes, and a nearer untessellated water draw, which writes no record, leaves another depth there. The
@@ -89,7 +88,6 @@ namespace PBRWaterDeferred
 	Texture2D<float2> Noise : register(t40);
 	Texture2D<float2> TexCoords : register(t41);
 	Texture2D<float> SceneDepth : register(t42);
-	Texture2D<float4> WorldFlowMap : register(t43);  // the vertex stage's flowmap (VertexWaves.hlsli)
 
 	/// Whether a pixel holds a record, and its tag's fields: the record's waves and noise are loaded once a pixel is chosen.
 	struct Pixel
@@ -203,8 +201,7 @@ namespace PBRWaterDeferred
 		waves.surface.current = recordWaves.xyz;
 		waves.surface.previous = 0.0;
 		waves.surface.shore = float4(0.0, 0.0, recordWaves.w, undisplaced.z);
-		// The river current per pixel, as the vertex program reads it (EvaluateVertexWaves).
-		waves.flowDamping = PBRWater::FlowDampingAt(WorldFlowMap, PBRWater::LinearClampSampler, undisplaced.xy + FrameBuffer::CameraPosAdjust.xy, waves.flowVelocity);
+		waves.river = 0.0;  // river meshes are never recorded (PBRWater::RestoreDraw)
 		VS_OUTPUT o = WaterVertexWith(v, waves);
 		o.SurfaceNoise = float2(recordNoise.x, 0.35 + 1.3 * recordNoise.y);
 		o.HPosition = float4(input.HPosition.xy, p.depth, input.HPosition.w);

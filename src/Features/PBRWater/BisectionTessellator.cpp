@@ -323,7 +323,8 @@ void BisectionTessellator::Build(const FrameParams& params, WaterMeshes& meshes)
 			int order[3] = { 0, 1, 2 };
 			std::sort(order, order + 3, [&](int a, int b) { return q[a] < q[b] || (!(q[b] < q[a]) && a < b); });
 			root.order = static_cast<uint32_t>(order[0] | (order[1] << 2) | (order[2] << 4));
-			root.neighbours[0] = root.neighbours[1] = root.neighbours[2] = root.neighbours[3] = None;
+			root.neighbours[0] = root.neighbours[1] = root.neighbours[2] = None;
+			root.neighbours[3] = mesh.source.river ? 1u : 0u;
 			rootData.push_back(root);
 			quantized.push_back(q);
 		}

@@ -520,17 +520,16 @@ float2 EvaluateVertex(uint v)
 
 	// Filtered to the spacing wanted at this point (not the bisector's own), so a split only adds samples of a surface
 	// already smoothed to them: nothing pops by more than the sampling changes.
-	PBRWater::VertexWaves waves = PBRWater::EvaluateVertexWaves(world, PBRWaterBisection::TessellationSpacing(world), true);
+	PBRWater::VertexWaves waves = PBRWater::EvaluateVertexWaves(world, (float)r.neighbours.w, PBRWaterBisection::TessellationSpacing(world), true);
 
 	PBRWaterTess::Vertex o;
 	o.position = model;
-	o.flowDamping = waves.flowDamping;
+	o.river = waves.river;
 	o.current = waves.surface.current;
 	o.previous = waves.surface.previous;
 	o.texCoordX = uv.x;
 	o.texCoordY = uv.y;
 	o.shore = waves.surface.shore;
-	o.flowVelocity = waves.flowVelocity;
 	o.color = uint2(f32tof16(color.x) | (f32tof16(color.y) << 16), f32tof16(color.z) | (f32tof16(color.w) << 16));
 	Vertices[v] = o;
 	return float2(length(o.current.xy), abs(o.current.z));

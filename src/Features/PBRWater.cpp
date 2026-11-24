@@ -71,7 +71,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		TurbidityPatchiness,
 		TurbidityPatchSize,
 		ShoreResuspension,
-		RiverTurbidity,
 		StormTurbidity,
 		WadingSilt,
 		SedimentLayerHeight,
@@ -99,11 +98,6 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		RippleHalfLife,
 		RippleHorizDisplace,
 		RippleDisplaceClamp,
-		RiverCurrentSpeed,
-		RiverWaveDamping,
-		FlowPeriodScale,
-		FlowPeriodMin,
-		FlowPeriodMax,
 		BuoyancyStrength,
 		FloatingRange,
 		MaxFloatingSize,
@@ -206,7 +200,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		TurbidityPatchiness,
 		TurbidityPatchSize,
 		ShoreResuspension,
-		RiverTurbidity,
 		StormTurbidity,
 		WadingSilt,
 		SedimentLayerHeight,
@@ -234,11 +227,6 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		RippleHalfLife,
 		RippleHorizDisplace,
 		RippleDisplaceClamp,
-		RiverCurrentSpeed,
-		RiverWaveDamping,
-		FlowPeriodScale,
-		FlowPeriodMin,
-		FlowPeriodMax,
 		BuoyancyStrength,
 		FloatingRange,
 		MaxFloatingSize,
@@ -420,7 +408,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.TurbidityPatchiness, 0.0f, 1.0f, d.TurbidityPatchiness);
 	clamp(s.TurbidityPatchSize, 1.0f, 100000.0f, d.TurbidityPatchSize);
 	clamp(s.ShoreResuspension, 0.0f, Huge, d.ShoreResuspension);
-	clamp(s.RiverTurbidity, 0.0f, Huge, d.RiverTurbidity);
 	clamp(s.StormTurbidity, 0.0f, Huge, d.StormTurbidity);
 	clamp(s.WadingSilt, 0.0f, Huge, d.WadingSilt);
 	clamp(s.SedimentLayerHeight, 0.01f, 1000.0f, d.SedimentLayerHeight);
@@ -452,11 +439,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.RippleHalfLife, 0.05f, Huge, d.RippleHalfLife);
 	clamp(s.RippleHorizDisplace, 0.0f, 100.0f, d.RippleHorizDisplace);
 	clamp(s.RippleDisplaceClamp, 0.0f, 1.0f, d.RippleDisplaceClamp);
-	clamp(s.RiverCurrentSpeed, 0.0f, 100.0f, d.RiverCurrentSpeed);
-	clamp(s.RiverWaveDamping, 0.0f, 1.0f, d.RiverWaveDamping);
-	clamp(s.FlowPeriodScale, 0.1f, 100.0f, d.FlowPeriodScale);
-	clamp(s.FlowPeriodMin, 0.25f, 1024.0f, d.FlowPeriodMin);
-	clamp(s.FlowPeriodMax, 0.25f, 4096.0f, d.FlowPeriodMax);
 	clamp(s.BuoyancyStrength, 0.0f, Huge, d.BuoyancyStrength);
 	clamp(s.FloatingRange, 1.0f, 10000.0f, d.FloatingRange);
 	clamp(s.MaxFloatingSize, 1.0f, 10000.0f, d.MaxFloatingSize);
@@ -472,7 +454,6 @@ void PBRWater::SanitizeSettings()
 	clamp(s.SedimentColor.z, 0.0f, Huge, d.SedimentColor.z);
 	// Ranges whose ends depend on each other.
 	s.ShoreLongestPeriod = std::max(s.ShoreLongestPeriod, s.ShoreShortestPeriod);
-	s.FlowPeriodMax = std::max(s.FlowPeriodMax, s.FlowPeriodMin);
 	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
 	s.SprayQuality = std::clamp(s.SprayQuality, 0, 2);
@@ -773,7 +754,7 @@ void PBRWater::DrawSettings()
 	if (ImGui::BeginTabItem(T(TKEY("tab_clarity"), "Water Clarity"))) {
 		IdScope id("clarity");
 		Util::CheckboxTip(T(TKEY("enable_clarity"), "Water Clarity"), &s.EnableClarity,
-			T(TKEY("enable_clarity_tooltip"), "Suspended sediment: drifting plumes, stirred-up shallows, river and storm silt, wading silt. Off: the water is as clear as its form's colours make it, and the sediment is not evaluated."));
+			T(TKEY("enable_clarity_tooltip"), "Suspended sediment: drifting plumes, stirred-up shallows, storm silt, wading silt. Off: the water is as clear as its form's colours make it, and the sediment is not evaluated."));
 		Util::SliderFloatTip(T(TKEY("visibility"), "Water Visibility"), &s.Visibility, 0.05f, 5.0f, "%.2f",
 			T(TKEY("visibility_tooltip"), "Scales the water form's visibility distance. Absorption colour comes from the water form's shallow colour. Default 1."));
 		Util::SliderFloatTip(T(TKEY("turbidity"), "Turbidity"), &s.Turbidity, 0.0f, 5.0f, "%.2f",
@@ -787,8 +768,6 @@ void PBRWater::DrawSettings()
 			T(TKEY("turbidity_patch_size_tooltip"), "Size of the sediment plumes. Default 150 m."));
 		Util::SliderFloatTip(T(TKEY("shore_resuspension"), "Shallows Stirring"), &s.ShoreResuspension, 0.0f, 3.0f, "%.2f",
 			T(TKEY("shore_resuspension_tooltip"), "Sediment stirred up by the waves in the shallows and the surf. Default 1."));
-		Util::SliderFloatTip(T(TKEY("river_turbidity"), "River Silt"), &s.RiverTurbidity, 0.0f, 3.0f, "%.2f",
-			T(TKEY("river_turbidity_tooltip"), "Silt carried by river currents. Default 0.8."));
 		Util::SliderFloatTip(T(TKEY("storm_turbidity"), "Storm Silt"), &s.StormTurbidity, 0.0f, 3.0f, "%.2f",
 			T(TKEY("storm_turbidity_tooltip"), "Extra sediment in strong wind and rain. Default 1."));
 		Util::SliderFloatTip(T(TKEY("wading_silt"), "Wading Silt"), &s.WadingSilt, 0.0f, 3.0f, "%.2f",
@@ -863,7 +842,7 @@ void PBRWater::DrawSettings()
 		ImGui::EndTabItem();
 	}
 
-	if (ImGui::BeginTabItem(T(TKEY("tab_ripples"), "Ripples & Rivers"))) {
+	if (ImGui::BeginTabItem(T(TKEY("tab_ripples"), "Ripples"))) {
 		IdScope id("ripples");
 		Util::CheckboxTip(T(TKEY("enable_ripples"), "Interactive Ripples"), &s.EnableRipples,
 			T(TKEY("enable_ripples_tooltip"), "Simulates ripples and wakes from every actor and object in the water. Replaces the vanilla wading mesh."));
@@ -883,19 +862,6 @@ void PBRWater::DrawSettings()
 				T(TKEY("ripple_displace_clamp_tooltip"), "Largest sideways displacement, in texels of the ripple simulation. Default 0.3."));
 		}
 
-		ImGui::SeparatorText(T(TKEY("rivers"), "Rivers"));
-		Util::SliderFloatTip(T(TKEY("river_current_speed"), "River Current Speed"), &s.RiverCurrentSpeed, 0.3f, 4.0f, "%.2f m/s",
-			T(TKEY("river_current_speed_tooltip"), "Speed of the current at full flow strength. It carries the ripples and the waves downstream. Default 1.5 m/s."));
-		Util::SliderFloatTip(T(TKEY("river_wave_damping"), "River Wave Damping"), &s.RiverWaveDamping, 0.0f, 1.0f, "%.2f",
-			T(TKEY("river_wave_damping_tooltip"), "How much running water flattens the waves. Default 0.5."));
-		if (ImGui::CollapsingHeader(T(TKEY("rivers_advanced"), "Rivers Advanced"))) {
-			Util::SliderFloatTip(T(TKEY("flow_period_scale"), "Flow Period"), &s.FlowPeriodScale, 1.0f, 8.0f, "%.1f",
-				T(TKEY("flow_period_scale_tooltip"), "Waves on a river are carried along by cross-fading two copies. This sets how long each copy runs per metre of a cascade's texel: longer means fewer cross-fades but more stretching. Default 3."));
-			Util::SliderFloatTip(T(TKEY("flow_period_min"), "Shortest Flow Period"), &s.FlowPeriodMin, 1.0f, 4.0f, "%.1f s",
-				T(TKEY("flow_period_min_tooltip"), "The shortest a flow period gets, whatever the texel size. Default 1 s."));
-			Util::SliderFloatTip(T(TKEY("flow_period_max"), "Longest Flow Period"), &s.FlowPeriodMax, 4.0f, 64.0f, "%.0f s",
-				T(TKEY("flow_period_max_tooltip"), "The longest a flow period gets. Default 16 s."));
-		}
 		ImGui::EndTabItem();
 	}
 
@@ -1082,6 +1048,10 @@ void PBRWater::SetupResources()
 		}
 	}
 	flatDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::FlatDrawConstants");
+	for (uint32_t river = 0; river < 2; ++river) {
+		riverDrawBuffer[river] = std::make_unique<ConstantBuffer>(ConstantBufferDesc<float4>(), "PBRWater::RiverDrawConstants");
+		riverDrawBuffer[river]->Update(float4{ static_cast<float>(river), 0.0f, 0.0f, 0.0f });
+	}
 	offscreenDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::OffscreenDrawConstants");
 	spacingDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SpacingDrawConstants");
 	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
@@ -1438,19 +1408,13 @@ void PBRWater::Prepass()
 		rippleSettings.extent = settings.RippleExtent * UnitsPerMetre;
 		rippleSettings.halfLife = settings.RippleHalfLife;
 		rippleSettings.siltHalfLife = settings.SiltHalfLife;
-		rippleSettings.flowSpeed = settings.RiverCurrentSpeed * UnitsPerMetre;
-		// The bed and the flowmap as uploaded for the last frame (this runs before UpdateFrameConstants).
+		// The bed as uploaded for the last frame (this runs before UpdateFrameConstants).
 		RippleSimulation::Environment rippleEnvironment;
 		if (frameData.Terrain1.z > 0.5f && terrainTexture) {
 			rippleEnvironment.terrain = terrainTexture->srv.get();
 			rippleEnvironment.terrain0 = frameData.Terrain0;
 			rippleEnvironment.terrain1 = frameData.Terrain1;
 		}
-		if (frameData.Flow0.x != 0.0f && worldFlowmap) {
-			rippleEnvironment.flowmap = worldFlowmap;
-			rippleEnvironment.flow0 = frameData.Flow0;
-		}
-		rippleEnvironment.sampler = linearClampSampler.get();
 		ripples.Update(cameraPos.x, cameraPos.y, dt, rippleSettings, rippleEnvironment);
 	} else {
 		PBRWaterProfiling::Skipped("PBRWater::RippleStep");
@@ -1493,7 +1457,7 @@ void PBRWater::UpdateTessellation()
 	}
 
 	// The vertices are evaluated as the tessellated draws evaluate them: this frame's constants (tessellated: Tess0.x
-	// set, so the breakers curl), textures, the surf's state and the river flowmap.
+	// set, so the breakers curl), textures, and the surf's state.
 	auto context = globals::d3d::context;
 	GpuData d = frameData;
 	d.Tess0.x = 1.0f;
@@ -1507,12 +1471,9 @@ void PBRWater::UpdateTessellation()
 	ID3D11ShaderResourceView* srvs[WaterSRVCount];
 	GatherWaterSRVs(d, srvs);
 	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, srvs);
-	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
-	context->CSSetShaderResources(8, 1, &flowmap);
 	ID3D11SamplerState* linearClamp = linearClampSampler.get();
 	ID3D11SamplerState* samplers[2] = { linearClamp, oceanSampler.get() };
 	context->CSSetSamplers(WaterSamplerBase, 2, samplers);
-	context->CSSetSamplers(8, 1, &linearClamp);
 
 	BisectionTessellator::FrameParams p;
 	p.frame = globals::state->frameCount;
@@ -1959,9 +1920,7 @@ void PBRWater::DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height
 	context->VSGetConstantBuffers(0, 1, &savedCB0);
 	context->VSGetConstantBuffers(7, 1, &savedCB7);
 	context->VSGetConstantBuffers(12, 1, &savedCB12);
-	ID3D11ShaderResourceView* savedFlowmap = nullptr;
 	ID3D11ShaderResourceView* savedSRVs[WaterSRVCount] = {};
-	context->VSGetShaderResources(8, 1, &savedFlowmap);
 	context->VSGetShaderResources(WaterSRVBase, WaterSRVCount, savedSRVs);
 	ID3D11SamplerState* savedSamplers[2] = {};
 	context->VSGetSamplers(WaterSamplerBase, 2, savedSamplers);
@@ -2000,8 +1959,6 @@ void PBRWater::DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height
 	ID3D11ShaderResourceView* srvs[WaterSRVCount];
 	GatherWaterSRVs(d, srvs);
 	context->VSSetShaderResources(WaterSRVBase, WaterSRVCount, srvs);
-	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
-	context->VSSetShaderResources(8, 1, &flowmap);
 	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
 	context->VSSetSamplers(WaterSamplerBase, 2, samplers);
 
@@ -2024,7 +1981,6 @@ void PBRWater::DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height
 	context->VSSetConstantBuffers(0, 1, &savedCB0);
 	context->VSSetConstantBuffers(7, 1, &savedCB7);
 	context->VSSetConstantBuffers(12, 1, &savedCB12);
-	context->VSSetShaderResources(8, 1, &savedFlowmap);
 	context->VSSetShaderResources(WaterSRVBase, WaterSRVCount, savedSRVs);
 	context->VSSetSamplers(WaterSamplerBase, 2, savedSamplers);
 	auto release = [](auto*& p) {
@@ -2035,7 +1991,6 @@ void PBRWater::DrawWaveGrid(ID3D11DepthStencilView* dsv, UINT width, UINT height
 	release(savedCB0);
 	release(savedCB7);
 	release(savedCB12);
-	release(savedFlowmap);
 	for (auto*& srv : savedSRVs)
 		release(srv);
 	for (auto*& sampler : savedSamplers)
@@ -2242,12 +2197,12 @@ void PBRWater::UpdateFrameConstants()
 	d.Light1 = { settings.Visibility, settings.EnableFoam ? 1.0f : 0.0f, settings.RefractionDistortion, settings.EnablePointLightSpecular ? settings.PointLightSpecular : 0.0f };
 	// The open sea's foam test, also applied to the shore waves' crests and folds (PBRWater::EvaluateWavesFiltered); z the
 	// same Amount and Coverage as a gain on the shore's foam coverages, which have no Jacobian (1 at the defaults).
-	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, settings.FoamAmount * std::max(settings.FoamBias, 0.0f) / 0.85f, settings.RiverWaveDamping };
+	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, settings.FoamAmount * std::max(settings.FoamBias, 0.0f) / 0.85f, 0.0f };
 
 	// Water clarity and the light in the water.
 	d.Clarity0 = { settings.SedimentDensity / UnitsPerMetre, settings.Turbidity, settings.TurbidityPatchiness, settings.TurbidityPatchSize * UnitsPerMetre };
 	d.Clarity1 = { settings.SedimentColor.x, settings.SedimentColor.y, settings.SedimentColor.z, settings.ShoreResuspension };
-	d.Clarity2 = { settings.RiverTurbidity, weatherTurbidity.load(std::memory_order_acquire), settings.EnableRipples ? settings.WadingSilt : 0.0f, settings.SedimentLayerHeight * UnitsPerMetre };
+	d.Clarity2 = { 0.0f, weatherTurbidity.load(std::memory_order_acquire), settings.EnableRipples ? settings.WadingSilt : 0.0f, settings.SedimentLayerHeight * UnitsPerMetre };
 	// Sediment plumes drift and reshape over hours; a daily wrap keeps their coordinates precise.
 	d.Optics0 = { settings.ScatteringAnisotropy, settings.DownwellingAttenuation, std::fmod(globals::state->timer, 86400.0f), (snap && snap->ocean) ? snap->ocean->significantHeight : 0.0f };
 
@@ -2273,19 +2228,13 @@ void PBRWater::UpdateFrameConstants()
 	const bool anyWaves = d.Params0.x > 0.5f || d.Shore0.x > 0.5f || d.Ripple0.w > 0.5f;
 	d.Surface1 = { anyWaves ? (settings.EnableWaterline ? 2.0f : 1.0f) : 0.0f, settings.EnableClarity ? 1.0f : 0.0f, settings.FetchScale, settings.VanillaNormalMaps ? 0.0f : 1.0f };
 
-	// The artistic scales the shaders read (PBRWater.hlsli Tune0..Tune5).
-	d.Tune0 = { settings.RiverCurrentSpeed, settings.FlowPeriodScale, settings.FlowPeriodMin, settings.FlowPeriodMax };
+	// The artistic scales the shaders read (PBRWater.hlsli Tune1..Tune5).
 	d.Tune1 = { settings.FoamOffset0, settings.FoamOffset1, settings.FoamOffset2, settings.FoamOffset3 };
 	d.Tune2 = { settings.FoamCascadeWeightFull, settings.FoamDepthFalloff, settings.FoamFadeDistance, settings.FoamRoughnessModifier };
 	d.Tune3 = { settings.RippleHorizDisplace, settings.RippleDisplaceClamp, settings.ShoreTrainCycles, settings.ShoreResidualFoam };
 	d.Tune4 = { settings.ShoreWaveVariation, PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread), settings.DetailNormalCalm, settings.DetailNormalGale };
 	d.Tune5 = { settings.PointLightEmitterRadius, settings.FoamFeather, settings.FoamBubbleSize, settings.ShoreFoamLifetime };
 	d.Swash1 = { settings.SwashChurnHeight * UnitsPerMetre, settings.SwashChurnDepth, settings.SwashChurnSize * UnitsPerMetre, settings.SwashChurnSpeed };
-
-	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
-	worldFlowmap = nullptr;
-	if (globals::features::unifiedWater.GetWorldFlowmap(worldFlowmap, d.Flow0) && !worldFlowmap)
-		d.Flow0 = {};
 
 	frameData = d;
 }
@@ -2419,6 +2368,17 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// pending updates for this draw. RestoreDraw() marks them again so the next draw gets the game's.
 	shadow.PSSamplerModifiedBits &= ~(3u << WaterSamplerBase);
 
+	// A river's untessellated mesh says so to the vertex program (Water.hlsl PBRWRiver; the tessellated one carries the bit
+	// in each vertex); it never takes the deferred surface (RestoreDraw).
+	const bool river = hasWaves && WaterMeshes::IsRiver(*pass->geometry);
+	if (!cached) {
+		ID3D11Buffer* riverCb = riverDrawBuffer[river ? 1 : 0]->CB();
+		if (riverCb != boundRiverCb) {
+			context->VSSetConstantBuffers(8, 1, &riverCb);
+			boundRiverCb = riverCb;
+		}
+	}
+	cachedDrawRiver = river;
 	cachedDrawPending = cached;
 	cachedDrawStart = cachedStart;
 	cachedDrawTechnique = technique;
@@ -2483,19 +2443,16 @@ void PBRWater::BindDrawResources()
 	// the t110-t127 range, Lighting uses s12-s13).
 	ID3D11SamplerState* linearClamp = linearClampSampler.get();
 	ID3D11SamplerState* samplers[2] = { linearClamp, oceanSampler.get() };
-	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
 	context->VSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
 	context->PSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
 	context->VSSetSamplers(WaterSamplerBase, 2, samplers);
 	context->PSSetSamplers(WaterSamplerBase, 2, samplers);
-	// The vertex program reads the worldspace flowmap to calm waves on rivers.
-	context->VSSetShaderResources(8, 1, &flowmap);
-	context->VSSetSamplers(8, 1, &linearClamp);
 	// The waves' heightfield is the pixel stage's alone, in a slot nothing else uses.
 	ID3D11ShaderResourceView* heightfield = d.SunMap0.w > 0.5f && sunMapTexture ? sunMapTexture->srv.get() : nullptr;
 	context->PSSetShaderResources(WaveHeightfieldSlot, 1, &heightfield);
 	boundVertexCb = nullptr;
 	boundPixelCb = nullptr;
+	boundRiverCb = nullptr;
 }
 
 void PBRWater::BeginDrawBatch(uint32_t technique)
@@ -2558,7 +2515,7 @@ void PBRWater::RestoreDraw()
 		// The engine's draw rasterised nothing (the vertex shader's culling mode): the compute mesh, with all of the
 		// draw's state, the vertex shader in its compute mode. With the deferred surface the stencil pass also records its
 		// pixels, and the surface and point light passes shade those instead of drawing the triangles again.
-		const bool deferred = settings.DeferredSurface && settings.WireframeMode == 0;
+		const bool deferred = settings.DeferredSurface && settings.WireframeMode == 0 && !cachedDrawRiver;
 		if (deferred && IsStencilTechnique(cachedDrawTechnique))
 			DrawRecordedStencil();
 		else if (!(deferred && cachedDrawTechnique < 8 && DrawDeferredSurface()))
@@ -2838,7 +2795,7 @@ void PBRWater::EndDeferredBatch()
 	}
 	if (batch.shading) {
 		ID3D11ShaderResourceView* nullSrvs[6] = {};
-		context->PSSetShaderResources(38, 6, nullSrvs);
+		context->PSSetShaderResources(38, 5, nullSrvs);
 		context->PSSetShaderResources(46, 3, nullSrvs);
 		context->VSSetShaderResources(101, 1, nullSrvs);
 		ID3D11Buffer* nullCbs[3] = {};
@@ -2959,7 +2916,7 @@ void PBRWater::ClassifyDeferredTiles()
 	}
 }
 
-void PBRWater::BakeDeferredShore(ID3D11ShaderResourceView* depthSRV, ID3D11ShaderResourceView* flowmap)
+void PBRWater::BakeDeferredShore(ID3D11ShaderResourceView* depthSRV)
 {
 	PBRWaterProfiling::Scope pass("PBRWater::DeferredShore");
 	auto context = globals::d3d::context;
@@ -2982,15 +2939,15 @@ void PBRWater::BakeDeferredShore(ID3D11ShaderResourceView* depthSRV, ID3D11Shade
 	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
 	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
 	context->CSSetSamplers(WaterSamplerBase, 2, samplers);
-	ID3D11ShaderResourceView* srvs[4] = { deferredTags->srv.get(), deferredWaves->srv.get(), depthSRV, flowmap };
-	context->CSSetShaderResources(0, 4, srvs);
+	ID3D11ShaderResourceView* srvs[3] = { deferredTags->srv.get(), deferredWaves->srv.get(), depthSRV };
+	context->CSSetShaderResources(0, 3, srvs);
 	ID3D11UnorderedAccessView* uavs[3] = { deferredShore[0]->uav.get(), deferredShore[1]->uav.get(), deferredShore[2]->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
 	context->CSSetShader(deferredShoreCS.get(), nullptr, 0);
 	context->Dispatch((shoreData.halfWidth + 7) / 8, (shoreData.halfHeight + 7) / 8, 1);
 
 	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
-	context->CSSetShaderResources(0, 4, nullSrvs);
+	context->CSSetShaderResources(0, 3, nullSrvs);
 	context->CSSetShaderResources(WaterSRVBase, WaterSRVCount, nullSrvs);
 	ID3D11UnorderedAccessView* nullUavs[3] = {};
 	context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
@@ -3045,11 +3002,10 @@ bool PBRWater::DrawDeferredSurface()
 		// Listed once a frame, with the depth bound read-only (DeferredTilesCS reads it to find the distant tiles).
 		if (deferredTilesFrame != frame)
 			ClassifyDeferredTiles();
-		ID3D11ShaderResourceView* flowmap = frameData.Flow0.x != 0.0f ? worldFlowmap : nullptr;
 		if (deferredShoreFrame != frame && deferredShoreCS && frameData.Shore0.x > 0.5f)
-			BakeDeferredShore(depth.depthSRV, flowmap);
-		ID3D11ShaderResourceView* srvs[6] = { deferredTags->srv.get(), deferredWaves->srv.get(), deferredNoise->srv.get(), deferredTexCoords->srv.get(), depth.depthSRV, flowmap };
-		context->PSSetShaderResources(38, 6, srvs);
+			BakeDeferredShore(depth.depthSRV);
+		ID3D11ShaderResourceView* srvs[5] = { deferredTags->srv.get(), deferredWaves->srv.get(), deferredNoise->srv.get(), deferredTexCoords->srv.get(), depth.depthSRV };
+		context->PSSetShaderResources(38, 5, srvs);
 		ID3D11ShaderResourceView* shoreSrvs[3] = {};
 		if (deferredShoreFrame == frame) {
 			for (uint32_t i = 0; i < 3; ++i)

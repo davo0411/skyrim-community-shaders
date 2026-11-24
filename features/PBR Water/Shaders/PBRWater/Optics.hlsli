@@ -99,18 +99,17 @@ namespace PBRWater
 	}
 
 	/// Sediment spread through the whole column, with the sediment patches `patches` there (TurbidityPatches).
-	float MixedTurbidity(float patches, float flow)
+	float MixedTurbidity(float patches)
 	{
-		return Clarity0.y * lerp(1.0 - Clarity0.z, 1.0 + 2.0 * Clarity0.z, patches) + Clarity2.x * flow + Clarity2.y;
+		return Clarity0.y * lerp(1.0 - Clarity0.z, 1.0 + 2.0 * Clarity0.z, patches) + Clarity2.y;
 	}
 
 	/**
 	 * @param positionWS camera-relative position of the water column
 	 * @param patches    sediment patches there (TurbidityPatches, interpolated from the vertices)
 	 * @param depthUnits water depth there (units), used for wave resuspension
-	 * @param flow       0..1 river current strength
 	 */
-	Turbidity GetTurbidity(float3 positionWS, float patches, float depthUnits, float fetchRatio, float damping, float shoreBreak, float flow)
+	Turbidity GetTurbidity(float3 positionWS, float patches, float depthUnits, float fetchRatio, float damping, float shoreBreak)
 	{
 		Turbidity t;
 		t.mixed = 0.0;
@@ -118,7 +117,7 @@ namespace PBRWater
 		// Enable Water Clarity off: the water is as clear as its form colours make it.
 		[branch] if (ClarityEnabled())
 		{
-			t.mixed = MixedTurbidity(patches, flow);
+			t.mixed = MixedTurbidity(patches);
 			t.bottom = ResuspensionTurbidity(depthUnits, fetchRatio, damping, shoreBreak) + Clarity2.z * RippleSilt(positionWS);
 		}
 		return t;

@@ -219,13 +219,12 @@ namespace PBRWater
 
 	/**
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
-	 * @param waveParam  xyz undisplaced camera-relative position, w flow damping
-	 * @param flowVelocity the river current here (units/s, interpolated from the vertices; FlowVelocity)
+	 * @param waveParam  xyz undisplaced camera-relative position, w 1 on a river's mesh
 	 * @param detailNormal vanilla normal-map normal (z up)
 	 * @param detailVariance slope variance the mip filter averaged out of the vanilla normal maps (Toksvig), at their
 	 *                       blended amplitude
 	 */
-	SurfaceShading ShadeSurface(float4 waveParam, float2 flowVelocity, float3 detailNormal, float detailVariance)
+	SurfaceShading ShadeSurface(float4 waveParam, float3 detailNormal, float detailVariance)
 	{
 		SurfaceShading o;
 
@@ -236,8 +235,7 @@ namespace PBRWater
 		[branch] if (FoamEnabled())
 			o.surfFoam = ShoreFoamAt(absXY);
 
-		WaveContext ctx = BuildWaveContext(waveParam.xyz, waveParam.w, false);
-		ctx.flow = flowVelocity;
+		WaveContext ctx = BuildWaveContext(waveParam.xyz, 1.0, false, waveParam.w);
 		WaveResult waves = (WaveResult)0;
 		waves.normal = float3(0.0, 0.0, 1.0);
 		[branch] if (WavesActive())
@@ -256,11 +254,10 @@ namespace PBRWater
 		float wind = LocalWindSpeed(ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm water turns glassy, wind ripples it. River currents and
 		// rain ripple it whatever the wind.
-		float flow = saturate((1.0 - waveParam.w) / max(Foam1.w, 0.01));
 		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
 		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
 		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
-		float detailScale = max(windDetail, max(flow, Surface0.w));
+		float detailScale = max(windDetail, max(waveParam.w, Surface0.w));
 		// A breaker's face drawn up to plunge is stretched glassy: the wind's ripples on it are pulled out along the face.
 		detailScale *= 1.0 - 0.5 * waves.clearFace;
 

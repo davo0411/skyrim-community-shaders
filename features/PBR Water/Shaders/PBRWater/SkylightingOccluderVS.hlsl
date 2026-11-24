@@ -22,15 +22,6 @@ cbuffer SkylightingOccluderCB : register(b0)
 	float4 CellLevels[25];                 // x absolute still water level of cell (eye cell + (i - 2, j - 2)) at i + 5 j, < -1e8: no water
 };
 
-Texture2D<float4> FlowMap : register(t8);  // Unified Water's worldspace flowmap (PBRWater::Flow0)
-
-/// River current calms the waves, as on the water mesh (PBRWater::FlowDampingAt).
-float FlowDamping(float2 absXY)
-{
-	float2 velocity;
-	return PBRWater::FlowDampingAt(FlowMap, PBRWater::LinearClampSampler, absXY, velocity);
-}
-
 struct VS_OUTPUT
 {
 	float4 Position: SV_POSITION;
@@ -49,7 +40,7 @@ VS_OUTPUT main(uint id : SV_VertexID)
 
 	float3 absPos = float3(absXY, water ? level : Eye.z);
 	float3 positionWS = absPos - FrameBuffer::CameraPosAdjust.xyz;
-	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * PBRWater::LoadedGridFade(absXY) * FlowDamping(absXY);
+	float damping = PBRWater::DisplacementDistanceFade(length(absPos - Eye.xyz)) * PBRWater::LoadedGridFade(absXY);
 	PBRWater::WaveContext ctx = PBRWater::BuildWaveContext(positionWS, damping, false);
 	PBRWater::WaveResult waves = PBRWater::EvaluateWaves(positionWS, ctx, Grid.y, false);
 	float3 displacement = waves.displacement;

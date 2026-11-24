@@ -53,7 +53,7 @@ namespace PBRWaterBisection
 		float2 uv2;
 		uint mesh;         // the mesh slot (BisectionTessellator::Lookup), which draw lists it goes in
 		uint order;        // the corners in canonical order (by absolute position), 2 bits each, as BaseTriangle::order
-		uint4 neighbours;  // xyz the root across edges 0, 1 and 2 (None: the mesh's border), w unused
+		uint4 neighbours;  // xyz the root across edges 0, 1 and 2 (None: the mesh's border), w 1 on a river's mesh (WaterMeshes::Source::river)
 	};
 
 	/// A triangle of the subdivision. 48 bytes.
