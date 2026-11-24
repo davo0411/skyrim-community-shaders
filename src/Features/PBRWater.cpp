@@ -1393,8 +1393,23 @@ uint32_t PBRWater::WaveResolutionSize() const
 	return 128u << static_cast<uint32_t>(std::clamp(settings.WaveResolution, 0, 2));
 }
 
+std::vector<std::pair<std::string_view, std::string_view>> PBRWater::GetShaderDefineOptions()
+{
+	std::vector<std::pair<std::string_view, std::string_view>> result;
+	if (settings.DebugView != 0 || settings.WireframeMode != 0)
+		result.push_back({ "PBRW_DEBUG", "" });
+	return result;
+}
+
 void PBRWater::Prepass()
 {
+	// Toggling a debug view (menu, settings load, reset, devbench) recompiles the water shaders with or without the debug code.
+	const bool debugWanted = settings.DebugView != 0 || settings.WireframeMode != 0;
+	if (debugWanted != debugCompiled) {
+		debugCompiled = debugWanted;
+		globals::shaderCache->Clear(RE::BSShader::Type::Water);
+	}
+
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::Uploads");
 		UpdateFoamTexture();

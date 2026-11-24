@@ -85,7 +85,10 @@ PS_OUTPUT main(PS_INPUT input)
 #	endif
 // The vertex program's wading permutation: its own define, or in the pixel stage (the deferred surface runs the vertex
 // program there) the descriptor's flag.
-#	if defined(WADING)
+#	if defined(PBR_WATER)
+// PBR Water disables the wading mesh: no wading work in the vertex program.
+#		define PBRW_VS_WADING false
+#	elif defined(WADING)
 #		define PBRW_VS_WADING true
 #	elif defined(PSHADER) && defined(WADING_RT)
 #		define PBRW_VS_WADING ((Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Wading) != 0)
@@ -180,7 +183,9 @@ struct VS_OUTPUT
 #	if defined(PBR_WATER) && !defined(STENCIL)
 	float4 WaveParam : TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
 	float2 SurfaceNoise : TEXCOORD10;  // x sediment patches (TurbidityPatches), y unused
+#		if defined(PBRW_DEBUG)
 	float3 Barycentric : TEXCOORD11;
+#		endif
 	float2 FlowVelocity : TEXCOORD13;  // the river current (units/s, PBRWater::FlowVelocity), 0 on still water
 #	endif
 #	if defined(PBR_WATER)
@@ -292,7 +297,9 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 		float2 absXY = scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy;
 		vsout.SurfaceNoise = PBRWater::SurfaceNoise(absXY);
 #				endif
+#				if defined(PBRW_DEBUG)
 		vsout.Barycentric = 1.0 / 3.0;
+#				endif
 #			endif
 	}
 #		endif
@@ -599,7 +606,9 @@ VS_OUTPUT main(VS_INPUT input)
 	{
 		VS_OUTPUT v = input[i];
 #		if defined(PBR_WATER) && !defined(STENCIL)
+#			if defined(PBRW_DEBUG)
 		v.Barycentric = float3(i == 0, i == 1, i == 2);
+#			endif
 #		endif
 		stream.Append(v);
 	}
@@ -2245,11 +2254,13 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 finalColor = finalColorPreFog;
 	// Debug views go through the same per-pixel waterline as the water: drawn over the whole coverage, they showed the
 	// coarser, triangle-shaped region the passes keep (where the ground shows) as hard corners that are never on screen.
+#							if defined(PBRW_DEBUG)
 	if (PBRWater::Draw0.z > 0.5)
 		finalColor = PBRWater::DebugView((uint)PBRWater::Draw0.z, pbrSurface, pbrFoam, input.ShoreState.z);
 	// The waves' sun shadows: red the sun's glint hidden, green the water the sunlight crosses (2 m), blue off the heightfield.
 	if ((uint)PBRWater::Draw0.z == PBRWater::DebugWaveSun)
 		finalColor = float3(1.0 - pbrWaveSun.visible, saturate(pbrWaveSun.path / (2.0 * PBRWater::UnitsPerMetre)), pbrWaveSun.valid ? 0.0 : 0.3);
+#							endif
 #							if defined(REFRACTIONS)
 	// The thinnest water shows the ground it covers (as it is, already lit and fogged).
 	float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
@@ -2287,7 +2298,7 @@ PS_OUTPUT main(PS_INPUT input)
 
 #				endif
 #			endif
-#			if defined(PBR_WATER)
+#			if defined(PBR_WATER) && defined(PBRW_DEBUG)
 	if (PBRWater::Draw0.y > 0.5) {
 		float wire = PBRWater::WireframeMask(input.Barycentric);
 		float3 background = PBRWater::Draw0.y > 1.5 ? 0.0 : finalColor;

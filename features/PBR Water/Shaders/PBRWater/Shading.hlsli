@@ -189,17 +189,19 @@ namespace PBRWater
 		float swashDepth;    // its depth (units; 0 where dry)
 		float swashFoam;     // 0..1 the white water it carries
 		float simShare;      // 0..1 share of the surf simulation in the surface here (ComposeSurf)
+#if defined(PBRW_DEBUG)
 		float3 waveInfo;     // the shore wave here, for the debug view
+		float train;         // 0..1 share of the shore wave train (debug)
+		float room;          // 0..1 room the shore field gives the train here (debug)
+		float exposure;      // 0..1 exposure to the swell (debug)
+		float levelError;    // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
+#endif
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
 		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat
 		float surfFoam;      // 0..1 the foam the surf left on the water here (ShoreFoamAt)
 		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
 		float beach;         // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
-		float train;         // 0..1 share of the shore wave train (debug)
-		float room;          // 0..1 room the shore field gives the train here (debug)
-		float exposure;      // 0..1 exposure to the swell (debug)
-		float levelError;    // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
 		float breakStage;    // 0..1 how far the shore waves here have got with breaking (stirs up the bottom)
 		float depth;
 		float height;     // water surface above the still water at this pixel (units): the waves or the surf simulation (far below the ground where that is dry)
@@ -315,6 +317,7 @@ namespace PBRWater
 		o.swashFoam = waves.sheetFoam;
 		o.simShare = waves.surf;
 		o.beach = ctx.beach;
+#if defined(PBRW_DEBUG)
 		o.train = ctx.train;
 		o.room = ctx.shore.room;
 		o.exposure = ctx.shore.exposure;
@@ -327,6 +330,7 @@ namespace PBRWater
 		o.levelError = 0.0;
 		[branch] if ((uint)Draw0.z == DebugShoreLevel)
 			o.levelError = ShoreLevel(absXY) - (waveParam.z + FrameBuffer::CameraPosAdjust.z);
+#endif
 		o.breakStage = waves.breakStage;
 		o.depth = ctx.depth;
 		o.height = waves.displacement.z;
@@ -341,6 +345,7 @@ namespace PBRWater
 		return o;
 	}
 
+#if defined(PBRW_DEBUG)
 	float3 DebugView(uint mode, SurfaceShading s, float foam, float waveHeight)
 	{
 		switch (mode) {
@@ -396,6 +401,9 @@ namespace PBRWater
 		}
 	}
 
+#endif
+
+#if defined(PBRW_DEBUG)
 	/// Anti-aliased triangle edges from the geometry shader barycentrics.
 	float WireframeMask(float3 barycentric)
 	{
@@ -403,6 +411,7 @@ namespace PBRWater
 		float3 a = smoothstep(0.0, d * 1.5, barycentric);
 		return 1.0 - min(a.x, min(a.y, a.z));
 	}
+#endif
 }
 
 #endif  // __PBR_WATER_SHADING_HLSLI__

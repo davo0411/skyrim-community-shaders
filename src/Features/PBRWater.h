@@ -198,6 +198,8 @@ struct PBRWater : Feature
 	};
 
 	Settings settings;
+	/** @brief Whether the water shaders were last compiled with PBRW_DEBUG; a change recompiles them (Prepass). */
+	bool debugCompiled = false;
 
 	virtual void DrawSettings() override;
 	bool HasDebugSection() const override { return true; }
@@ -217,6 +219,8 @@ struct PBRWater : Feature
 
 	virtual void SetupResources() override;
 	virtual void ClearShaderCache() override;
+	/** @brief PBRW_DEBUG while a debug view or the wireframe is active: the water shaders carry that code only then. */
+	virtual std::vector<std::pair<std::string_view, std::string_view>> GetShaderDefineOptions() override;
 	virtual void Reset() override;
 	virtual void Prepass() override;
 	virtual void PostPostLoad() override;
