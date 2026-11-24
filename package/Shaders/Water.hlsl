@@ -1860,19 +1860,20 @@ PS_OUTPUT main(PS_INPUT input)
 			// (a filtered cube map lookup) is only worth reading where it does. Read for every pixel in a lit cluster it was
 			// the costliest part of the surface pass in a lit town on the coast (1.4 of 5.3 ms at Dawnstar).
 			[branch] if (localShadow && max(lightColor.x, max(lightColor.y, lightColor.z)) > 1e-4)
-				lightColor *= LightLimitFix::GetLocalShadow(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
+				lightColor *= LightLimitFix::GetLocalShadowWithLightFade(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
 			specularLighting += lightColor;
 #					else
-			float lightShadow = 1.0;
-			[branch] if (localShadow)
-				lightShadow = LightLimitFix::GetLocalShadowWithLightFade(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
-
 			float3 H = normalize(normalizedLightDirection - viewDirection);
 			float HdotN = saturate(dot(H, normal));
 
-			float3 lightColor = Color::PointLight(light.color.xyz) * pow(HdotN, FresnelRI.z) * light.fade;
+			float3 lightColor = Color::PointLight(light.color.xyz) * pow(HdotN, FresnelRI.z) * light.fade * intensityMultiplier;
 
-			specularLighting += lightColor * intensityMultiplier * lightShadow;
+			// Water lights only with its narrow specular lobe, which a lamp's reflection fills on a few pixels: the local
+			// shadow (a filtered cube map lookup) is only read where the lobe adds something.
+			[branch] if (localShadow && max(lightColor.x, max(lightColor.y, lightColor.z)) > 1e-4)
+				lightColor *= LightLimitFix::GetLocalShadowWithLightFade(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
+
+			specularLighting += lightColor;
 #					endif
 		}
 	}

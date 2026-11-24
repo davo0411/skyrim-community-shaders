@@ -11,6 +11,7 @@
 #include "State.h"
 #include "Util.h"
 #include "Utils/DebugSection.h"
+#include "Utils/EditorIDCache.h"
 #include "Utils/UI.h"
 
 #define I18N_KEY_PREFIX "feature.true_pbr."
@@ -1286,13 +1287,6 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 		}
 
 		if (lightingFlags & static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::CharacterLight)) {
-			static const REL::Relocation<RE::ImageSpaceTexture*> characterLightTexture{ RELOCATION_ID(513464, 391302) };
-
-			if (characterLightTexture->renderTarget >= RE::RENDER_TARGET::kFRAMEBUFFER) {
-				shadowState->SetPSTexture(11, renderer->GetRuntimeData().renderTargets[characterLightTexture->renderTarget]);
-				shadowState->SetPSTextureAddressMode(11, RE::BSGraphics::TextureAddressMode::kClampSClampT);
-			}
-
 			std::array<float, 4> characterLightParams{};  // in C++, arrays will be zero-initialized
 			if (smState->characterLightEnabled) {
 				std::copy_n(smState->characterLightParams, 4, characterLightParams.data());
@@ -1634,23 +1628,7 @@ struct TESForm_GetFormEditorID
 {
 	static const char* thunk(const RE::TESForm* form)
 	{
-		auto* singleton = &globals::features::truePBR;
-		auto it = singleton->editorIDs.find(form->GetFormID());
-		if (it == singleton->editorIDs.cend()) {
-			return "";
-		}
-		return it->second.c_str();
-	}
-	static inline REL::Relocation<decltype(thunk)> func;
-};
-
-struct TESForm_SetFormEditorID
-{
-	static bool thunk(RE::TESForm* form, const char* editorId)
-	{
-		auto* singleton = &globals::features::truePBR;
-		singleton->editorIDs[form->GetFormID()] = editorId;
-		return func(form, editorId);
+		return Util::EditorIDCache::Find(form->GetFormID());
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
@@ -1981,15 +1959,10 @@ void TruePBR::PostPostLoad()
 
 	logger::info("[TruePBR] Hooking TESLandTexture");
 	stl::write_vfunc<0x32, TESForm_GetFormEditorID>(RE::VTABLE_TESLandTexture[0]);
-	stl::write_vfunc<0x33, TESForm_SetFormEditorID>(RE::VTABLE_TESLandTexture[0]);
 	stl::write_vfunc<0x32, TESForm_GetFormEditorID>(RE::VTABLE_BGSTextureSet[0]);
-	stl::write_vfunc<0x33, TESForm_SetFormEditorID>(RE::VTABLE_BGSTextureSet[0]);
 	stl::write_vfunc<0x32, TESForm_GetFormEditorID>(RE::VTABLE_BGSMaterialObject[0]);
-	stl::write_vfunc<0x33, TESForm_SetFormEditorID>(RE::VTABLE_BGSMaterialObject[0]);
 	stl::write_vfunc<0x32, TESForm_GetFormEditorID>(RE::VTABLE_BGSLightingTemplate[0]);
-	stl::write_vfunc<0x33, TESForm_SetFormEditorID>(RE::VTABLE_BGSLightingTemplate[0]);
 	stl::write_vfunc<0x32, TESForm_GetFormEditorID>(RE::VTABLE_TESWeather[0]);
-	stl::write_vfunc<0x33, TESForm_SetFormEditorID>(RE::VTABLE_TESWeather[0]);
 
 	logger::info("[TruePBR] Hooking BSTempEffectSimpleDecal");
 	stl::detour_thunk<BSTempEffectSimpleDecal_SetupGeometry>(REL::RelocationID(29253, 30108));
