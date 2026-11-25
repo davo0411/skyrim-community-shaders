@@ -42,13 +42,19 @@ namespace PBRWater
 		return 0.5 * (rs * rs + rp * rp);
 	}
 
+	/// Pure water's absorption (1/m) in the red, green and blue bands (Pope and Fry 1997; Smith and Baker 1981): no water,
+	/// however clear, takes less. Red is gone within a few metres, blue lasts tens.
+	static const float3 PureWaterAbsorption = float3(0.35, 0.06, 0.012);
+
 	/// Per-channel extinction (1/unit). The vanilla shallow colour is read as the tint light picks up
-	/// over the water form's visibility distance; at that distance 5% of the light remains.
+	/// over the water form's visibility distance; at that distance 5% of the light remains. Never below pure water's own
+	/// absorption: a white or grey form colour with a long visibility left every channel equal, and deep clear water grey
+	/// instead of blue-green.
 	float3 Extinction(float3 shallowColorLinear, float visibilityUnits)
 	{
 		float3 tint = saturate(shallowColorLinear / max(max(shallowColorLinear.r, max(shallowColorLinear.g, shallowColorLinear.b)), 1e-4));
 		tint = max(tint, 0.02);
-		return (log(20.0) - log(tint)) / max(visibilityUnits, 1.0);
+		return max((log(20.0) - log(tint)) / max(visibilityUnits, 1.0), PureWaterAbsorption * MetresPerUnit);
 	}
 
 	/// Henyey-Greenstein phase function, normalised so that an isotropic medium gives 1.

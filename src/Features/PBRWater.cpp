@@ -740,7 +740,7 @@ void PBRWater::DrawSettings()
 		Util::SliderFloatTip(T(TKEY("detail_normal_gale"), "Normal Map Strength (Windy)"), &s.DetailNormalGale, 0.0f, 2.0f, "%.2f",
 			T(TKEY("detail_normal_gale_tooltip"), "The same at 8 m/s of wind and over; in between it blends. Default 1.3."));
 		Util::SliderFloatTip(T(TKEY("refraction_distortion"), "Refraction Strength"), &s.RefractionDistortion, 0.0f, 3.0f, "%.2f",
-			T(TKEY("refraction_distortion_tooltip"), "How far the surface bends the view of what lies below. Default 1."));
+			T(TKEY("refraction_distortion_tooltip"), "How far the surface bends the view of what lies below, along the refracted ray to the bed (Snell's law): the deeper the water, the larger the shift. 1 is physically correct. Default 1."));
 		Util::SliderFloatTip(T(TKEY("sun_specular"), "Sun Specular"), &s.SunSpecular, 0.0f, 3.0f, "%.2f",
 			T(TKEY("sun_specular_tooltip"), "Brightness of the sun's glint on the surface. Default 1."));
 		Util::SliderFloatTip(T(TKEY("point_light_specular"), "Point Light Specular"), &s.PointLightSpecular, 0.0f, 3.0f, "%.2f",

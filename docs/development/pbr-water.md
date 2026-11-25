@@ -823,3 +823,25 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Bobbing Framework (RavenKZP, GPL-3.0-or-later WITH Modding Exception) - moving placed references with
     keyframed collision, their children and the actors standing on them; the floating objects build on it
 -   Faltinsen, _Sea Loads on Ships and Offshore Structures_ (1990) - heave and roll natural periods of a hull
+
+## Refraction, depth and absorption (2026-11-25)
+
+Assessed against the vanilla path the PBR water column still leaned on:
+
+- **Depth was measured from the flat water plane.** `distanceMul` (which drives the depth fades of reflections, normals,
+  specular and the shore) used the game's `ReflectPlane`, but PBR Water's surface is displaced: crests near the shore read
+  deeper than they are and troughs below the plane read as dry, their normals and specular faded out. It is now the
+  path from the pixel's own (displaced) surface to the scene behind it.
+- **Refraction used a constant offset.** Vanilla shifts the refracted lookup by `normal.xy` times a fixed magnitude,
+  whatever the depth: a bed a few centimetres down swam like a deep one, and things standing on the shore were pulled
+  into the shallows. It now follows Snell's ray: the refracted direction meets the bed at the depth the straight view
+  finds, once more at the depth found where that lands, and the image comes from there. The shift grows with depth
+  (none at the waterline). Refraction Strength scales it; 1 is physical. Cost: one more depth read and two projections.
+- **Transmission used another point's depth.** The colour came from the refracted lookup but was attenuated over the
+  straight view's water. The column now attenuates over the refracted ray's own path to the bed it shows.
+- **Absorption could be grey.** Extinction comes from the water form's shallow colour and visibility; a white or grey
+  colour with a long visibility attenuated every channel equally. It now never falls below pure water's absorption
+  (0.35, 0.06, 0.012 /m in red, green, blue; Pope and Fry 1997), so clear water turns blue-green with depth as it does.
+
+Not changed: the in-scattered body colour stays the form's deep colour (artist control), and the vanilla (non-PBR)
+water keeps its own fog model. Written without compiling; untested in game.

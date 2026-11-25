@@ -1953,7 +1953,7 @@
     "feature.pbr_water.projected_grid": "Projected Sea Grid",
     "feature.pbr_water.projected_grid_tooltip": "Draws the sea as one grid spread evenly over the screen and cast onto the water: the waves reach the horizon instead of fading out at the edge of the loaded cells, with the same triangle size near and far. Lakes and rivers keep their tessellated meshes.",
     "feature.pbr_water.refraction_distortion": "Refraction Strength",
-    "feature.pbr_water.refraction_distortion_tooltip": "How far the surface bends the view of what lies below. Default 1.",
+    "feature.pbr_water.refraction_distortion_tooltip": "How far the surface bends the view of what lies below, along the refracted ray to the bed (Snell's law): the deeper the water, the larger the shift. 1 is physically correct. Default 1.",
     "feature.pbr_water.ripple_displace_clamp": "Displacement Limit",
     "feature.pbr_water.ripple_displace_clamp_tooltip": "Largest sideways displacement, in texels of the ripple simulation. Default 0.3.",
     "feature.pbr_water.ripple_extent": "Ripple Range",

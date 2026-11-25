@@ -1512,27 +1512,62 @@ struct DiffuseOutput
 	float depth;
 	float refractionMul;
 	float3 refractedViewDirection;
+	float refractedPath;  // PBR Water: the refracted ray's length through the water to what it shows (units), < 0 unknown
+	float bedDepth;       // and that point's depth below the surface (units), < 0 unknown
 };
+
+#			if defined(REFRACTIONS) && defined(PBR_WATER) && !defined(UNDERWATER)
+/// Screen uv (0..1, full resolution) of camera-relative `p`.
+float2 PBRWaterScreenUv(float3 p)
+{
+	float4 clip = mul(FrameBuffer::CameraViewProj, float4(p, 1.0));
+	return clip.xy / max(clip.w, 1e-4) * float2(0.5, -0.5) + 0.5;
+}
+#			endif
 
 DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDirection, inout float4 distanceMul, float refractionsDepthFactor, float fresnel, float3 viewPosition, float depth)
 {
 #			if defined(REFRACTIONS) && defined(PBR_WATER) && !defined(UNDERWATER)
-	// PBR Water takes only the scene behind, distorted by the normal: its water column (main) does the depth, the body
+	// PBR Water takes only the scene behind, seen along the refracted ray: its water column (main) does the depth, the body
 	// colour and the transmission. None of the game's refraction-plane fog is worked out.
+	DiffuseOutput output;
+	output.refractedViewDirection = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
+	output.refractedPath = -1.0;
+	output.bedDepth = -1.0;
+#				if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	// Screen-space refraction along Snell's ray: it meets the bed at the depth the straight view finds there, then once more
+	// at the depth found where that lands. The shift grows with the water's depth, as the real one does: none at the
+	// waterline (the vanilla offset, the same at any depth, pulled what stands on the shore into the shallows and made a
+	// sandy bottom a few centimetres down swim like a deep one), the refracted ray's true offset over a deep bed.
+	// Refraction Strength scales the shift (1: physical).
+	float2 straightUv = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
+	float3 surfacePoint = input.WPosition.xyz;
+	float3 ray = output.refractedViewDirection;
+	float down = max(-ray.z, 0.05);
+	// The farthest the image shifts (units): past it the bed is lost in the water's colour anyway.
+	static const float MaxShift = 30.0 * PBRWater::UnitsPerMetre;
+	float bed = max(surfacePoint.z - surfacePoint.z * depth / max(viewPosition.z, 1e-3), 0.0);
+	float2 refractionUvRaw = lerp(straightUv, PBRWaterScreenUv(surfacePoint + ray * min(bed / down, MaxShift)), PBRWater::Light1.z);
+	float2 landedPixel = FrameBuffer::DynamicResolutionParams1.xy * (saturate(refractionUvRaw) / VPOSOffset.xy);
+	float landedRaw = DepthTex.Load(float3(landedPixel, 0)).x;
+	if (any(refractionUvRaw != saturate(refractionUvRaw)) || GetScreenDepthWater(landedPixel) < viewPosition.z) {
+		// Off the screen, or in front of the water there (a leg, a hull): the straight view.
+		refractionUvRaw = straightUv;
+	} else {
+		float4 landed = mul(FrameBuffer::CameraViewProjInverse, float4((refractionUvRaw * 2 - 1) * float2(1, -1), landedRaw, 1));
+		bed = max(surfacePoint.z - landed.z / landed.w, 0.0);
+		refractionUvRaw = saturate(lerp(straightUv, PBRWaterScreenUv(surfacePoint + ray * min(bed / down, MaxShift)), PBRWater::Light1.z));
+	}
+	output.refractedPath = bed / down;
+	output.bedDepth = bed;
+#				else
 	float4 refractionNormal = mul(transpose(TextureProj), float4((VarAmounts.w * PBRWater::Light1.z * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
 	float2 refractionUvRaw = float2(refractionNormal.x, refractionNormal.w - refractionNormal.y) / refractionNormal.ww;
-#				if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
-	// The distorted ray lands on something in front of the water (a leg, a hull): the undistorted scene instead.
-	float2 refractionScreenPosition = FrameBuffer::DynamicResolutionParams1.xy * (refractionUvRaw / VPOSOffset.xy);
-	if (GetScreenDepthWater(refractionScreenPosition) < viewPosition.z)
-		refractionUvRaw = FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
 #				endif
-	DiffuseOutput output;
 	output.refractionColor = PreExposure::Decode(RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(refractionUvRaw)).xyz);
 	output.refractionDiffuseColor = DeepColor.xyz;  // the light an optically deep column scatters back
 	output.depth = depth;
 	output.refractionMul = 1.0;
-	output.refractedViewDirection = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
 	return output;
 #			elif defined(REFRACTIONS)
 	float refractionMagnitude = VarAmounts.w;
@@ -1602,6 +1637,8 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	output.depth = depth;
 	output.refractionMul = refractionMul;
 	output.refractedViewDirection = normalize(refractionWorldPosition.xyz - input.WPosition.xyz);
+	output.refractedPath = -1.0;
+	output.bedDepth = -1.0;
 	return output;
 #			else
 	DiffuseOutput output;
@@ -1610,6 +1647,8 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	output.depth = 1;
 	output.refractionMul = 1;
 	output.refractedViewDirection = viewDirection;
+	output.refractedPath = -1.0;
+	output.bedDepth = -1.0;
 	return output;
 #			endif
 }
@@ -1729,6 +1768,17 @@ PS_OUTPUT main(PS_INPUT input)
 	float2 depthOffset =
 		FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw;
 	float depthMul = length(float3((depthOffset * 2 - 1) * depth / ProjData.xy, depth));
+#					if defined(PBR_WATER)
+	// The water in front of what is seen, from the surface this pixel shows: the waves stand above the game's flat water
+	// plane (ReflectPlane) and dip below it, so measured from the plane a crest near the shore read deeper than it is and a
+	// trough read as dry (the plane behind the bed), its normals and specular faded out. x, y along the view, z, w the
+	// vertical depth, as the plane's terms.
+	{
+		float pbrViewPath = max(depthMul - length(input.WPosition.xyz), 0.0);
+		float pbrVertical = pbrViewPath * abs(viewDirection.z);
+		distanceMul = saturate(float4(pbrViewPath, pbrViewPath, pbrVertical, pbrVertical) / FogParam.z);
+	}
+#					else
 	float3 depthAdjustedViewDirection = -viewDirection * depthMul;
 	float viewSurfaceAngle = dot(depthAdjustedViewDirection, ReflectPlane[0].xyz);
 
@@ -1736,6 +1786,7 @@ PS_OUTPUT main(PS_INPUT input)
 	distanceMul = saturate(
 		planeMul * float4(length(depthAdjustedViewDirection).xx, abs(viewSurfaceAngle).xx) /
 		FogParam.z);
+#					endif
 
 #					if defined(HORIZON_FIX)
 	if (DepthTex.Load(float3(screenPosition, 0)).x >= HorizonFix::EmptyDepthThreshold)
@@ -2112,6 +2163,13 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrBottomDepth = pbrPathLength * abs(viewDirection.z);
 	float3 pbrRefracted = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
 	float pbrWaterPath = pbrBottomDepth / max(-pbrRefracted.z, 0.2);
+	// Where the refraction found the bed the image shows (GetWaterDiffuseColor): its depth and the refracted ray's path to
+	// it, so the colour seen and the water it is seen through belong to the same point (the straight view's depth lit the
+	// refracted image with the water in front of another one: dark halos round anything standing in shallow water).
+	if (diffuseOutput.refractedPath >= 0.0 && pbrPathLength < 1e6) {
+		pbrBottomDepth = diffuseOutput.bedDepth;
+		pbrWaterPath = diffuseOutput.refractedPath;
+	}
 	// A breaker's face is no slab: the ray seen through it runs into the crest nearly level and leaves through its back,
 	// crossing only the crest's thickness at that height, about three times the height still above it (a crest's back is
 	// about a third as steep as a breaking face). As a slab down to the bed far behind, every face shaded as the same deep
