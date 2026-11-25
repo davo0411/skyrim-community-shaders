@@ -2581,7 +2581,6 @@ bool PBRWater::EnsureDeferredRecords()
 	const std::tuple<std::unique_ptr<Texture2D>*, DXGI_FORMAT, const char*> targets[] = {
 		{ &deferredTags, DXGI_FORMAT_R32_UINT, "PBRWater::DeferredTags" },
 		{ &deferredWaves, DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::DeferredWaves" },
-		{ &deferredNoise, DXGI_FORMAT_R8G8_UNORM, "PBRWater::DeferredNoise" },
 		{ &deferredTexCoords, DXGI_FORMAT_R32G32_FLOAT, "PBRWater::DeferredTexCoords" },
 	};
 	for (const auto& [target, format, name] : targets) {
@@ -2758,8 +2757,8 @@ void PBRWater::DrawRecordedStencil()
 	const char* reason = nullptr;
 	if (!bound.dsv)
 		reason = "the stencil pass has no depth target";
-	else if (!ours && (bound.rtv[2] || bound.rtv[3] || bound.rtv[4] || bound.rtv[5]))
-		reason = "the stencil pass already uses render targets 2-5";
+	else if (!ours && (bound.rtv[2] || bound.rtv[3] || bound.rtv[4]))
+		reason = "the stencil pass already uses render targets 2-4";
 	else if (!cachedDrawGeometry)
 		reason = "no geometry for the draw";
 	else if (!EnsureDeferredRecords())
@@ -2790,13 +2789,13 @@ void PBRWater::DrawRecordedStencil()
 		batch.recordTargets = 0;
 		batch.recordBlend = nullptr;
 	}
-	const UINT needed = mesh.texCoords ? 6 : 5;
+	const UINT needed = mesh.texCoords ? 5 : 4;
 	if (!ours || batch.recordTargets != needed) {
-		ID3D11RenderTargetView* recorded[6] = { bound.rtv[0], bound.rtv[1], deferredTags->rtv.get(), deferredWaves->rtv.get(), deferredNoise->rtv.get(), deferredTexCoords->rtv.get() };
+		ID3D11RenderTargetView* recorded[5] = { bound.rtv[0], bound.rtv[1], deferredTags->rtv.get(), deferredWaves->rtv.get(), deferredTexCoords->rtv.get() };
 		context->OMSetRenderTargets(needed, recorded, bound.dsv);
 		batch.recordTargets = needed;
 	}
-	// The engine's blend state need not write targets 2-5 (a zero write mask drops the record without a word): its own for
+	// The engine's blend state need not write targets 2-4 (a zero write mask drops the record without a word): its own for
 	// targets 0 and 1, the record's written whole. Set again only when the engine has set its own since.
 	{
 		winrt::com_ptr<ID3D11BlendState> blend;
@@ -2888,7 +2887,7 @@ ID3D11BlendState* PBRWater::RecordBlendState(ID3D11BlendState* engineState)
 				desc.RenderTarget[i] = desc.RenderTarget[0];
 			desc.IndependentBlendEnable = TRUE;
 		}
-		for (uint32_t i = 2; i < 6; ++i) {
+		for (uint32_t i = 2; i < 5; ++i) {
 			auto& target = desc.RenderTarget[i];
 			target.BlendEnable = FALSE;
 			target.SrcBlend = target.SrcBlendAlpha = D3D11_BLEND_ONE;
@@ -3127,7 +3126,7 @@ bool PBRWater::DrawDeferredSurface()
 			ClassifyDeferredTiles();
 		if (deferredShoreFrame != frame && deferredShoreCS && frameData.Shore0.x > 0.5f)
 			BakeDeferredShore(depth.depthSRV);
-		ID3D11ShaderResourceView* srvs[5] = { deferredTags->srv.get(), deferredWaves->srv.get(), deferredNoise->srv.get(), deferredTexCoords->srv.get(), depth.depthSRV };
+		ID3D11ShaderResourceView* srvs[5] = { deferredTags->srv.get(), deferredWaves->srv.get(), nullptr, deferredTexCoords->srv.get(), depth.depthSRV };
 		context->PSSetShaderResources(38, 5, srvs);
 		ID3D11ShaderResourceView* shoreSrvs[3] = {};
 		if (deferredShoreFrame == frame) {

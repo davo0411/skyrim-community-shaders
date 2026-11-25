@@ -41,12 +41,12 @@ namespace PBRWaterDeferred
 	/// The half-rate pass's key for the pixel it shaded (DeferredFar.hlsl): 1 + which of its 2x2 pixels, 0 none.
 	static float HalfRateKey = 0.0;
 
-	/// The stencil pass's record of a pixel (SV_Target2-5).
+	/// The stencil pass's record of a pixel (SV_Target2-4). The surface noise is not in it: Resolve reads the bake
+	/// (PBRWater::SurfaceNoise) at the undisplaced position.
 	struct Record
 	{
 		uint tag;      // tag | vertex alpha << 8 | depth (24-bit) & 0xFFFF << 16
 		float4 waves;  // xyz the waves' displacement (units), w the waves without the surf (ShoreState.z)
-		float2 noise;  // SurfaceNoise: x sediment patches, y (wind gust factor - 0.35) / 1.3
 		float2 uv;     // the mesh's texture coordinate (where Tag.z)
 	};
 
@@ -57,14 +57,12 @@ namespace PBRWaterDeferred
 
 	/**
 	 * @param depth  the pixel's depth (SV_Position.z)
-	 * @param noise  SurfaceNoise at the undisplaced position
 	 */
-	Record Pack(float depth, float3 current, float wavesAlone, float2 noise, float2 uv, float alpha)
+	Record Pack(float depth, float3 current, float wavesAlone, float2 uv, float alpha)
 	{
 		Record r;
 		r.tag = Tag.x | ((uint)round(saturate(alpha) * 255.0) << 8) | (DepthBits(depth) << 16);
 		r.waves = float4(current, wavesAlone);
-		r.noise = float2(noise.x, (noise.y - 0.35) / 1.3);
 		r.uv = uv;
 		return r;
 	}
@@ -88,7 +86,7 @@ namespace PBRWaterDeferred
 #if defined(PBRW_DEFERRED)
 	Texture2D<uint> Tags : register(t38);
 	Texture2D<float4> Waves : register(t39);
-	Texture2D<float2> Noise : register(t40);
+	// t40: free (the record's surface noise, now read from the bake)
 	Texture2D<float2> TexCoords : register(t41);
 	Texture2D<float> SceneDepth : register(t42);
 #	if defined(PBRW_MATERIAL)
@@ -191,12 +189,8 @@ namespace PBRWaterDeferred
 			}
 		}
 		float4 recordWaves = 0.0;
-		float2 recordNoise = float2(0.0, 0.5);
 		[branch] if (p.water)
-		{
 			recordWaves = Waves.Load(int3(source, 0));
-			recordNoise = Noise.Load(int3(source, 0));
-		}
 
 #	if defined(PBRW_MATERIAL)
 		MaterialPixel = source;
@@ -230,7 +224,7 @@ namespace PBRWaterDeferred
 		waves.surface.shore = float4(0.0, 0.0, recordWaves.w, undisplaced.z);
 		waves.river = 0.0;  // river meshes are never recorded (PBRWater::RestoreDraw)
 		VS_OUTPUT o = WaterVertexWith(v, waves);
-		o.SurfaceNoise = float2(recordNoise.x, 0.35 + 1.3 * recordNoise.y);
+		o.SurfaceNoise = p.water ? PBRWater::SurfaceNoise(undisplaced.xy + FrameBuffer::CameraPosAdjust.xy) : float2(0.0, 1.0);
 		o.HPosition = float4(input.HPosition.xy, p.depth, input.HPosition.w);
 		input = o;
 		// A half-rate pixel whose 2x2 holds none of this mesh's water writes nothing (the upsampling reads its key 0).

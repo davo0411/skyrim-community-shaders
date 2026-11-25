@@ -181,7 +181,6 @@ struct VS_OUTPUT
 	float3 DeferredWave : TEXCOORD9;    // the waves' displacement (units)
 	float2 DeferredUV : TEXCOORD10;     // the mesh's texture coordinate
 	float DeferredAlpha : TEXCOORD11;   // the mesh's vertex colour alpha
-	float2 DeferredNoise : TEXCOORD13;  // SurfaceNoise
 #		endif
 #	endif
 
@@ -337,7 +336,6 @@ VS_OUTPUT WaterVertexWith(VS_INPUT input)
 	vsout.DeferredWave = waves.surface.current;
 	vsout.DeferredUV = 0.0;
 	vsout.DeferredAlpha = 1.0;
-	vsout.DeferredNoise = PBRWater::SurfaceNoise(scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy);
 #			endif
 #		else
 
@@ -580,7 +578,6 @@ VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV
 		o.DeferredWave = 0.0;
 		o.DeferredUV = 0.0;
 		o.DeferredAlpha = 1.0;
-		o.DeferredNoise = PBRWater::SurfaceNoise(instance.xy + local.xy);
 		return o;
 	}
 #			endif
@@ -643,8 +640,7 @@ struct PS_OUTPUT
 	// The deferred surface's record (PBRWater/Deferred.hlsli): bound for the tessellated meshes only.
 	uint DeferredTag : SV_Target2;
 	float4 DeferredWaves : SV_Target3;
-	float2 DeferredNoise : SV_Target4;
-	float2 DeferredUV : SV_Target5;
+	float2 DeferredUV : SV_Target4;
 #		endif
 #	endif
 };
@@ -1906,6 +1902,11 @@ PS_OUTPUT main(PS_INPUT input)
 			float3 lightDirection = light.positionWS.xyz - input.WPosition.xyz;
 			float lightDist = length(lightDirection);
 
+#					if defined(PBR_WATER)
+			// A lamp further than 30 m from this point of the water lights it with next to nothing.
+			if (lightDist > 30.0 * PBRWater::UnitsPerMetre)
+				continue;
+#					endif
 			float intensityMultiplier = LightLimitFix::GetAttenuation(lightDist, light);
 			// Out of the light's reach here (the cluster holds it for its other pixels): no shadow lookup or lobe.
 			if (intensityMultiplier < 1e-5)
@@ -2416,10 +2417,9 @@ PS_OUTPUT main(PS_INPUT input)
 #			endif
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, previousPosition);
 #			if defined(PBR_WATER)
-	PBRWaterDeferred::Record pbrRecord = PBRWaterDeferred::Pack(input.HPosition.z, input.DeferredWave, input.ShoreState.z, input.DeferredNoise, input.DeferredUV, input.DeferredAlpha);
+	PBRWaterDeferred::Record pbrRecord = PBRWaterDeferred::Pack(input.HPosition.z, input.DeferredWave, input.ShoreState.z, input.DeferredUV, input.DeferredAlpha);
 	psout.DeferredTag = pbrRecord.tag;
 	psout.DeferredWaves = pbrRecord.waves;
-	psout.DeferredNoise = pbrRecord.noise;
 	psout.DeferredUV = pbrRecord.uv;
 #			endif
 #		endif

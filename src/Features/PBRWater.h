@@ -483,7 +483,6 @@ private:
 	// The stencil pass's record (Deferred.hlsli): SV_Target2-5 there, t38-t41 of the surface.
 	std::unique_ptr<Texture2D> deferredTags;              ///< R32_UINT: tag, vertex alpha, 16 bits of the depth
 	std::unique_ptr<Texture2D> deferredWaves;             ///< R16G16B16A16_FLOAT: the waves' displacement, the waves without the surf
-	std::unique_ptr<Texture2D> deferredNoise;             ///< R8G8_UNORM: the surface noise
 	std::unique_ptr<Texture2D> deferredTexCoords;         ///< R32G32_FLOAT: texture coordinates, of the meshes that need them
 	std::unique_ptr<ConstantBuffer> deferredCB;           ///< b13 (DeferredDrawCB)
 	winrt::com_ptr<ID3D11ComputeShader> deferredTilesCS;  ///< DeferredTilesCS: sorts the tiles by mesh
