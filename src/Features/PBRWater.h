@@ -156,6 +156,8 @@ struct PBRWater : Feature
 		bool EnableRipples = true;
 		bool EnableWakes = true;     ///< Kelvin wakes behind the actors moving through the water (PBRWater/KelvinWake.h)
 		bool UnderwaterVolume = true;  ///< the water around the camera under the surface absorbs and scatters as the surface's does, in place of the game's fog
+		int LightShaftSamples = 12;    ///< steps of the underwater light shafts' march (0: no shafts)
+		float LightShaftFocus = 1.0f;  ///< how strongly the waves focus the shafts (caustic streaks)
 		float WakeStrength = 1.0f;   ///< scales their height
 		float RippleExtent = 64.0f;  ///< m covered around the camera
 		float RippleHeight = 0.12f;  ///< m

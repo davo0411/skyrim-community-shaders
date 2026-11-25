@@ -151,6 +151,8 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		EnableWakes,
 		WakeStrength,
 		UnderwaterVolume,
+		LightShaftSamples,
+		LightShaftFocus,
 		WireframeMode,
 		DebugView))
 	nlohmann_json_j["SprayEmitters"] = nlohmann_json_t.SprayEmitters;
@@ -285,6 +287,8 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		EnableWakes,
 		WakeStrength,
 		UnderwaterVolume,
+		LightShaftSamples,
+		LightShaftFocus,
 		WireframeMode,
 		DebugView))
 	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest. An emitter saved for
@@ -379,6 +383,8 @@ void PBRWater::SanitizeSettings()
 	clamp(s.TessellationTriangleSize, 1.0f, Huge, d.TessellationTriangleSize);
 	clamp(s.GridCellSize, 2.0f, 64.0f, d.GridCellSize);
 	clamp(s.WakeStrength, 0.0f, 10.0f, d.WakeStrength);
+	s.LightShaftSamples = std::clamp(s.LightShaftSamples, 0, 64);
+	clamp(s.LightShaftFocus, 0.0f, 4.0f, d.LightShaftFocus);
 	clamp(s.DistantHalfRateDistance, 1.0f, Huge, d.DistantHalfRateDistance);
 	clamp(s.WindSpeedCalm, 0.0f, Huge, d.WindSpeedCalm);
 	clamp(s.WindSpeedStorm, 0.1f, Huge, d.WindSpeedStorm);
@@ -861,6 +867,14 @@ void PBRWater::DrawSettings()
 			T(TKEY("enable_ripples_tooltip"), "Simulates ripples and wakes from every actor and object in the water. Replaces the vanilla wading mesh."));
 		Util::CheckboxTip(T(TKEY("underwater_volume"), "Physical Underwater Water"), &s.UnderwaterVolume,
 			T(TKEY("underwater_volume_tooltip"), "Under the surface, the water absorbs and scatters light as it does from above (red first, then green, blue last), in place of the game's underwater fog."));
+		{
+			Util::DisableGuard disableShafts(!s.UnderwaterVolume);
+			ImGui::SliderInt(T(TKEY("light_shaft_samples"), "Underwater Light Shafts"), &s.LightShaftSamples, 0, 32);
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::TextUnformatted(T(TKEY("light_shaft_samples_tooltip"), "Steps of the light shafts under water: sunlight through the waves, shadowed by what stands in it. More steps are smoother and cost more. 0: no shafts. Default 12."));
+			Util::SliderFloatTip(T(TKEY("light_shaft_focus"), "Light Shaft Focusing"), &s.LightShaftFocus, 0.0f, 3.0f, "%.2f",
+				T(TKEY("light_shaft_focus_tooltip"), "How strongly the waves focus the sunlight into streaks under water. 1 is physical. Default 1."));
+		}
 		Util::CheckboxTip(T(TKEY("enable_wakes"), "Kelvin Wakes"), &s.EnableWakes,
 			T(TKEY("enable_wakes_tooltip"), "Swimmers, waders and horses moving through the water leave the V-shaped wake of real deep-water waves behind them, its waves longer the faster they go."));
 		{
@@ -1100,8 +1114,18 @@ void PBRWater::SetupResources()
 	projectedGrid.Setup();
 	kelvinPattern = PBRWaterWake::CreatePattern();
 	underwaterVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl", {}, "vs_5_0", "VS")));
-	underwaterPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl", {}, "ps_5_0", "PS")));
-	underwaterCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<float4[3]>(), "PBRWater::UnderwaterCB");
+	{
+		// The light shafts' shadows: the shadow features that are loaded (ShadowSampling::GetSurfaceShadow).
+		std::vector<std::pair<const char*, const char*>> defines;
+		if (globals::features::terrainShadows.loaded)
+			defines.push_back({ "TERRAIN_SHADOWS", "" });
+		if (globals::features::cloudShadows.loaded)
+			defines.push_back({ "CLOUD_SHADOWS", "" });
+		if (globals::features::volumetricShadows.loaded)
+			defines.push_back({ "VOLUMETRIC_SHADOWS", "" });
+		underwaterPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl", defines, "ps_5_0", "PS")));
+	}
+	underwaterCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<float4[4]>(), "PBRWater::UnderwaterCB");
 	{
 		D3D11_BLEND_DESC desc{};
 		auto& target = desc.RenderTarget[0];
@@ -3440,12 +3464,25 @@ void PBRWater::DrawUnderwaterVolume()
 	D3D11_VIEWPORT viewport{};
 	UINT viewports = 1;
 	context->RSGetViewports(&viewports, &viewport);
-	float4 data[3] = {
-		{ extinction[0], extinction[1], extinction[2], std::max(waterSystem->underwaterHeight - eye.z, 0.0f) },
+	const float cameraDepth = std::max(waterSystem->underwaterHeight - eye.z, 0.0f);
+	float4 data[4] = {
+		{ extinction[0], extinction[1], extinction[2], cameraDepth },
 		{ linear(deep.red), linear(deep.green), linear(deep.blue), 0.0f },
-		{ std::max(viewport.Width, 1.0f), std::max(viewport.Height, 1.0f), 200.0f * UnitsPerMetre, 0.0f },
+		{ std::max(viewport.Width, 1.0f), std::max(viewport.Height, 1.0f), 200.0f * UnitsPerMetre, cameraDepth },
+		{ static_cast<float>(settings.LightShaftSamples), 0.8f, settings.LightShaftFocus, 0.0f },
 	};
 	underwaterCB->Update(data);
+	// The shafts read the waves (the cascades' compression) and PBR Water's constants: bound here, before the batch's first
+	// draw binds them for the water (BindDrawResources).
+	{
+		ID3D11Buffer* waterCb = flatDrawBuffer->CB();
+		context->PSSetConstantBuffers(7, 1, &waterCb);
+		context->PSSetShaderResources(WaterSRVBase, WaterSRVCount, drawSRVs);
+		ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
+		context->PSSetSamplers(WaterSamplerBase, 2, samplers);
+		boundPixelCb = nullptr;
+		drawResourcesFrame = UINT32_MAX;
+	}
 
 	// What the draw changes, put back after it: the engine binds its state lazily and expects it unchanged.
 	winrt::com_ptr<ID3D11VertexShader> savedVS;

@@ -881,3 +881,22 @@ water keeps its own fog model. Written without compiling; untested in game.
   To verify in game: that zeroing the fog amount alone removes the engine's fog from objects under water.
 
 Written without compiling; untested in game.
+
+## Underwater light shafts (2026-11-25)
+
+The underwater volume (UnderwaterVolume.hlsl) marches its in-scattering along the view ray under the surface instead of
+taking it in closed form (Underwater Light Shafts steps, default 12; 0 keeps the closed form). Per step: the sunlight
+that crossed the water down along the refracted sun direction, shadowed by what stands between it and the sun
+(ShadowSampling::GetSurfaceShadow: terrain, clouds, the shadow map; the shader is compiled with the loaded shadow
+features' defines), focused or spread by the waves where that ray left the surface (the cascades' compression gives the
+curvature: a crest is a converging lens of focal length ~ 1 / ((1 - 1/n) curvature)), blurred with depth (coarser mips
+as the water scatters it), and scattered towards the camera with a forward-peaked Henyey-Greenstein phase (g 0.8). The
+sky's light adds without shafts. Steps are spread exponentially (dense near the camera) and jittered per pixel and frame
+(interleaved gradient noise); the game's temporal filter adds them up. Light Shaft Focusing scales the focusing (1:
+physical). Version 0-31-0.
+
+Technique after HPWater's water volumetrics (AshenOneArt/HPWater, MPL-2.0), reimplemented: exponential steps, IGN
+jitter, depth-driven blur. Not taken: its low-resolution accumulation with temporal reprojection, a-trous filtering and
+joint bilateral upsampling; if the full-resolution march costs too much under water, that is the next step.
+Underwater only: shafts seen from above into clear water would put the march in the surface's lighting shader.
+Written without compiling; untested in game.
