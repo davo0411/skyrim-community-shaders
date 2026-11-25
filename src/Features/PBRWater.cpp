@@ -148,6 +148,8 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		SprayQuality,
 		ProjectedGrid,
 		GridCellSize,
+		EnableWakes,
+		WakeStrength,
 		WireframeMode,
 		DebugView))
 	nlohmann_json_j["SprayEmitters"] = nlohmann_json_t.SprayEmitters;
@@ -279,6 +281,8 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		SprayQuality,
 		ProjectedGrid,
 		GridCellSize,
+		EnableWakes,
+		WakeStrength,
 		WireframeMode,
 		DebugView))
 	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest. An emitter saved for
@@ -372,6 +376,7 @@ void PBRWater::SanitizeSettings()
 	static const Settings d{};  // the defaults, built once (this runs every frame)
 	clamp(s.TessellationTriangleSize, 1.0f, Huge, d.TessellationTriangleSize);
 	clamp(s.GridCellSize, 2.0f, 64.0f, d.GridCellSize);
+	clamp(s.WakeStrength, 0.0f, 10.0f, d.WakeStrength);
 	clamp(s.DistantHalfRateDistance, 1.0f, Huge, d.DistantHalfRateDistance);
 	clamp(s.WindSpeedCalm, 0.0f, Huge, d.WindSpeedCalm);
 	clamp(s.WindSpeedStorm, 0.1f, Huge, d.WindSpeedStorm);
@@ -852,6 +857,13 @@ void PBRWater::DrawSettings()
 		IdScope id("ripples");
 		Util::CheckboxTip(T(TKEY("enable_ripples"), "Interactive Ripples"), &s.EnableRipples,
 			T(TKEY("enable_ripples_tooltip"), "Simulates ripples and wakes from every actor and object in the water. Replaces the vanilla wading mesh."));
+		Util::CheckboxTip(T(TKEY("enable_wakes"), "Kelvin Wakes"), &s.EnableWakes,
+			T(TKEY("enable_wakes_tooltip"), "Swimmers, waders and horses moving through the water leave the V-shaped wake of real deep-water waves behind them, its waves longer the faster they go."));
+		{
+			Util::DisableGuard disableWakes(!s.EnableWakes);
+			Util::SliderFloatTip(T(TKEY("wake_strength"), "Wake Strength"), &s.WakeStrength, 0.0f, 3.0f, "%.2f",
+				T(TKEY("wake_strength_tooltip"), "Scales the height of the wakes. Default 1."));
+		}
 		Util::SliderFloatTip(T(TKEY("ripple_extent"), "Ripple Range"), &s.RippleExtent, 16.0f, 128.0f, "%.0f m",
 			T(TKEY("ripple_extent_tooltip"), "Width of the area around the camera in which ripples are simulated. A wider area spreads the same simulation thinner, so ripples look coarser. Default 64 m."));
 		Util::SliderFloatTip(T(TKEY("ripple_height"), "Ripple Height"), &s.RippleHeight, 0.0f, 0.5f, "%.3f m",
@@ -1082,6 +1094,7 @@ void PBRWater::SetupResources()
 	for (auto& buffer : patchDrawBuffers)
 		buffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::GridPatchDrawConstants");
 	projectedGrid.Setup();
+	kelvinPattern = PBRWaterWake::CreatePattern();
 	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
 	instancedDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::InstancedStencilConstants");
 	stencilInstanceBuffer = std::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(MaxStencilInstances), MaxStencilInstances, "PBRWater::StencilInstances");
@@ -2309,6 +2322,22 @@ void PBRWater::UpdateFrameConstants()
 
 	// The artistic scales the shaders read (PBRWater.hlsli Tune1..Tune5).
 	d.Tune1 = { settings.FoamOffset0, settings.FoamOffset1, settings.FoamOffset2, settings.FoamOffset3 };
+	// The actors' Kelvin wakes (GatherInteractions, main thread).
+	d.WakeInfo = {};
+	if (settings.EnableWakes && kelvinPattern) {
+		if (const auto wakes = wakeSources.load(std::memory_order_acquire)) {
+			const float gravity = static_cast<float>(9.81 * UnitsPerMetre);
+			uint32_t count = 0;
+			for (const auto& w : *wakes) {
+				if (count >= PBRWaterWake::MaxSources || w.speed <= 0.0f)
+					break;
+				d.Wake0[count] = { w.x, w.y, gravity / (w.speed * w.speed), w.amplitude * settings.WakeStrength };
+				d.Wake1[count] = { w.dirX, w.dirY, 0.0f, 0.0f };
+				++count;
+			}
+			d.WakeInfo.x = static_cast<float>(count);
+		}
+	}
 	d.Tune2 = { settings.FoamCascadeWeightFull, settings.FoamDepthFalloff, settings.FoamFadeDistance, settings.FoamRoughnessModifier };
 	d.Tune3 = { settings.RippleHorizDisplace, settings.RippleDisplaceClamp, settings.ShoreTrainCycles, settings.ShoreResidualFoam };
 	d.Tune4 = { settings.ShoreWaveVariation, PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread), settings.DetailNormalCalm, settings.DetailNormalGale };
@@ -2625,7 +2654,7 @@ void PBRWater::GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srv
 	const bool shore = d.Shore0.x > 0.5f && shoreTextures.field;
 	srvs[9] = shore ? shoreTextures.times->srv.get() : nullptr;
 	srvs[10] = shore ? shoreTextures.rays->srv.get() : nullptr;
-	srvs[11] = ocean.GetFoamSRV();
+	srvs[11] = kelvinPattern.get();  // the Kelvin wake pattern (KelvinWakes); the FFT foam reaches the pixels through Surface.w
 	srvs[12] = shore && d.Shore0.y < 1.0f && previousShoreTextures.field ? previousShoreTextures.times->srv.get() : nullptr;
 	srvs[13] = shore && d.Swash0.w > 0.5f ? swash.GetWetSRV() : nullptr;
 	srvs[14] = shore ? shoreTextures.room->srv.get() : nullptr;
@@ -3968,8 +3997,11 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 		sources.push_back(s);
 	};
 
+	// Kelvin wakes: actors moving through the water, nearest the camera first.
+	std::vector<PBRWaterWake::Source> wakes;
+
 	// Actors: every collision shape (legs, torso, ...) that crosses the surface makes its own ripple.
-	if (wantRipples) {
+	if (wantRipples || settings.EnableWakes) {
 		auto handleActor = [&](RE::Actor* actor) {
 			if (!actor || !actor->Is3DLoaded())
 				return;
@@ -3980,6 +4012,27 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 			PBRWaterModel::WaveSnapshot::Sample wave;
 			if (!surfaceAt(actor, pos, flatZ, wave))
 				return;
+			// A Kelvin wake from a body moving through the water at the surface: swimming, wading at least knee deep, a horse
+			// fording. Its height is empirical: a few centimetres for a swimmer at a walk, growing with the hull's draft
+			// and its speed (Wake Strength scales it).
+			if (settings.EnableWakes) {
+				RE::NiPoint3 velocity;
+				actor->GetLinearVelocity(velocity);
+				const float speed = std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+				const float draft = flatZ + wave.height - pos.z;  // the water above the feet
+				const float bodyHeight = std::max(actor->GetHeight(), 1.0f);
+				if (speed > 0.4f * UnitsPerMetre && draft > 0.3f * UnitsPerMetre && draft < bodyHeight + 0.5f * UnitsPerMetre) {
+					PBRWaterWake::Source w;
+					w.x = pos.x;
+					w.y = pos.y;
+					w.dirX = velocity.x / speed;
+					w.dirY = velocity.y / speed;
+					w.speed = speed;
+					const float immersed = std::min(draft, bodyHeight) / UnitsPerMetre;
+					w.amplitude = 0.05f * UnitsPerMetre * std::min(immersed, 1.5f) * std::min(speed / (1.5f * UnitsPerMetre), 2.0f);
+					wakes.push_back(w);
+				}
+			}
 			// Wading (feet on the bed, under water): moving feet stir the bottom up.
 			if (siltRate > 0.0f && pos.z < flatZ + wave.height - 2.0f) {
 				const auto state = actor->AsActorState();
@@ -4074,6 +4127,12 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 
 	lastSources = std::move(tracks);
 	lastWaveVelocities = std::move(waveVelocities);
+	std::sort(wakes.begin(), wakes.end(), [&](const PBRWaterWake::Source& a, const PBRWaterWake::Source& b) {
+		return (a.x - eye.x) * (a.x - eye.x) + (a.y - eye.y) * (a.y - eye.y) < (b.x - eye.x) * (b.x - eye.x) + (b.y - eye.y) * (b.y - eye.y);
+	});
+	if (wakes.size() > PBRWaterWake::MaxSources)
+		wakes.resize(PBRWaterWake::MaxSources);
+	wakeSources.store(std::make_shared<const std::vector<PBRWaterWake::Source>>(std::move(wakes)), std::memory_order_release);
 	if (wantRipples) {
 		ripples.SubmitSources(std::move(sources));
 		ripples.SubmitWaterLevels(GatherWaterLevels(eye, snap.exterior));

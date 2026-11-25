@@ -1516,7 +1516,7 @@ struct DiffuseOutput
 	float bedDepth;       // and that point's depth below the surface (units), < 0 unknown
 };
 
-#			if defined(REFRACTIONS) && defined(PBR_WATER) && !defined(UNDERWATER)
+#			if defined(PBR_WATER)
 /// Screen uv (0..1, full resolution) of camera-relative `p`.
 float2 PBRWaterScreenUv(float3 p)
 {
@@ -2049,8 +2049,34 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 
 #				if defined(UNDERWATER)
+#					if defined(PBR_WATER)
+	// The surface seen from below. Light leaves the water only inside Snell's window (48.6 degrees off the normal): there
+	// the world above shows through, bent along the refracted ray, and the surface reflects a little of the water below;
+	// outside it every ray is totally reflected, and the surface is a mirror of the water under it - lit water, its body
+	// colour. Between the camera and the surface the light crosses the same water as from above (Beer-Lambert with its
+	// extinction), scattering in the water's own colour. Vanilla blended half the shallow colour with the reflection and
+	// faded linearly with distance, the same in any water.
+	float pbrCosUp = saturate(dot(viewDirection, normal));
+	float pbrReflected = PBRWater::FresnelDielectric(pbrCosUp, PBRWater::WaterIOR);
+	float3 pbrWaterLight = ColorManagement::SceneToLinear(diffuseOutput.refractionDiffuseColor);
+	float3 pbrAbove = ColorManagement::SceneToLinear(specularColor);
+#						if defined(REFRACTIONS)
+	{
+		float3 pbrOut = refract(viewDirection, -normal, PBRWater::WaterIOR);
+		if (any(pbrOut != 0.0)) {
+			float2 pbrAboveUv = saturate(PBRWaterScreenUv(input.WPosition.xyz + pbrOut * (10.0 * PBRWater::UnitsPerMetre)));
+			pbrAbove = ColorManagement::SceneToLinear(PreExposure::Decode(RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(pbrAboveUv)).xyz));
+		}
+	}
+#						endif
+	float3 pbrSurfaceLight = lerp(pbrAbove, pbrWaterLight, pbrReflected);
+	float3 pbrExtinction = PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x);
+	float3 pbrSeen = exp(-pbrExtinction * length(input.WPosition.xyz));
+	float3 finalColor = ColorManagement::LinearToScene(pbrSurfaceLight * pbrSeen + pbrWaterLight * (1.0 - pbrSeen));
+#					else
 	float3 finalSpecularColor = lerp(ShallowColor.xyz, specularColor, 0.5);
 	float3 finalColor = saturate(1 - length(input.WPosition.xyz) * 0.002) * ((1 - fresnel) * (diffuseColor - finalSpecularColor)) + finalSpecularColor;
+#					endif
 	// Add ripple and splash color effects for underwater
 #					if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override water color with debug visualization (darker for underwater)
@@ -2308,9 +2334,9 @@ PS_OUTPUT main(PS_INPUT input)
 	// The bore's and the surf's shore foam gated by flatness come from the material (foam: Material.hlsli).
 	float pbrFlatCoverage = max(max(pbrSurface.foam, pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
 #							else
-	float pbrFlatCoverage = max(max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.surfFoam * pbrFlat * (1.0 - pbrSurface.simShare)), pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
+	float pbrFlatCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSurface.swashFoam * pbrSheet), pbrEdgeLace);
 #							endif
-	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
+	// The surf's leftover foam is in pbrSurface.breakerFoam on every face, drawn with the sea's (BreakerFoamDrawn).
 	// The foam settings reach all of it: Foam Amount and Foam Coverage scale the shore's coverages as they do the sea's
 	// (Foam1.z; the breakers' in BreakerFoamDrawn), and the distance fade is applied to the whole.
 	pbrFlatCoverage = saturate(pbrFlatCoverage * PBRWater::Foam1.z);

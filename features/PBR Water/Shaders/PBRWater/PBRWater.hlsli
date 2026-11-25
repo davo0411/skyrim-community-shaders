@@ -96,6 +96,9 @@ namespace PBRWater
 		float4 Proj1;                    // the cells (SeaLevels): xy first cell, zw cells across
 		float4 Proj2;                    // x its first cell, y its first patch, zw unused
 		float4 Proj3;                    // unused
+		float4 WakeInfo;                 // x Kelvin wakes this frame (KelvinWakes)
+		float4 Wake0[8];                 // per wake: xy absolute position (units), z k0 = g / U^2 (1/unit), w peak height (units)
+		float4 Wake1[8];                 // xy heading, zw unused
 	}
 
 	Texture2D<float> SeaLevels : register(t28);  // the projected grids' cells: each one's still water level (absolute z), < -1e8 none (or a river's)
@@ -109,7 +112,7 @@ namespace PBRWater
 	Texture2DArray<float4> OceanSurface : register(t87);               // x height (units), y shear dDx/dy, z |slope|^2 (LEAN), w foam (OceanAssembleCS)
 	Texture2DArray<float4> OceanPreviousDisplacement : register(t88);  // last frame's displacement (motion vectors)
 	Texture2DArray<float4> ShoreProfileTexture : register(t84);        // the shore wave through its life (ShoreProfile.h): slice 0 forward, up, their d/dphase; slice 1 foam
-	Texture2DArray<float> OceanFoam : register(t91);                   // the FFT foam, one persistent slice per cascade (OceanAssembleCS)
+	Texture2D<float4> KelvinWakeTexture : register(t91);               // the Kelvin wake pattern (PBRWaterWake::CreatePattern): height, d/dX, d/dY in 1 / k0
 	Texture2D<float4> ShoreField0 : register(t89);                     // x travel time to the waterline tau (s; up the beach: the waterline's), y signed distance to it (units), z offset of the crests along the coast (wave cycles), w still water level (absolute z, < -1e6: none)
 	Texture2D<float4> ShoreField1 : register(t90);                     // xy grad tau (s/m, seaward; up the beach: the waterline's), z beach slope (tan) at the waterline, w exposure to the swell
 	Texture2D<float4> ShoreFieldPrevious : register(t92);              // ShoreField0 of the field being replaced (Shore0.y < 1)
@@ -2231,8 +2234,8 @@ namespace PBRWater
 	 * (trilinear / anisotropic). The slope variance the filter removes is recovered from the mip-filtered
 	 * second moments (LEAN mapping) and returned for the roughness, as is the variance of the shore wave
 	 * train where the pixel cannot carry it.
-	 * @param surfFoam  0..1 the foam the surf left on the water here (ShoreFoamAt): on a face that is not flat it is
-	 *                  drawn with the breaker's white water, through the sea's foam
+	 * @param surfFoam  0..1 the foam the surf left on the water here (ShoreFoamAt): drawn with the breaker's white water,
+	 *                  through the sea's foam, on every face
 	 * @param footprint the pixel's footprint on the water (units): the longer of its screen derivatives
 	 */
 	WaveResult EvaluateWavesFiltered(float3 positionWS, WaveContext ctx, float surfFoam, float footprint)
@@ -2292,6 +2295,13 @@ namespace PBRWater
 				}
 			}
 		}
+		// The actors' Kelvin wakes, filtered to the pixel's footprint.
+		{
+			float2 wakeSlope;
+			sums.displacement.z += KelvinWakes(positionWS, footprint, wakeSlope);
+			sums.dzdx += wakeSlope.x;
+			sums.dzdy += wakeSlope.y;
+		}
 		ShoreTrain train = (ShoreTrain)0;
 #if defined(PSHADER) || defined(PBRW_MATERIAL_CS)
 		// The deferred surface has the train once per 2x2 pixels (DeferredShoreCS).
@@ -2321,7 +2331,11 @@ namespace PBRWater
 		float flatness = smoothstep(0.80, 0.95, o.normal.z);
 		float boreFlat = o.bore * flatness;
 		// Foam Amount and Foam Coverage scale it as they do the sea's (Foam1.z); crestFoam is the sea's own test already.
-		float breakerCoverage = saturate(max(o.breakerFoam * (1.0 - boreFlat), saturate(surfFoam) * (1.0 - flatness)) * Foam1.z);
+		// The surf's leftover foam is the sea's lace thickened, on flat water too: drawn as a coverage of its own with the
+		// foam texture held still, it lay as a fixed ring along the breaker line, unlike the open sea's whitecaps around it
+		// (its tracer barely drifts there: the shallow-water drift under the waves comes and goes). Inshore the surf
+		// simulation carries its own (swashFoam).
+		float breakerCoverage = saturate(max(o.breakerFoam * (1.0 - boreFlat), saturate(surfFoam) * (1.0 - o.surf)) * Foam1.z);
 		o.breakerFoam = BreakerFoamDrawn(max(breakerCoverage, crestFoam), sums);
 		// The churned water (the crushed tube, the splash-up, the roller) is in BreakerFoam's coverage and drawn with the sea's
 		// foam, thickened to solid where it is densest. Drawn opaque on top with no pattern, it laid a smooth white band along
@@ -2377,6 +2391,41 @@ namespace PBRWater
 	{
 		uv = (absXY - origin) * Ripple0.z;
 		return Ripple0.w > 0.5 && all(uv > 0.0) && all(uv < 1.0);
+	}
+
+	static const float KelvinWakeLength = 30.0;  // PBRWaterWake::Length
+	static const float KelvinWakeWidth = 15.0;   // PBRWaterWake::Width
+
+	/**
+	 * The Kelvin wakes of the actors moving through the water at camera-relative `positionWS`: height (units) and its
+	 * slope. Each lays the pattern behind it along its heading, scaled by its speed (k0 = g / U^2: the transverse waves are
+	 * 2 pi / k0 long). Faded where the sampling (`spacing`, units) cannot carry half a transverse wave.
+	 */
+	float KelvinWakes(float3 positionWS, float spacing, out float2 slope)
+	{
+		slope = 0.0;
+		float height = 0.0;
+		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+		uint count = (uint)WakeInfo.x;
+		[loop] for (uint i = 0; i < count; i++)
+		{
+			float4 a = Wake0[i];
+			float2 heading = Wake1[i].xy;
+			float2 d = absXY - a.xy;
+			float x = -dot(d, heading) * a.z;
+			float y = (heading.x * d.y - heading.y * d.x) * a.z;
+			if (x <= 0.0 || x >= KelvinWakeLength || abs(y) >= KelvinWakeWidth)
+				continue;
+			float resolved = saturate(2.0 - spacing * a.z / Math::PI);
+			if (resolved <= 0.0)
+				continue;
+			float4 t = KelvinWakeTexture.SampleLevel(LinearClampSampler, float2(x / KelvinWakeLength, abs(y) / KelvinWakeWidth), 0);
+			float amplitude = a.w * resolved;
+			height += amplitude * t.x;
+			float side = y < 0.0 ? -1.0 : 1.0;
+			slope += amplitude * a.z * (-t.y * heading + t.z * side * float2(-heading.y, heading.x));
+		}
+		return height;
 	}
 
 	/// The displayed state (height in simulation units) at `uv`, of this frame (or last frame's copy for motion vectors).
@@ -2594,6 +2643,11 @@ namespace PBRWater
 		float3 ripple = RippleDisplacement(positionWS, false) * rippleFade;
 		o.current = now.displacement + ripple;
 		o.previous = motion ? now.previousDisplacement + RippleDisplacement(positionWS, true) * rippleFade : 0.0;
+		// The actors' Kelvin wakes (their last frame taken as this one's: they move a hair between frames).
+		float2 wakeSlope;
+		float wake = KelvinWakes(positionWS, spacing, wakeSlope) * damping;
+		o.current.z += wake;
+		o.previous.z += motion ? wake : 0.0;
 		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
 		// The waves alone: AboveWaterline blends them with the surf simulation per pixel.
 		float waves = now.heightRaw + ripple.z;

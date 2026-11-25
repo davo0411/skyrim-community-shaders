@@ -4,6 +4,7 @@
 #include "PBRWater/BisectionTessellator.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
+#include "PBRWater/KelvinWake.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/ProjectedGrid.h"
 #include "PBRWater/RippleSimulation.h"
@@ -153,6 +154,8 @@ struct PBRWater : Feature
 
 		// Ripples
 		bool EnableRipples = true;
+		bool EnableWakes = true;     ///< Kelvin wakes behind the actors moving through the water (PBRWater/KelvinWake.h)
+		float WakeStrength = 1.0f;   ///< scales their height
 		float RippleExtent = 64.0f;  ///< m covered around the camera
 		float RippleHeight = 0.12f;  ///< m
 		float RippleNormalStrength = 1.0f;
@@ -281,6 +284,9 @@ struct PBRWater : Feature
 		float4 Proj1;                                 // the cells (SeaLevels): xy first cell, zw cells across
 		float4 Proj2;                                 // x its first cell, y its first patch, zw unused
 		float4 Proj3;                                 // unused
+		float4 WakeInfo;                              // x Kelvin wakes this frame
+		float4 Wake0[PBRWaterWake::MaxSources];       // per wake: xy absolute position (units), z k0 = g / U^2 (1/unit), w peak height (units)
+		float4 Wake1[PBRWaterWake::MaxSources];       // xy heading, zw unused
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -601,6 +607,8 @@ private:
 		float offset = 0.0f;
 	};
 	std::unordered_map<const void*, SourceTrack> lastSources;          ///< main thread: ripple source motion relative to the water
+	std::atomic<std::shared_ptr<const std::vector<PBRWaterWake::Source>>> wakeSources;  ///< main thread -> render thread: this frame's wakes
+	winrt::com_ptr<ID3D11ShaderResourceView> kelvinPattern;             ///< the Kelvin wake pattern (t91)
 	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;  ///< main thread: wave velocity added per body
 	uint32_t uploadedTerrainGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedTerrain;

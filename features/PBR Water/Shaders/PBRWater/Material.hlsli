@@ -97,7 +97,7 @@ namespace PBRWaterMaterial
 		uint2 octBits = (uint2)round(saturate(oct) * 65535.0);
 		float flatness = smoothstep(0.80, 0.95, s.waveNormal.z);
 		// The shore foam gated by how flat the surface is: the bore's, and what the surf left where the simulation is not the water.
-		float flatFoam = max(s.foam * s.bore * flatness, s.surfFoam * flatness * (1.0 - s.simShare));
+		float flatFoam = s.foam * s.bore * flatness;  // the surf's leftover foam is in breakerFoam (EvaluateWavesFiltered)
 		float swash = s.swashDepth > PBRWater::SwashMinDepth ? s.swashSurface : -2.0 * HalfLimit;
 		float elevation = max(s.elevation, -2.0 * HalfLimit);
 

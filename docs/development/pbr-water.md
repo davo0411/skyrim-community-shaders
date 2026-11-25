@@ -845,3 +845,30 @@ Assessed against the vanilla path the PBR water column still leaned on:
 
 Not changed: the in-scattered body colour stays the form's deep colour (artist control), and the vanilla (non-PBR)
 water keeps its own fog model. Written without compiling; untested in game.
+
+## Foam ring, foam drift, Kelvin wakes, the surface from below (2026-11-25)
+
+- **Static foam ring in the shallows.** The surf's leftover foam (ShoreFoamCS, a tracer that barely drifts: the shallow
+  water drift under the waves comes and goes) was drawn on flat water as a coverage of its own with the foam texture
+  held still, a fixed band along the breaker line unlike the open sea's whitecaps around it. It is now drawn on every
+  face as the sea's own lace thickened (BreakerFoamDrawn), so it has the sea's pattern and rides the water with it.
+- **The open sea's foam drifts.** The wind drags the surface water downwind at about 3% of its speed (Wu 1983), and the
+  foam with it while the crests that made it run on. Each cascade's foam field slides over its texture by whole texels
+  as the drift adds up (OceanAssembleCS FoamShift: each thread still owns one texel, nothing is resampled), and a second
+  dispatch (FOAM_DRIFT) gives the pixels the foam at the drift's fraction, so the longest cascade's metre-wide texels do
+  not step.
+- **Kelvin wakes.** Actors moving through the water (swimming, wading at least knee deep, horses fording) leave the wake
+  of deep-water waves: the far-field Kelvin integral for a moving pressure point (Lamb 1932), evaluated once into a
+  texture in units of 1 / k0 (PBRWaterWake::CreatePattern, t91, where the unread FFT foam view was), laid behind each of
+  the eight nearest along its heading and scaled by its speed (transverse wavelength 2 pi U^2 / g). The vertices take
+  its height (DisplaceSurface), the pixels its slope (EvaluateWavesFiltered), faded where the sampling cannot carry half
+  a transverse wave. Its height is empirical (a few centimetres for a swimmer at a walk); Wake Strength scales it.
+  Settings Kelvin Wakes, Wake Strength (version 0-29-0).
+- **The surface from below.** PBR Water now shades the underwater technique: Snell's window (the world above, along the
+  refracted ray, inside 48.6 degrees), total internal reflection of the lit water outside it (Fresnel from the water
+  side), and Beer-Lambert with the surface's own extinction over the path from the camera. Vanilla blended half the
+  shallow colour with the reflection and faded linearly with distance.
+  Not changed: the fog the engine lays over everything else under water (its underwater image space and fog settings);
+  replacing it needs the engine's underwater fog hooked first.
+
+Written without compiling; untested in game.

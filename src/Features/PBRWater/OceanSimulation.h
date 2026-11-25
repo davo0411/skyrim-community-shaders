@@ -59,8 +59,12 @@ private:
 		float4 Band[PBRWaterModel::NumCascades];
 		float4 Foam;
 		float4 SwellShape;
+		float4 FoamShift[2];  ///< whole texels the foam drifted, per cascade (xy, zw)
 	};
 	STATIC_ASSERT_ALIGNAS_16(OceanCB);
+
+	/// The foam's drift so far per cascade, in texels (x, y), kept within one tile.
+	std::array<double, PBRWaterModel::NumCascades * 2> foamDrift{};
 
 	void CreateTextures(uint32_t size);
 	void CompileShaders();
@@ -77,6 +81,7 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> fftRowsCS;
 	winrt::com_ptr<ID3D11ComputeShader> fftColumnsCS;
 	winrt::com_ptr<ID3D11ComputeShader> assembleCS;
+	winrt::com_ptr<ID3D11ComputeShader> foamDriftCS;  ///< OceanAssembleCS with FOAM_DRIFT: the drifted foam the pixels read
 
 	uint32_t resolution = 0;
 	uint32_t mipCount = 1;

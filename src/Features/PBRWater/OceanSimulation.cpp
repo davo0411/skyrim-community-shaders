@@ -106,7 +106,8 @@ void OceanSimulation::CompileShaders()
 	fftRowsCS = compile(L"Data\\Shaders\\PBRWater\\OceanFFTCS.hlsl", { { "FFT_SIZE", size.c_str() }, { "FFT_LOG2", log2.c_str() } });
 	fftColumnsCS = compile(L"Data\\Shaders\\PBRWater\\OceanFFTCS.hlsl", { { "FFT_SIZE", size.c_str() }, { "FFT_LOG2", log2.c_str() }, { "VERTICAL", "" } });
 	assembleCS = compile(L"Data\\Shaders\\PBRWater\\OceanAssembleCS.hlsl", {});
-	ready = spectrumCS && fftRowsCS && fftColumnsCS && assembleCS && displacement && foam && constants;
+	foamDriftCS = compile(L"Data\\Shaders\\PBRWater\\OceanAssembleCS.hlsl", { { "FOAM_DRIFT", "" } });
+	ready = spectrumCS && fftRowsCS && fftColumnsCS && assembleCS && foamDriftCS && displacement && foam && constants;
 	if (!ready)
 		logger::warn("[PBR Water] FFT ocean shaders failed to compile; open water stays flat");
 }
@@ -165,6 +166,25 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 	cb.Time.w = std::clamp(settings.deltaTime, 0.0f, 0.25f) * 60.0f;
 	cb.Foam = { settings.foamBias, settings.foamThreshold, settings.foamAdd, settings.foamDecayRate };
 	cb.SwellShape = { ocean.swellGamma, ocean.swellSpread, static_cast<float>(settings.cascadeMask), 0.0f };
+	// The foam drifts downwind with the surface water: the wind drift current, about 3% of the wind speed (Wu 1983), with
+	// the wind speed from the sea's peak frequency (Pierson-Moskowitz: omega_p = 0.855 g / U).
+	{
+		const double windSpeed = ocean.peakOmega > 1e-3f ? 0.855 * Gravity / ocean.peakOmega : 0.0;
+		const double drift = 0.03 * windSpeed * std::clamp(settings.deltaTime, 0.0f, 0.25f);  // metres this frame
+		float shift[Cascades * 2];
+		for (uint32_t c = 0; c < Cascades; ++c) {
+			const double texel = std::max(static_cast<double>(ocean.cascades[c].length), 1e-3) / resolution;
+			for (uint32_t k = 0; k < 2; ++k) {
+				double& accumulated = foamDrift[c * 2 + k];
+				accumulated = std::fmod(accumulated + drift * (k ? ocean.windDirY : ocean.windDirX) / texel, static_cast<double>(resolution));
+				if (accumulated < 0.0)
+					accumulated += resolution;
+				shift[c * 2 + k] = static_cast<float>(accumulated);
+			}
+		}
+		cb.FoamShift[0] = { shift[0], shift[1], shift[2], shift[3] };
+		cb.FoamShift[1] = { shift[4], shift[5], shift[6], shift[7] };
+	}
 	constants->Update(cb);
 
 	if (foamClear) {
@@ -218,6 +238,9 @@ void OceanSimulation::Update(const WaveSnapshot& snapshot, const Settings& setti
 		context->CSSetShaderResources(0, 1, &srv);
 		context->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
 		context->CSSetShader(assembleCS.get(), nullptr, 0);
+		context->Dispatch(groups, groups, Cascades);
+		// The foam the pixels read, taken at the drift's fraction once every texel of the field is updated.
+		context->CSSetShader(foamDriftCS.get(), nullptr, 0);
 		context->Dispatch(groups, groups, Cascades);
 		context->CSSetShaderResources(0, 1, nullSrvs);
 		context->CSSetUnorderedAccessViews(0, 4, nullUavs, nullptr);
