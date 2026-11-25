@@ -2315,20 +2315,24 @@ namespace PBRWater
 	}
 
 	/**
-	 * The low-frequency surface noise at absolute `absXY`: x TurbidityPatches, y unused (1). Around the camera it is read
-	 * from this frame's bake (SurfaceNoiseCS: the noise once per texel instead of once per vertex, which with tessellation
-	 * is every generated vertex in every pass); beyond it, and until the bake is ready, it is evaluated here. Without
-	 * Water Clarity nothing reads the sediment: no noise at all.
+	 * The low-frequency surface noise at absolute `absXY`: x TurbidityPatches, y unused (1). It is read from this frame's
+	 * bake around the camera (SurfaceNoiseCS: the noise once per texel instead of once per vertex, which with tessellation
+	 * is every generated vertex in every pass) and fades to its mean towards the bake's edge: far water's patches are
+	 * lost in its fog anyway, and no vertex program carries the noise octaves. Without Water Clarity nothing reads the
+	 * sediment: no noise at all.
 	 */
 	float2 SurfaceNoise(float2 absXY)
 	{
+		static const float MeanPatches = 0.5;
 		float2 noise = float2(0.0, 1.0);
 		[branch] if (ClarityEnabled())
 		{
 			float2 uv = (absXY - Noise0.xy) * Noise0.z;
-			[branch] if (Noise0.w > 0.5 && all(uv > 0.002) && all(uv < 0.998))
-				noise.x = SurfaceNoiseTexture.SampleLevel(LinearClampSampler, uv, 0).x;
-			else noise.x = TurbidityPatches(absXY);
+			float2 edge = abs(uv - 0.5) * 2.0;
+			float kept = Noise0.w > 0.5 ? saturate((1.0 - max(edge.x, edge.y)) / 0.2) : 0.0;
+			noise.x = MeanPatches;
+			[branch] if (kept > 0.0)
+				noise.x = lerp(MeanPatches, SurfaceNoiseTexture.SampleLevel(LinearClampSampler, uv, 0).x, kept);
 		}
 		return noise;
 	}
