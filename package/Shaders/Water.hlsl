@@ -1306,6 +1306,25 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	return result;
 }
 
+#	if defined(PBR_WATER) && defined(SKYLIGHTING)
+/// Skylighting::SampleNoBias with one filtered read: the probe array is toroidal (ArrayOrigin), so a point whose eight
+/// probes straddle the wrap seam or the array's edge takes the eight separate reads instead.
+sh2 PBRWaterSkylighting(float3 positionMS)
+{
+	if (SharedData::InInterior)
+		return Skylighting::UNIT_SH / 1e-10;
+	const float3 dim = Skylighting::ARRAY_DIM;
+	float3 cell = (positionMS - SharedData::skylightingSettings.PosOffset.xyz) / Skylighting::ARRAY_SIZE * dim;
+	cell += 0.5 * dim - 0.5;
+	float3 base = floor(cell);
+	float3 physical = base + SharedData::skylightingSettings.ArrayOrigin.xyz;
+	physical -= floor(physical / dim) * dim;
+	[branch] if (any(base < 0.0) || any(base + 1.0 >= dim) || any(physical + 1.0 >= dim))
+		return Skylighting::SampleNoBias(positionMS, false);
+	return Skylighting::SkylightingProbeArray.SampleLevel(PBRWater::LinearClampSampler, (physical + (cell - base) + 0.5) / dim, 0);
+}
+#	endif
+
 float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular, float roughness = 0.0)
 {
 #			if !defined(DYNAMIC_CUBEMAPS)
@@ -1702,7 +1721,7 @@ PS_OUTPUT main(PS_INPUT input)
 	// Skylighting off (PBR Water): the open sky, as Skylighting itself gives indoors; its probes are not read.
 	sh2 skylightingSH = Skylighting::UNIT_SH / 1e-10;
 	[branch] if (PBRWater::SkylightingEnabled())
-		skylightingSH = Skylighting::SampleNoBias(positionMSSkylight, false);
+		skylightingSH = PBRWaterSkylighting(positionMSSkylight);
 #				else
 	sh2 skylightingSH = Skylighting::Sample(positionMSSkylight, float3(0, 0, 1));
 #				endif
