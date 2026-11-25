@@ -16,9 +16,28 @@
 
 #define PBRW_MATERIAL_CS
 
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "PBRWater/DeferredCommon.hlsli"
+
+// The tile's baked shore blocks (DeferredShoreCS, one a 2x2 pixels), with one more around it for the bilinear blend: read
+// once per tile into group-shared memory (PBRWater.hlsli BakedShoreTrain reads them there, PBRW_BAKED_SHORE_SHARED).
+#define PBRW_BAKED_SHORE_SHARED
+#define PBRW_SHARED_SHORE_SPAN (PBRWATER_DEFERRED_TILE / 2 + 2)
+groupshared uint4 SharedShore0[PBRW_SHARED_SHORE_SPAN * PBRW_SHARED_SHORE_SPAN];
+groupshared uint4 SharedShore1[PBRW_SHARED_SHORE_SPAN * PBRW_SHARED_SHORE_SPAN];
+groupshared uint4 SharedShore2[PBRW_SHARED_SHORE_SPAN * PBRW_SHARED_SHORE_SPAN];
+static int2 SharedShoreOrigin = 0;  // the block at SharedShore*[0]
+uint SharedShoreIndex(int2 block)
+{
+	int2 k = clamp(block - SharedShoreOrigin, 0, PBRW_SHARED_SHORE_SPAN - 1);
+	return k.y * PBRW_SHARED_SHORE_SPAN + k.x;
+}
+uint4 SharedShoreLoad0(int2 block) { return SharedShore0[SharedShoreIndex(block)]; }
+uint4 SharedShoreLoad1(int2 block) { return SharedShore1[SharedShoreIndex(block)]; }
+uint4 SharedShoreLoad2(int2 block) { return SharedShore2[SharedShoreIndex(block)]; }
+
 #include "PBRWater/Material.hlsli"
 
 cbuffer SurfaceMaterialCB : register(b0)
@@ -58,10 +77,21 @@ float3 Unproject(float2 pixel, float depth)
 	return world.xyz / world.w;
 }
 
-[numthreads(PBRWATER_DEFERRED_TILE, PBRWATER_DEFERRED_TILE, 1)] void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+[numthreads(PBRWATER_DEFERRED_TILE, PBRWATER_DEFERRED_TILE, 1)] void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint gi : SV_GroupIndex) {
 	// A group is one of DeferredTilesCS's tiles: the nearest water in it decides whether the tile is a distant one.
 	if (gi == 0)
 		Nearest = 0x7F7FFFFF;
+	// Its baked shore blocks: the pixels' bilinear blend reaches one block past the tile's own on each side.
+	SharedShoreOrigin = int2(group.xy) * (PBRWATER_DEFERRED_TILE / 2) - 1;
+	[branch] if (ShoreBaked != 0 && gi < PBRW_SHARED_SHORE_SPAN * PBRW_SHARED_SHORE_SPAN)
+	{
+		uint width, height;
+		PBRWater::BakedShore0.GetDimensions(width, height);
+		int2 c = clamp(SharedShoreOrigin + int2(gi % PBRW_SHARED_SHORE_SPAN, gi / PBRW_SHARED_SHORE_SPAN), 0, int2(width, height) - 1);
+		SharedShore0[gi] = PBRWater::BakedShore0.Load(int3(c, 0));
+		SharedShore1[gi] = PBRWater::BakedShore1.Load(int3(c, 0));
+		SharedShore2[gi] = PBRWater::BakedShore2.Load(int3(c, 0));
+	}
 	GroupMemoryBarrierWithGroupSync();
 	int2 px = int2(id.xy);
 	float depth = 1.0;

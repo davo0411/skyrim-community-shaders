@@ -980,9 +980,14 @@ void PBRWater::DrawDebugSection()
 	};
 	ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &s.DebugView, views, IM_ARRAYSIZE(views));
 	ImGui::Text(T(TKEY("stat_engine_reflections"), "Effective engine reflections: %d"), EffectiveEngineReflections());
-	if (projectedGrid.HasSea())
-		ImGui::Text(T(TKEY("stat_projected_grid"), "Sea grid: %u x %u cells, sea at %.0f, %s"), projectedGrid.Columns(), projectedGrid.Rows(), projectedGrid.SeaLevel(),
-			projectedGrid.IsBuilt(globals::state->frameCount) ? T(TKEY("stat_ready"), "ready") : T(TKEY("stat_none"), "none"));
+	if (projectedGrid.HasCells()) {
+		const uint32_t gridFrame = globals::state->frameCount;
+		ImGui::Text(T(TKEY("stat_projected_grids"), "Projected grids: %u (sea at %.0f)"), projectedGrid.BuiltCount(gridFrame), projectedGrid.SeaLevel());
+		for (uint32_t slot = 0; slot < projectedGrid.BuiltCount(gridFrame); ++slot) {
+			const auto& grid = projectedGrid.Built(slot);
+			ImGui::Text(T(TKEY("stat_projected_grid_level"), "Level %.0f: %u x %u cells"), grid.z, grid.columns, grid.rows);
+		}
+	}
 
 	const char* ready = T(TKEY("stat_ready"), "ready");
 	const char* none = T(TKEY("stat_none"), "none");
@@ -1072,7 +1077,10 @@ void PBRWater::SetupResources()
 	offscreenDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::OffscreenDrawConstants");
 	spacingDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SpacingDrawConstants");
 	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
-	gridDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::GridDrawConstants");
+	for (auto& buffer : gridDrawBuffers)
+		buffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::GridDrawConstants");
+	for (auto& buffer : patchDrawBuffers)
+		buffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::GridPatchDrawConstants");
 	projectedGrid.Setup();
 	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
 	instancedDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::InstancedStencilConstants");
@@ -1534,29 +1542,20 @@ void PBRWater::UpdateTessellation()
 	bisection.Build(p, waterMeshes);
 	frameData.Draw0.w = budgetCoarsening;
 
-	// The sea's projected grid: its cells follow the worldspace (Unified Water's coverage), its vertices this frame's view.
+	// The projected grids: their cells follow the worldspace (Unified Water's coverage), their vertices this frame's view.
 	{
 		auto cells = environment.GetCellLevels();
 		if (cells != gridCells) {
 			gridCells = cells;
 			projectedGrid.SetCells(cells);
-			gridTexCoordsValid = false;
-			gridTexCoordU = {};
-			gridTexCoordV = {};
 		}
-		frameData.Proj0 = {};
-		frameData.Proj1 = {};
-		frameData.Proj2 = gridTexCoordU;
-		frameData.Proj3 = gridTexCoordV;
-		if (settings.ProjectedGrid && projectedGrid.HasSea()) {
-			// The grid has no border with the far tiles, so no fade at the loaded cells' edge, and none with the distance
+		if (settings.ProjectedGrid && projectedGrid.HasCells()) {
+			// A grid has no border with the far tiles, so no fade at the loaded cells' edge, and none with the distance
 			// short of its end: its own spacing filters the far waves (ProjectedGridCS).
 			GpuData g = d;
 			g.Grid0 = {};
 			g.Params1.z = 0.5f * GridMaxDistance;
 			g.Params1.w = GridMaxDistance;
-			g.Proj2 = gridTexCoordU;
-			g.Proj3 = gridTexCoordV;
 			gpuBuffer->Update(g);
 
 			ProjectedGrid::FrameParams gp;
@@ -1564,6 +1563,8 @@ void PBRWater::UpdateTessellation()
 			for (int r = 0; r < 4; ++r)
 				for (int c = 0; c < 4; ++c)
 					gp.viewProj[r][c] = unjittered.m[r][c];
+			gp.cameraX = camera.x;
+			gp.cameraY = camera.y;
 			gp.cameraZ = camera.z;
 			float scale[2] = { 1.0f, 1.0f };
 			if (globals::features::upscaling.loaded) {
@@ -1574,10 +1575,7 @@ void PBRWater::UpdateTessellation()
 			gp.viewportHeight = static_cast<float>(globals::game::graphicsState->screenHeight) * scale[1];
 			gp.cellPixels = settings.GridCellSize;
 			gp.maxDistance = GridMaxDistance;
-			if (projectedGrid.Build(gp, globals::state->frameCount)) {
-				frameData.Proj0 = { static_cast<float>(projectedGrid.Columns()), projectedGrid.SeaLevel(), 1.0f, 0.0f };
-				frameData.Proj1 = projectedGrid.CellsMapping();
-			}
+			projectedGrid.Build(gp, globals::state->frameCount);
 		}
 	}
 
@@ -2375,14 +2373,24 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	const bool mainView = state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections));
 	// The sea's projected grid draws every mesh at the sea's level: the engine's draw rasterises nothing (Tess0.x = 2), and
 	// the first sea draw of each pass draws the grid in its state instead (RestoreDraw, DrawGrid).
-	const bool gridSea = mainView && IsTessellatedTechnique(technique) && GridDrawsSea(*pass->geometry) && customShadersLive();
+	// The levels the grids take: a lake gets one once its meshes are drawn; a river keeps its meshes and its cells leave the
+	// grid at its level.
+	if (settings.ProjectedGrid && mainView && IsTessellatedTechnique(technique)) {
+		const auto& bound = pass->geometry->worldBound;
+		if (WaterMeshes::IsRiver(*pass->geometry))
+			projectedGrid.ExcludeRiver(bound.center.x, bound.center.y, bound.radius, bound.center.z);
+		else
+			projectedGrid.Want(bound.center.z, state->frameCount);
+	}
+	const int gridSlot = mainView && IsTessellatedTechnique(technique) && customShadersLive() ? GridSlotOf(*pass->geometry) : -1;
+	const bool gridSea = gridSlot >= 0;
 	bool gridFirst = false;
 	if (gridSea) {
-		gridFirst = std::exchange(gridPassFrame[technique], state->frameCount) != state->frameCount;
-		if (!gridTexCoordsValid) {
-			// The sea meshes' texture coordinates as a plane over absolute world xy, from the first one seen in the
+		gridFirst = std::exchange(gridPassFrame[technique * 8 + static_cast<uint32_t>(gridSlot)], state->frameCount) != state->frameCount;
+		if (!projectedGrid.HasTexCoords(pass->geometry->worldBound.center.z)) {
+			// The level's meshes' texture coordinates as a plane over absolute world xy, from the first one seen in the
 			// worldspace (the vanilla normal maps; the grid evaluates them per vertex, ProjectedGridCS).
-			float4 mapU, mapV;
+			float4 mapU{}, mapV{};
 			if (waterMeshes.AffineTexCoords(*pass->geometry, mapU, mapV)) {
 				const auto& world = pass->geometry->world;
 				const float invScale = 1.0f / std::max(world.scale, 1e-6f);
@@ -2391,10 +2399,10 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 					const float ay = (map.x * world.rotate.entry[1][0] + map.y * world.rotate.entry[1][1]) * invScale;
 					return float4(ax, ay, map.z - ax * world.translate.x - ay * world.translate.y, 0.0f);
 				};
-				gridTexCoordU = toWorld(mapU);
-				gridTexCoordV = toWorld(mapV);
+				mapU = toWorld(mapU);
+				mapV = toWorld(mapV);
 			}
-			gridTexCoordsValid = true;
+			projectedGrid.SetTexCoords(pass->geometry->worldBound.center.z, mapU, mapV);
 		}
 	}
 	bool cached = false;
@@ -2440,7 +2448,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// rasterises nothing, and RestoreDraw draws the mesh with the tessellated mode's constants, which the pixel stage gets
 	// now.
 	const bool cheap = !mainView && settings.CheapOffscreenWater;
-	ID3D11Buffer* cb = gridSea ? gridDrawBuffer->CB() : (cached ? drawBuffer->CB() : (cheap ? offscreenDrawBuffer->CB() : flatDrawBuffer->CB()));
+	ID3D11Buffer* cb = gridSea ? gridDrawBuffers[gridSlot]->CB() : (cached ? drawBuffer->CB() : (cheap ? offscreenDrawBuffer->CB() : flatDrawBuffer->CB()));
 	if (spacing > 0.0f) {
 		// Neighbouring tiles share a spacing: upload only when it (or the view's gates) changes.
 		if (spacing != uploadedSpacing || cheap != uploadedSpacingCheap) {
@@ -2485,7 +2493,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	}
 	cachedDrawRiver = river;
 	cachedDrawPending = cached || gridFirst;
-	cachedDrawStart = gridSea ? GridMeshStart : cachedStart;
+	cachedDrawStart = gridSea ? GridMeshStart - static_cast<uint32_t>(gridSlot) : cachedStart;
 	cachedDrawTechnique = technique;
 	cachedDrawGeometry = pass->geometry;
 	cachedDrawShader = waterShader;
@@ -2531,8 +2539,19 @@ void PBRWater::UploadDrawConstants()
 	deferredDrawBuffer->Update(drawData);
 	drawData.Tess0.x = 5.0f;
 	instancedDrawBuffer->Update(drawData);
-	drawData.Tess0.x = 6.0f;
-	gridDrawBuffer->Update(drawData);
+	// The projected grids built this frame, each with its layout (ProjectedGrid::BuiltLevel).
+	const uint32_t frame = globals::state->frameCount;
+	for (uint32_t slot = 0; slot < projectedGrid.BuiltCount(frame); ++slot) {
+		const auto& grid = projectedGrid.Built(slot);
+		GpuData gridData = drawData;
+		gridData.Proj0 = { static_cast<float>(grid.columns), grid.z, 1.0f, static_cast<float>(grid.firstVertex) };
+		gridData.Proj1 = projectedGrid.CellsMapping();
+		gridData.Proj2 = { static_cast<float>(grid.firstCell), static_cast<float>(grid.firstPatch), 0.0f, 0.0f };
+		gridData.Tess0.x = 6.0f;
+		gridDrawBuffers[slot]->Update(gridData);
+		gridData.Tess0.x = 7.0f;
+		patchDrawBuffers[slot]->Update(gridData);
+	}
 	drawData.Tess0.x = 0.0f;
 	flatDrawBuffer->Update(drawData);
 	// Costly gates off for other views (CheapOffscreenWater); always uploaded so toggling the setting never binds stale data.
@@ -2802,8 +2821,8 @@ bool PBRWater::EnsureDeferredRecords()
 
 void PBRWater::DrawCachedMesh()
 {
-	if (cachedDrawStart == GridMeshStart) {
-		DrawGrid();
+	if (IsGridKey(cachedDrawStart)) {
+		DrawGrid(GridMeshStart - cachedDrawStart);
 		return;
 	}
 	ID3D11Buffer* cb = drawBuffer->CB();
@@ -2811,23 +2830,28 @@ void PBRWater::DrawCachedMesh()
 	bisection.Draw(cachedDrawStart);
 }
 
-bool PBRWater::GridDrawsSea(const RE::NiAVObject& geometry) const
+int PBRWater::GridSlotOf(RE::BSGeometry& geometry) const
 {
 	// A water mesh is flat: its bound's centre is at its level.
-	return settings.ProjectedGrid && projectedGrid.IsBuilt(globals::state->frameCount) && geometry.worldBound.radius > 0.0f &&
-	       std::abs(geometry.worldBound.center.z - projectedGrid.SeaLevel()) < 4.0f;
+	if (!settings.ProjectedGrid || geometry.worldBound.radius <= 0.0f || WaterMeshes::IsRiver(geometry))
+		return -1;
+	return projectedGrid.SlotOf(geometry.worldBound.center.z, globals::state->frameCount);
 }
 
-void PBRWater::DrawGrid()
+void PBRWater::DrawGrid(uint32_t slot)
 {
 	auto context = globals::d3d::context;
-	ID3D11Buffer* cb = gridDrawBuffer->CB();
-	context->VSSetConstantBuffers(7, 1, &cb);
-	context->PSSetConstantBuffers(7, 1, &cb);
-	// The cells the sea is in: the grid's pixels elsewhere are discarded (PBRWater.hlsli SeaCovers).
+	// The cells the grid's level is in: its pixels elsewhere are discarded (PBRWater.hlsli SeaCovers).
 	ID3D11ShaderResourceView* cells = projectedGrid.CellsSRV();
 	context->PSSetShaderResources(SeaLevelsSlot, 1, &cells);
-	projectedGrid.Draw();
+	ID3D11Buffer* cb = gridDrawBuffers[slot]->CB();
+	context->VSSetConstantBuffers(7, 1, &cb);
+	context->PSSetConstantBuffers(7, 1, &cb);
+	projectedGrid.DrawCells(slot);
+	cb = patchDrawBuffers[slot]->CB();
+	context->VSSetConstantBuffers(7, 1, &cb);
+	context->PSSetConstantBuffers(7, 1, &cb);
+	projectedGrid.DrawPatches(slot);
 	ID3D11ShaderResourceView* none = nullptr;
 	context->PSSetShaderResources(SeaLevelsSlot, 1, &none);
 	++drawStats.computeDraws;
@@ -2896,7 +2920,7 @@ void PBRWater::DrawRecordedStencil()
 	DeferredMesh mesh;
 	mesh.startIndex = cachedDrawStart;
 	// Texture coordinates that are one plane over the mesh are rebuilt per pixel: only the others are written.
-	mesh.texCoords = cachedDrawStart == GridMeshStart || !waterMeshes.AffineTexCoords(*cachedDrawGeometry, mesh.uvMapU, mesh.uvMapV);
+	mesh.texCoords = IsGridKey(cachedDrawStart) || !waterMeshes.AffineTexCoords(*cachedDrawGeometry, mesh.uvMapU, mesh.uvMapV);
 	deferredMeshes.push_back(mesh);
 
 	auto& batch = deferredBatch;
@@ -4198,7 +4222,7 @@ bool PBRWater::CollectStencilTile(RE::BSRenderPass* pass, uint32_t technique)
 {
 	if (!stencilBatch.ready || technique != stencilBatch.technique || !settings.BatchedStencil || !pass || !pass->geometry)
 		return false;
-	if (pass->geometry->GetGeometryRuntimeData().rendererData != stencilBatch.rendererData || WavesReach(*pass->geometry) || GridDrawsSea(*pass->geometry))
+	if (pass->geometry->GetGeometryRuntimeData().rendererData != stencilBatch.rendererData || WavesReach(*pass->geometry) || GridSlotOf(*pass->geometry) >= 0)
 		return false;
 	if (stencilInstances.size() >= MaxStencilInstances)
 		FlushStencilInstances();
@@ -4222,7 +4246,7 @@ void PBRWater::AfterEnginePass(RE::BSRenderPass* pass, uint32_t technique)
 	// The tiles the waves reach are drawn as they are (displaced, tessellated, recorded): only the flat far water is batched.
 	const auto* triShape = pass->geometry->AsTriShape();
 	const auto& data = pass->geometry->GetGeometryRuntimeData();
-	if (!triShape || !data.rendererData || WavesReach(*pass->geometry) || GridDrawsSea(*pass->geometry))
+	if (!triShape || !data.rendererData || WavesReach(*pass->geometry) || GridSlotOf(*pass->geometry) >= 0)
 		return;
 	// Only Unified Water's tiles share a mesh (clones of one): its tiles are told apart by it.
 	auto* unifiedTile = globals::features::unifiedWater.GetTileRendererData();

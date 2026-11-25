@@ -1,4 +1,4 @@
-# PBR Water: the sea's projected grid
+# PBR Water: the projected grids (sea, lakes, breakers)
 
 ## Why
 
@@ -43,6 +43,42 @@ A projected grid (Johanson 2004, "Real-time water rendering: introducing the pro
 - Texture coordinates (vanilla normal maps): the first sea mesh's affine map, turned into a plane over absolute xy
   (`GpuData::Proj2/3`), evaluated per vertex.
 
+## Lakes (one grid per level)
+
+Every level of Unified Water's coverage is a candidate (the sea is the level most cells share). A level gets a grid once
+its meshes are drawn in the main view (`ProjectedGrid::Want`), up to four a frame (`MaxLevels`: the sea first, then the
+nearest lakes). A lake's grid covers only its cells' bounds on screen (when all four corners are in front of the camera),
+so a small lake costs a small grid. Each level keeps its own texture-coordinate plane, vertex, cell and patch runs, draw
+constants (`gridDrawBuffers` / `patchDrawBuffers`) and deferred mesh key (`GridMeshStart - slot`). Rivers keep their meshes
+(flow normals, sloped water): their cells are taken out of the cells texture (`ExcludeRiver`), so no grid doubles them.
+
+## Breakers (refined patches)
+
+`FlagCS` flags a cell where the shore train is there (the vertex's `shore.y`, now the train's share from DisplaceSurface)
+and the cell is coarser than the lip wants (deep-water wavelength / 25). Each flagged cell takes a patch (up to
+`MaxPatches` split over the grids) and is drawn as a 4 x 4 sub-grid (`PatchCS`, `Tess0.x = 7`) evaluated at its own spacing;
+the coarse cell collapses (its first corner's `river` field carries the flag to the vertex shader). Corners are the coarse
+vertices; edge points shared with an unflagged cell lie on that cell's edge (lerped), so no crack; two flagged cells
+compute their shared edge from the same grid coordinates.
+
+## Material pass: shared baked shore
+
+`SurfaceMaterialCS` gathers its tile's baked shore blocks (6 x 6, three records each) into group-shared memory once
+(`PBRW_BAKED_SHORE_SHARED`); `BakedShoreTrain` reads them there instead of up to twelve texture reads per pixel. A full
+merge of DeferredShoreCS into the material pass was not done: the shore pass costs ~0.04 ms, and evaluating the train for
+the halo blocks in every tile would run it 2.25x as often; the read traffic was the material pass's share.
+
+## Looked at and not done
+
+- Far material from the vertices (long cascades through the record): the material pass already skips the cascades a far
+  pixel cannot resolve (`filtered >= 1`); carrying the long cascades' slopes through the record costs more bandwidth than
+  the two reads per cascade it would save.
+- Longest FFT bands at 128: the cascades are one Texture2DArray (one size); per-cascade sizes mean separate textures and
+  sampling paths for ~0.05-0.1 ms. `LongWaveHalfRate` already halves their cost.
+- Sea mask per vertex instead of per pixel: early depth rejection still culls the grid under the terrain with a discard in
+  the shader, so it would save little and coarsen coastline edges.
+- One stencil draw for all water: with grids, each level is already one draw (plus its patches) per pass.
+
 ## Settings
 
 `ProjectedGrid` (default on), `GridCellSize` (px, default 8). Feature version 0-28-0.
@@ -54,4 +90,6 @@ A projected grid (Johanson 2004, "Real-time water rendering: introducing the pro
 - The curl's mesh-spacing test (`ShoreCurlSpacing`) still models the tessellator's spacing, not the grid's.
 - Sea cells are whole cells: a cell partly at the sea's level and partly a lake at another level is all sea or none.
 - Camera within a unit of the surface: the plane is taken a unit away (never edge-on).
-- Untested in game (written 2026-11-25 without compiling the DLL; shaders compiled offline before that).
+- Untested in game and uncompiled (2026-11-25: the lakes, patches and shared shore were written without compiling anything).
+- A lake whose rounded level matches a river's: the river's cells are excluded only once its mesh has been drawn (one frame).
+- `MaxLevels` grids: more lakes in view than three keep their tessellated meshes.

@@ -92,13 +92,13 @@ namespace PBRWater
 		float4 SunMap0;                  // xy wave heightfield centre (absolute units), z 1 / its extent (units), w drawn this frame
 		float4 SunMap1;                  // x its reference level (absolute z), y height range either side of it (units), zw unused
 		float4 Swash1;                   // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
-		float4 Proj0;                    // the sea's projected grid (ProjectedGrid): x columns, y the sea's level (absolute z), z cells listed, w unused
-		float4 Proj1;                    // its cells (SeaLevels): xy first cell, zw cells across
-		float4 Proj2;                    // its texture coordinate u = dot(xy, absolute xy) + z
-		float4 Proj3;                    // and v
+		float4 Proj0;                    // a projected grid's draw (ProjectedGrid): x columns, y its level (absolute z), z cells listed, w its first vertex
+		float4 Proj1;                    // the cells (SeaLevels): xy first cell, zw cells across
+		float4 Proj2;                    // x its first cell, y its first patch, zw unused
+		float4 Proj3;                    // unused
 	}
 
-	Texture2D<float> SeaLevels : register(t28);  // the projected grid's cells: each one's still water level (absolute z), < -1e8 none
+	Texture2D<float> SeaLevels : register(t28);  // the projected grids' cells: each one's still water level (absolute z), < -1e8 none (or a river's)
 
 	Texture2D<float4> RippleTexture : register(t80);                   // x height, y height one step earlier, w silt
 	Texture2DArray<float> FetchTexture : register(t81);                // fetch in km, one slice per upwind direction
@@ -640,11 +640,11 @@ namespace PBRWater
 		return DisplacementDistanceFade(length(positionWS)) * LoadedGridFade(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
 	}
 
-	/// A draw of the sea's projected grid (Tess0.x 6: ProjectedGrid, Water.hlsl GridWaterVertex).
-	bool GridDraw() { return abs(Tess0.x - 6.0) < 0.5; }
+	/// A draw of a projected grid (ProjectedGrid, Water.hlsl): Tess0.x 6 its cells, 7 its breakers' patches.
+	bool GridDraw() { return Tess0.x > 5.5; }
 
-	/// Whether the sea is at absolute `absXY`: a cell with water at the sea's level (Unified Water's coverage). The projected
-	/// grid spans the whole plane; the water is only where the engine's would be.
+	/// Whether the grid's level is at absolute `absXY`: a cell with water at this draw's level (Unified Water's coverage). A
+	/// projected grid spans its whole plane; the water is only where the engine's would be.
 	bool SeaCovers(float2 absXY)
 	{
 		float2 cell = floor(absXY * (1.0 / 4096.0)) - Proj1.xy;
@@ -2153,6 +2153,18 @@ namespace PBRWater
 		return float4(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, v >> 24) / 255.0;
 	}
 
+#	if defined(PBRW_BAKED_SHORE_SHARED)
+	// The material pass gathered its tile's blocks into group-shared memory first (SurfaceMaterialCS): read them there, once
+	// per tile instead of up to twelve reads per pixel.
+	uint4 BakedShoreLoad0(int2 c, int2 block) { return SharedShoreLoad0(block); }
+	uint4 BakedShoreLoad1(int2 c, int2 block) { return SharedShoreLoad1(block); }
+	uint4 BakedShoreLoad2(int2 c, int2 block) { return SharedShoreLoad2(block); }
+#	else
+	uint4 BakedShoreLoad0(int2 c, int2 block) { return BakedShore0.Load(int3(c, 0)); }
+	uint4 BakedShoreLoad1(int2 c, int2 block) { return BakedShore1.Load(int3(c, 0)); }
+	uint4 BakedShoreLoad2(int2 c, int2 block) { return BakedShore2.Load(int3(c, 0)); }
+#	endif
+
 	/**
 	 * The shore train at this pixel from DeferredShoreCS: the four nearest 2x2 blocks blended bilinearly, each only where
 	 * it was evaluated at about this pixel's distance (the same water, not a wave in front of it or the sea behind).
@@ -2171,15 +2183,16 @@ namespace PBRWater
 		[unroll] for (uint i = 0; i < 4; i++)
 		{
 			int2 offset = int2(i & 1, i >> 1);
-			int2 c = clamp(base + offset, 0, int2(width, height) - 1);
+			int2 block = base + offset;
+			int2 c = clamp(block, 0, int2(width, height) - 1);
 			float bilinear = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y);
-			uint4 o0 = BakedShore0.Load(int3(c, 0));
+			uint4 o0 = BakedShoreLoad0(c, block);
 			float2 zd = UnpackHalves(o0.y);
 			float w = (zd.y > 0.0 && abs(zd.y - BakedShoreDistance) < 0.1 * BakedShoreDistance) ? max(bilinear, 1e-3) : 0.0;
 			[branch] if (w > 0.0)
 			{
-				uint4 o1 = BakedShore1.Load(int3(c, 0));
-				uint4 o2 = BakedShore2.Load(int3(c, 0));
+				uint4 o1 = BakedShoreLoad1(c, block);
+				uint4 o2 = BakedShoreLoad2(c, block);
 				a0 += w * float4(UnpackHalves(o0.x), zd.x, 0.0);
 				a1 += w * float4(UnpackHalves(o0.z), UnpackHalves(o0.w));
 				a2 += w * float4(UnpackHalves(o1.x), UnpackHalves(o1.y));
@@ -2622,7 +2635,8 @@ namespace PBRWater
 		float surf = 0.0;
 		[branch] if (ctx.hasTerrain > 0.5 && ShoreGridUV(absXY, gridUV))
 			surf = SurfSharesAt(ctx).drawn;
-		o.shore = float4(surf, 0.0, clamp(waves, -limit, limit), positionWS.z);
+		// y: the shore train's share, where the projected grid refines for the breakers (ProjectedGridCS FlagCS).
+		o.shore = float4(surf, ctx.train, clamp(waves, -limit, limit), positionWS.z);
 		return o;
 	}
 }

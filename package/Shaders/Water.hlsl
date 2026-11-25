@@ -194,7 +194,7 @@ struct VS_OUTPUT
 #		endif
 #	endif
 #	if defined(PBR_WATER)
-	float4 ShoreState : TEXCOORD12;  // x share of the surf simulation, y unused, z the waves without it (units above the still water), w still water level (camera-relative z; DisplaceSurface)
+	float4 ShoreState : TEXCOORD12;  // x share of the surf simulation, y the shore train's share, z the waves without it (units above the still water), w still water level (camera-relative z; DisplaceSurface)
 #	endif
 };
 
@@ -532,15 +532,36 @@ VS_OUTPUT CachedWaterVertex(uint vertexID)
 
 #			include "PBRWater/ProjectedGrid.hlsli"
 
-/// A vertex of the sea's projected grid (Tess0.x 6, ProjectedGrid::Draw binds its vertices in TessellatedVertices' slot):
-/// its camera-relative position brought into this draw's model space, as the deferred surface does (Deferred.hlsli).
+/// A projected grid's vertex (ProjectedGrid binds them in TessellatedVertices' slot): its camera-relative position brought
+/// into this draw's model space, as the deferred surface does (Deferred.hlsli).
+VS_OUTPUT GridVertexFrom(PBRWaterTess::Vertex t)
+{
+	float3 worldOrigin = float3(World[0].w, World[1].w, World[2].w);
+	t.position = mul(InverseLinear(World), t.position - worldOrigin);
+	t.river = 0.0;  // the grid's cells carry their refinement flag there (ProjectedGridCS FlagCS)
+	return CachedVertexFrom(t);
+}
+
+/// Tess0.x 6: a vertex of the grid's cells. A cell drawn as a breaker's patch instead (its first corner's flag) collapses.
 VS_OUTPUT GridWaterVertex(uint vertexID)
 {
 	uint columns = (uint)PBRWater::Proj0.x;
-	PBRWaterTess::Vertex t = TessellatedVertices[PBRWaterGrid::VertexIndex(PBRWaterGrid::ListCorner(vertexID, columns), columns)];
-	float3 worldOrigin = float3(World[0].w, World[1].w, World[2].w);
-	t.position = mul(InverseLinear(World), t.position - worldOrigin);
-	return CachedVertexFrom(t);
+	uint first = (uint)PBRWater::Proj0.w;
+	uint cell = vertexID / 6;
+	if (TessellatedVertices[first + PBRWaterGrid::VertexIndex(uint2(cell % columns, cell / columns), columns)].river > 0.5) {
+		VS_OUTPUT culled = (VS_OUTPUT)0;
+		culled.HPosition = float4(2.0, 2.0, 2.0, 1.0);
+		return culled;
+	}
+	return GridVertexFrom(TessellatedVertices[first + PBRWaterGrid::VertexIndex(PBRWaterGrid::ListCorner(vertexID, columns), columns)]);
+}
+
+/// Tess0.x 7: a vertex of a breaker's patch (one instance a patch, the patches' vertices in TessellatedVertices' slot).
+VS_OUTPUT GridPatchVertex(uint vertexID, uint instanceID)
+{
+	static const uint n = PBRW_GRID_PATCH;
+	uint patch = (uint)PBRWater::Proj2.y + instanceID;
+	return GridVertexFrom(TessellatedVertices[patch * (n + 1) * (n + 1) + PBRWaterGrid::VertexIndex(PBRWaterGrid::ListCorner(vertexID, n), n)]);
 }
 
 #			if defined(SPECULAR)
@@ -573,9 +594,13 @@ uint BisectionVertexIndex(uint vertexID)
 
 VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
-	// Tess0.x 6: the sea's projected grid (PBRWater/ProjectedGrid.cpp).
+	// Tess0.x 6 and 7: a projected grid's cells and its breakers' patches (PBRWater/ProjectedGrid.cpp).
 	[branch] if (PBRWater::GridDraw())
+	{
+		if (PBRWater::Tess0.x > 6.5)
+			return GridPatchVertex(vertexID, instanceID);
 		return GridWaterVertex(vertexID);
+	}
 #			if defined(STENCIL)
 	// Tess0.x 5: one of Unified Water's far tiles, drawn instanced (PBRWater::FlushStencilInstances).
 	[branch] if (abs(PBRWater::Tess0.x - 5.0) < 0.5)
