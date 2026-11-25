@@ -2185,6 +2185,8 @@
     "feature.pbr_water.turbidity_patchiness": "Patchiness",
     "feature.pbr_water.turbidity_patchiness_tooltip": "How unevenly the sediment is spread: 0 is uniform, 1 has drifting clear and murky plumes. Default 0.7.",
     "feature.pbr_water.turbidity_tooltip": "Sediment suspended everywhere in the water. 0 keeps the water form's own clarity. Default 0.15.",
+    "feature.pbr_water.underwater_volume": "Physical Underwater Water",
+    "feature.pbr_water.underwater_volume_tooltip": "Under the surface, the water absorbs and scatters light as it does from above (red first, then green, blue last), in place of the game's underwater fog.",
     "feature.pbr_water.unified_water_required": "Unified Water is required for PBR Water to function.",
     "feature.pbr_water.vanilla_normal_maps": "Vanilla Normal Maps",
     "feature.pbr_water.vanilla_normal_maps_tooltip": "Reads the water form's own normal maps on top of the simulated waves. Off: the three normal map reads are skipped; the waves, ripples and rain carry the detail, and water without any of them lies flat. Rivers always keep theirs.",

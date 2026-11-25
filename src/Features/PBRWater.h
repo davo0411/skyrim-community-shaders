@@ -155,6 +155,7 @@ struct PBRWater : Feature
 		// Ripples
 		bool EnableRipples = true;
 		bool EnableWakes = true;     ///< Kelvin wakes behind the actors moving through the water (PBRWater/KelvinWake.h)
+		bool UnderwaterVolume = true;  ///< the water around the camera under the surface absorbs and scatters as the surface's does, in place of the game's fog
 		float WakeStrength = 1.0f;   ///< scales their height
 		float RippleExtent = 64.0f;  ///< m covered around the camera
 		float RippleHeight = 0.12f;  ///< m
@@ -609,6 +610,18 @@ private:
 	std::unordered_map<const void*, SourceTrack> lastSources;          ///< main thread: ripple source motion relative to the water
 	std::atomic<std::shared_ptr<const std::vector<PBRWaterWake::Source>>> wakeSources;  ///< main thread -> render thread: this frame's wakes
 	winrt::com_ptr<ID3D11ShaderResourceView> kelvinPattern;             ///< the Kelvin wake pattern (t91)
+
+	// The water around the camera under the surface (UnderwaterVolume.hlsl), in place of the game's underwater fog.
+	winrt::com_ptr<ID3D11VertexShader> underwaterVS;
+	winrt::com_ptr<ID3D11PixelShader> underwaterPS;
+	winrt::com_ptr<ID3D11BlendState> underwaterBlend;  ///< dual-source: added + existing * transmittance
+	std::unique_ptr<ConstantBuffer> underwaterCB;
+	uint32_t underwaterFrame = UINT32_MAX;
+	std::unordered_map<RE::TESWaterForm*, float> originalUnderwaterFog;  ///< main thread: each water form's fog amount before it was zeroed
+	/** @brief Main thread: zeroes every water form's underwater fog amount while the volume replaces it, restores it otherwise. */
+	void ApplyUnderwaterFogOverride();
+	/** @brief The water between the camera and what each pixel shows, while the camera is under water (before the water's passes). */
+	void DrawUnderwaterVolume();
 	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;  ///< main thread: wave velocity added per body
 	uint32_t uploadedTerrainGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedTerrain;

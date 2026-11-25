@@ -868,7 +868,16 @@ water keeps its own fog model. Written without compiling; untested in game.
   refracted ray, inside 48.6 degrees), total internal reflection of the lit water outside it (Fresnel from the water
   side), and Beer-Lambert with the surface's own extinction over the path from the camera. Vanilla blended half the
   shallow colour with the reflection and faded linearly with distance.
-  Not changed: the fog the engine lays over everything else under water (its underwater image space and fog settings);
-  replacing it needs the engine's underwater fog hooked first.
+- **The water around the camera under the surface.** The game's underwater fog is off: every water form's
+  `underwaterFogAmount` is zeroed while PBR Water runs (the originals are kept and put back when the setting is off or
+  the feature unloads; ApplyUnderwaterFogOverride, main thread). In its place, while the camera is under water, one
+  full-screen pass before the water's first colour pass (UnderwaterVolume.hlsl, DrawUnderwaterVolume) gives every pixel
+  the water between it and the camera: Beer-Lambert with the surface's extinction (the current water form's shallow
+  colour and visibility, pure water's absorption the floor) and in-scattering in its deep colour, lit by the sun and
+  the sky through the surface down to the camera's depth. Dual-source blending (added + existing * transmittance), so
+  no copy of the scene. The surface seen from below draws over its own pixels afterwards with its own path. Setting
+  Physical Underwater Water (version 0-30-0).
+  Not changed: the underwater image space modifier (the water form's tint and blur), which is a look, not the fog.
+  To verify in game: that zeroing the fog amount alone removes the engine's fog from objects under water.
 
 Written without compiling; untested in game.

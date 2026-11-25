@@ -150,6 +150,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		GridCellSize,
 		EnableWakes,
 		WakeStrength,
+		UnderwaterVolume,
 		WireframeMode,
 		DebugView))
 	nlohmann_json_j["SprayEmitters"] = nlohmann_json_t.SprayEmitters;
@@ -283,6 +284,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		GridCellSize,
 		EnableWakes,
 		WakeStrength,
+		UnderwaterVolume,
 		WireframeMode,
 		DebugView))
 	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest. An emitter saved for
@@ -857,6 +859,8 @@ void PBRWater::DrawSettings()
 		IdScope id("ripples");
 		Util::CheckboxTip(T(TKEY("enable_ripples"), "Interactive Ripples"), &s.EnableRipples,
 			T(TKEY("enable_ripples_tooltip"), "Simulates ripples and wakes from every actor and object in the water. Replaces the vanilla wading mesh."));
+		Util::CheckboxTip(T(TKEY("underwater_volume"), "Physical Underwater Water"), &s.UnderwaterVolume,
+			T(TKEY("underwater_volume_tooltip"), "Under the surface, the water absorbs and scatters light as it does from above (red first, then green, blue last), in place of the game's underwater fog."));
 		Util::CheckboxTip(T(TKEY("enable_wakes"), "Kelvin Wakes"), &s.EnableWakes,
 			T(TKEY("enable_wakes_tooltip"), "Swimmers, waders and horses moving through the water leave the V-shaped wake of real deep-water waves behind them, its waves longer the faster they go."));
 		{
@@ -1095,6 +1099,25 @@ void PBRWater::SetupResources()
 		buffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::GridPatchDrawConstants");
 	projectedGrid.Setup();
 	kelvinPattern = PBRWaterWake::CreatePattern();
+	underwaterVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl", {}, "vs_5_0", "VS")));
+	underwaterPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl", {}, "ps_5_0", "PS")));
+	underwaterCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<float4[3]>(), "PBRWater::UnderwaterCB");
+	{
+		D3D11_BLEND_DESC desc{};
+		auto& target = desc.RenderTarget[0];
+		target.BlendEnable = TRUE;
+		target.SrcBlend = D3D11_BLEND_ONE;
+		target.DestBlend = D3D11_BLEND_SRC1_COLOR;
+		target.BlendOp = D3D11_BLEND_OP_ADD;
+		target.SrcBlendAlpha = D3D11_BLEND_ZERO;
+		target.DestBlendAlpha = D3D11_BLEND_ONE;
+		target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+		target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+		if (SUCCEEDED(globals::d3d::device->CreateBlendState(&desc, underwaterBlend.put())))
+			Util::SetResourceName(underwaterBlend.get(), "PBRWater::UnderwaterBlend");
+	}
+	if (!underwaterVS || !underwaterPS || !underwaterBlend)
+		logger::warn("[PBR Water] The underwater volume's shaders failed; the game's underwater fog stays");
 	deferredDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::DeferredDrawConstants");
 	instancedDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::InstancedStencilConstants");
 	stencilInstanceBuffer = std::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(MaxStencilInstances), MaxStencilInstances, "PBRWater::StencilInstances");
@@ -2616,6 +2639,15 @@ void PBRWater::BeginDrawBatch(uint32_t technique)
 {
 	drawBatchOpen = true;
 	PBRWaterProfiling::Begin(DrawPassNames[globals::state->inWorld ? 0 : 1][DrawPassIndex(technique)]);
+	// The water around the camera under the surface: over the scene before the first colour pass of the water (the surface or
+	// the surface from below), so the surface draws over its own pixels with its own path through the water.
+	const auto* state = globals::state;
+	const uint32_t pass = DrawPassIndex(technique);
+	const bool mainView = state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections));
+	if (mainView && (pass == 0 || pass == 2) && underwaterFrame != state->frameCount) {
+		underwaterFrame = state->frameCount;
+		DrawUnderwaterVolume();
+	}
 }
 
 void PBRWater::EndDrawBatch()
@@ -3378,6 +3410,94 @@ bool PBRWater::DrawDeferredSurface()
 	return true;
 }
 
+void PBRWater::DrawUnderwaterVolume()
+{
+	auto* waterSystem = RE::TESWaterSystem::GetSingleton();
+	if (!settings.UnderwaterVolume || !underwaterVS || !underwaterPS || !underwaterBlend || !waterSystem || !waterSystem->playerUnderwater)
+		return;
+	auto* form = waterSystem->currentWaterType;
+	auto& depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+	if (!form || !depth.depthSRV)
+		return;
+	auto context = globals::d3d::context;
+	BoundTargets bound(context);
+	if (!bound.rtv[0])
+		return;
+
+	// The water form's extinction as the surface works it out (Optics.hlsli Extinction): its shallow colour is the tint the
+	// light takes over its visibility, pure water's absorption the floor. Its deep colour is what the water scatters.
+	auto linear = [](uint8_t c) { return std::pow(c / 255.0f, 2.2f); };
+	const auto& shallow = form->data.shallowWaterColor;
+	const auto& deep = form->data.deepWaterColor;
+	float tint[3] = { linear(shallow.red), linear(shallow.green), linear(shallow.blue) };
+	const float tintMax = std::max({ tint[0], tint[1], tint[2], 1e-4f });
+	const float visibility = std::max(form->data.aboveWaterFogDistFar * settings.Visibility, 1.0f);
+	constexpr float pureWater[3] = { 0.35f, 0.06f, 0.012f };  // 1/m (Optics.hlsli PureWaterAbsorption)
+	float extinction[3];
+	for (int i = 0; i < 3; ++i)
+		extinction[i] = std::max((std::log(20.0f) - std::log(std::max(tint[i] / tintMax, 0.02f))) / visibility, pureWater[i] / UnitsPerMetre);
+	const auto eye = globals::game::frameBufferCached.GetCameraPosAdjust();
+	D3D11_VIEWPORT viewport{};
+	UINT viewports = 1;
+	context->RSGetViewports(&viewports, &viewport);
+	float4 data[3] = {
+		{ extinction[0], extinction[1], extinction[2], std::max(waterSystem->underwaterHeight - eye.z, 0.0f) },
+		{ linear(deep.red), linear(deep.green), linear(deep.blue), 0.0f },
+		{ std::max(viewport.Width, 1.0f), std::max(viewport.Height, 1.0f), 200.0f * UnitsPerMetre, 0.0f },
+	};
+	underwaterCB->Update(data);
+
+	// What the draw changes, put back after it: the engine binds its state lazily and expects it unchanged.
+	winrt::com_ptr<ID3D11VertexShader> savedVS;
+	winrt::com_ptr<ID3D11PixelShader> savedPS;
+	winrt::com_ptr<ID3D11InputLayout> savedLayout;
+	winrt::com_ptr<ID3D11BlendState> savedBlend;
+	winrt::com_ptr<ID3D11Buffer> savedCb, savedFrameCb;
+	winrt::com_ptr<ID3D11ShaderResourceView> savedSrv;
+	float blendFactor[4];
+	UINT sampleMask;
+	D3D11_PRIMITIVE_TOPOLOGY topology;
+	context->VSGetShader(savedVS.put(), nullptr, nullptr);
+	context->PSGetShader(savedPS.put(), nullptr, nullptr);
+	context->IAGetInputLayout(savedLayout.put());
+	context->IAGetPrimitiveTopology(&topology);
+	context->OMGetBlendState(savedBlend.put(), blendFactor, &sampleMask);
+	context->PSGetConstantBuffers(0, 1, savedCb.put());
+	context->PSGetConstantBuffers(12, 1, savedFrameCb.put());
+	context->PSGetShaderResources(0, 1, savedSrv.put());
+
+	// The depth buffer is bound for writing: the colour target alone for this draw, the depth read as a texture.
+	context->OMSetRenderTargets(1, bound.rtv, nullptr);
+	context->OMSetBlendState(underwaterBlend.get(), nullptr, 0xFFFFFFFF);
+	context->IASetInputLayout(nullptr);
+	context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	context->VSSetShader(underwaterVS.get(), nullptr, 0);
+	context->PSSetShader(underwaterPS.get(), nullptr, 0);
+	ID3D11Buffer* cbs[1] = { underwaterCB->CB() };
+	context->PSSetConstantBuffers(0, 1, cbs);
+	ID3D11Buffer* frameCb[1] = { *globals::game::perFrame.get() };
+	context->PSSetConstantBuffers(12, 1, frameCb);
+	ID3D11ShaderResourceView* depthView = depth.depthSRV;
+	context->PSSetShaderResources(0, 1, &depthView);
+	{
+		PBRWaterProfiling::Scope scope("PBRWater::Underwater Volume");
+		context->Draw(3, 0);
+	}
+
+	ID3D11ShaderResourceView* restoredSrv = savedSrv.get();
+	context->PSSetShaderResources(0, 1, &restoredSrv);
+	ID3D11Buffer* restoredCb = savedCb.get();
+	context->PSSetConstantBuffers(0, 1, &restoredCb);
+	ID3D11Buffer* restoredFrameCb = savedFrameCb.get();
+	context->PSSetConstantBuffers(12, 1, &restoredFrameCb);
+	context->VSSetShader(savedVS.get(), nullptr, 0);
+	context->PSSetShader(savedPS.get(), nullptr, 0);
+	context->IASetInputLayout(savedLayout.get());
+	context->IASetPrimitiveTopology(topology);
+	context->OMSetBlendState(savedBlend.get(), blendFactor, sampleMask);
+	context->OMSetRenderTargets(bound.count, bound.rtv, bound.dsv);
+}
+
 bool PBRWater::DrawDistantHalfRate(uint32_t slot, DeferredDrawCB data)
 {
 	if (!settings.DistantHalfRate || deferredFarFailed || !deferredFar)
@@ -3517,8 +3637,27 @@ static uint32_t NeededCascadeMask(const PBRWaterModel::WaveSnapshot& snap, float
 	return mask;
 }
 
+void PBRWater::ApplyUnderwaterFogOverride()
+{
+	auto* dataHandler = RE::TESDataHandler::GetSingleton();
+	if (!dataHandler)
+		return;
+	const bool replace = loaded && settings.UnderwaterVolume && underwaterVS && underwaterPS && underwaterBlend;
+	if (replace) {
+		for (auto* form : dataHandler->GetFormArray<RE::TESWaterForm>()) {
+			if (form && originalUnderwaterFog.try_emplace(form, form->data.underwaterFogAmount).second)
+				form->data.underwaterFogAmount = 0.0f;
+		}
+	} else if (!originalUnderwaterFog.empty()) {
+		for (auto& [form, amount] : originalUnderwaterFog)
+			form->data.underwaterFogAmount = amount;
+		originalUnderwaterFog.clear();
+	}
+}
+
 void PBRWater::MainThreadUpdate()
 {
+	ApplyUnderwaterFogOverride();
 	auto player = RE::PlayerCharacter::GetSingleton();
 	auto tes = globals::game::tes;
 	if (!player || !tes)
