@@ -5,6 +5,7 @@
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
 #include "PBRWater/OceanSimulation.h"
+#include "PBRWater/ProjectedGrid.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
 #include "PBRWater/SprayParticles.h"
@@ -174,6 +175,8 @@ struct PBRWater : Feature
 		bool DistantHalfRate = true;             ///< shade the deferred surface's distant tiles at a quarter of the pixels (DeferredFar.hlsl)
 		float DistantHalfRateDistance = 60.0f;   ///< metres: where the distant tiles start
 		float TessellationTriangleSize = 12.0f;  ///< target triangle edge on screen (pixels)
+		bool ProjectedGrid = true;               ///< draw the sea as one grid cast from the screen onto its plane (PBRWater/ProjectedGrid.h)
+		float GridCellSize = 8.0f;               ///< the projected grid's cell on screen (pixels)
 		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
 		bool AdaptiveTessellation = true;        ///< coarsen the open water's mesh where the waves leave little to resolve (PBRWater::AdaptiveCoarsening)
 		float TessellationErrorPixels = 0.5f;    ///< the height error the adaptive tessellation allows (pixels)
@@ -274,6 +277,10 @@ struct PBRWater : Feature
 		float4 SunMap0;                               // xy wave heightfield centre (absolute units), z 1 / extent, w drawn this frame
 		float4 SunMap1;                               // x its reference level (absolute z), y height range either side (units), zw unused
 		float4 Swash1;                                // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
+		float4 Proj0;                                 // the sea's projected grid: x columns, y the sea's level (absolute z), z cells listed, w unused
+		float4 Proj1;                                 // its cells (SeaLevels): xy first cell, zw cells across
+		float4 Proj2;                                 // its texture coordinate u = dot(xy, absolute xy) + z
+		float4 Proj3;                                 // and v
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -451,6 +458,7 @@ private:
 	std::unique_ptr<ConstantBuffer> offscreenDrawBuffer;  ///< for the untessellated draws of other views (reflections, cubemaps, the map) with CheapOffscreenWater: Tess0.x = 0 and the costly gates off
 	std::unique_ptr<ConstantBuffer> spacingDrawBuffer;    ///< untessellated draws filtered to their vertex spacing (Draw0.x)
 	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;    ///< for the engine's own draw of a mesh the tessellator draws instead (Tess0.x = 2: culled)
+	std::unique_ptr<ConstantBuffer> gridDrawBuffer;       ///< for the sea's projected grid (Tess0.x = 6)
 	std::unique_ptr<ConstantBuffer> riverDrawBuffer[2];   ///< b8 of the vertex stage: the untessellated draws' river bit (Water.hlsl PBRWRiver), off and on
 	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;   ///< for the deferred surface's rectangle around a tessellated mesh (Tess0.x = 3)
 
@@ -555,6 +563,21 @@ private:
 	/// The water meshes the tessellated draws drew, for the tessellator to subdivide.
 	WaterMeshes waterMeshes;
 	BisectionTessellator bisection;
+
+	// The sea's projected grid (PBRWater/ProjectedGrid.h): drawn in place of every water mesh at the sea's level.
+	ProjectedGrid projectedGrid;
+	std::shared_ptr<const CellLevels> gridCells;                   ///< the worldspace cells the grid was given
+	std::unordered_map<uint32_t, uint32_t> gridPassFrame;          ///< technique -> the frame its pass last drew the grid
+	bool gridTexCoordsValid = false;                               ///< GpuData::Proj2/3 hold a sea mesh's texture coordinates
+	float4 gridTexCoordU{};
+	float4 gridTexCoordV{};
+	static constexpr uint32_t GridMeshStart = 0xFFFFFFFFu;         ///< cachedDrawStart of the grid (the deferred surface's mesh key)
+	static constexpr UINT SeaLevelsSlot = 28;                      ///< pixel stage view of the grid's cells (PBRWater.hlsli SeaLevels)
+	static constexpr float GridMaxDistance = 1000000.0f;           ///< the farthest the grid is cast (units)
+	/** @brief Whether `geometry` is a water mesh at the sea's level, which the projected grid draws this frame. */
+	bool GridDrawsSea(const RE::NiAVObject& geometry) const;
+	/** @brief The projected grid in the current draw's state (Water.hlsl GridWaterVertex). */
+	void DrawGrid();
 	float budgetCoarsening = 1.0f;  ///< render thread: the target size's growth that holds the tessellated triangles to TriangleBudget (Draw0.w)
 	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh. */
 	void DrawCachedMesh();

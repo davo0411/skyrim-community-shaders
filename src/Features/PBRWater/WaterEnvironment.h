@@ -46,6 +46,9 @@ class WaterEnvironment
 public:
 	~WaterEnvironment();
 
+	/** @brief Each cell's still water level in the current worldspace (Unified Water's cache), or null. */
+	std::shared_ptr<const CellLevels> GetCellLevels() const { return cellLevels.load(std::memory_order_acquire); }
+
 	/** @brief Main thread: detects worldspace changes and starts a rebuild when needed. */
 	void Update(const RE::TESWorldSpace* worldSpace);
 

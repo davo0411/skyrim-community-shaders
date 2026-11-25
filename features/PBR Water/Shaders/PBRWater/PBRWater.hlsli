@@ -92,7 +92,13 @@ namespace PBRWater
 		float4 SunMap0;                  // xy wave heightfield centre (absolute units), z 1 / its extent (units), w drawn this frame
 		float4 SunMap1;                  // x its reference level (absolute z), y height range either side of it (units), zw unused
 		float4 Swash1;                   // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
+		float4 Proj0;                    // the sea's projected grid (ProjectedGrid): x columns, y the sea's level (absolute z), z cells listed, w unused
+		float4 Proj1;                    // its cells (SeaLevels): xy first cell, zw cells across
+		float4 Proj2;                    // its texture coordinate u = dot(xy, absolute xy) + z
+		float4 Proj3;                    // and v
 	}
+
+	Texture2D<float> SeaLevels : register(t28);  // the projected grid's cells: each one's still water level (absolute z), < -1e8 none
 
 	Texture2D<float4> RippleTexture : register(t80);                   // x height, y height one step earlier, w silt
 	Texture2DArray<float> FetchTexture : register(t81);                // fetch in km, one slice per upwind direction
@@ -632,6 +638,19 @@ namespace PBRWater
 	float DisplacementFade(float3 positionWS)
 	{
 		return DisplacementDistanceFade(length(positionWS)) * LoadedGridFade(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
+	}
+
+	/// A draw of the sea's projected grid (Tess0.x 6: ProjectedGrid, Water.hlsl GridWaterVertex).
+	bool GridDraw() { return abs(Tess0.x - 6.0) < 0.5; }
+
+	/// Whether the sea is at absolute `absXY`: a cell with water at the sea's level (Unified Water's coverage). The projected
+	/// grid spans the whole plane; the water is only where the engine's would be.
+	bool SeaCovers(float2 absXY)
+	{
+		float2 cell = floor(absXY * (1.0 / 4096.0)) - Proj1.xy;
+		if (Proj0.z < 0.5 || any(cell < 0.0) || any(cell >= Proj1.zw))
+			return false;
+		return abs(SeaLevels.Load(int3(cell, 0)) - Proj0.y) < 2.0;
 	}
 
 	/// Tile coordinate of camera-relative position `p` in cascade `c` (world-anchored, re-based on the

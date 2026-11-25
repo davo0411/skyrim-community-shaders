@@ -498,10 +498,10 @@ VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 // (BisectionVertexIndex finds them).
 StructuredBuffer<PBRWaterTess::Vertex> TessellatedVertices : register(t109);
 
-/// A vertex the tessellator made and evaluated the waves of this frame: only the cheap rest of the program runs.
-VS_OUTPUT CachedWaterVertex(uint vertexID)
+/// A vertex whose waves a compute pass evaluated this frame (`t.position` in the draw's model space): only the cheap rest of
+/// the program runs.
+VS_OUTPUT CachedVertexFrom(PBRWaterTess::Vertex t)
 {
-	PBRWaterTess::Vertex t = TessellatedVertices[vertexID];
 	VS_INPUT v = (VS_INPUT)0;
 	v.Position = float4(t.position, 1.0);
 #			if defined(NORMAL_TEXCOORD)
@@ -522,6 +522,25 @@ VS_OUTPUT CachedWaterVertex(uint vertexID)
 	vsout.DeferredAlpha = f16tof32(t.color.y >> 16);
 #			endif
 	return vsout;
+}
+
+/// A vertex the tessellator made and evaluated the waves of this frame.
+VS_OUTPUT CachedWaterVertex(uint vertexID)
+{
+	return CachedVertexFrom(TessellatedVertices[vertexID]);
+}
+
+#			include "PBRWater/ProjectedGrid.hlsli"
+
+/// A vertex of the sea's projected grid (Tess0.x 6, ProjectedGrid::Draw binds its vertices in TessellatedVertices' slot):
+/// its camera-relative position brought into this draw's model space, as the deferred surface does (Deferred.hlsli).
+VS_OUTPUT GridWaterVertex(uint vertexID)
+{
+	uint columns = (uint)PBRWater::Proj0.x;
+	PBRWaterTess::Vertex t = TessellatedVertices[PBRWaterGrid::VertexIndex(PBRWaterGrid::ListCorner(vertexID, columns), columns)];
+	float3 worldOrigin = float3(World[0].w, World[1].w, World[2].w);
+	t.position = mul(InverseLinear(World), t.position - worldOrigin);
+	return CachedVertexFrom(t);
 }
 
 #			if defined(SPECULAR)
@@ -554,9 +573,12 @@ uint BisectionVertexIndex(uint vertexID)
 
 VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
+	// Tess0.x 6: the sea's projected grid (PBRWater/ProjectedGrid.cpp).
+	[branch] if (PBRWater::GridDraw())
+		return GridWaterVertex(vertexID);
 #			if defined(STENCIL)
 	// Tess0.x 5: one of Unified Water's far tiles, drawn instanced (PBRWater::FlushStencilInstances).
-	[branch] if (PBRWater::Tess0.x > 4.5)
+	[branch] if (abs(PBRWater::Tess0.x - 5.0) < 0.5)
 	{
 		float4 instance = PBRWStencilInstances[instanceID];
 		float3 local = input.Position.xyz * instance.w;
@@ -1638,12 +1660,18 @@ PS_OUTPUT main(PS_INPUT input)
 		// Dry: the bed rises above the waves and the surf, where DisplaceSurface held the mesh just above it. Both passes
 		// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
 #				if defined(STENCIL)
-		if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
-			discard;
+		float3 pbrPosition = input.WorldPosition.xyz;
 #				else
-		if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
-			discard;
+		float3 pbrPosition = input.WPosition.xyz;
 #				endif
+		if (PBRWater::AboveWaterline(pbrPosition, input.ShoreState))
+			discard;
+		// The sea's projected grid covers the whole plane: only the cells the sea is in keep it (ProjectedGrid).
+		[branch] if (PBRWater::GridDraw())
+		{
+			if (!PBRWater::SeaCovers(pbrPosition.xy + FrameBuffer::CameraPosAdjust.xy))
+				discard;
+		}
 	}
 #			endif
 #		endif
