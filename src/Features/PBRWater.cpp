@@ -144,6 +144,7 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		GameplayWaves,
 		EnableFloatingObjects,
 		CarryActors,
+		HullMasks,
 		EnableSpray,
 		SprayAmount,
 		SprayRange,
@@ -281,6 +282,7 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		GameplayWaves,
 		EnableFloatingObjects,
 		CarryActors,
+		HullMasks,
 		EnableSpray,
 		SprayAmount,
 		SprayRange,
@@ -932,6 +934,8 @@ void PBRWater::DrawSettings()
 			Util::SliderFloatTip(T(TKEY("max_floating_size"), "Largest Floating Hull"), &s.MaxFloatingSize, 20.0f, 200.0f, "%.0f m",
 				T(TKEY("max_floating_size_tooltip"), "The longest hull that floats (the large Skyrim ships are about 65 m). Default 90 m."));
 		}
+		Util::CheckboxTip(T(TKEY("hull_masks"), "Keep Water Out of Hulls"), &s.HullMasks,
+			T(TKEY("hull_masks_tooltip"), "The water is not drawn inside boats, ships and rafts, so the waves passing through a hull no longer show on its deck or in its bilge. Each hull's outline at the waterline is measured once against its collision, floating or not. Works with the boats that stay put too."));
 		Util::SliderFloatTip(T(TKEY("buoyancy_strength"), "Small Object Buoyancy"), &s.BuoyancyStrength, 0.0f, 3.0f, "%.2f",
 			T(TKEY("buoyancy_strength_tooltip"), "How strongly the waves push loose props and bodies that float on the water. Default 1."));
 		ImGui::EndTabItem();
@@ -1072,6 +1076,8 @@ void PBRWater::DrawDebugSection()
 		frameData.Swash0.w > 0.5f ? running : idle, surfAsleep ? T(TKEY("stat_surf_asleep"), ", surf asleep") : "");
 	const auto floatingStats = floating.GetStats();
 	ImGui::Text(T(TKEY("stat_floating"), "Floating: %u hulls, %u attached, %u actors on board, %u small objects riding the water"), floatingStats.floaters, floatingStats.parts, floatingStats.carried, floatingStats.riders);
+	ImGui::Text(T(TKEY("stat_hull_masks"), "Hull masks: %u hulls keep the water out (%u outlined from collision), %u drawn"), floatingStats.masks, floatingStats.measured,
+		static_cast<uint32_t>(frameData.Hull0.x));
 	ImGui::TextUnformatted(floating.GetSelectionReport().c_str());  // i18n-ignore: diagnostic report built from form names
 }
 
@@ -2422,6 +2428,29 @@ void PBRWater::UpdateFrameConstants()
 	d.Tune4 = { settings.ShoreWaveVariation, PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread), settings.DetailNormalCalm, settings.DetailNormalGale };
 	d.Tune5 = { settings.PointLightEmitterRadius, settings.FoamFeather, settings.FoamBubbleSize, settings.ShoreFoamLifetime };
 	d.Swash1 = { settings.SwashChurnHeight * UnitsPerMetre, settings.SwashChurnDepth, settings.SwashChurnSize * UnitsPerMetre, settings.SwashChurnSpeed };
+
+	// The hulls the water is kept out of (PBRWater.hlsli InsideHull), nearest the camera first. Their centres relative to
+	// the reference camera, like the cascades' tile coordinates, so every view reads them at full precision.
+	if (settings.HullMasks) {
+		const auto hulls = floating.GetHullMasks();
+		const uint32_t count = std::min(static_cast<uint32_t>(hulls.size()), MaxHullMasks);
+		for (uint32_t i = 0; i < count; ++i) {
+			const auto& h = hulls[i];
+			const float3 centre = { static_cast<float>(static_cast<double>(h.centre.x) - static_cast<double>(d.RefCamPos.x)),
+				static_cast<float>(static_cast<double>(h.centre.y) - static_cast<double>(d.RefCamPos.y)),
+				static_cast<float>(static_cast<double>(h.centre.z) - static_cast<double>(d.RefCamPos.z)) };
+			float4* out = d.HullData + i * HullMaskStride;
+			const RE::NiPoint3* axes[3] = { &h.axisX, &h.axisY, &h.axisZ };
+			for (uint32_t row = 0; row < 3; ++row) {
+				const auto& a = *axes[row];
+				out[row] = { a.x, a.y, a.z, -(a.x * centre.x + a.y * centre.y + a.z * centre.z) };
+			}
+			out[3] = { h.bottom, h.top, h.front, h.back };
+			for (uint32_t j = 0; j < FloatingObjects::HullStations; j += 4)
+				out[4 + j / 4] = { h.width[j], h.width[j + 1], h.width[j + 2], h.width[j + 3] };
+		}
+		d.Hull0.x = static_cast<float>(count);
+	}
 
 	frameData = d;
 }
@@ -3990,7 +4019,9 @@ void PBRWater::MainThreadUpdate()
 	GatherInteractions(*published, dt);
 
 	FloatingObjects::Settings floatingSettings;
-	floatingSettings.enabled = settings.EnableFloatingObjects && globals::shaderCache->IsEnabled();
+	// The hulls are also found for their masks alone, when they do not float.
+	floatingSettings.enabled = (settings.EnableFloatingObjects || settings.HullMasks) && globals::shaderCache->IsEnabled();
+	floatingSettings.move = settings.EnableFloatingObjects;
 	floatingSettings.range = settings.FloatingRange * UnitsPerMetre;
 	floatingSettings.maxSize = settings.MaxFloatingSize * UnitsPerMetre;
 	floatingSettings.response = settings.FloatingResponse;

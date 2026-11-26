@@ -43,6 +43,9 @@
 // ============================================================================
 
 #define PBRW_CASCADES 4
+#define PBRW_MAX_HULLS 8       // PBRWater::MaxHullMasks
+#define PBRW_HULL_STRIDE 7     // PBRWater::HullMaskStride
+#define PBRW_HULL_STATIONS 12  // FloatingObjects::HullStations
 
 namespace PBRWater
 {
@@ -99,6 +102,9 @@ namespace PBRWater
 		float4 WakeInfo;                 // x Kelvin wakes this frame (KelvinWakes)
 		float4 Wake0[8];                 // per wake: xy absolute position (units), z k0 = g / U^2 (1/unit), w peak height (units)
 		float4 Wake1[8];                 // xy heading, zw unused
+
+		float4 Hull0;                                        // x hull masks listed in HullData
+		float4 HullData[PBRW_MAX_HULLS * PBRW_HULL_STRIDE];  // per hull (InsideHull): 3 rows of its frame (axis, -axis . centre, relative to RefCamPos); bottom, top, front, back (units); 3 x 4 half widths at its stations
 	}
 
 	Texture2D<float> SeaLevels : register(t28);  // the projected grids' cells: each one's still water level (absolute z), < -1e8 none (or a river's)
@@ -654,6 +660,37 @@ namespace PBRWater
 		if (Proj0.z < 0.5 || any(cell < 0.0) || any(cell >= Proj1.zw))
 			return false;
 		return abs(SeaLevels.Load(int3(cell, 0)) - Proj0.y) < 2.0;
+	}
+
+	/// Whether camera-relative `positionWS` is inside one of the hulls (FloatingObjects::HullMask): the water is not drawn
+	/// there, so the waves passing through a boat stay out of it. Each hull is its outline at the waterline, measured
+	/// against its collision at stations along its length, between its keel and its top, turned with the hull.
+	bool InsideHull(float3 positionWS)
+	{
+		uint count = (uint)Hull0.x;
+		[branch] if (count == 0) return false;
+		float3 p = positionWS + (FrameBuffer::CameraPosAdjust.xyz - RefCamPos.xyz);
+		[loop] for (uint h = 0; h < count; ++h)
+		{
+			uint base = h * PBRW_HULL_STRIDE;
+			float3 local = float3(dot(HullData[base].xyz, p) + HullData[base].w, dot(HullData[base + 1].xyz, p) + HullData[base + 1].w,
+				dot(HullData[base + 2].xyz, p) + HullData[base + 2].w);
+			float4 extent = HullData[base + 3];  // bottom, top, front, back
+			if (local.z <= extent.x || local.z >= extent.y || local.x >= extent.z || local.x <= -extent.w)
+				continue;
+			// The outline between the stations, narrowing to the ends half a station out from the last ones.
+			float t = (local.x + extent.w) / max(extent.z + extent.w, 1.0) * PBRW_HULL_STATIONS - 0.5;
+			float i0 = clamp(floor(t), 0.0, PBRW_HULL_STATIONS - 2.0);
+			uint s0 = (uint)i0;
+			uint s1 = s0 + 1;
+			float w0 = dot(HullData[base + 4 + s0 / 4], float4((s0 % 4) == uint4(0, 1, 2, 3)));
+			float w1 = dot(HullData[base + 4 + s1 / 4], float4((s1 % 4) == uint4(0, 1, 2, 3)));
+			float width = lerp(w0, w1, saturate(t - i0));
+			width *= saturate(2.0 * (t + 0.5)) * saturate(2.0 * (PBRW_HULL_STATIONS - 0.5 - t));
+			if (abs(local.y) < width)
+				return true;
+		}
+		return false;
 	}
 
 	/// Tile coordinate of camera-relative position `p` in cascade `c` (world-anchored, re-based on the
