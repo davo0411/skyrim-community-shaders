@@ -4545,11 +4545,7 @@ bool PBRWater::BSWaterShader_SetupTechnique::thunk(RE::BSShader* waterShader, ui
 	const bool ok = func(waterShader, technique);
 	if (!ok)
 		return false;
-	// The game's underwater surface (the water seen from below) is not drawn: PBR Water will have its own.
-	if (WaterTechnique(globals::state->modifiedVertexDescriptor) == static_cast<uint32_t>(SC::WaterShaderTechniques::Underwater)) {
-		BSWaterShader_RestoreTechnique::func(waterShader, technique);
-		return false;
-	}
+	// The surface seen from below (Underwater) draws too: Water.hlsl's PBR branch, and its batch draws the underwater volume.
 	globals::features::pbrWater.SetupBatch();
 	return ok;
 }
