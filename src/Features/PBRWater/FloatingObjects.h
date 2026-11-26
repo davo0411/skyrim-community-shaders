@@ -154,6 +154,16 @@ private:
 	std::unordered_map<RE::FormID, Floater> floaters;     ///< by hull form ID
 	std::unordered_map<RE::FormID, RE::FormID> owner;     ///< any moving reference -> its hull
 	std::unordered_map<RE::FormID, RE::FormID> riding;    ///< actor -> the hull it last stood on
+	/** @brief An actor in furniture on a hull: the engine holds it at the furniture's rest place, so its 3D is moved. */
+	struct Seated
+	{
+		const RE::NiAVObject* node = nullptr;
+		RE::NiPoint3 restPos;
+		RE::NiMatrix3 restRot;
+		RE::NiPoint3 appliedPos;  ///< where this placed it, to tell when the engine placed it anew
+	};
+	std::unordered_map<RE::FormID, Seated> seated;  ///< by actor form ID
+	void RestoreSeated(RE::FormID id, const Seated& s);
 	std::unordered_set<RE::FormID> rejected;              ///< examined, not floating
 	std::unordered_map<RE::FormID, const char*> reasons;  ///< why a reference does not float (debug view)
 	std::unordered_map<RE::FormID, Rider> riders;         ///< by form ID

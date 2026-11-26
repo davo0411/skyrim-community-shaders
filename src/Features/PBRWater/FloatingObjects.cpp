@@ -295,6 +295,24 @@ namespace
 
 	/// Casts a ray straight down from `from` over `length` units. Returns whether anything solid was hit and
 	/// the reference it belongs to (null for the landscape).
+	/// Something grown onto a rock, a pile or the bed (barnacles, coral, rooted weed): solid within reach of
+	/// its base, along its own down axis (it is placed facing away from what it grows on) or straight down.
+	bool IsAttached(RE::TES* tes, RE::TESObjectREFR* ref, const WorldBox& box)
+	{
+		const float reach = 2.0f * box.half.z + 15.0f;
+		for (const RE::NiPoint3& down : { box.axis[2] * -1.0f, RE::NiPoint3{ 0.0f, 0.0f, -1.0f } }) {
+			RE::bhkPickData pick{};
+			const RE::NiPoint3 from = box.centre;
+			const RE::NiPoint3 to = from + down * reach;
+			pick.rayInput.from = RE::hkVector4(from.x * SkyrimToHavok, from.y * SkyrimToHavok, from.z * SkyrimToHavok, 0.0f);
+			pick.rayInput.to = RE::hkVector4(to.x * SkyrimToHavok, to.y * SkyrimToHavok, to.z * SkyrimToHavok, 0.0f);
+			tes->Pick(pick);
+			if (pick.rayOutput.rootCollidable && RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable) != ref)
+				return true;
+		}
+		return false;
+	}
+
 	bool PickBelow(RE::TES* tes, const RE::NiPoint3& from, float length, RE::TESObjectREFR*& hitRef, float& hitZ)
 	{
 		RE::bhkPickData pick{};
@@ -484,7 +502,8 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			float bed = 0.0f;
 			const bool free = !BedHeight(tes, snapshot, box.centre.x, box.centre.y, box.maxZ + 1000.0f, bed) || bed < box.minZ - 5.0f;
 			const bool topLevel = (node->local.translate - ref->GetPosition()).Length() < 1.0f;
-			if (riderType && (atSurface || underSurface) && free && topLevel && HasLitGeometry(node) && !FindDynamicBody(node) && !IsTerrainFeatureModel(path)) {
+			if (riderType && (atSurface || underSurface) && free && topLevel && HasLitGeometry(node) && !FindDynamicBody(node) && !IsTerrainFeatureModel(path) &&
+			    !IsAttached(tes, ref, box)) {
 				Rider rider;
 				rider.ref = ref->GetHandle();
 				rider.id = id;
@@ -881,12 +900,21 @@ void FloatingObjects::CarryActors(std::vector<Floater*>& moved, const std::vecto
 		f->loadRoll = 0.0f;
 	}
 
+	std::unordered_set<RE::FormID> stillSeated;
 	for (auto* actor : actors) {
 		// Only what the character stands on carries it: a box around the hull also takes in the dock it is
 		// moored to. Between steps, or while the deck drops away, there is no support: keep the last boat.
 		const RE::FormID actorId = actor->GetFormID();
 		RE::FormID supportHull = 0;
-		if (auto* controller = actor->GetCharController()) {
+		const auto* state = actor->AsActorState();
+		const bool inFurniture = state && state->GetSitSleepState() >= RE::SIT_SLEEP_STATE::kWaitingForSitAnim;
+		if (inFurniture) {
+			// Sitting or lying, nothing supports the controller: the furniture tells which hull it is on.
+			if (auto furniture = actor->GetOccupiedFurniture().get()) {
+				if (const auto it = owner.find(furniture->GetFormID()); it != owner.end())
+					supportHull = it->second;
+			}
+		} else if (auto* controller = actor->GetCharController()) {
 			if (auto* body = controller->supportBody.get()) {
 				if (auto* ref = RE::TESHavokUtilities::FindCollidableRef(body->collidable)) {
 					if (const auto it = owner.find(ref->GetFormID()); it != owner.end())
@@ -906,12 +934,13 @@ void FloatingObjects::CarryActors(std::vector<Floater*>& moved, const std::vecto
 			Floater& f = *moved[i];
 			if (f.hull.id != supportHull)
 				continue;
-			// Where the actor stands in the hull's rest frame, from last frame's motion.
+			// Where the actor stands in the hull's rest frame, from last frame's motion. A seated actor's
+			// reference stays at the furniture's rest place, which is already in that frame.
 			const RE::NiPoint3 position = actor->GetPosition();
-			const RE::NiPoint3 local = previousRotations[i].Transpose() * (position - f.pivot - previousOffsets[i]);
+			const RE::NiPoint3 local = inFurniture ? position - f.pivot : previousRotations[i].Transpose() * (position - f.pivot - previousOffsets[i]);
 			const float u = local.Dot(f.axisX);
 			const float v = local.Dot(f.axisY);
-			if (std::abs(u) > f.halfLength + 20.0f || std::abs(v) > f.halfWidth + 20.0f || local.z < -f.draft - 20.0f || local.z > f.freeboard + 80.0f)
+			if (!inFurniture && (std::abs(u) > f.halfLength + 20.0f || std::abs(v) > f.halfWidth + 20.0f || local.z < -f.draft - 20.0f || local.z > f.freeboard + 80.0f))
 				continue;
 
 			// Their weight sinks and tilts the hull a little (box waterplane: area A, inertia A L^2 / 12).
@@ -925,6 +954,23 @@ void FloatingObjects::CarryActors(std::vector<Floater*>& moved, const std::vecto
 			f.loadPitch = std::clamp(f.loadPitch, -0.6f * MaxTilt, 0.6f * MaxTilt);
 			f.loadRoll = std::clamp(f.loadRoll, -0.6f * MaxTilt, 0.6f * MaxTilt);
 			++stats.carried;
+
+			if (inFurniture) {
+				// Move the 3D with the furniture, as the furniture's own 3D moves; the reference stays at rest.
+				auto* node = actor->Get3D();
+				if (!node)
+					break;
+				auto& s = seated[actorId];
+				if (s.node != node || (node->local.translate - s.appliedPos).SqrLength() > 1e-4f) {
+					s.node = node;
+					s.restPos = node->local.translate;
+					s.restRot = node->local.rotate;
+				}
+				s.appliedPos = f.pivot + f.offset + f.rotation * (s.restPos - f.pivot);
+				ApplyTransform(node, s.appliedPos, f.rotation * s.restRot);
+				stillSeated.insert(actorId);
+				break;
+			}
 
 			// Carry them with the deck (Bobbing Framework): move the reference and its character controller
 			// together, keeping the controller's forward vector and collector distance as they were.
@@ -943,12 +989,36 @@ void FloatingObjects::CarryActors(std::vector<Floater*>& moved, const std::vecto
 			controller->SetPositionImpl(RE::hkVector4(next.x * SkyrimToHavok, next.y * SkyrimToHavok, next.z * SkyrimToHavok, 0.0f), true, false);
 			controller->forwardVec = forwardVec;
 			proxyController->proxy.ignoredCollisionStartCollector.earlyOutDistance = earlyOutDistance;
+			// An NPC's 3D follows its reference only on its next AI update, a frame behind the deck: place it now.
+			if (!actor->IsPlayerRef()) {
+				if (auto* node = actor->Get3D())
+					ApplyTransform(node, next, node->local.rotate);
+			}
 			// A deck dropping away under the feet is not a fall.
 			if (controller->context.currentState == RE::hkpCharacterStateType::kInAir)
 				controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
 			break;
 		}
 	}
+
+	// Stood up, left, or the hull is no longer moved: back to where the engine put them.
+	for (auto it = seated.begin(); it != seated.end();) {
+		if (stillSeated.contains(it->first)) {
+			++it;
+			continue;
+		}
+		RestoreSeated(it->first, it->second);
+		it = seated.erase(it);
+	}
+}
+
+void FloatingObjects::RestoreSeated(RE::FormID id, const Seated& s)
+{
+	auto* actor = RE::TESForm::LookupByID<RE::Actor>(id);
+	auto* node = actor ? actor->Get3D() : nullptr;
+	// Placed anew by the engine (standing up, new 3D): it already stands where it belongs.
+	if (node && node == s.node && (node->local.translate - s.appliedPos).SqrLength() <= 1e-4f)
+		ApplyTransform(node, s.restPos, s.restRot);
 }
 
 void FloatingObjects::CarryCargo(const std::vector<Floater*>& moved, const std::vector<RE::NiPoint3>& previousOffsets, const std::vector<RE::NiMatrix3>& previousRotations)
@@ -1086,6 +1156,10 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 		}
 		CarryActors(nearPlayer, actors, previousOffsets, previousRotations);
 		CarryCargo(nearPlayer, previousOffsets, previousRotations);
+	} else {
+		for (const auto& [id, s] : seated)
+			RestoreSeated(id, s);
+		seated.clear();
 	}
 
 	UpdateRiders(snapshot, settings, camera);
@@ -1224,6 +1298,9 @@ void FloatingObjects::Reset()
 	for (auto& [hullId, f] : floaters)
 		Release(f);
 	RestorePlacements();
+	for (const auto& [id, s] : seated)
+		RestoreSeated(id, s);
+	seated.clear();
 	floaters.clear();
 	owner.clear();
 	riding.clear();

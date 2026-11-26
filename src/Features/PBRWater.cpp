@@ -361,6 +361,15 @@ namespace
 		const auto type = body->motion.type.get();
 		return type == Type::kDynamic || type == Type::kSphereInertia || type == Type::kBoxInertia || type == Type::kThinBoxInertia;
 	}
+
+	/// Held by a constraint (chains, ropes, hanging nets, things hinged to the world): the waves must not drag it.
+	bool IsConstrained(const RE::hkpRigidBody* body)
+	{
+		// hkSmallArray keeps its size private: a uint16 after the data pointer.
+		static_assert(sizeof(RE::hkSmallArray<RE::hkConstraintInternal>) == 0x10);
+		const auto masterCount = *reinterpret_cast<const std::uint16_t*>(reinterpret_cast<const std::byte*>(&body->constraintsMaster) + 0x08);
+		return masterCount != 0 || !body->constraintsSlave.empty();
+	}
 }
 
 // ============================================================================
@@ -4374,7 +4383,7 @@ void PBRWater::GatherInteractions(const PBRWaterModel::WaveSnapshot& snap, float
 
 			auto bhkBody = niCollision->body.get() ? niCollision->body.get()->AsBhkRigidBody() : nullptr;
 			auto body = bhkBody ? bhkBody->GetRigidBody() : nullptr;
-			if (!body || !IsDynamicMotion(body))
+			if (!body || !IsDynamicMotion(body) || IsConstrained(body))
 				return RE::BSContainer::ForEachResult::kContinue;
 
 			RE::NiPoint3 center;
