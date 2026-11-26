@@ -16,6 +16,7 @@
 // After HPWater's water volumetrics (AshenOneArt/HPWater, MPL-2.0), reimplemented here.
 // ============================================================================
 
+#include "Common/ColorManagement.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"

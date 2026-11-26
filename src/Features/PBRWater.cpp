@@ -4,7 +4,9 @@
 
 #include "Features/CloudShadows.h"
 #include "Features/DynamicCubemaps.h"
+#include "Features/TerrainShadows.h"
 #include "Features/UnifiedWater.h"
+#include "Features/VolumetricShadows.h"
 #include "Features/Upscaling.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
@@ -1127,8 +1129,8 @@ void PBRWater::SetupResources()
 			defines.push_back({ "CLOUD_SHADOWS", "" });
 		if (globals::features::volumetricShadows.loaded)
 			defines.push_back({ "VOLUMETRIC_SHADOWS", "" });
-		const wchar_t* volume = L"Data\Shaders\PBRWater\UnderwaterVolume.hlsl";
-		const wchar_t* shaftsCS = L"Data\Shaders\PBRWater\UnderwaterShaftsCS.hlsl";
+		const wchar_t* volume = L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl";
+		const wchar_t* shaftsCS = L"Data\\Shaders\\PBRWater\\UnderwaterShaftsCS.hlsl";
 		underwaterVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(volume, defines, "vs_5_0", "VS")));
 		underwaterPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(volume, defines, "ps_5_0", "PS")));
 		underwaterMarchPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(volume, defines, "ps_5_0", "MarchPS")));

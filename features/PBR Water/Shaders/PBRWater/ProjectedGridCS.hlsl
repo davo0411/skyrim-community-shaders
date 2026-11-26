@@ -26,7 +26,7 @@
 cbuffer ProjectedGridCB : register(b0)
 {
 	row_major float4x4 ClipToWorld;  // camera-relative inverse view-projection, unjittered
-	uint4 Pass;                      // x the level this dispatch works on, y the levels this frame
+	uint4 Run;                       // x the level this dispatch works on, y the levels this frame
 };
 
 StructuredBuffer<PBRWaterGrid::Level> Levels : register(t0);
@@ -89,14 +89,14 @@ PBRWaterTess::Vertex LerpVertex(PBRWaterTess::Vertex a, PBRWaterTess::Vertex b, 
 }
 
 [numthreads(8, 8, 1)] void GridCS(uint3 id : SV_DispatchThreadID) {
-	PBRWaterGrid::Level l = Levels[Pass.x];
+	PBRWaterGrid::Level l = Levels[Run.x];
 	if (any(id.xy > l.layout.xy))
 		return;
 	Vertices[l.layout.z + PBRWaterGrid::VertexIndex(id.xy, l.layout.x)] = Evaluate(float2(id.xy), 1.0, l);
 }
 
 [numthreads(8, 8, 1)] void FlagCS(uint3 id : SV_DispatchThreadID) {
-	PBRWaterGrid::Level l = Levels[Pass.x];
+	PBRWaterGrid::Level l = Levels[Run.x];
 	if (any(id.xy >= l.layout.xy))
 		return;
 	uint columns = l.layout.x;
@@ -112,7 +112,7 @@ PBRWaterTess::Vertex LerpVertex(PBRWaterTess::Vertex a, PBRWaterTess::Vertex b, 
 	[branch] if (train > 0.05 && spacing > lip)
 	{
 		uint index;
-		Counters.InterlockedAdd(Pass.x * 4, 1, index);
+		Counters.InterlockedAdd(Run.x * 4, 1, index);
 		if (index < l.patches.y) {
 			Patches[l.patches.x + index] = cell;
 			flag = 1;
@@ -125,14 +125,14 @@ PBRWaterTess::Vertex LerpVertex(PBRWaterTess::Vertex a, PBRWaterTess::Vertex b, 
 
 [numthreads(1, 1, 1)] void ArgsCS(uint3 id : SV_DispatchThreadID) {
 	for (uint i = 0; i < PBRW_GRID_MAX_LEVELS; i++) {
-		uint count = i < Pass.y ? min(Counters.Load(i * 4), Levels[i].patches.y) : 0;
+		uint count = i < Run.y ? min(Counters.Load(i * 4), Levels[i].patches.y) : 0;
 		Args.Store4(i * 16, uint4(PBRW_GRID_PATCH * PBRW_GRID_PATCH * 6, count, 0, 0));
 		Args.Store3(PBRW_GRID_MAX_LEVELS * 16 + i * 12, uint3(count, 1, 1));
 	}
 }
 
 [numthreads(PBRW_GRID_PATCH + 1, PBRW_GRID_PATCH + 1, 1)] void PatchCS(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID) {
-	PBRWaterGrid::Level l = Levels[Pass.x];
+	PBRWaterGrid::Level l = Levels[Run.x];
 	const uint n = PBRW_GRID_PATCH;
 	uint patch = l.patches.x + group.x;
 	uint columns = l.layout.x;

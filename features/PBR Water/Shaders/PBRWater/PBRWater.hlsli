@@ -2229,6 +2229,41 @@ namespace PBRWater
 	}
 #endif
 
+	static const float KelvinWakeLength = 30.0;  // PBRWaterWake::Length
+	static const float KelvinWakeWidth = 15.0;   // PBRWaterWake::Width
+
+	/**
+	 * The Kelvin wakes of the actors moving through the water at camera-relative `positionWS`: height (units) and its
+	 * slope. Each lays the pattern behind it along its heading, scaled by its speed (k0 = g / U^2: the transverse waves are
+	 * 2 pi / k0 long). Faded where the sampling (`spacing`, units) cannot carry half a transverse wave.
+	 */
+	float KelvinWakes(float3 positionWS, float spacing, out float2 slope)
+	{
+		slope = 0.0;
+		float height = 0.0;
+		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+		uint count = (uint)WakeInfo.x;
+		[loop] for (uint i = 0; i < count; i++)
+		{
+			float4 a = Wake0[i];
+			float2 heading = Wake1[i].xy;
+			float2 d = absXY - a.xy;
+			float x = -dot(d, heading) * a.z;
+			float y = (heading.x * d.y - heading.y * d.x) * a.z;
+			if (x <= 0.0 || x >= KelvinWakeLength || abs(y) >= KelvinWakeWidth)
+				continue;
+			float resolved = saturate(2.0 - spacing * a.z / Math::PI);
+			if (resolved <= 0.0)
+				continue;
+			float4 t = KelvinWakeTexture.SampleLevel(LinearClampSampler, float2(x / KelvinWakeLength, abs(y) / KelvinWakeWidth), 0);
+			float amplitude = a.w * resolved;
+			height += amplitude * t.x;
+			float side = y < 0.0 ? -1.0 : 1.0;
+			slope += amplitude * a.z * (-t.y * heading + t.z * side * float2(-heading.y, heading.x));
+		}
+		return height;
+	}
+
 	/**
 	 * Waves for shading at undisplaced camera-relative `positionWS`, filtered over the pixel footprint
 	 * (trilinear / anisotropic). The slope variance the filter removes is recovered from the mip-filtered
@@ -2391,41 +2426,6 @@ namespace PBRWater
 	{
 		uv = (absXY - origin) * Ripple0.z;
 		return Ripple0.w > 0.5 && all(uv > 0.0) && all(uv < 1.0);
-	}
-
-	static const float KelvinWakeLength = 30.0;  // PBRWaterWake::Length
-	static const float KelvinWakeWidth = 15.0;   // PBRWaterWake::Width
-
-	/**
-	 * The Kelvin wakes of the actors moving through the water at camera-relative `positionWS`: height (units) and its
-	 * slope. Each lays the pattern behind it along its heading, scaled by its speed (k0 = g / U^2: the transverse waves are
-	 * 2 pi / k0 long). Faded where the sampling (`spacing`, units) cannot carry half a transverse wave.
-	 */
-	float KelvinWakes(float3 positionWS, float spacing, out float2 slope)
-	{
-		slope = 0.0;
-		float height = 0.0;
-		float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
-		uint count = (uint)WakeInfo.x;
-		[loop] for (uint i = 0; i < count; i++)
-		{
-			float4 a = Wake0[i];
-			float2 heading = Wake1[i].xy;
-			float2 d = absXY - a.xy;
-			float x = -dot(d, heading) * a.z;
-			float y = (heading.x * d.y - heading.y * d.x) * a.z;
-			if (x <= 0.0 || x >= KelvinWakeLength || abs(y) >= KelvinWakeWidth)
-				continue;
-			float resolved = saturate(2.0 - spacing * a.z / Math::PI);
-			if (resolved <= 0.0)
-				continue;
-			float4 t = KelvinWakeTexture.SampleLevel(LinearClampSampler, float2(x / KelvinWakeLength, abs(y) / KelvinWakeWidth), 0);
-			float amplitude = a.w * resolved;
-			height += amplitude * t.x;
-			float side = y < 0.0 ? -1.0 : 1.0;
-			slope += amplitude * a.z * (-t.y * heading + t.z * side * float2(-heading.y, heading.x));
-		}
-		return height;
 	}
 
 	/// The displayed state (height in simulation units) at `uv`, of this frame (or last frame's copy for motion vectors).

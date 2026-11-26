@@ -10,16 +10,13 @@
 // draws over its own pixels afterwards with the same water (Water.hlsl, UNDERWATER).
 // ============================================================================
 
-#include "PBRWater/UnderwaterLight.hlsli"
-
-Texture2D<float> Depth : register(t0);
-Texture2D<float4> ShaftLight : register(t1);  // UnderwaterShaftsCS: rgb in-scattered light, a distance (units)
-
 struct VSOutput
 {
 	float4 position : SV_Position;
 };
 
+#if defined(VSHADER)
+// The full-screen triangle (the vertex stage takes none of the lighting headers).
 VSOutput VS(uint id : SV_VertexID)
 {
 	VSOutput o;
@@ -27,6 +24,12 @@ VSOutput VS(uint id : SV_VertexID)
 	o.position = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 	return o;
 }
+#else
+
+#include "PBRWater/UnderwaterLight.hlsli"
+
+Texture2D<float> Depth : register(t0);
+Texture2D<float4> ShaftLight : register(t1);  // UnderwaterShaftsCS: rgb in-scattered light, a distance (units)
 
 struct PSOutput
 {
@@ -83,3 +86,4 @@ float4 MarchPS(VSOutput input) : SV_Target0
 	float jitter = Random::InterleavedGradientNoise(halfPixel, SharedData::FrameCount);
 	return float4(UnderwaterScatteringMarched(viewDirection, distance, jitter), distance);
 }
+#endif
