@@ -2654,7 +2654,7 @@ void PBRWater::UploadDrawConstants()
 		GpuData gridData = drawData;
 		gridData.Proj0 = { static_cast<float>(grid.columns), grid.z, 1.0f, static_cast<float>(grid.firstVertex) };
 		gridData.Proj1 = projectedGrid.CellsMapping();
-		gridData.Proj2 = { static_cast<float>(grid.firstCell), static_cast<float>(grid.firstPatch), 0.0f, 0.0f };
+		gridData.Proj2 = { static_cast<float>(grid.firstCell), static_cast<float>(grid.firstPatch), static_cast<float>(grid.subdivision), 0.0f };
 		gridData.Tess0.x = 6.0f;
 		gridDrawBuffers[slot]->Update(gridData);
 		gridData.Tess0.x = 7.0f;

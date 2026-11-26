@@ -421,6 +421,9 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 			break;
 		const auto& level = levels[layout.levelIndex];
 		const uint32_t slot = static_cast<uint32_t>(built.size());
+		// A patch's cells never smaller than 2 pixels (one pixel quad a vertex): finer than that, every quad along a triangle
+		// edge is shaded once more for each triangle it touches. Cells too small to split once take no patches.
+		const uint32_t subdivision = static_cast<uint32_t>(std::clamp(std::floor(cell * scale / 2.0f), 1.0f, static_cast<float>(Subdivision)));
 		BuiltLevel b;
 		b.z = level.z;
 		b.columns = columns;
@@ -428,6 +431,7 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 		b.firstVertex = vertexCursor;
 		b.firstCell = cellCursor;
 		b.firstPatch = slot * patchesEach;
+		b.subdivision = subdivision;
 		built.push_back(b);
 
 		auto& g = gpu[slot];
@@ -439,7 +443,8 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 		g.layout[2] = vertexCursor;
 		g.layout[3] = cellCursor;
 		g.patches[0] = b.firstPatch;
-		g.patches[1] = patchesEach;
+		g.patches[1] = subdivision > 1 ? patchesEach : 0;
+		g.patches[2] = subdivision;
 		g.texCoordU = level.texCoordU;
 		g.texCoordV = level.texCoordV;
 		vertexCursor += count;

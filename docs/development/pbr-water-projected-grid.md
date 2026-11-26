@@ -55,8 +55,11 @@ constants (`gridDrawBuffers` / `patchDrawBuffers`) and deferred mesh key (`GridM
 ## Breakers (refined patches)
 
 `FlagCS` flags a cell where the shore train is there (the vertex's `shore.y`, now the train's share from DisplaceSurface)
-and the cell is coarser than the lip wants (deep-water wavelength / 25). Each flagged cell takes a patch (up to
-`MaxPatches` split over the grids) and is drawn as a 4 x 4 sub-grid (`PatchCS`, `Tess0.x = 7`) evaluated at its own spacing;
+and the cell is coarser than the lip wants (deep-water wavelength / 25) but not so coarse that a patch stays far from it
+(spacing < 4 n lip): no dense squares on distant breakers. Each flagged cell takes a patch (up to `MaxPatches` split
+over the grids) and is drawn as an n x n sub-grid (`PatchCS`, `Tess0.x = 7`) evaluated at its own spacing, n = the grid's
+cell pixels / 2 clamped to 1..4 (`Level.patches.z`, `Proj2.z`): a patch cell is never under 2 pixels (one pixel quad a
+vertex), and at n = 1 (cells under 4 pixels) the grid takes no patches;
 the coarse cell collapses (its first corner's `river` field carries the flag to the vertex shader). Corners are the coarse
 vertices; edge points shared with an unflagged cell lie on that cell's edge (lerped), so no crack; two flagged cells
 compute their shared edge from the same grid coordinates.

@@ -94,7 +94,7 @@ namespace PBRWater
 		float4 Swash1;                   // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
 		float4 Proj0;                    // a projected grid's draw (ProjectedGrid): x columns, y its level (absolute z), z cells listed, w its first vertex
 		float4 Proj1;                    // the cells (SeaLevels): xy first cell, zw cells across
-		float4 Proj2;                    // x its first cell, y its first patch, zw unused
+		float4 Proj2;                    // x its first cell, y its first patch, z a patch's cells across, w unused
 		float4 Proj3;                    // unused
 		float4 WakeInfo;                 // x Kelvin wakes this frame (KelvinWakes)
 		float4 Wake0[8];                 // per wake: xy absolute position (units), z k0 = g / U^2 (1/unit), w peak height (units)
@@ -2097,7 +2097,10 @@ namespace PBRWater
 				[branch] if (vertical > 0.0)
 				{
 					float3 uv = float3(CascadeUV(positionWS.xy, c), c);
-					float lod = spacing > 0.0 ? clamp(log2(spacing / Cascade0[c].w) - 0.5, 0.0, Params2.w) : 0.0;
+					// Texels of 1.4x the vertex spacing: the shortest wave left spans ~3 vertices (Nyquist needs 2). At 0.7x waves
+					// shorter than the vertices resolve stayed in, aliased, and the distant sea jiggled as the projected grid's
+					// vertices slid over it with the camera.
+					float lod = spacing > 0.0 ? clamp(log2(spacing / Cascade0[c].w) + 0.5, 0.0, Params2.w) : 0.0;
 					float horizontal = vertical * steepnessScale;
 					float4 d = OceanDisplacement.SampleLevel(OceanSampler, uv, lod);
 					float4 g = OceanDerivatives.SampleLevel(OceanSampler, uv, lod);

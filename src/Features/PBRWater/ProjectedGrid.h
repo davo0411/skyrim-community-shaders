@@ -55,6 +55,7 @@ public:
 		uint32_t firstVertex = 0;
 		uint32_t firstCell = 0;
 		uint32_t firstPatch = 0;
+		uint32_t subdivision = Subdivision;  ///< a patch's cells across (2..Subdivision; 1: no patches)
 	};
 
 	/** @brief Compiles the compute shaders and creates the buffers. */

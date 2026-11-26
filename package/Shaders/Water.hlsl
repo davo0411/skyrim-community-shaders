@@ -559,9 +559,9 @@ VS_OUTPUT GridWaterVertex(uint vertexID)
 /// Tess0.x 7: a vertex of a breaker's patch (one instance a patch, the patches' vertices in TessellatedVertices' slot).
 VS_OUTPUT GridPatchVertex(uint vertexID, uint instanceID)
 {
-	static const uint n = PBRW_GRID_PATCH;
+	uint n = (uint)PBRWater::Proj2.z;
 	uint patch = (uint)PBRWater::Proj2.y + instanceID;
-	return GridVertexFrom(TessellatedVertices[patch * (n + 1) * (n + 1) + PBRWaterGrid::VertexIndex(PBRWaterGrid::ListCorner(vertexID, n), n)]);
+	return GridVertexFrom(TessellatedVertices[PBRWaterGrid::PatchVertex(patch, PBRWaterGrid::ListCorner(vertexID, n), n)]);
 }
 
 #			if defined(SPECULAR)
@@ -1852,9 +1852,12 @@ PS_OUTPUT main(PS_INPUT input)
 	// A curling lip can turn its far side to the camera (seen from behind the wave, or where the lip passes through the
 	// water behind it). Shaded about a normal facing away, its reflection, sun and foam lighting turned odd along the crest:
 	// mirrored across the view direction, the normal keeps its lean along the surface and faces the side that is seen.
+	// From below every normal faces away from the camera: the underside is what is seen, about the normal as it is.
+#				if !defined(UNDERWATER)
 	float pbrFacing = dot(normal, viewDirection);
 	if (pbrFacing > 0.0)
 		normal = normalize(normal - 2.0 * pbrFacing * viewDirection);
+#				endif
 	pbrSurface.normal = normal;  // the normals debug view shows what is shaded
 	float pbrRoughness = pbrSurface.roughness;
 #			else

@@ -20,7 +20,7 @@ namespace PBRWaterGrid
 		float4 range;      // xy the grid's NDC x from and to, zw its NDC y from and to
 		float4 plane;      // x the level relative to the camera (units, never within a unit of 0), y the farthest a vertex is cast (units)
 		uint4 layout;      // x columns, y rows, z its first vertex, w its first cell
-		uint4 patches;     // x its first patch, y patches it may take
+		uint4 patches;     // x its first patch, y patches it may take, z a patch's cells across (PBRW_GRID_PATCH at most)
 		float4 texCoordU;  // texture coordinate u = dot(xy, absolute xy) + z
 		float4 texCoordV;  // and v
 	};
@@ -28,6 +28,12 @@ namespace PBRWaterGrid
 	uint VertexIndex(uint2 g, uint columns)
 	{
 		return g.y * (columns + 1) + g.x;
+	}
+
+	/// Patch `patch`'s vertex `s` of its n x n cells: every patch keeps room for PBRW_GRID_PATCH.
+	uint PatchVertex(uint patch, uint2 s, uint n)
+	{
+		return patch * (PBRW_GRID_PATCH + 1) * (PBRW_GRID_PATCH + 1) + VertexIndex(s, n);
 	}
 
 	/// The grid corner of vertex `vertexID` of a triangle list over `columns`-wide cells: corners (0,0) (1,0) (0,1), then

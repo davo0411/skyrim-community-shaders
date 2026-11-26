@@ -109,7 +109,9 @@ PBRWaterTess::Vertex LerpVertex(PBRWaterTess::Vertex a, PBRWaterTess::Vertex b, 
 	float lip = max(PBRWater::Shore3.w, PBRWater::UnitsPerMetre) / 25.0;
 	uint cell = id.y * columns + id.x;
 	uint flag = 0;
-	[branch] if (train > 0.05 && spacing > lip)
+	// Only where the patch brings the cell near what the lip wants: further out a patch stays far too coarse for it, and
+	// the distant breakers came out as squares four times denser than the water round them.
+	[branch] if (train > 0.05 && spacing > lip && spacing < 4.0 * l.patches.z * lip)
 	{
 		uint index;
 		Counters.InterlockedAdd(Run.x * 4, 1, index);
@@ -126,14 +128,17 @@ PBRWaterTess::Vertex LerpVertex(PBRWaterTess::Vertex a, PBRWaterTess::Vertex b, 
 [numthreads(1, 1, 1)] void ArgsCS(uint3 id : SV_DispatchThreadID) {
 	for (uint i = 0; i < PBRW_GRID_MAX_LEVELS; i++) {
 		uint count = i < Run.y ? min(Counters.Load(i * 4), Levels[i].patches.y) : 0;
-		Args.Store4(i * 16, uint4(PBRW_GRID_PATCH * PBRW_GRID_PATCH * 6, count, 0, 0));
+		uint n = i < Run.y ? Levels[i].patches.z : 1;
+		Args.Store4(i * 16, uint4(n * n * 6, count, 0, 0));
 		Args.Store3(PBRW_GRID_MAX_LEVELS * 16 + i * 12, uint3(count, 1, 1));
 	}
 }
 
 [numthreads(PBRW_GRID_PATCH + 1, PBRW_GRID_PATCH + 1, 1)] void PatchCS(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID) {
 	PBRWaterGrid::Level l = Levels[Run.x];
-	const uint n = PBRW_GRID_PATCH;
+	const uint n = l.patches.z;  // ProjectedGrid::Build: as fine as 2 pixels a cell allows, at most PBRW_GRID_PATCH
+	if (any(local.xy > n))
+		return;
 	uint patch = l.patches.x + group.x;
 	uint columns = l.layout.x;
 	uint cell = Patches[patch];
@@ -172,5 +177,5 @@ PBRWaterTess::Vertex LerpVertex(PBRWaterTess::Vertex a, PBRWaterTess::Vertex b, 
 		}
 	}
 	o.river = 0.0;  // the corners carry their cell's flag (FlagCS)
-	PatchVertices[patch * (n + 1) * (n + 1) + s.y * (n + 1) + s.x] = o;
+	PatchVertices[PBRWaterGrid::PatchVertex(patch, s, n)] = o;
 }
