@@ -111,6 +111,13 @@ namespace
 
 void ProjectedGrid::Setup()
 {
+	CompileShaders();
+	constants = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GridCB>(), "PBRWater::ProjectedGridCB");
+	CreateBuffers();
+}
+
+void ProjectedGrid::CompileShaders()
+{
 	auto compile = [](const char* entry) {
 		winrt::com_ptr<ID3D11ComputeShader> cs;
 		cs.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\ProjectedGridCS.hlsl", {}, "cs_5_0", entry)));
@@ -120,8 +127,14 @@ void ProjectedGrid::Setup()
 	flagCS = compile("FlagCS");
 	argsCS = compile("ArgsCS");
 	patchCS = compile("PatchCS");
-	constants = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GridCB>(), "PBRWater::ProjectedGridCB");
+	if (!gridCS || !flagCS || !argsCS || !patchCS) {
+		gridCS = nullptr;
+		logger::warn("[PBR Water] The projected grid's shaders failed to compile; the water is drawn from its meshes");
+	}
+}
 
+void ProjectedGrid::CreateBuffers()
+{
 	D3D11_BUFFER_DESC levelsDesc{};
 	levelsDesc.ByteWidth = sizeof(GpuLevel) * MaxLevels;
 	levelsDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -142,9 +155,9 @@ void ProjectedGrid::Setup()
 	bool ok = CreateRaw(MaxLevels * 4, 0, "PBRWater::ProjectedGridCounters", counters, countersUAV);
 	ok = ok && CreateRaw(ArgsBytes, D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS, "PBRWater::ProjectedGridArgs", args, argsUAV);
 
-	if (!gridCS || !flagCS || !argsCS || !patchCS || !ok) {
+	if (!ok) {
 		gridCS = nullptr;
-		logger::warn("[PBR Water] The projected grid's shaders or buffers failed; the water is drawn from its meshes");
+		logger::warn("[PBR Water] The projected grid's buffers failed; the water is drawn from its meshes");
 	}
 }
 

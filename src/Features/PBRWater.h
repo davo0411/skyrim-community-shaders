@@ -631,6 +631,8 @@ private:
 	void ApplyUnderwaterFogOverride();
 	/** @brief The water between the camera and what each pixel shows, while the camera is under water (before the water's passes). */
 	void DrawUnderwaterVolume();
+	/** @brief Compiles the underwater volume's shaders (at setup, and again when the shader cache is cleared). */
+	void CompileUnderwater();
 	std::unordered_map<const void*, RE::NiPoint3> lastWaveVelocities;  ///< main thread: wave velocity added per body
 	uint32_t uploadedTerrainGeneration = UINT32_MAX;
 	std::shared_ptr<const PBRWaterModel::Bathymetry> uploadedTerrain;

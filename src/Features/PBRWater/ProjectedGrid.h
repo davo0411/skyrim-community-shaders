@@ -60,6 +60,9 @@ public:
 	/** @brief Compiles the compute shaders and creates the buffers. */
 	void Setup();
 
+	/** @brief Compiles the compute shaders (again when the shader cache is cleared). */
+	void CompileShaders();
+
 	/** @brief Takes the worldspace's cells (Unified Water's coverage: each cell's still level), or none outside one. */
 	void SetCells(const std::shared_ptr<const CellLevels>& cells);
 
@@ -126,6 +129,7 @@ private:
 		float4 texCoordV{};
 	};
 
+	void CreateBuffers();
 	int FindLevel(float z) const;
 	void Draw(uint32_t vertexCount, const ID3D11ShaderResourceView* vertexView, uint32_t argsOffset) const;
 

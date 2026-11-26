@@ -1119,30 +1119,7 @@ void PBRWater::SetupResources()
 		buffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::GridPatchDrawConstants");
 	projectedGrid.Setup();
 	kelvinPattern = PBRWaterWake::CreatePattern();
-	{
-		// The light shafts' shadows: the shadow features that are loaded (ShadowSampling::GetSurfaceShadow). Every part of the
-		// volume includes UnderwaterLight.hlsli, so all are compiled with them.
-		std::vector<std::pair<const char*, const char*>> defines;
-		if (globals::features::terrainShadows.loaded)
-			defines.push_back({ "TERRAIN_SHADOWS", "" });
-		if (globals::features::cloudShadows.loaded)
-			defines.push_back({ "CLOUD_SHADOWS", "" });
-		if (globals::features::volumetricShadows.loaded)
-			defines.push_back({ "VOLUMETRIC_SHADOWS", "" });
-		const wchar_t* volume = L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl";
-		const wchar_t* shaftsCS = L"Data\\Shaders\\PBRWater\\UnderwaterShaftsCS.hlsl";
-		underwaterVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(volume, defines, "vs_5_0", "VS")));
-		underwaterPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(volume, defines, "ps_5_0", "PS")));
-		underwaterMarchPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(volume, defines, "ps_5_0", "MarchPS")));
-		auto withDefine = [&](const char* name) {
-			auto d = defines;
-			d.push_back({ name, "" });
-			return d;
-		};
-		underwaterTemporalCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(shaftsCS, withDefine("TEMPORAL"), "cs_5_0")));
-		underwaterBlurCS[0].attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(shaftsCS, withDefine("HORIZONTAL"), "cs_5_0")));
-		underwaterBlurCS[1].attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(shaftsCS, defines, "cs_5_0")));
-	}
+	CompileUnderwater();
 	underwaterCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<float4[5]>(), "PBRWater::UnderwaterCB");
 	{
 		D3D11_BLEND_DESC desc{};
@@ -1307,8 +1284,36 @@ void PBRWater::SetupResources()
 		foamBake = std::async(std::launch::async, [] { return PBRWaterFoam::Bake(); });
 }
 
+void PBRWater::CompileUnderwater()
+{
+	// The light shafts' shadows: the shadow features that are loaded (ShadowSampling::GetSurfaceShadow). Every part of the
+	// volume includes UnderwaterLight.hlsli, so all are compiled with them.
+	std::vector<std::pair<const char*, const char*>> defines;
+	if (globals::features::terrainShadows.loaded)
+		defines.push_back({ "TERRAIN_SHADOWS", "" });
+	if (globals::features::cloudShadows.loaded)
+		defines.push_back({ "CLOUD_SHADOWS", "" });
+	if (globals::features::volumetricShadows.loaded)
+		defines.push_back({ "VOLUMETRIC_SHADOWS", "" });
+	const wchar_t* volume = L"Data\\Shaders\\PBRWater\\UnderwaterVolume.hlsl";
+	const wchar_t* shaftsCS = L"Data\\Shaders\\PBRWater\\UnderwaterShaftsCS.hlsl";
+	underwaterVS.attach(reinterpret_cast<ID3D11VertexShader*>(Util::CompileShader(volume, defines, "vs_5_0", "VS")));
+	underwaterPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(volume, defines, "ps_5_0", "PS")));
+	underwaterMarchPS.attach(reinterpret_cast<ID3D11PixelShader*>(Util::CompileShader(volume, defines, "ps_5_0", "MarchPS")));
+	auto withDefine = [&](const char* name) {
+		auto d = defines;
+		d.push_back({ name, "" });
+		return d;
+	};
+	underwaterTemporalCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(shaftsCS, withDefine("TEMPORAL"), "cs_5_0")));
+	underwaterBlurCS[0].attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(shaftsCS, withDefine("HORIZONTAL"), "cs_5_0")));
+	underwaterBlurCS[1].attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(shaftsCS, defines, "cs_5_0")));
+}
+
 void PBRWater::ClearShaderCache()
 {
+	CompileUnderwater();
+	projectedGrid.CompileShaders();
 	ripples.ClearShaderCache();
 	swash.ClearShaderCache();
 	spray.ClearShaderCache();

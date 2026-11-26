@@ -2109,10 +2109,23 @@ namespace PBRWater
 				}
 			}
 		}
-		ShoreTrain train = ShoreWaves(positionWS, ctx, spacing, previous, false);
-		ComposeSurf(train, positionWS, ctx, false, spacing, spacing);
-		AddShoreTrain(sums, o, train);
-		SeaFloorHold(sums, ctx, train);
+		// The shore train in the geometry only where the vertices are a few metres apart: further out (the projected grids'
+		// distant cells) a cell spanning the waterline took the surf's surface, the bed where it is dry, and the grid stood
+		// in walls over distant shores. The pixels carry the distant breakers (EvaluateWavesFiltered).
+		float shoreGeometry = saturate(2.0 - spacing / (4.0 * UnitsPerMetre));
+		o.heightRaw = sums.displacement.z;
+		[branch] if (shoreGeometry > 0.0)
+		{
+			WaveSums sea = sums;
+			ShoreTrain train = ShoreWaves(positionWS, ctx, spacing, previous, false);
+			ComposeSurf(train, positionWS, ctx, false, spacing, spacing);
+			AddShoreTrain(sums, o, train);
+			SeaFloorHold(sums, ctx, train);
+			sums.displacement = lerp(sea.displacement, sums.displacement, shoreGeometry);
+			sums.previous = lerp(sea.previous, sums.previous, shoreGeometry);
+			sums.dzdx = lerp(sea.dzdx, sums.dzdx, shoreGeometry);
+			sums.dzdy = lerp(sea.dzdy, sums.dzdy, shoreGeometry);
+		}
 		return FinishWaves(sums, o);
 	}
 
@@ -2674,10 +2687,15 @@ namespace PBRWater
 			float water = base.z;
 			float highest = max(water, max(Shore0.w, 0.0) + 0.5 * UnitsPerMetre);
 			float2 uv;
-			float held = ShoreGridUV(absXY, uv) ? highest : min(water + max(0.5 * UnitsPerMetre, 2.0 * spacing * length(ctx.terrainGrad)), highest);
-			float lifted = min(bed, held) + WaterlineLift(spacing, ctx.terrainGrad);
-			o.current.z = max(base.z, lifted) + now.lip.z;
-			o.previous.z = max(o.previous.z - now.previousLip.z, lifted) + now.previousLip.z;
+			// Only where the vertices are a few metres apart: further out (the projected grids' distant cells, tens of metres
+			// across) the hold lifted them by a share of their spacing onto every slope behind the waterline, walls of grid
+			// standing over distant shores and ice. There the pixels' waterline (AboveWaterline) has the edge to itself.
+			float holdSpacing = min(spacing, 4.0 * UnitsPerMetre);
+			float hold = saturate(2.0 - spacing / (4.0 * UnitsPerMetre));
+			float held = ShoreGridUV(absXY, uv) ? highest : min(water + max(0.5 * UnitsPerMetre, 2.0 * holdSpacing * length(ctx.terrainGrad)), highest);
+			float lifted = min(bed, held) + WaterlineLift(holdSpacing, ctx.terrainGrad);
+			o.current.z = lerp(base.z, max(base.z, lifted), hold) + now.lip.z;
+			o.previous.z = lerp(o.previous.z - now.previousLip.z, max(o.previous.z - now.previousLip.z, lifted), hold) + now.previousLip.z;
 		}
 
 		// Hard bound. Clamping also flushes NaN (D3D min/max return the non-NaN operand), so a bad input can never throw
