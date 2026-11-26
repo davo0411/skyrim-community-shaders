@@ -295,10 +295,10 @@ namespace
 
 	/// Casts a ray straight down from `from` over `length` units. Returns whether anything solid was hit and
 	/// the reference it belongs to (null for the landscape).
-	bool PickBelow(RE::TES* tes, const RE::NiPoint3& from, float length, RE::TESObjectREFR*& hitRef, float& hitZ)
+	/// The first collision on the segment from `from` to `to`: its reference (null: none found) and the share of the way to it.
+	bool Pick(RE::TES* tes, const RE::NiPoint3& from, const RE::NiPoint3& to, RE::TESObjectREFR*& hitRef, float& fraction)
 	{
 		RE::bhkPickData pick{};
-		const RE::NiPoint3 to = { from.x, from.y, from.z - length };
 		pick.rayInput.from = RE::hkVector4(from.x * SkyrimToHavok, from.y * SkyrimToHavok, from.z * SkyrimToHavok, 0.0f);
 		pick.rayInput.to = RE::hkVector4(to.x * SkyrimToHavok, to.y * SkyrimToHavok, to.z * SkyrimToHavok, 0.0f);
 		tes->Pick(pick);
@@ -306,7 +306,16 @@ namespace
 		if (!pick.rayOutput.rootCollidable)
 			return false;
 		hitRef = RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable);
-		hitZ = from.z - length * pick.rayOutput.hitFraction;
+		fraction = pick.rayOutput.hitFraction;
+		return true;
+	}
+
+	bool PickBelow(RE::TES* tes, const RE::NiPoint3& from, float length, RE::TESObjectREFR*& hitRef, float& hitZ)
+	{
+		float fraction = 0.0f;
+		if (!Pick(tes, from, { from.x, from.y, from.z - length }, hitRef, fraction))
+			return false;
+		hitZ = from.z - length * fraction;
 		return true;
 	}
 
@@ -436,6 +445,16 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			++it;
 		}
 	}
+	// A hull that stays put and unloaded or got new 3D is looked at again.
+	for (auto it = stillHulls.begin(); it != stillHulls.end();) {
+		const auto ref = it->second.ref.get();
+		if (!present.contains(it->first) || !ref || ref->Get3D() != it->second.node) {
+			rejected.erase(it->first);
+			it = stillHulls.erase(it);
+		} else {
+			++it;
+		}
+	}
 	std::erase_if(rejected, [&](RE::FormID id) { return !present.contains(id); });
 	std::erase_if(reasons, [&](const auto& entry) { return !present.contains(entry.first); });
 
@@ -443,6 +462,15 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 	std::vector<RE::TESObjectREFR*> fresh;
 	std::vector<Candidate> hulls;
 	std::vector<WorldBox> anchors;  // fixed structure standing in the water: piles, grounded pier sections
+	std::vector<Candidate> still;   // hulls that stay put: they only keep the water out
+	// A vessel that does not float still keeps the waves out of its hull, where they can reach it.
+	const float waveReach = snapshot.VerticalBound() + 20.0f;
+	auto keepStill = [&](const Candidate& c) {
+		const float length = 2.0f * std::max(c.box.half.x, c.box.half.y);
+		if (c.box.axis[2].z >= 0.85f && c.box.maxZ > c.flatZ && c.box.minZ < c.flatZ + waveReach && length >= 1.0f * UnitsPerMetre &&
+			HasLitGeometry(c.ref->Get3D()) && !IsLooseProp(c.ref->Get3D()))
+			still.push_back(c);
+	};
 	const float riderReach = std::max(snapshot.VerticalBound(), 1.5f * UnitsPerMetre) + 20.0f;
 	for (auto* ref : refs) {
 		const auto id = ref->GetFormID();
@@ -484,7 +512,7 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			float bed = 0.0f;
 			const bool free = !BedHeight(tes, snapshot, box.centre.x, box.centre.y, box.maxZ + 1000.0f, bed) || bed < box.minZ - 5.0f;
 			const bool topLevel = (node->local.translate - ref->GetPosition()).Length() < 1.0f;
-			if (riderType && (atSurface || underSurface) && free && topLevel && HasLitGeometry(node) && !FindDynamicBody(node) && !IsTerrainFeatureModel(path)) {
+			if (settings.move && riderType && (atSurface || underSurface) && free && topLevel && HasLitGeometry(node) && !FindDynamicBody(node) && !IsTerrainFeatureModel(path)) {
 				Rider rider;
 				rider.ref = ref->GetHandle();
 				rider.id = id;
@@ -523,6 +551,7 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			continue;
 		}
 		if (draft < 2.0f || freeboard < 2.0f) {
+			keepStill(c);
 			Reject(id, "not placed through the water surface");
 			continue;
 		}
@@ -535,6 +564,7 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 		}
 		// Under a metre: fish, bottles and other clutter, never a hull.
 		if (length > settings.maxSize) {
+			keepStill(c);
 			Reject(id, "longer than the Largest Hull setting");
 			continue;
 		}
@@ -549,6 +579,7 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 		// Not resting on the bottom (the bed may graze the keel, but not rise into the hull)...
 		if (const char* grounded = GroundedReason(tes, snapshot, box, flatZ)) {
 			anchors.push_back(box);
+			keepStill(c);
 			Reject(id, grounded);
 			continue;
 		}
@@ -559,6 +590,7 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 		// The ray starts just under the bounds, which can still be inside the reference's own collision.
 		if (PickBelow(tes, { box.centre.x, box.centre.y, box.minZ - 1.0f }, std::max(0.1f * draft, 10.0f), below, belowZ) && below && below != ref) {
 			anchors.push_back(box);
+			keepStill(c);
 			Reject(id, "stands on another object");
 			continue;
 		}
@@ -579,8 +611,10 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			const float v = std::abs(d.Dot(c.box.axis[1])) - 0.8f * c.box.half.y;
 			return u < 0.0f && v < 0.0f && anchor.maxZ > c.flatZ && anchor.minZ < c.box.minZ + 8.0f;
 		});
-		if (onPiles)
+		if (onPiles) {
+			keepStill(c);
 			Reject(c.ref->GetFormID(), "pier section: stands on piles");
+		}
 		return onPiles;
 	});
 
@@ -658,6 +692,13 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			}
 		}
 
+		{
+			std::unordered_set<RE::FormID> hullForms{ f.hull.id };
+			for (const auto& part : f.parts)
+				hullForms.insert(part.id);
+			f.profile = MeasureProfile(tes, hullForms, f.pivot, f.axisX, f.axisY, f.halfLength, f.halfWidth, f.freeboard);
+		}
+
 		// A box hull: displaced mass rho A d, heave period 2 pi sqrt(d / g); it tilts somewhat slower.
 		const float lengthM = 2.0f * f.halfLength * MetresPerUnit;
 		const float widthM = 2.0f * f.halfWidth * MetresPerUnit;
@@ -672,6 +713,32 @@ void FloatingObjects::Scan(const Settings& settings, const PBRWaterModel::WaveSn
 			owner[part.id] = hullId;
 		floaters.emplace(hullId, std::move(f));
 		created.push_back(hullId);
+	}
+
+	// The hulls that stay put, each on its own.
+	for (const auto& c : still) {
+		const auto id = c.ref->GetFormID();
+		if (stillHulls.contains(id) || owner.contains(id))
+			continue;
+		Floater shape;
+		RE::NiPoint3 axisX = { c.box.axis[0].x, c.box.axis[0].y, 0.0f };
+		const float axisLength = axisX.Length();
+		shape.axisX = axisLength > 1e-3f ? axisX / axisLength : RE::NiPoint3{ 1.0f, 0.0f, 0.0f };
+		shape.axisY = RE::NiPoint3{ 0.0f, 0.0f, 1.0f }.Cross(shape.axisX);
+		shape.pivot = { c.box.centre.x, c.box.centre.y, c.flatZ };
+		shape.flatZ = c.flatZ;
+		extendHull(shape, c.box);
+		StillHull hull;
+		hull.ref = c.ref->GetHandle();
+		hull.node = c.ref->Get3D();
+		hull.pivot = shape.pivot;
+		hull.axisX = shape.axisX;
+		hull.axisY = shape.axisY;
+		// Placed above the still water, its keel may be above the centre.
+		hull.draft = shape.flatZ - c.box.minZ;
+		hull.freeboard = shape.freeboard;
+		hull.profile = MeasureProfile(tes, { id }, shape.pivot, shape.axisX, shape.axisY, shape.halfLength, shape.halfWidth, shape.freeboard);
+		stillHulls.emplace(id, hull);
 	}
 
 	// Attach what rides a hull: references resting on it, or within its footprint and held by nothing else
@@ -1002,9 +1069,14 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 	auto* player = RE::PlayerCharacter::GetSingleton();
 	auto* tes = RE::TES::GetSingleton();
 	if (!settings.enabled || !player || !tes) {
-		if (!floaters.empty() || !riders.empty())
+		if (!floaters.empty() || !riders.empty() || !stillHulls.empty())
 			Reset();
 		return;
+	}
+	// Found for their masks only, or moved: what was moved goes back, what was found is looked at again.
+	if (settings.move != lastMove) {
+		Reset();
+		lastMove = settings.move;
 	}
 	if (!bobbingLoaded)
 		LoadBobbingFrameworkExclusions();
@@ -1042,7 +1114,7 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 	std::vector<RE::NiPoint3> previousOffsets;
 	std::vector<RE::NiMatrix3> previousRotations;
 	for (auto& [hullId, f] : floaters) {
-		const bool close = f.pivot.GetDistance(playerPosition) < CollisionRange + f.halfLength;
+		const bool close = settings.move && f.pivot.GetDistance(playerPosition) < CollisionRange + f.halfLength;
 		if (!close || !settings.carryActors)
 			f.loadSink = f.loadPitch = f.loadRoll = 0.0f;
 		// Collision follows the hull near the player: keyframed through the 3D only, so nothing is saved.
@@ -1063,7 +1135,8 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 			previousRotations.push_back(f.rotation);
 		}
 
-		UpdateFloater(f, snapshot, settings, dt, camera);
+		if (settings.move)
+			UpdateFloater(f, snapshot, settings, dt, camera);
 		++stats.floaters;
 		stats.parts += static_cast<uint32_t>(f.parts.size());
 	}
@@ -1088,7 +1161,9 @@ void FloatingObjects::Update(const PBRWaterModel::WaveSnapshot& snapshot, const 
 		CarryCargo(nearPlayer, previousOffsets, previousRotations);
 	}
 
-	UpdateRiders(snapshot, settings, camera);
+	if (settings.move)
+		UpdateRiders(snapshot, settings, camera);
+	PublishMasks(camera);
 
 	std::string report = "Select a reference in the console to see why it floats or stays put";
 	if (const auto selected = RE::Console::GetSelectedRef())
@@ -1165,9 +1240,144 @@ std::string FloatingObjects::Describe(const RE::TESObjectREFR* ref) const
 		return it->second == id ? std::string("Floats: hull") : std::format("Floats: part of hull {:08X}", it->second);
 	if (riders.contains(id))
 		return "Rides the water: small object";
-	if (const auto it = reasons.find(id); it != reasons.end())
+	if (const auto it = reasons.find(id); it != reasons.end()) {
+		if (const auto hull = stillHulls.find(id); hull != stillHulls.end())
+			return std::format("Stays put: {}; keeps the water out of its hull ({})", it->second, hull->second.profile.measured ? "outline from its collision" : "outline from its bounds");
 		return std::format("Stays put: {}", it->second);
+	}
 	return "Not examined: out of range, not loaded or not in water";
+}
+
+// ============================================================================
+// Hull masks
+// ============================================================================
+
+FloatingObjects::HullProfile FloatingObjects::MeasureProfile(RE::TES* tes, const std::unordered_set<RE::FormID>& hull, const RE::NiPoint3& pivot, const RE::NiPoint3& axisX,
+	const RE::NiPoint3& axisY, float halfLength, float halfWidth, float freeboard)
+{
+	HullProfile profile;
+	profile.front = profile.back = halfLength;
+	if (!tes || halfLength <= 0.0f || halfWidth <= 0.0f)
+		return profile;
+
+	// Just above the still water and partway up the side, where the waves reach: the wider of the two, as a flared
+	// side overhangs the water under it.
+	const float heights[2] = { 2.0f, std::clamp(0.5f * freeboard, 10.0f, 60.0f) };
+	constexpr float Margin = 50.0f;  // units outside the bounds the rays start from
+	const RE::NiPoint3 up{ 0.0f, 0.0f, 1.0f };
+
+	// From `distance` out along `direction`, in to `at` at each height: how far out this hull's side is (> 0), clear
+	// water all the way (0), or something else in the way (< 0).
+	auto probe = [&](const RE::NiPoint3& at, const RE::NiPoint3& direction, float distance) {
+		float widest = 0.0f;
+		bool hit = false;
+		bool blocked = false;
+		for (const float height : heights) {
+			const RE::NiPoint3 to = at + up * height;
+			RE::TESObjectREFR* ref = nullptr;
+			float fraction = 0.0f;
+			if (!Pick(tes, to + direction * distance, to, ref, fraction))
+				continue;
+			if (!ref || !hull.contains(ref->GetFormID())) {
+				blocked = true;
+				continue;
+			}
+			widest = std::max(widest, distance * (1.0f - fraction));
+			hit = true;
+		}
+		return hit ? std::max(widest, 1.0f) : (blocked ? -1.0f : 0.0f);
+	};
+
+	// The stem and the stern along the centreline. Clear or blocked: the bounds'.
+	bool measured = false;
+	if (const float front = probe(pivot, axisX, halfLength + Margin); front > 0.0f) {
+		profile.front = front;
+		measured = true;
+	}
+	if (const float back = probe(pivot, axisX * -1.0f, halfLength + Margin); back > 0.0f) {
+		profile.back = back;
+		measured = true;
+	}
+
+	// The sides at each station; a station clear on both sides has no hull at the waterline.
+	float widths[HullStations];
+	bool known[HullStations];
+	const float span = profile.front + profile.back;
+	for (uint32_t i = 0; i < HullStations; ++i) {
+		const float u = -profile.back + span * (static_cast<float>(i) + 0.5f) / static_cast<float>(HullStations);
+		const RE::NiPoint3 station = pivot + axisX * u;
+		const float left = probe(station, axisY, halfWidth + Margin);
+		const float right = probe(station, axisY * -1.0f, halfWidth + Margin);
+		widths[i] = std::max({ left, right, 0.0f });
+		known[i] = (left >= 0.0f && right >= 0.0f) || widths[i] > 0.0f;
+		measured = measured || widths[i] > 0.0f;
+	}
+
+	if (!measured) {
+		// No collision of its own at the waterline: an ellipse inside the bounds.
+		for (uint32_t i = 0; i < HullStations; ++i) {
+			const float t = -1.0f + 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(HullStations);
+			profile.width[i] = 0.9f * halfWidth * std::sqrt(std::max(0.0f, 1.0f - t * t));
+		}
+		return profile;
+	}
+
+	// Stations something else hid take their neighbours' widths.
+	for (uint32_t i = 0; i < HullStations; ++i) {
+		if (known[i]) {
+			profile.width[i] = widths[i];
+			continue;
+		}
+		int below = static_cast<int>(i) - 1;
+		while (below >= 0 && !known[below])
+			--below;
+		uint32_t above = i + 1;
+		while (above < HullStations && !known[above])
+			++above;
+		if (below >= 0 && above < HullStations) {
+			const float a = (static_cast<float>(i) - static_cast<float>(below)) / (static_cast<float>(above) - static_cast<float>(below));
+			profile.width[i] = widths[below] + (widths[above] - widths[below]) * a;
+		} else if (below >= 0) {
+			profile.width[i] = widths[below];
+		} else if (above < HullStations) {
+			profile.width[i] = widths[above];
+		}
+	}
+	profile.measured = true;
+	return profile;
+}
+
+void FloatingObjects::PublishMasks(const RE::NiPoint3& camera)
+{
+	std::vector<HullMask> next;
+	next.reserve(floaters.size() + stillHulls.size());
+	const RE::NiPoint3 up{ 0.0f, 0.0f, 1.0f };
+	auto add = [&](const RE::NiPoint3& centre, const RE::NiPoint3& x, const RE::NiPoint3& y, const RE::NiPoint3& z, float draft, float freeboard, const HullProfile& profile) {
+		HullMask mask;
+		mask.centre = centre;
+		mask.axisX = x;
+		mask.axisY = y;
+		mask.axisZ = z;
+		mask.bottom = -draft;
+		mask.top = freeboard;
+		mask.front = profile.front;
+		mask.back = profile.back;
+		std::copy_n(profile.width, HullStations, mask.width);
+		next.push_back(mask);
+		if (profile.measured)
+			++stats.measured;
+	};
+	// As the hull lies now: the motion turns its frame about the waterline centre.
+	for (const auto& [id, f] : floaters)
+		add(f.pivot + f.offset, f.rotation * f.axisX, f.rotation * f.axisY, f.rotation * up, f.draft, f.freeboard, f.profile);
+	for (const auto& [id, h] : stillHulls)
+		add(h.pivot, h.axisX, h.axisY, up, h.draft, h.freeboard, h.profile);
+	std::sort(next.begin(), next.end(), [&](const HullMask& a, const HullMask& b) {
+		return a.centre.GetSquaredDistance(camera) < b.centre.GetSquaredDistance(camera);
+	});
+	stats.masks = static_cast<uint32_t>(next.size());
+	std::scoped_lock lock(maskMutex);
+	masks = std::move(next);
 }
 
 // ============================================================================
@@ -1231,6 +1441,9 @@ void FloatingObjects::Reset()
 	reasons.clear();
 	riders.clear();
 	cargo.clear();
+	stillHulls.clear();
 	scanTimer = 0.0f;
 	stats = {};
+	std::scoped_lock lock(maskMutex);
+	masks.clear();
 }

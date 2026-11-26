@@ -164,6 +164,7 @@ struct PBRWater : Feature
 		bool GameplayWaves = true;
 		bool EnableFloatingObjects = true;
 		bool CarryActors = true;
+		bool HullMasks = true;  ///< the water is not drawn inside boats and ships (FloatingObjects::HullMask)
 		float BuoyancyStrength = 1.0f;
 		float FloatingRange = 150.0f;   ///< metres around the player in which objects float
 		float MaxFloatingSize = 90.0f;  ///< metres: the longest hull that floats (the large Skyrim ships are ~65 m)
@@ -231,6 +232,10 @@ struct PBRWater : Feature
 	bool GetWaveHeight(const RE::NiPoint3& position, float flatWaterZ, float& height) const;
 
 	// ---- GPU constants, must match PBRWaterData in PBRWater.hlsli ----
+	static constexpr uint32_t MaxHullMasks = 8;    ///< hulls the water is kept out of, nearest the camera (PBRWater.hlsli PBRW_MAX_HULLS)
+	static constexpr uint32_t HullMaskStride = 7;  ///< float4 per hull mask (PBRWater.hlsli InsideHull)
+	static_assert(FloatingObjects::HullStations == 12, "InsideHull reads the widths as three float4");
+
 	struct GpuData
 	{
 		float4 Cascade0[PBRWaterModel::NumCascades];  // x 1 / tile size (1/unit), yz tile coordinate of the reference camera, w texel size (units)
@@ -281,6 +286,9 @@ struct PBRWater : Feature
 		float4 Proj1;                                 // the cells (SeaLevels): xy first cell, zw cells across
 		float4 Proj2;                                 // x its first cell, y its first patch, zw unused
 		float4 Proj3;                                 // unused
+
+		float4 Hull0;                                    // x hull masks listed (HullData), yzw unused
+		float4 HullData[MaxHullMasks * HullMaskStride];  // per hull: its frame's rows (axis, -axis . centre, centre relative to RefCamPos); bottom, top, front, back; the half widths at its stations
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 

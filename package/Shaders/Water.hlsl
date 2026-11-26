@@ -1730,6 +1730,10 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 		if (PBRWater::AboveWaterline(pbrPosition, input.ShoreState))
 			discard;
+		// Inside a boat: the waves passing through its hull are not drawn on its deck (FloatingObjects::HullMask). Both
+		// passes test the same pixels, so the stencil's depth and mask leave the hull's inside to it.
+		if (PBRWater::InsideHull(pbrPosition))
+			discard;
 		// The sea's projected grid covers the whole plane: only the cells the sea is in keep it (ProjectedGrid).
 		[branch] if (PBRWater::GridDraw())
 		{
