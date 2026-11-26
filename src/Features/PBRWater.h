@@ -157,6 +157,7 @@ struct PBRWater : Feature
 		bool EnableWakes = true;     ///< Kelvin wakes behind the actors moving through the water (PBRWater/KelvinWake.h)
 		bool UnderwaterVolume = true;  ///< the water around the camera under the surface absorbs and scatters as the surface's does, in place of the game's fog
 		int LightShaftSamples = 12;    ///< steps of the underwater light shafts' march (0: no shafts)
+		bool PhysicalBodyColour = true;  ///< the deep water's colour from its absorption and scattering (Optics.hlsli DeepReflectance), not the water form's
 		float LightShaftFocus = 1.0f;  ///< how strongly the waves focus the shafts (caustic streaks)
 		float WakeStrength = 1.0f;   ///< scales their height
 		float RippleExtent = 64.0f;  ///< m covered around the camera
@@ -619,6 +620,12 @@ private:
 	winrt::com_ptr<ID3D11BlendState> underwaterBlend;  ///< dual-source: added + existing * transmittance
 	std::unique_ptr<ConstantBuffer> underwaterCB;
 	uint32_t underwaterFrame = UINT32_MAX;
+	// The light shafts at half resolution (UnderwaterShaftsCS.hlsl): the march, its denoising, two histories.
+	winrt::com_ptr<ID3D11PixelShader> underwaterMarchPS;
+	winrt::com_ptr<ID3D11ComputeShader> underwaterTemporalCS;
+	std::array<winrt::com_ptr<ID3D11ComputeShader>, 2> underwaterBlurCS;          ///< horizontal, vertical
+	std::array<std::unique_ptr<Texture2D>, 4> underwaterShaftTargets;              ///< march (and the result), history 0, history 1, blur middle
+	uint32_t underwaterHistoryFrame = UINT32_MAX;                                   ///< the frame the last history was written
 	std::unordered_map<RE::TESWaterForm*, float> originalUnderwaterFog;  ///< main thread: each water form's fog amount before it was zeroed
 	/** @brief Main thread: zeroes every water form's underwater fog amount while the volume replaces it, restores it otherwise. */
 	void ApplyUnderwaterFogOverride();

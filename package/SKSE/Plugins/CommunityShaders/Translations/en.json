@@ -1952,6 +1952,8 @@
     "feature.pbr_water.max_floating_size_tooltip": "The longest hull that floats (the large Skyrim ships are about 65 m). Default 90 m.",
     "feature.pbr_water.name": "PBR Water",
     "feature.pbr_water.open_sea_foam": "Open Sea",
+    "feature.pbr_water.physical_body_colour": "Physical Water Colour",
+    "feature.pbr_water.physical_body_colour_tooltip": "The colour of deep water comes from how it absorbs and scatters light (blue in clear water, green and brown as particles and sediment take over) instead of the water type's colour.",
     "feature.pbr_water.point_light_emitter_radius": "Point Light Size",
     "feature.pbr_water.point_light_emitter_radius_tooltip": "Skyrim's lights have no size; this is the radius given to a point light when working out its reflection (about a torch flame). Bigger gives softer, wider glints. Default 8 units.",
     "feature.pbr_water.point_light_specular": "Point Light Specular",

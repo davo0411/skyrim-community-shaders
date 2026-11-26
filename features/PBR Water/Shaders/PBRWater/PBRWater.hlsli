@@ -67,7 +67,7 @@ namespace PBRWater
 		float4 Ripple2;                  // xy previous frame's simulation origin, z step interpolation (now), w step interpolation (previous frame)
 		float4 Light0;                   // x base roughness, y subsurface strength, z environment reflections on, w sun specular intensity
 		float4 Light1;                   // x visibility scale, y foam on (Enable Foam), z refraction distortion scale, w point light specular intensity
-		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w unused
+		float4 Foam1;                    // x the foam bias (Jacobian), y the open sea's threshold, z gain on the shore's foam coverages (FoamAmount x FoamBias / 0.85), w body colour from the physics (Optics.hlsli DeepReflectance)
 		float4 Clarity0;                 // x sediment extinction (1/unit per unit turbidity), y base turbidity, z patchiness (0..1), w patch size (units)
 		float4 Clarity1;                 // xyz sediment colour (gamma, like the water form colours), w shore resuspension strength
 		float4 Clarity2;                 // x unused, y weather turbidity (storm and rain, already scaled), z wading silt strength, w sediment layer height (units)

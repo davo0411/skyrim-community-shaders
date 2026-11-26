@@ -900,3 +900,19 @@ jitter, depth-driven blur. Not taken: its low-resolution accumulation with tempo
 joint bilateral upsampling; if the full-resolution march costs too much under water, that is the next step.
 Underwater only: shafts seen from above into clear water would put the march in the surface's lighting shader.
 Written without compiling; untested in game.
+
+## Light shafts at half resolution; absorption and scattering apart (2026-11-26)
+
+- **Shafts, denoised.** The march runs at half resolution, one pixel of every 2x2 a frame (UnderwaterVolume.hlsl MarchPS:
+  a pixel shader, the shadow maps are bound to the pixel stage), then UnderwaterShaftsCS.hlsl: a temporal pass that
+  reprojects last frame's result with the camera and rejects history whose distance disagrees, and Effects 11's
+  separable depth-aware blur (BlurVolumetricRaysCS) on rgb with the distance in alpha. The composite upsamples it jointly
+  with the full-resolution depth (Effects 11's ApplyVolumetricRaysPS weights) and keeps the transmittance exact per
+  pixel. Targets: four half-resolution RGBA16F (march/result, two histories, the blur's middle).
+- **Absorption and scattering apart.** GetWaterOptics no longer gives clear water an assumed 60% albedo: scattering is
+  pure water's own (Morel 1974) plus the particles' share of what the form adds beyond pure water (spectrally flat, half
+  of the clearest-coloured channel's excess), dissolved matter absorbing the rest; sediment scatters with its albedo.
+  The deep water's colour comes from that (Physical Water Colour, default on): the irradiance reflectance of a deep
+  column R = 0.33 b_b / a (Morel and Prieur 1977; b_b half of pure water's scattering and 1.9% of the particles'), times
+  the sun and sky reaching the surface, from above and in the surface seen from below. The underwater volume scatters
+  the albedo sigma_s / sigma_t. Off: the water form's deep colour as before. Version 0-32-0.

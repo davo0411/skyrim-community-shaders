@@ -2059,6 +2059,14 @@ PS_OUTPUT main(PS_INPUT input)
 	float pbrCosUp = saturate(dot(viewDirection, normal));
 	float pbrReflected = PBRWater::FresnelDielectric(pbrCosUp, PBRWater::WaterIOR);
 	float3 pbrWaterLight = ColorManagement::SceneToLinear(diffuseOutput.refractionDiffuseColor);
+	[branch] if (PBRWater::PhysicalBody())
+	{
+		// As from above: the water's own reflectance (DeepReflectance) times the light reaching it.
+		float3 pbrIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * dirShadow * saturate(SunDir.z) +
+		                       ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting(input.WPosition.xyz));
+		PBRWater::WaterOptics pbrBelowOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x), 0.0);
+		pbrWaterLight = PBRWater::DeepReflectance(pbrBelowOptics) * pbrIrradiance;
+	}
 	float3 pbrAbove = ColorManagement::SceneToLinear(specularColor);
 #						if defined(REFRACTIONS)
 	{
@@ -2236,7 +2244,16 @@ PS_OUTPUT main(PS_INPUT input)
 
 	// Body colour: the water form's, shifted towards the sediment colour as sediment takes over.
 	float3 pbrBodyLinear = ColorManagement::SceneToLinear(diffuseOutput.refractionDiffuseColor);
-	pbrBodyLinear = PBRWater::BodyColour(pbrBodyLinear, PBRWater::SedimentBodyColour(pbrBodyLinear), pbrOptics);
+	[branch] if (PBRWater::PhysicalBody())
+	{
+		// The body's light from its absorption and scattering (DeepReflectance) times the light reaching the surface: the
+		// sediment's colour comes with its scattering, so no blend towards it.
+		float3 pbrIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * dirShadow * saturate(SunDir.z) +
+		                       ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting(input.WPosition.xyz));
+		pbrBodyLinear = PBRWater::DeepReflectance(pbrOptics) * pbrIrradiance;
+	}
+	else
+		pbrBodyLinear = PBRWater::BodyColour(pbrBodyLinear, PBRWater::SedimentBodyColour(pbrBodyLinear), pbrOptics);
 
 	// Transmission (Beer-Lambert along the refracted path, in linear light). What is seen through the water
 	// was itself lit through the water above it, so light reaching the bottom is attenuated by K_d.

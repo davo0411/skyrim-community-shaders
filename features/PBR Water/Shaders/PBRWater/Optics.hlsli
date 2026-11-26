@@ -45,6 +45,9 @@ namespace PBRWater
 	/// Pure water's absorption (1/m) in the red, green and blue bands (Pope and Fry 1997; Smith and Baker 1981): no water,
 	/// however clear, takes less. Red is gone within a few metres, blue lasts tens.
 	static const float3 PureWaterAbsorption = float3(0.35, 0.06, 0.012);
+	/// Pure water's own scattering (1/m; Morel 1974, ~ lambda^-4.32): tiny, half of it back towards the surface, and what
+	/// makes the clearest water blue.
+	static const float3 PureWaterScattering = float3(0.0010, 0.0019, 0.0045);
 
 	/// Per-channel extinction (1/unit). The vanilla shallow colour is read as the tint light picks up
 	/// over the water form's visibility distance; at that distance 5% of the light remains. Never below pure water's own
@@ -54,7 +57,7 @@ namespace PBRWater
 	{
 		float3 tint = saturate(shallowColorLinear / max(max(shallowColorLinear.r, max(shallowColorLinear.g, shallowColorLinear.b)), 1e-4));
 		tint = max(tint, 0.02);
-		return max((log(20.0) - log(tint)) / max(visibilityUnits, 1.0), PureWaterAbsorption * MetresPerUnit);
+		return max((log(20.0) - log(tint)) / max(visibilityUnits, 1.0), (PureWaterAbsorption + PureWaterScattering) * MetresPerUnit);
 	}
 
 	/// Henyey-Greenstein phase function, normalised so that an isotropic medium gives 1.
@@ -168,9 +171,13 @@ namespace PBRWater
 		float sediment = max(turbidity, 0.0) * Clarity0.x;
 		float3 sedimentAlbedo = SedimentAlbedo();
 		o.extinction = baseExtinction + sediment;
-		// Particle scattering is spectrally flat: give the clearest channel an albedo of 0.6 and let
-		// absorption make up the rest of every channel's extinction.
-		o.scattering = 0.6 * min(baseExtinction.r, min(baseExtinction.g, baseExtinction.b)) + sediment * sedimentAlbedo;
+		// Absorption and scattering apart: pure water's own of each, and what the form adds beyond them split between
+		// particles, which scatter alike at every wavelength (half of what the clearest-coloured channel adds), and
+		// dissolved matter, which only absorbs (the rest); the sediment scatters with its albedo.
+		float3 pure = (PureWaterAbsorption + PureWaterScattering) * MetresPerUnit;
+		float3 excess = max(baseExtinction - pure, 0.0);
+		float particles = 0.5 * min(excess.r, min(excess.g, excess.b));
+		o.scattering = PureWaterScattering * MetresPerUnit + particles + sediment * sedimentAlbedo;
 		// K_d ~ a + b_b with a backscatter fraction of ~10% for the forward-peaked particle phase function.
 		o.downwelling = max(o.extinction - 0.9 * o.scattering, 0.0) * Optics0.y;
 		o.sedimentShare = sediment / max(o.extinction, 1e-8);
@@ -192,6 +199,23 @@ namespace PBRWater
 	{
 		return lerp(waterBody, sedimentBody, o.sedimentShare);
 	}
+
+	/**
+	 * Irradiance reflectance of an optically deep column (Morel and Prieur 1977): R = 0.33 b_b / a, with the backscatter
+	 * b_b half of pure water's scattering and ~1.9% of the particles' (Petzold's phase function). The deep water's colour
+	 * out of its absorption and scattering: blue in clear water (red is absorbed, blue scattered back), green and then
+	 * brown as particles and sediment take over. Times the light reaching the surface, the body's light (Water.hlsl).
+	 */
+	float3 DeepReflectance(WaterOptics o)
+	{
+		float3 pureScattering = PureWaterScattering * MetresPerUnit;
+		float3 absorption = max(o.extinction - o.scattering, 1e-8);
+		float3 backscatter = 0.5 * pureScattering + 0.019 * max(o.scattering - pureScattering, 0.0);
+		return saturate(0.33 * backscatter / absorption);
+	}
+
+	/// The body colour from the physics (Physical Body Colour, Foam1.w), or the water form's.
+	bool PhysicalBody() { return Foam1.w > 0.5; }
 
 	/// Fraction of the light at the surface that reaches `depth` (direct sun at `sunCosine`, plus sky light).
 	float3 DownwellingTransmittance(WaterOptics o, float depth, float sunCosine, float sunShare)
