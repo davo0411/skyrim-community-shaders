@@ -1,17 +1,14 @@
-// ============================================================================
-// PBR Water - the shore wave train for the deferred surface, once per 2x2 pixels.
+// ============================================================================ PBR Water - the shore wave train for the
+// deferred surface, once per 2x2 pixels.
 //
-// The shore train (PBRWater::ShoreWaves) is a large part of the surface's pixel program: each pixel finds its wave,
-// shoals and breaks it, looks up its profile and turns its curl, some hundreds of instructions where the train reaches,
-// which near a coast is most of the water on screen. Everything it makes varies over a wave's length, metres, not from
-// one pixel to the next. So after the stencil pass this pass evaluates it once for every 2x2 pixels, from the stencil
-// pass's record (Deferred.hlsli), and the surface and point light passes read it back, blended between the four nearest
-// blocks that lie at the pixel's own depth (BakedShoreTrain). Pixels with no such block, along the edges of the water
-// in front of other water, evaluate it themselves.
+// The shore train (PBRWater::ShoreWaves) is some hundreds of instructions a pixel where it reaches, yet it varies over
+// a wave's length, not from pixel to pixel. After the stencil pass this pass evaluates it once for every 2x2 pixels
+// from the stencil pass's record (Deferred.hlsli); the surface and point light passes read it back, blended between the
+// four nearest blocks at the pixel's own depth (BakedShoreTrain). Pixels with no such block evaluate it themselves.
 //
 // Each block's train is packed into three uint4 (PBRWater::BakedShoreTrain unpacks them): half floats for the
-// displacements, slopes and stretches, eight bits for the 0..1 shares, and the distance of the pixel it was evaluated at.
-// ============================================================================
+// displacements, slopes and stretches, eight bits for the 0..1 shares, and the distance of the pixel it was evaluated
+// at. ============================================================================
 
 #include "Common/FrameBuffer.hlsli"
 #include "PBRWater/DeferredCommon.hlsli"
@@ -30,26 +27,12 @@ RWTexture2D<uint4> Out0 : register(u0);
 RWTexture2D<uint4> Out1 : register(u1);
 RWTexture2D<uint4> Out2 : register(u2);
 
-uint DepthBits(float depth)
-{
-	return (uint)round(saturate(depth) * 16777215.0) & 0xFFFF;
-}
-
-/// Whether the stencil pass's tessellated water is still the nearest at `px` (PBRWaterDeferred::Read).
+/// Whether the stencil pass's grid water is still the nearest at `px` (PBRWaterDeferred::Read).
 bool RecordedWater(int2 px, out float depth)
 {
 	uint tag = Tags.Load(int3(px, 0));
 	depth = SceneDepth.Load(int3(px, 0));
-	uint bits = (DepthBits(depth) - (tag >> 16) + 1) & 0xFFFF;
-	return (tag & 0xFF) != 0 && bits <= 2;
-}
-
-/// Camera-relative position on the screen at pixel centre `pixel` and depth `depth` (as Resolve finds it).
-float3 Unproject(float2 pixel, float depth)
-{
-	float2 uv = pixel * FrameBuffer::DynamicResolutionParams2.xy / float2(Size);
-	float4 world = mul(FrameBuffer::CameraViewProjInverse, float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0));
-	return world.xyz / world.w;
+	return (tag & 0xFF) != 0 && PBRWaterRecordHolds(tag, depth);
 }
 
 uint Pack(float a, float b)
@@ -86,14 +69,14 @@ uint PackUnorm4(float4 v)
 	}
 
 	float2 centre = px + 0.5;
-	float3 displaced = Unproject(centre, depth);
+	float3 displaced = PBRWaterUnproject(centre, depth, float2(Size));
 	float3 undisplaced = displaced - Waves.Load(int3(px, 0)).xyz;
 
 	// The pixel's footprint on the still water (ShadeSurface's, from the derivatives of the undisplaced position there):
 	// the rays through the neighbouring pixels met with the plane of this point.
-	float3 ray = normalize(Unproject(centre, 1.0));
-	float3 rayX = normalize(Unproject(centre + float2(1.0, 0.0), 1.0));
-	float3 rayY = normalize(Unproject(centre + float2(0.0, 1.0), 1.0));
+	float3 ray = normalize(PBRWaterUnproject(centre, 1.0, float2(Size)));
+	float3 rayX = normalize(PBRWaterUnproject(centre + float2(1.0, 0.0), 1.0, float2(Size)));
+	float3 rayY = normalize(PBRWaterUnproject(centre + float2(0.0, 1.0), 1.0, float2(Size)));
 	float footprint;
 	[branch] if (undisplaced.z * ray.z > 0.0 && abs(ray.z) > 0.02)
 	{

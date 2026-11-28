@@ -11,27 +11,29 @@
 struct CellLevels;
 
 /**
- * @brief The projected grids: per water level on screen (the sea's, each lake's), one mesh laid out evenly on the screen
- * and cast onto the level's plane, drawn in place of every water mesh at that level (the loaded cells' and Unified Water's
- * far tiles).
+ * @brief The projected grids: per water level on screen (the sea's, each lake's), one mesh laid out evenly on the
+ *   screen
+ * and cast onto the level's plane, drawn in place of every water mesh at that level (the loaded cells' and Unified
+ * Water's far tiles).
  *
- * The cells' meshes are tessellated only inside the loaded cells, and the far tiles meet them with T-junctions, so the
- * waves had to fade out at the loaded cells' border. One mesh over the whole plane has no border: the waves reach as far
- * as the water is seen, and as many triangles near the camera as far away, each a few pixels across (no sub-pixel
- * triangles far away, no quads shaded over and over along them). The vertices are evaluated once a frame
- * (ProjectedGridCS.hlsl), filtered to the grid's spacing at each one so the waves they carry do not swim as the grid slides
- * over the water with the camera; where a breaker needs more than a cell gives, the cell is drawn as a patch of
- * Subdivision^2 cells stitched to its coarse neighbours. Water.hlsl draws them (Tess0.x 6 the cells, 7 the patches). The
- * water is where Unified Water's coverage has cells at the grid's level (PBRWater::SeaCovers); rivers keep their meshes, and
- * the cells under them are taken out of the grids.
+ * One mesh over the whole plane has no border with the far tiles, so the waves reach as far as the water is seen, with
+ * as many triangles near the camera as far away, each a few pixels across. The vertices are evaluated once a frame
+ * (ProjectedGridCS.hlsl), filtered to the grid's spacing at each one so the waves they carry do not swim as the grid
+ * slides over the water; where a breaker needs more than a cell gives, the cell is drawn as a patch of Subdivision^2
+ * cells stitched to its coarse neighbours; a cell no water can show in (none of the level's cells under it, or the ground
+ * above it) is drawn collapsed. Water.hlsl draws them (Tess0.x 6 the cells, 7 the patches). The water is
+ * where Unified Water's coverage has cells at the grid's level (PBRWater::SeaCovers); rivers keep their meshes, and the
+ * cells under them are taken out of the grids, except at the sea's level, where the sea's grid draws the river's mouth.
  */
 class ProjectedGrid
 {
 public:
-	static constexpr uint32_t MaxLevels = 4;     ///< grids a frame (the sea and three lakes); PBRW_GRID_MAX_LEVELS
-	static constexpr uint32_t Subdivision = 4;   ///< a breaker's patch is Subdivision^2 cells; PBRW_GRID_PATCH
+	static constexpr uint32_t MaxLevels = 4;    ///< grids a frame (the sea and three lakes); PBRW_GRID_MAX_LEVELS
+	static constexpr uint32_t Subdivision = 4;  ///< a breaker's patch is Subdivision^2 cells; PBRW_GRID_PATCH
 	static constexpr uint32_t MaxVertices = 300000;
-	static constexpr uint32_t MaxPatches = 8192;
+	/// The breakers' patch vertices a frame, (subdivision + 1)^2 a patch: the most patches at the finest subdivision.
+	static constexpr uint32_t MaxPatchVertices = 16384 * (Subdivision + 1) * (Subdivision + 1);
+	static constexpr uint32_t MaxPatches = MaxPatchVertices / 9;  ///< at the coarsest subdivision (2)
 
 	/** @brief One frame's layout inputs. */
 	struct FrameParams
@@ -42,8 +44,8 @@ public:
 		float cameraZ = 0.0f;
 		float viewportWidth = 0.0f;
 		float viewportHeight = 0.0f;
-		float cellPixels = 8.0f;    ///< target cell size on screen (pixels)
-		float maxDistance = 0.0f;   ///< the farthest a vertex is cast (units)
+		float cellPixels = 8.0f;   ///< target cell size on screen (pixels)
+		float maxDistance = 0.0f;  ///< the farthest a vertex is cast (units)
 	};
 
 	/** @brief A grid built this frame, for the draws (PBRWater GpuData::Proj0-2). */
@@ -132,7 +134,8 @@ private:
 
 	void CreateBuffers();
 	int FindLevel(float z) const;
-	void Draw(uint32_t vertexCount, const ID3D11ShaderResourceView* vertexView, uint32_t argsOffset) const;
+	/// Draws `count` cells' indices from `firstIndex` (patches: `count` 0, their indirect arguments at `argsOffset`).
+	void Draw(uint32_t count, uint32_t firstIndex, const ID3D11ShaderResourceView* vertexView, uint32_t argsOffset) const;
 
 	winrt::com_ptr<ID3D11ComputeShader> gridCS, flagCS, argsCS, patchCS;
 	std::unique_ptr<ConstantBuffer> constants;
@@ -141,8 +144,8 @@ private:
 	std::unique_ptr<Buffer> flags;
 	std::unique_ptr<Buffer> patches;
 	std::unique_ptr<Buffer> patchVertices;
-	winrt::com_ptr<ID3D11Buffer> counters, args;
-	winrt::com_ptr<ID3D11UnorderedAccessView> countersUAV, argsUAV;
+	winrt::com_ptr<ID3D11Buffer> counters, args, cellIndices;
+	winrt::com_ptr<ID3D11UnorderedAccessView> countersUAV, argsUAV, cellIndicesUAV;
 
 	winrt::com_ptr<ID3D11Texture2D> cellsTexture;
 	winrt::com_ptr<ID3D11ShaderResourceView> cellsSRV;

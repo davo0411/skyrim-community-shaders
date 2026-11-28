@@ -1,12 +1,11 @@
-// ============================================================================
-// PBR Water - the distant water's upsampling (PBRWater::DrawDeferredSurface).
+// ============================================================================ PBR Water - the distant water's
+// upsampling (PBRWater::DrawDeferredSurface).
 //
-// Beyond a distance (DeferredTilesCS) the water's detail is far finer than a pixel: the surface program already filters
-// it all down (the cascades and the foam by the footprint, the shore train once per 2x2 pixels), so it shades those tiles
-// at a quarter of the pixels, one of every 2x2 into a half-size target (Deferred.hlsli, Mode.y = PBRWATER_DEFERRED_HALF).
-// This pass draws the mesh's distant tiles at full size with the surface draw's own blend, depth and stencil state, and
-// gives each of its pixels the samples around it: the half-size texels whose shaded pixel is this mesh's water at about
-// the same distance, weighted by how far that pixel lies from this one. Which pixel of its 2x2 a texel shaded turns every
+// Beyond a distance (DeferredTilesCS) the water's detail is far finer than a pixel and the surface program filters it
+// down anyway, so those tiles are shaded at a quarter of the pixels, one of every 2x2 into a half-size target
+// (Deferred.hlsli, Mode.y = PBRWATER_DEFERRED_HALF). This pass draws the grid's distant tiles at full size with the
+// surface draw's own blend, depth and stencil state, and gives each pixel the half-size texels around it whose shaded
+// pixel is this grid's water at about the same distance, weighted by distance. The shaded pixel of each 2x2 turns every
 // frame, so the temporal filter gathers all four.
 //
 // Compiled twice: VSHADER for the tiles (Deferred.hlsli's TileVertex), PSHADER for the pixels.
@@ -43,26 +42,18 @@ Texture2D<uint> Tags : register(t38);
 Texture2D<float> SceneDepth : register(t42);
 Texture2D<float4> Shaded : register(t49);  // the half-rate pass: rgb its colour, a 1 + which of its 2x2 pixels (0 none)
 
-uint DepthBits(float depth)
-{
-	return (uint)round(saturate(depth) * 16777215.0) & 0xFFFF;
-}
-
-/// The tag of the tessellated water the record still holds at `px` (PBRWaterDeferred::Read), 0 if none.
+/// The tag of the grid the record still holds at `px` (PBRWaterDeferred::Read), 0 if none.
 uint OwnerAt(int2 px, out float depth)
 {
 	uint tag = Tags.Load(int3(px, 0));
 	depth = SceneDepth.Load(int3(px, 0));
-	uint bits = (DepthBits(depth) - (tag >> 16) + 1) & 0xFFFF;
-	return bits <= 2 ? (tag & 0xFF) : 0;
+	return PBRWaterRecordHolds(tag, depth) ? (tag & 0xFF) : 0;
 }
 
 /// Camera distance of the point on the screen at pixel `px` with depth `depth` (units).
 float DistanceAt(int2 px, float depth, float2 size)
 {
-	float2 uv = (px + 0.5) * FrameBuffer::DynamicResolutionParams2.xy / size;
-	float4 world = mul(FrameBuffer::CameraViewProjInverse, float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0));
-	return length(world.xyz / world.w);
+	return length(PBRWaterUnproject(px + 0.5, depth, size));
 }
 
 float4 main(float4 position : SV_Position) :

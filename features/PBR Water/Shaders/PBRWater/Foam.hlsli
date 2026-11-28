@@ -1,17 +1,15 @@
 #ifndef __PBR_WATER_FOAM_HLSLI__
 #define __PBR_WATER_FOAM_HLSLI__
 
-// ============================================================================
-// PBR Water - drawing foam from a coverage.
+// ============================================================================ PBR Water - drawing foam from a
+// coverage.
 //
 // Foam is a coverage (0..1, how much of the surface is foam) turned into a pattern by the "black point fade" of Crest
 // (wave-harmonic/crest, MIT, OceanFoam.hlsl WhiteFoamTexture): the foam texture is thresholded at 1 - coverage, so as
-// the coverage falls the bubbles in the foam grow and merge and dense foam thins into lace and then specks. The
-// texture (t95, baked at start-up: src/Features/PBRWater/FoamPattern.cpp) stores the coverage at which each texel
-// whitens, equalised, so the thresholded share equals the coverage. The water shader samples it still, where the surface
-// is, projected from above (at the rest position the waves' horizontal displacement drew it out into streaks over every
-// breaker's face); steep faces, where it would run down the face, are drawn as the coverage. Every foam (the open sea's,
-// the breakers', the shore's) is one coverage drawn through here, so all of it has the same bubbles, edge and translucency.
+// the coverage falls the bubbles grow and merge and dense foam thins into lace and then specks. The texture (t95, baked
+// at start-up by FoamPattern.cpp) stores the coverage at which each texel whitens, equalised, so the thresholded share
+// equals the coverage. It is sampled where the surface is, projected from above; steep faces are drawn as the plain
+// coverage. All foam (the sea's, the breakers', the surf's) goes through here as one coverage.
 // ============================================================================
 
 // The foam pattern's anti-tiling is Terrain Variation's (it defines TERRAIN_VARIATION for the water shaders when it is
@@ -25,6 +23,8 @@ namespace PBRWaterFoam
 	Texture2D<float> FoamTexture : register(t95);
 
 	static const float BubblesPerTile = 12.0;  // PBRWaterFoam::BubblesPerTile (FoamPattern.h)
+	/// How far the white share of the pattern is feathered, in the texture's values: the bubbles' soft edge.
+	static const float Feather = 0.12;
 
 	/// Reflectance of dense foam (linear RGB, Lambertian: Dupuy & Bruneton 2012 after Koepke 1984): about 55 % of visible
 	/// light (Whitlock, Bartlett & Gurganus 1982), a little less towards the red, where the water between the bubbles
@@ -32,10 +32,10 @@ namespace PBRWaterFoam
 	static const float3 Albedo = float3(0.47, 0.53, 0.56);
 
 	/**
-	 * Crest's black-point fade: the share `coverage` of the (uniform) texture values `value` that turns white, feathered.
-	 * The feather is held within the values' range: a window reaching past 1 whitened far more than the coverage.
+	 * Crest's black-point fade: the share `coverage` of the (uniform) texture values `value` that turns white,
+	 * feathered. The feather is held within the values' range.
 	 */
-	float BlackPoint(float value, float coverage, float Feather)
+	float BlackPoint(float value, float coverage)
 	{
 		float threshold = 1.0 - coverage;
 		float feather = max(min(Feather, min(coverage, threshold)), 1e-3);
@@ -43,21 +43,19 @@ namespace PBRWaterFoam
 	}
 
 	/**
-	 * Surface foam in [0, 1] (water pixel shader: needs screen derivatives). The texture at three fixed scales, each three
-	 * times the last (the bubbles, and lace a few and ten bubbles across), so the foam is a microfoam with a ragged edge;
-	 * the larger structure comes from the coverage itself (the simulated foam). Each scale drops out as its bubbles shrink
-	 * below a few pixels, and with none left the foam is drawn as the coverage it stands for: a pattern held at any
-	 * distance by moving to coarser scales drew distant foam as metre-sized blotches, and a thresholded mip of the pattern
-	 * would turn into a hard-edged mask.
-	 * @param p    absolute position (units)
+	 * Surface foam in [0, 1] (water pixel shader: needs screen derivatives). The texture at three fixed scales, each
+	 * three times the last (the bubbles, and lace a few and ten bubbles across), so the foam is a microfoam with a
+	 * ragged edge; the larger structure comes from the coverage itself. Each scale drops out as its bubbles shrink
+	 * below a few pixels, and with none left the foam is drawn as the coverage it stands for.
+	 * @param p absolute position (units)
 	 * @param foam the foam here, 0..1
 	 * @param tile size of the foam texture's tile (units): BubblesPerTile bubbles across
-	 * @param Feather how far the white share of the pattern is feathered, in the texture's values (0.12 by default)
-	 * @param s    sampler (wrap, anisotropic)
-	 * @param detail 0..1 how much of the pattern is shown, as for distance: the pattern is projected from above, so steep
-	 *               faces (where it would stretch) take 0 and are drawn as the coverage, with the same translucency
+	 * @param s sampler (wrap, anisotropic)
+	 * @param detail 0..1 how much of the pattern is shown, as for distance: steep faces (where the projection from
+	 *   above
+	 *               would stretch it) take 0 and are drawn as the coverage, with the same translucency
 	 */
-	float SurfaceFoam(float2 p, float foam, float tile, float Feather, SamplerState s, float detail)
+	float SurfaceFoam(float2 p, float foam, float tile, SamplerState s, float detail)
 	{
 		float amount = saturate(foam);
 		// The gradients are taken first, in uniform control flow; most of the water has no foam and skips the rest.
@@ -71,11 +69,10 @@ namespace PBRWaterFoam
 			float bubblePixels = tile / BubblesPerTile / footprint;
 			float3 scales = tile * float3(1.0, 3.0, 9.0);
 			float3 shown = saturate((bubblePixels * float3(1.0, 3.0, 9.0) - 2.0) / 4.0) * saturate(detail);
-			// Anti-tiling, with Terrain Variation installed: its two-tap stochastic lattice. Each read is shifted by a random
-			// offset per cell of a skewed triangle grid a tile across, and the two blend by the cells' weights. The blend keeps
-			// a single read's contrast (variance-preserving, Heitz & Neyret 2018), or the foam would thin out between the
-			// cells' centres.
-			// A scale too fine to be shown (its bubbles under two pixels) has no weight: it is not read.
+			// Anti-tiling, with Terrain Variation installed: its two-tap stochastic lattice. Each read is shifted by a
+			// random offset per cell of a skewed triangle grid a tile across, and the two blend by the cells' weights,
+			// keeping a single read's contrast (variance-preserving, Heitz & Neyret 2018). A scale too fine to be shown
+			// (its bubbles under two pixels) has no weight: it is not read.
 			float3 values = 0.5;
 			[unroll] for (uint i = 0; i < 3; i++)
 			{
@@ -99,7 +96,7 @@ namespace PBRWaterFoam
 			// The mix of uniform values is narrower than any of them: back to their contrast, or the foam would thin out.
 			float total = dot(shown, 1.0.xxx);
 			float value = saturate(0.5 + dot(values - 0.5, shown) * rsqrt(max(dot(shown, shown), 1e-4)));
-			float pattern = BlackPoint(value, amount, Feather);
+			float pattern = BlackPoint(value, amount);
 			result = lerp(amount, pattern, saturate(total)) * (0.35 + 0.65 * amount);
 		}
 		return result;

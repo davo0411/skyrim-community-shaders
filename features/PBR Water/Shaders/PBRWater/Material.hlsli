@@ -4,14 +4,13 @@
 #include "PBRWater/PBRWater.hlsli"
 #include "PBRWater/Shading.hlsli"
 
-// ============================================================================
-// PBR Water - the deferred surface's material (SurfaceMaterialCS.hlsl writes it, Water.hlsl's lighting reads it).
+// ============================================================================ PBR Water - the deferred surface's
+// material (SurfaceMaterialCS.hlsl writes it, Water.hlsl's lighting reads it).
 //
-// The surface program's waves, shore train and foam coverage cost the pixel shader most of its registers, which capped the
-// surface pass's occupancy. SurfaceMaterialCS evaluates them once per recorded water pixel (PBRWater::EvaluateSurface) and
-// keeps what the lighting reads of them: the waves' own normal, the ripples, the foam coverages and the few depths and
-// heights the column and the waterline are worked out from. The lighting pixel shader (Water.hlsl, PBRW_MATERIAL) no
-// longer holds any of that code: it adds the vanilla detail normal maps (PBRWater::ApplyDetail) and lights the surface.
+// SurfaceMaterialCS evaluates the waves, shore train and foam coverage once per recorded water pixel
+// (PBRWater::EvaluateSurface) and keeps what the lighting reads of them, so the lighting pixel shader (Water.hlsl,
+// PBRW_MATERIAL) holds none of that code and its register pressure stays low: it adds the vanilla detail normal maps
+// (PBRWater::ApplyDetail) and lights the surface.
 //
 // 24 bytes a pixel in two textures, every field its own bits (a 64-bit word is two of the words below):
 //
@@ -24,17 +23,14 @@
 //   A.z  height 16 | elevation 16            water surface and bed above the still water (units), half floats
 //   A.w  swash 16 | share 8 | swashFoam 8    the surf simulation's surface (half float, below -60000 where it is not the
 //                                            water), its share of the surface and its foam, unorm
-//   B.x  foam 8 | flat 8 | rough 8 | crest 8
+//   B.x  foam 8 | unused 16 | crest 8
 //          foam      0..1 the open sea's and the breakers' foam coverage, unorm
-//          flat      0..1 the shore foam on flat water (bore, what the surf left), unorm
-//          rough     0..1 the foam that roughens the surface (distance faded), unorm
 //          crest     units above the still water the shore wave's crest stands, 0 or log2 over 0.002..16 m
 //   B.y  ripple.x 12 | ripple.y 12 | depth 8    the ripples' slope (signed, +-1), the water's depth, 0 or log2 over 0.01..1000 m
 //
-// What is approximated against the inline evaluation (Water.hlsl without PBRW_MATERIAL): the fields above are quantised as
-// described; the pixel's footprint and the cascades' screen derivatives come from the rays through the neighbouring pixels
-// met with the plane of the undisplaced point (as DeferredShoreCS does) instead of from the derivatives of its quad; and the
-// foam coverages are summed to the three terms the waterline and the foam pattern are worked out from.
+// Approximations against the inline evaluation: the quantisation above; the pixel's footprint and the cascades' screen
+// derivatives come from the rays through the neighbouring pixels met with the plane of the undisplaced point (as
+// DeferredShoreCS does); and the sea's and breakers' foam coverages are kept as their maximum.
 // ============================================================================
 
 namespace PBRWaterMaterial
@@ -95,9 +91,6 @@ namespace PBRWaterMaterial
 	{
 		float2 oct = OctEncode(s.waveNormal) * 0.5 + 0.5;
 		uint2 octBits = (uint2)round(saturate(oct) * 65535.0);
-		float flatness = smoothstep(0.80, 0.95, s.waveNormal.z);
-		// The shore foam gated by how flat the surface is: the bore's, and what the surf left where the simulation is not the water.
-		float flatFoam = s.foam * s.bore * flatness;  // the surf's leftover foam is in breakerFoam (EvaluateWavesFiltered)
 		float swash = s.swashDepth > PBRWater::SwashMinDepth ? s.swashSurface : -2.0 * HalfLimit;
 		float elevation = max(s.elevation, -2.0 * HalfLimit);
 
@@ -105,27 +98,25 @@ namespace PBRWaterMaterial
 		a.y = LogCode(s.baseVariance, exp2(VarianceMin), exp2(VarianceMax)) | (PackUnorm8(s.detailScale * 0.5) << 8) | (PackUnorm8(s.fetchRatio) << 16) | (PackUnorm8(s.breakStage) << 24);
 		a.z = Half(s.height) | (Half(elevation) << 16);
 		a.w = Half(swash) | (PackUnorm8(s.simShare) << 16) | (PackUnorm8(s.swashFoam) << 24);
-		b.x = PackUnorm8(max(saturate(s.fftFoam), s.breakerFoam)) | (PackUnorm8(flatFoam) << 8) | (PackUnorm8(s.foamCover) << 16) |
-		      (LogCode(s.crest * PBRWater::MetresPerUnit, CrestMinMetres, CrestMaxMetres) << 24);
+		b.x = PackUnorm8(max(saturate(s.fftFoam), s.breakerFoam)) | (LogCode(s.crest * PBRWater::MetresPerUnit, CrestMinMetres, CrestMaxMetres) << 24);
 		b.y = PackSigned12(s.ripple.x) | (PackSigned12(s.ripple.y) << 12) | (LogCode(s.depth * PBRWater::MetresPerUnit, DepthMinMetres, DepthMaxMetres) << 24);
 	}
 
-	/// A pixel's material as stored. The lighting program keeps these six words across its length and decodes each field
-	/// where it is used: decoded early, the fields would sit in registers through the whole lighting.
+	/// A pixel's material as stored. The lighting keeps these six words and decodes each field where it is used, so the
+	/// fields do not sit in registers through the whole lighting.
 	struct Words
 	{
 		uint4 a;
 		uint2 b;
 	};
 
-	/// The waves' normal, the ripples and what roughens the surface: all PBRWater::ApplyDetail reads.
+	/// The waves' normal and the ripples: all PBRWater::ApplyDetail reads.
 	PBRWater::SurfaceShading DecodeWaves(Words w)
 	{
 		PBRWater::SurfaceShading s = (PBRWater::SurfaceShading)0;
 		s.waveNormal = OctDecode(float2(w.a.x & 0xFFFF, w.a.x >> 16) / 65535.0 * 2.0 - 1.0);
 		s.baseVariance = LogValue(w.a.y, exp2(VarianceMin), exp2(VarianceMax));
 		s.detailScale = UnpackUnorm8(w.a.y >> 8) * 2.0;
-		s.foamCover = UnpackUnorm8(w.b.x >> 16);
 		s.ripple = float2(UnpackSigned12(w.b.y), UnpackSigned12(w.b.y >> 12));
 		return s;
 	}
@@ -145,11 +136,7 @@ namespace PBRWaterMaterial
 		s.breakStage = UnpackUnorm8(w.a.y >> 24);
 	}
 
-	/**
-	 * The bed and the foam coverages. The shore foam and the sea's foam are left where Water.hlsl reads them: fftFoam is the
-	 * sea's and the breakers' coverage (breakerFoam 0), foam the shore's on flat water (already gated by flatness: bore 1, no
-	 * surfFoam).
-	 */
+	/// The bed and the foam coverages: fftFoam holds the sea's and the breakers' (breakerFoam 0).
 	void DecodeFoam(Words w, inout PBRWater::SurfaceShading s)
 	{
 		s.elevation = f16tof32(w.a.z >> 16);
@@ -162,9 +149,6 @@ namespace PBRWaterMaterial
 		s.swashFoam = UnpackUnorm8(w.a.w >> 24);
 		s.fftFoam = UnpackUnorm8(w.b.x);
 		s.breakerFoam = 0.0;
-		s.foam = UnpackUnorm8(w.b.x >> 8);
-		s.bore = 1.0;
-		s.surfFoam = 0.0;
 	}
 }
 

@@ -81,13 +81,6 @@ void ShoreSimulation::CreateFoamPair()
 
 	auto device = globals::d3d::device;
 	for (uint32_t i = 0; i < 2; ++i) {
-		D3D11_SHADER_RESOURCE_VIEW_DESC sliceSrv = srvDesc;
-		sliceSrv.Texture2DArray.FirstArraySlice = i;
-		sliceSrv.Texture2DArray.ArraySize = 1;
-		foamSliceSRV[i] = nullptr;
-		DX::ThrowIfFailed(device->CreateShaderResourceView(foamPair->resource.get(), &sliceSrv, foamSliceSRV[i].put()));
-		Util::SetResourceName(foamSliceSRV[i].get(), i ? "PBRWater::ShoreFoam Slice1 SRV" : "PBRWater::ShoreFoam Slice0 SRV");
-
 		D3D11_UNORDERED_ACCESS_VIEW_DESC sliceUav{};
 		sliceUav.Format = format;
 		sliceUav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
@@ -399,32 +392,29 @@ void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
 	ID3D11ShaderResourceView* nullSrvs[3] = {};
 	ID3D11UnorderedAccessView* nullUavs[3] = {};
 
-	// The surf's foam, and what the waves bring the surf simulation this frame.
+	// What the waves bring the surf simulation and the spray this frame.
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::ShoreFoam");
-		ID3D11ShaderResourceView* srv = foamSliceSRV[foamCurrent].get();
 		ID3D11UnorderedAccessView* uavs[3] = { stage->uav.get(), prep->uav.get(), spraySource->uav.get() };
 		context->CSSetShader(foamCS.get(), nullptr, 0);
-		context->CSSetShaderResources(0, 1, &srv);
 		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
 		context->Dispatch(groups, groups, 1);
 		context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
 	}
 
-	// The surf simulation: explicit steps within the shallow water's stability limit. Each moves the face velocities under
-	// the old depths, then the depths with the new velocities, in one pass (SwashStepCS). The scheme is stable to a
-	// Courant number of about 0.7 in two dimensions: bores and uprushes of up to 9 m/s over a couple of metres of water
-	// (waves at 4.5 m/s), across 17 cm cells, stay under 0.35 at 4 ms (34 cm cells at 8 ms alike), and no face moves water more than a quarter of a
-	// cell, which keeps every depth positive. The frame's first step takes the grid's scroll; a fresh grid starts with the
-	// water at rest. A step reads one of `surf` and `surfMoved` and writes the other; the first (over the whole grid) is
-	// copied back into `surf`, so cells the later steps' tiles leave out are this frame's in both, and the frame ends in
-	// `surf` (swapped in when the last step wrote `surfMoved`).
+	// The surf simulation: explicit steps within the shallow water's stability limit, each moving the face velocities
+	// under the old depths and then the depths with the new velocities, in one pass (SwashStepCS). Stable to a Courant
+	// number of about 0.7 in two dimensions: uprushes of up to 9 m/s across 17 cm cells stay under 0.35 at 4 ms (34 cm
+	// cells at 8 ms), and no face moves water more than a quarter of a cell, which keeps every depth positive. The
+	// frame's first step takes the grid's scroll; a fresh grid starts with the water at rest. A step reads one of
+	// `surf` and `surfMoved` and writes the other; the first (over the whole grid) is copied back into `surf`, so cells
+	// the later steps' tiles leave out are this frame's in both, and the frame ends in `surf` (swapped in when the last
+	// step wrote `surfMoved`).
 	{
 		PBRWaterProfiling::Scope pass("PBRWater::SwashStep");
 		// The stability limit grows with the cell (the Courant number is speed x step / cell): 4 ms at 17 cm, 8 ms at 34.
 		const float maxStep = 0.004f * foamTexel / 12.0f;  // s
-		// The surf keeps the waves' time down to 10 fps, as the foam does: held to fewer steps a frame it ran slower than
-		// the waves feeding it at low frame rates, and each uprush followed its bore late.
+		// The surf keeps the waves' time down to 10 fps, so each uprush follows its bore at low frame rates too.
 		const float stepDt = std::clamp(dt, 0.0f, 0.1f);
 		const uint32_t steps = std::max(1u, static_cast<uint32_t>(std::ceil(stepDt / maxStep)));
 		// The first step covers the whole grid (it takes the scroll); the rest only the tiles with anything to move.

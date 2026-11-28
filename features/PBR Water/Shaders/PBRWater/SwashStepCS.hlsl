@@ -1,33 +1,26 @@
-// ============================================================================
-// PBR Water - the surf simulation: every broken wave's own water through the inner surf and up the beach.
+// ============================================================================ PBR Water - the surf simulation: every
+// broken wave's own water through the inner surf and up the beach.
 //
-// A broken wave runs in as a bore, meets the backwash of the wave before it, collapses at the waterline and sends its
-// water up the beach as a thin sheet, which slows on the slope and drains back (Shen & Meyer 1963; Hibberd & Peregrine
-// 1979: the nonlinear shallow water equations carry all of it, the bore as their shock). None of that is a function of
-// one wave, so it is simulated on a camera-centred grid.
+// A broken wave runs in as a bore, meets the previous backwash, collapses at the waterline and sends a thin sheet up
+// the beach that slows and drains back (Shen & Meyer 1963; Hibberd & Peregrine 1979: the nonlinear shallow water
+// equations, the bore as their shock). Simulated on a camera-centred grid.
 //
-// The scheme is Stelling & Duinmeijer's (2003), the one the coastal models SWASH and XBeach use for the swash: depths at
-// the cell centres, velocities at the faces between them, the momentum advected in conservation form and the depth carried
-// by the upwind cell's. It keeps the momentum balance across a bore (so bores travel at the right speed and stay two
-// cells sharp), never makes a depth negative, leaves water at rest over any bed, and lets a thin sheet climb a slope on
-// its own momentum against gravity alone. The Rusanov fluxes on the hydrostatic reconstruction this replaces smeared a
-// bore over seven cells, and stopped a sheet shallower than the bed's rise from one cell to the next dead, as if against
-// a wall: on a 1:10 beach it carried a dam-break uprush a third of the way up (the exact solution: Shen & Meyer).
+// The scheme is Stelling & Duinmeijer's (2003), as in SWASH and XBeach: depths at cell centres, velocities at the
+// faces, momentum advected in conservation form and the depth carried by the upwind cell's. It keeps the momentum
+// balance across a bore (right speed, two cells sharp), never makes a depth negative, holds still water at rest over
+// any bed, and lets a thin sheet climb a slope on its own momentum.
 //
-// Two halves a step, in one pass. The momentum half moves the face velocities under the old depths; the continuity half
-// moves the depths (and the foam) with the new velocities, soaks the sheet into the sand, and makes and decays the foam.
-// Each 8 x 8 group reads the old state around its tile into group memory (two cells beyond it), moves the velocities of
-// its cells and of the row and column behind them, then the depths of its own: as two passes, a step wrote the whole
-// state out and read it back in between (16 MB at 1024^2), most of its cost. The state is read from one texture and
-// written to the other. A frame's first step covers the whole grid; with SWASH_TILES the later ones cover only the
-// tiles SwashTilesCS listed.
+// Two halves a step, in one pass: the momentum half moves the face velocities under the old depths; the continuity half
+// moves the depths and foam with the new velocities, soaks the sheet into the sand, and makes and decays the foam. Each
+// 8 x 8 group reads the old state around its tile into group memory (two cells beyond it), moves the velocities of its
+// cells and of the row and column behind them, then its own depths. The state is read from one texture and written to
+// the other. A frame's first step covers the whole grid; with SWASH_TILES the later ones cover only the tiles
+// SwashTilesCS listed.
 //
-// The waves come in through the hand-over (PBRWater::SurfSharesAt, laid out by ShoreFoamCS): there the simulation takes
-// the train's incoming Riemann invariant, u + 2 sqrt(g h) along the waves' travel, and keeps its own outgoing one,
-// u - 2 sqrt(g h), so what the beach sends back leaves freely (the characteristic boundary of the swash's theory; in
-// the bulk, Van Dongeren & Svendsen 1997). Relaxed to the train's whole state instead, the hand-over was a wall to
-// everything going out: backwash piled up against it and each released bore was drained again behind its crest.
-// Further out, where the train alone is the water, the outgoing invariant is given up too and the state is the train's.
+// The waves come in through the hand-over (PBRWater::SurfSharesAt, laid out by ShoreFoamCS): the simulation takes the
+// train's incoming Riemann invariant, u + 2 sqrt(g h) along the waves' travel, and keeps its own outgoing one, u - 2
+// sqrt(g h), so what the beach sends back leaves freely (Van Dongeren & Svendsen 1997). Further out, where the train
+// alone is the water, the state is the train's.
 //
 // State: x depth (m), y velocity through the east face, z through the north face (m/s), w foam per area (0..1).
 // ============================================================================
@@ -62,8 +55,11 @@ static const float Infiltration = 0.001;
 /// Foam stranded on the sand drains into it within a few seconds (s): long enough for the swash mark to show where the
 /// uprush reached.
 static const float StrandedLifetime = 2.5;
-/// The dense foam of a bore's roller thins to what lingers on the water (Tune3.w) within about this long (s).
+/// The dense foam of a bore's roller thins to what lingers on the water (this share of full cover) within about this
+/// long (s), and what lingers fades over LingerLifetime.
 static const float RollerLifetime = 0.4;
+static const float LingerShare = 0.5;
+static const float LingerLifetime = 12.0;
 /// How quickly the simulation takes the train's waves in the hand-over (s).
 static const float HandOverTime = 0.08;
 /// No ground: a wall (ShoreFoamCS).
@@ -279,13 +275,12 @@ float4 ContinuityAt(int2 c)
 	float depth = max(s.x - (Dt / dx) * (qE - qW + qN - qS), 0.0);
 	float foam = max(s.w - (Dt / dx) * (fE - fW + fN - fS), 0.0);
 
-	// A bore makes foam: where the water runs together hard across a step in its depth, it is breaking (the shock of the
-	// shallow water equations is the bore's roller, where its energy goes). The step gates it: the edge of a thin sheet
-	// and the last of the backwash run together too, with no bore to speak of, and drew white lines along the water's
-	// edge when they counted.
+	// A bore makes foam: where the water runs together hard across a step in its depth, it is breaking (the shock of
+	// the shallow water equations is the bore's roller). Gated by the step, since a thin sheet's edge and the last of
+	// the backwash also converge without a bore.
 	float converging = -(s.y - sW.y + s.z - sS.z);
-	// The step is in the water's level between wet cells: the depth alone steps with every sloping bed, and a dry cell's
-	// level is its ground (both drew a white line along every waterline).
+	// The step is in the water's level between wet cells: the depth alone steps with every sloping bed, and a dry
+	// cell's level is its ground.
 	float level = s.x + bed;
 	float levelE = sE.x > 0.01 ? sE.x + LoadPrep(c + int2(1, 0)).x : level;
 	float levelW = sW.x > 0.01 ? sW.x + LoadPrep(c - int2(1, 0)).x : level;
@@ -301,8 +296,8 @@ float4 ContinuityAt(int2 c)
 
 	// The foam decays: the roller's dense foam thins quickly to what lingers, whose bubbles burst slowly on the water;
 	// the sand drains what is stranded on it.
-	float lingering = min(foam, PBRWater::Tune3.w);
-	foam = lingering * exp(-Dt / (depth < 0.003 ? StrandedLifetime : max(PBRWater::Tune5.w, 0.1))) + (foam - lingering) * exp(-Dt / RollerLifetime);
+	float lingering = min(foam, LingerShare);
+	foam = lingering * exp(-Dt / (depth < 0.003 ? StrandedLifetime : LingerLifetime)) + (foam - lingering) * exp(-Dt / RollerLifetime);
 
 	// The hand-over: the depth takes the train's incoming invariant with the velocity (the momentum pass), and the foam
 	// the white water the train's waves carry.

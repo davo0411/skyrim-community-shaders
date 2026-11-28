@@ -124,10 +124,9 @@ void from_json(const nlohmann::json& j, SprayParticles::Emitter& e)
 SprayParticles::Emitters SprayParticles::DefaultEmitters()
 {
 	// Many small particles rather than a few large ones: the sheet a breaker throws tears into ligaments and droplets
-	// (droplet streaks), with mist that drifts downwind (large, faint puffs). Only the mist is drawn as puffs: the splash-up,
-	// the roller's spray and the whitecaps' were puffs too, lit like solids, and read as grey cotton balls and rocks.
-	// Shore speeds are for a 1 m wave and grow with the square root of its height. Drag k: about 0.0002 / radius (m) for
-	// one droplet; a puff stands for a cloud of them and slows faster; mist, k of a few, hangs and drifts with the wind.
+	// (droplet streaks), with mist that drifts downwind (large, faint puffs); only the mist is drawn as puffs. Shore
+	// speeds are for a 1 m wave and grow with the square root of its height. Drag k: about 0.0002 / radius (m) for one
+	// droplet; a puff stands for a cloud of them and slows faster; mist, k of a few, hangs and drifts with the wind.
 	const float3 mistColor{ 0.95f, 0.97f, 1.0f };
 	return { {
 		{ .SourceKind = Plunge, .ShapeKind = Droplets,  // Breaker Sheet: the splash-up curtain, torn into drops

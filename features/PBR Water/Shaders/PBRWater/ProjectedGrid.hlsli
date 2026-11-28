@@ -30,10 +30,10 @@ namespace PBRWaterGrid
 		return g.y * (columns + 1) + g.x;
 	}
 
-	/// Patch `patch`'s vertex `s` of its n x n cells: every patch keeps room for PBRW_GRID_PATCH.
+	/// Patch `patch`'s vertex `s` of its n x n cells: the patches packed at their size (ProjectedGrid::MaxPatchVertices).
 	uint PatchVertex(uint patch, uint2 s, uint n)
 	{
-		return patch * (PBRW_GRID_PATCH + 1) * (PBRW_GRID_PATCH + 1) + VertexIndex(s, n);
+		return patch * (n + 1) * (n + 1) + VertexIndex(s, n);
 	}
 
 	/// The grid corner of vertex `vertexID` of a triangle list over `columns`-wide cells: corners (0,0) (1,0) (0,1), then

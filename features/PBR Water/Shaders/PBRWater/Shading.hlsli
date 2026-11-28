@@ -77,8 +77,7 @@ namespace PBRWater
 		float2 uvDir = dir.xy * SunMap0.z * float2(1.0, -1.0);
 		float2 toEdge = (uvDir > 0.0 ? 1.0 - uv0 : uv0) / abs(uvDir);
 		reach = min(reach, min(toEdge.x, toEdge.y));
-		// Six steps: the jitter moves them every frame and the temporal filter adds them up (twelve cost 0.5 ms more in
-		// the surface pass for no difference once filtered).
+		// Six steps: the jitter moves them every frame and the temporal filter adds them up.
 		static const uint Steps = 6;
 		float stepLength = reach / Steps;
 		// The heightfield's grid filters out waves shorter than its spacing, which the surface here still carries.
@@ -148,15 +147,13 @@ namespace PBRWater
 	}
 
 	/**
-	 * GGX specular lobe for a light of finite angular size, Fresnel included. `toEye`/`toLight` point
-	 * away from the surface.
+	 * GGX specular lobe for a light of finite angular size, Fresnel included. `toEye`/`toLight` point away from the
+	 * surface.
 	 *
-	 * A light of angular radius theta reflected in a mirror covers a cone of half vectors of radius
-	 * theta / (2 sqrt(N.V)), so its spread adds to the microfacet variance (the sphere-light idea of
-	 * Karis 2013, "Real Shading in Unreal Engine 4"). Treating the sun as a true point instead makes
-	 * GGX divide by alpha^2 -> 0 on calm water and by N.V -> 0 at grazing angles, which overflows to
-	 * inf and turns into NaN further down the frame. With the source size the lobe peak is bounded
-	 * by 1 / (pi theta^2), the radiance of the source itself, and every denominator stays positive.
+	 * A light of angular radius theta reflected in a mirror covers a cone of half vectors of radius theta / (2
+	 * sqrt(N.V)), so its spread adds to the microfacet variance (Karis 2013, "Real Shading in Unreal Engine 4"). This
+	 * bounds the lobe's peak by the source's own radiance, 1 / (pi theta^2), and keeps every denominator positive on
+	 * calm water and at grazing angles, where a true point light overflows.
 	 */
 	float SpecularGGX(float3 N, float3 toEye, float3 toLight, float roughness, float eta, float sourceAngularRadius)
 	{
@@ -187,27 +184,23 @@ namespace PBRWater
 		float3 normal;
 		float roughness;
 		float fftFoam;       // 0..1 the open sea's foam here (FftFoam): drawn with the rest of the foam (Water.hlsl)
-		float foam;          // 0..1 the shore waves' white water at this pixel
 		float swashSurface;  // the surf simulation's surface at this pixel (units above the still water; SurfSheet)
 		float swashDepth;    // its depth (units; 0 where dry)
 		float swashFoam;     // 0..1 the white water it carries
 		float simShare;      // 0..1 share of the surf simulation in the surface here (ComposeSurf)
 #if defined(PBRW_DEBUG)
-		float3 waveInfo;     // the shore wave here, for the debug view
-		float train;         // 0..1 share of the shore wave train (debug)
-		float room;          // 0..1 room the shore field gives the train here (debug)
-		float exposure;      // 0..1 exposure to the swell (debug)
-		float levelError;    // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
+		float3 waveInfo;   // the shore wave here, for the debug view
+		float train;       // 0..1 share of the shore wave train (debug)
+		float room;        // 0..1 room the shore field gives the train here (debug)
+		float exposure;    // 0..1 exposure to the swell (debug)
+		float levelError;  // the shore field's still water level minus this water's (units; < -1e8 outside the field) (debug)
 #endif
 		float3 waveNormal;   // the waves' own normal, without the ripples and detail maps (the foam's projection)
 		float2 ripple;       // the interactive ripples' slope (ApplyDetail)
 		float baseVariance;  // slope variance of the waves and the wind's ripples (ApplyDetail adds the detail maps')
 		float detailScale;   // strength of the vanilla detail normal maps here (ApplyDetail)
-		float foamCover;     // 0..1 the foam that roughens the surface here (ApplyDetail)
 		float fetchRatio;    // FetchHeightRatio of the fetch here
-		float breakerFoam;   // 0..1 the breaking wave's own white water (BreakerFoam), with the surf's leftover foam on faces that are not flat
-		float surfFoam;      // 0..1 the foam the surf left on the water here (ShoreFoamAt)
-		float bore;          // 0..1 the wave has flattened into a bore: its foam takes the texture's pattern
+		float breakerFoam;   // 0..1 the breaking wave's white water (BreakerFoam)
 		float crest;         // units above the still water the shore wave's crest stands here (ShoreTrain::crest)
 		float beach;         // 0..1 waves break on this shore (no surf or swash on rock faces and cliffs)
 		float breakStage;    // 0..1 how far the shore waves here have got with breaking (stirs up the bottom)
@@ -239,57 +232,44 @@ namespace PBRWater
 		SurfaceShading o = (SurfaceShading)0;
 
 		float2 absXY = waveParam.xy + FrameBuffer::CameraPosAdjust.xy;
-		o.surfFoam = 0.0;
-		[branch] if (FoamEnabled())
-			o.surfFoam = ShoreFoamAt(absXY);
-
 		WaveContext ctx = BuildWaveContext(waveParam.xyz, 1.0, false, waveParam.w);
 		WaveResult waves = (WaveResult)0;
 		waves.normal = float3(0.0, 0.0, 1.0);
 		[branch] if (WavesActive())
-			waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.surfFoam, footprint);
-		// Enable Foam off: no foam of any kind reaches the roughness or Water.hlsl's foam pass.
+			waves = EvaluateWavesFiltered(waveParam.xyz, ctx, footprint);
+		// Enable Foam off: no foam of any kind reaches Water.hlsl's foam pass.
 		[branch] if (!FoamEnabled())
 		{
 			waves.fftFoam = 0.0;
 			waves.breakerFoam = 0.0;
-			waves.shoreFoam = 0.0;
 			waves.sheetFoam = 0.0;
 		}
 		o.ripple = 0.0;
 		[branch] if (WavesActive())
 			o.ripple = RippleSlope(waveParam.xyz, ctx.depth);
 		float wind = LocalWindSpeed(ctx.fetchMetres);
-		// The vanilla normal maps are the wind's ripples: calm water turns glassy, wind ripples it. River currents and
-		// rain ripple it whatever the wind.
-		// The normal maps keep most of their strength on top of the FFT waves: they carry the capillary texture
-		// and, on rivers, the flowmap normals, so the change from flowing to open water stays visible.
+		// The vanilla normal maps are the wind's ripples: calm water turns glassy, wind ripples it; river currents and
+		// rain ripple it whatever the wind. On top of the FFT waves they keep most of their strength: they carry the
+		// capillary texture and, on rivers, the flowmap normals.
 		float windDetail = lerp(Tune4.z, Tune4.w, saturate(wind / 8.0));
 		o.detailScale = max(windDetail, max(waveParam.w, Surface0.w));
 		// A breaker's face drawn up to plunge is stretched glassy: the wind's ripples on it are pulled out along the face.
 		o.detailScale *= 1.0 - 0.5 * waves.clearFace;
 
-		// Specular anti-aliasing: the normal varies within the pixel, so widen the lobe by that variance. Without it
-		// a mirror-like sun glint lands on single pixels at ~1e4x the sky radiance and blooms into blobs.
-		//  - waves: the slope variance their mip filtering removed (LEAN), from the cascades and the shore train;
-		//  - detail maps: Toksvig (2005) from the shortening of their mip-filtered normals (Water.hlsl).
-		// All of it comes from filtered textures, none from screen derivatives: those are shared by 2x2 pixel quads
-		// and turned the roughness into blocks (the ripples are magnified, never sub-pixel, so they need no term).
+		// Specular anti-aliasing: the normal varies within the pixel, so the lobe widens by that variance, or a
+		// mirror-like sun glint lands on single pixels at ~1e4x the sky radiance and blooms. - waves: the slope
+		// variance their mip filtering removed (LEAN), from the cascades and the shore train; - detail maps: Toksvig
+		// (2005) from the shortening of their mip-filtered normals (Water.hlsl). All of it from filtered textures, none
+		// from screen derivatives, which 2x2 quads share (the ripples are magnified, never sub-pixel, so they need no
+		// term).
 		float windVariance = 0.5 * (WindMeanSquareSlope(wind) + RainMeanSquareSlope());
 		o.baseVariance = waves.slopeVariance + windVariance;
-		// Foam Roughness from all the foam, as Water.hlsl gathers it (there gated by flatness), faded with distance like it.
-		float shoreCover = saturate(max(max(waves.shoreFoam * waves.bore, o.surfFoam), waves.sheetFoam * waves.surf) * Foam1.z);
-		o.foamCover = max(max(waves.fftFoam, waves.breakerFoam), shoreCover) * FoamFade(length(waveParam.xyz));
 		o.windSpeed = wind;
+		// The foam's coverages (PBRWater.hlsli), drawn together in Water.hlsl: the open sea's, the breakers' and the surf
+		// simulation's (swashFoam).
 		o.fftFoam = waves.fftFoam;
-
-		// Foam (PBRWater.hlsli): the shore waves carry theirs; the open sea's is o.fftFoam.
-		// The breakers' white water, the crest of a curling lip included: breaking starts at the lip's tip. (Thinning it by the
-		// lip's stretch, from when its pattern was drawn at the rest position and drawn out along the lip, cut a dark line
-		// along every curling crest.)
-		o.foam = waves.shoreFoam;
-		// The surf simulation per pixel (ComposeSurf): interpolated from the vertices it is linear across each triangle, so
-		// the sheet ended in straight lines along the triangle edges.
+		o.breakerFoam = waves.breakerFoam;
+		// The surf simulation per pixel (ComposeSurf): its sheet's edge is not linear across a triangle.
 		o.swashSurface = waves.sheetSurface;
 		o.swashDepth = waves.sheetDepth;
 		o.swashFoam = waves.sheetFoam;
@@ -317,8 +297,6 @@ namespace PBRWater
 		o.fetchRatio = FetchHeightRatio(ctx.fetchMetres);
 		o.turbidity = 0.0;
 		o.waveNormal = waves.normal;
-		o.breakerFoam = waves.breakerFoam;
-		o.bore = waves.bore;
 		o.crest = waves.crest;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
@@ -340,17 +318,14 @@ namespace PBRWater
 		float2 detailSlope = detailNormal.xy / max(detailNormal.z, 0.05) * o.detailScale;
 		slope += detailSlope;
 		o.normal = normalize(float3(-slope, 1.0));
-		// Slopes (a height field) cannot hold a surface turned vertical or past it: a breaker's face, and the lip of a curl whose
-		// underside faces down. There the ripples and the detail maps tilt the waves' own normal within its tangent plane
-		// instead. Both forms give the waves' own normal exactly, so blending them by how steep the surface is leaves no seam.
-		// (Blended by the curl's weight, which falls off sharply at the lip's edge, the two were averaged across a normal
-		// facing down and drew a line of normals along the crest.)
+		// Slopes (a height field) cannot hold a surface turned vertical or past it: a breaker's face, a curl's lip.
+		// There the ripples and the detail maps tilt the waves' own normal within its tangent plane instead. Both forms
+		// give the waves' own normal exactly, so blending them by how steep the surface is leaves no seam.
 		float steep = smoothstep(0.35, 0.1, waveNormal.z);
 		[branch] if (steep > 0.0)
 		{
-			// The detail's slopes laid onto the face: what runs along the crest tilts the normal along the crest, what runs
-			// along the way the face looks tilts it up or down the face. (Projected into the tangent plane as a horizontal
-			// tilt, all but the along-crest part was lost on a face near vertical, and breakers' faces shaded flat.)
+			// The detail's slopes laid onto the face: what runs along the crest tilts the normal along the crest, what
+			// runs along the way the face looks tilts it up or down the face.
 			float2 facing = SafeNormalize(float3(waveNormal.xy, 0.0), float3(1.0, 0.0, 0.0)).xy;
 			float3 alongCrest = float3(-facing.y, facing.x, 0.0);
 			float3 upFace = SafeNormalize(cross(waveNormal, alongCrest), float3(0.0, 0.0, 1.0));
@@ -360,7 +335,7 @@ namespace PBRWater
 		}
 
 		float mapVariance = detailVariance * o.detailScale * o.detailScale;
-		o.roughness = CombinedRoughness(Light0.x + o.foamCover * Tune2.w, o.baseVariance + mapVariance);
+		o.roughness = CombinedRoughness(Light0.x, o.baseVariance + mapVariance);
 	}
 
 	/**

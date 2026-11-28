@@ -1,25 +1,22 @@
 #ifndef __PBR_WATER_DEFERRED_HLSLI__
 #define __PBR_WATER_DEFERRED_HLSLI__
 
-// ============================================================================
-// PBR Water - the deferred surface.
+// ============================================================================ PBR Water - the deferred surface.
 //
-// The surface and point light passes shade a pixel once for every triangle of its 2x2 quad: with the tessellator's
-// small triangles each water pixel ran the whole surface program about 1.75 times. The stencil pass draws the same
-// triangles first; for the tessellated meshes it also writes, per pixel, which mesh is there and what the vertex program
-// reads of the waves (Pack). DeferredTilesCS sorts the screen's tiles by the meshes in them; the surface and point light
-// passes then draw each mesh's tiles (TileVertex), and every pixel the stencil pass left to that mesh runs the vertex
-// program and the shading once, from that record (Resolve). How finely the mesh is tessellated no longer costs pixel
-// shading.
+// The surface and point light passes would shade a pixel once for every triangle of its 2x2 quad, about 1.75 times per
+// water pixel with the grids' small triangles. The stencil pass draws the triangles and also writes, per pixel, which
+// grid is there and what the vertex program reads of the waves (Pack). DeferredTilesCS sorts the screen's tiles by the
+// grids in them; the surface and point light passes then draw each grid's tiles (TileVertex), and every pixel the
+// stencil pass left to that grid runs the vertex program and the shading once, from its record (Resolve).
 //
-// The record is what the vertex program cannot rebuild: the waves' displacement, the surface noise (procedural beyond its
-// bake), the vertex alpha and, for meshes whose texture coordinates are not one plane over the mesh, those. The displaced
-// position comes from the depth buffer, the undisplaced one from that minus the displacement. Writing it is bandwidth, so it is small: 14 bytes, 22 with texture coordinates.
+// The record is what the vertex program cannot rebuild: the waves' displacement, the surface noise (procedural beyond
+// its bake), the vertex alpha and the texture coordinates (22 bytes). The displaced position comes from the depth
+// buffer, the undisplaced one from that minus the displacement.
 //
 // A record is this frame's where the stencil pass's depth is still what the depth buffer holds: nothing draws depth
-// between the two passes, and a nearer untessellated water draw, which writes no record, leaves another depth there. The
-// tag target is cleared every frame (PBRWater::DrawRecordedStencil) and carries 16 bits of the depth to compare.
-// Needs Water.hlsl's VS_INPUT, VS_OUTPUT, WaterVertexWith and the vertex constants (b8-b10 in the pixel stage).
+// between the two passes, and a nearer water draw without a record leaves another depth there. The tag target is
+// cleared every frame (PBRWater::DrawRecordedStencil) and carries 16 bits of the depth to compare. Needs Water.hlsl's
+// VS_INPUT, VS_OUTPUT, WaterVertexWith and the vertex constants (b8-b10 in the pixel stage).
 // ============================================================================
 
 #include "PBRWater/DeferredCommon.hlsli"
@@ -31,11 +28,11 @@ namespace PBRWaterDeferred
 {
 	cbuffer DeferredDraw : register(b13)
 	{
-		uint4 Tag;        // x this mesh's tag (1..PBRWATER_DEFERRED_MESHES), y the tile list's room for each mesh, z texture coordinates recorded (else UVMapU/V), w the shore train is baked (DeferredShoreCS)
+		uint4 Tag;        // x this grid's tag (1..PBRWATER_DEFERRED_MESHES), y the tile list's room for each mesh, z unused, w the shore train is baked (DeferredShoreCS)
 		float4 Viewport;  // xy the viewport's size (pixels)
-		float4 UVMapU;    // the mesh's texture coordinate u over its model-space xy: x d/dx, y d/dy, z at the origin
-		float4 UVMapV;
-		uint4 Mode;  // x the tile list drawn (DeferredCommon.hlsli), y PBRWATER_DEFERRED_FULL or _HALF, z the frame's sample rotation (_HALF)
+		float4 UVMapU;    // unused
+		float4 UVMapV;    // unused
+		uint4 Mode;       // x the tile list drawn (DeferredCommon.hlsli), y PBRWATER_DEFERRED_FULL or _HALF, z the frame's sample rotation (_HALF)
 	};
 
 	/// The half-rate pass's key for the pixel it shaded (DeferredFar.hlsl): 1 + which of its 2x2 pixels, 0 none.
@@ -50,18 +47,13 @@ namespace PBRWaterDeferred
 		float2 uv;     // the mesh's texture coordinate (where Tag.z)
 	};
 
-	uint DepthBits(float depth)
-	{
-		return (uint)round(saturate(depth) * 16777215.0) & 0xFFFF;
-	}
-
 	/**
 	 * @param depth  the pixel's depth (SV_Position.z)
 	 */
 	Record Pack(float depth, float3 current, float wavesAlone, float2 uv, float alpha)
 	{
 		Record r;
-		r.tag = Tag.x | ((uint)round(saturate(alpha) * 255.0) << 8) | (DepthBits(depth) << 16);
+		r.tag = Tag.x | ((uint)round(saturate(alpha) * 255.0) << 8) | (PBRWaterDepthBits(depth) << 16);
 		r.waves = float4(current, wavesAlone);
 		r.uv = uv;
 		return r;
@@ -125,8 +117,7 @@ namespace PBRWaterDeferred
 		uint tag = Tags.Load(int3(px, 0));
 		p.depth = SceneDepth.Load(int3(px, 0));
 		p.tag = tag & 0xFF;
-		uint bits = (DepthBits(p.depth) - (tag >> 16) + 1) & 0xFFFF;
-		p.water = p.tag != 0 && bits <= 2;
+		p.water = p.tag != 0 && PBRWaterRecordHolds(tag, p.depth);
 		p.alpha = ((tag >> 8) & 0xFF) / 255.0;
 		return p;
 	}
@@ -211,9 +202,7 @@ namespace PBRWaterDeferred
 		float3 model = mul(InverseLinear(World), undisplaced - worldOrigin);
 		v.Position = float4(model, 1.0);
 #	if defined(NORMAL_TEXCOORD)
-		[branch] if (Tag.z != 0)
-			v.TexCoord0 = TexCoords.Load(int3(source, 0));
-		else v.TexCoord0 = float2(dot(UVMapU.xy, model.xy) + UVMapU.z, dot(UVMapV.xy, model.xy) + UVMapV.z);
+		v.TexCoord0 = TexCoords.Load(int3(source, 0));
 #	endif
 #	if defined(VC)
 		v.Color = float4(1.0, 1.0, 1.0, p.alpha);

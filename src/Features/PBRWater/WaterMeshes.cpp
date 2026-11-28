@@ -13,17 +13,13 @@
 
 namespace
 {
-	/// Meshes with more triangles are drawn untessellated (they already carry their own detail).
+	/// Meshes with more triangles are not read back (no cell's water is one plane of texture coordinates with that many).
 	constexpr uint32_t MaxMeshTriangles = 4096;
-	/// Meshes not drawn for this many frames are read back again if they return.
-	constexpr uint32_t MeshLifetime = 600;
 
 	/**
 	 * A mesh that is one flat rectangle cut into a grid (the cells' water: 32 x 32 quads, 2048 triangles) becomes its
-	 * rectangle's two triangles, so the subdivision alone sets its detail. Cut along the grid, every one of its 2048 triangles
-	 * was a root to refine every frame, near or far. Its UVs
-	 * and colours must vary affinely over it (the rectangle's corners then carry them), and the triangles must tile the
-	 * rectangle exactly. Neighbouring cells share whole rectangle sides.
+	 * rectangle's two triangles, whose corners carry its UVs and colours (AffineTexCoords reads the plane they lie on). Its
+	 * UVs and colours must vary affinely over it, and the triangles must tile the rectangle exactly.
 	 * @return whether the mesh was merged
 	 */
 	template <class CornerT>
@@ -141,12 +137,6 @@ namespace
 	}
 }
 
-bool WaterMeshes::SameSource(const Source& a, const Source& b)
-{
-	return a.rendererData == b.rendererData && a.triangleCount == b.triangleCount && a.vertexDesc == b.vertexDesc &&
-	       std::memcmp(&a.world, &b.world, sizeof(RE::NiTransform)) == 0;
-}
-
 bool WaterMeshes::IsRiver(RE::BSGeometry& geometry)
 {
 	const auto prop = geometry.GetGeometryRuntimeData().shaderProperty.get();
@@ -161,87 +151,26 @@ bool WaterMeshes::MakeSource(RE::BSGeometry& geometry, Source& s)
 	auto& data = geometry.GetGeometryRuntimeData();
 	if (!triShape || !data.rendererData)
 		return false;
-	s.world = geometry.world;
 	s.rendererData = data.rendererData;
 	s.triangleCount = triShape->GetTrishapeRuntimeData().triangleCount;
 	s.vertexDesc = std::bit_cast<uint64_t>(data.vertexDesc);
-	s.river = IsRiver(geometry);
 	return s.triangleCount > 0 && s.triangleCount <= MaxMeshTriangles;
 }
 
-void WaterMeshes::Register(RE::BSGeometry& geometry)
-{
-	Source s;
-	if (MakeSource(geometry, s))
-		registered[&geometry] = s;
-}
-
-void WaterMeshes::TakeBaseTriangles(std::vector<WorldMesh>& out)
-{
-	out.clear();
-	++frame;
-	auto sources = std::move(registered);
-	registered.clear();
-	for (const auto& [geometry, source] : sources) {
-		const Mesh* mesh = GetMesh(source);
-		if (!mesh)
-			continue;
-		WorldMesh& world = out.emplace_back();
-		world.geometry = geometry;
-		world.source = source;
-		const auto& w = source.world;
-		world.triangles.resize(mesh->corners.size() / 3);
-		for (size_t t = 0; t < world.triangles.size(); ++t) {
-			WorldTriangle& tri = world.triangles[t];
-			for (int i = 0; i < 3; ++i) {
-				const Corner& c = mesh->corners[t * 3 + i];
-				const double s = w.scale;
-				const double x = c.position[0] * s, y = c.position[1] * s, z = c.position[2] * s;
-				tri.world[i][0] = w.translate.x + w.rotate.entry[0][0] * x + w.rotate.entry[0][1] * y + w.rotate.entry[0][2] * z;
-				tri.world[i][1] = w.translate.y + w.rotate.entry[1][0] * x + w.rotate.entry[1][1] * y + w.rotate.entry[1][2] * z;
-				tri.world[i][2] = w.translate.z + w.rotate.entry[2][0] * x + w.rotate.entry[2][1] * y + w.rotate.entry[2][2] * z;
-				std::copy_n(c.position, 3, tri.model[i]);
-				std::copy_n(c.uv, 2, tri.uv[i]);
-				std::copy_n(c.color, 4, tri.color[i]);
-			}
-		}
-	}
-	std::erase_if(meshes, [&](const auto& entry) { return frame - entry.second.lastUsed > MeshLifetime; });
-}
-
-bool WaterMeshes::StillSource(RE::BSGeometry& geometry, const Source& source)
-{
-	Source s;
-	return MakeSource(geometry, s) && SameSource(s, source);
-}
-
-const WaterMeshes::Mesh* WaterMeshes::GetMesh(const Source& source)
+bool WaterMeshes::ReadCorners(const Source& source, std::vector<Corner>& corners, bool merge)
 {
 	const auto* shape = static_cast<const RE::BSGraphics::TriShape*>(source.rendererData);
 	auto* vb = reinterpret_cast<ID3D11Buffer*>(shape->vertexBuffer);
 	auto* ib = reinterpret_cast<ID3D11Buffer*>(shape->indexBuffer);
-	auto& mesh = meshes[source.rendererData];
-	mesh.lastUsed = frame;
-	// Read once, including when that failed: a mesh that cannot be read is drawn untessellated, not read every frame.
-	if (mesh.read && mesh.vertexBuffer.get() == vb && mesh.triangleCount == source.triangleCount && mesh.vertexDesc == source.vertexDesc)
-		return mesh.valid ? &mesh : nullptr;
-
-	// New (or rebuilt) mesh: read its buffers back once.
-	mesh = {};
-	mesh.lastUsed = frame;
-	mesh.read = true;
-	mesh.triangleCount = source.triangleCount;
-	mesh.vertexDesc = source.vertexDesc;
-	mesh.vertexBuffer.copy_from(vb);
 	std::vector<uint8_t> vertices, indices;
 	if (!vb || !ib || !ReadBack(vb, vertices) || !ReadBack(ib, indices))
-		return nullptr;
+		return false;
 
 	const uint64_t desc = source.vertexDesc;
 	const uint32_t stride = static_cast<uint32_t>((4 * desc) & 0x3C);
 	const uint32_t flags = static_cast<uint32_t>(desc >> 44);
 	if (stride < 8 || vertices.size() < stride)
-		return nullptr;
+		return false;
 	const uint32_t vertexCount = static_cast<uint32_t>(vertices.size() / stride);
 	auto offsetOf = [&](RE::BSGraphics::Vertex::Attribute a) { return static_cast<uint32_t>((desc >> (4 * a + 2)) & 0x3C); };
 	const bool hasUV = (flags & RE::BSGraphics::Vertex::VF_UV) != 0;
@@ -260,51 +189,56 @@ const WaterMeshes::Mesh* WaterMeshes::GetMesh(const Source& source)
 	}
 	const bool fullPrecision = (flags & RE::BSGraphics::Vertex::VF_FULLPREC) != 0 || positionSize >= 12;
 	if ((fullPrecision && stride < 12) || (hasUV && uvOffset + 4 > stride) || (hasColor && colorOffset + 4 > stride))
-		return nullptr;
+		return false;
 	const size_t indexCount = static_cast<size_t>(source.triangleCount) * 3;
 	if (indices.size() < indexCount * sizeof(uint16_t))
-		return nullptr;
+		return false;
 
 	auto half = [](const uint8_t* p) {
 		uint16_t h;
 		std::memcpy(&h, p, sizeof(h));
 		return DirectX::PackedVector::XMConvertHalfToFloat(h);
 	};
-	mesh.corners.resize(indexCount);
+	corners.resize(indexCount);
 	for (size_t i = 0; i < indexCount; ++i) {
 		uint16_t index;
 		std::memcpy(&index, indices.data() + i * sizeof(uint16_t), sizeof(index));
 		if (index >= vertexCount)
-			return nullptr;
+			return false;
 		const uint8_t* v = vertices.data() + static_cast<size_t>(index) * stride;
-		Corner& c = mesh.corners[i];
+		Corner& c = corners[i];
 		for (int k = 0; k < 3; ++k) {
 			if (fullPrecision)
 				std::memcpy(&c.position[k], v + 4 * k, sizeof(float));
 			else
 				c.position[k] = half(v + 2 * k);
 			if (!std::isfinite(c.position[k]))
-				return nullptr;
+				return false;
 		}
 		c.uv[0] = hasUV ? half(v + uvOffset) : 0.0f;
 		c.uv[1] = hasUV ? half(v + uvOffset + 2) : 0.0f;
 		for (int k = 0; k < 4; ++k)
 			c.color[k] = hasColor ? static_cast<float>(v[colorOffset + k]) / 255.0f : 1.0f;
 	}
-	MergeRectangle(mesh.corners);
-	mesh.valid = true;
-	return &mesh;
+	if (merge)
+		MergeRectangle(corners);
+	return true;
 }
 
-bool WaterMeshes::AffineTexCoords(RE::BSGeometry& geometry, float4& mapU, float4& mapV) const
+bool WaterMeshes::Triangles(RE::BSGeometry& geometry, std::vector<Corner>& corners)
+{
+	Source source;
+	return MakeSource(geometry, source) && ReadCorners(source, corners, false);
+}
+
+bool WaterMeshes::AffineTexCoords(RE::BSGeometry& geometry, float4& mapU, float4& mapV)
 {
 	Source source;
 	if (!MakeSource(geometry, source))
 		return false;
-	const auto mesh = meshes.find(source.rendererData);
-	if (mesh == meshes.end() || !mesh->second.valid || mesh->second.corners.size() != 6)
+	std::vector<Corner> c;
+	if (!ReadCorners(source, c) || c.size() != 6)
 		return false;
-	const auto& c = mesh->second.corners;
 	const double e1x = c[1].position[0] - c[0].position[0], e1y = c[1].position[1] - c[0].position[1];
 	const double e2x = c[2].position[0] - c[0].position[0], e2y = c[2].position[1] - c[0].position[1];
 	const double det = e1x * e2y - e1y * e2x;

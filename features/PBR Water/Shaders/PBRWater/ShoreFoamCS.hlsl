@@ -1,29 +1,13 @@
 // ============================================================================
-// PBR Water - the foam the surf leaves on the water, and what the waves bring the surf simulation.
+// PBR Water - what the shore waves bring the surf simulation each frame, and where they throw spray.
 //
-// Foam in the surf is a tracer on the water's surface: the breakers make it (the overturning crest and the bore's roller,
-// where the shore profile carries white water), the water carries it, and it decays as its bubbles burst (coastal
-// surfactants make surf foam outlast the bubble plume under it). So a breaker leaves a lace of foam behind it on the
-// water as it flattens.
+// For the surf simulation (SwashStepCS): the bed, how far the simulation takes the train's waves here and gives up its own
+// (PBRWater::SurfSharesAt), the train's level, the direction its waves travel in and the white water they carry. The
+// simulation carries its own foam with its water; outside it the breakers' white water travels with the train
+// (PBRWater::BreakerFoam), and nothing is left lying on the water once a wave has passed.
 //
-// A camera-centred grid in the water's rest coordinates, like the ripples: the surface the shaders draw is the rest
-// position plus the waves' displacement, so the foam is carried by the water's velocity less the displacement's own
-// rate. Under the shore waves the water moves with them at u = c eta / h (shallow water: the bores carry their water
-// forward, the troughs pull it back). Semi-Lagrangian advection, as Crest 4 (wave-harmonic/crest, MIT) moves its foam.
-// Inshore of the hand-over the surf simulation carries its own foam with its water (SwashStepCS); this one is drawn
-// where the train is the water.
-//
-// The water shader draws the foam's pattern still, where the surface is: the foam moves over it. Every way of carrying the
-// pattern along tore it: with the water sloshing under the waves, with the breakers next to still lace, and as a texture
-// offset carried per texel.
-//
-// It also lays out, for the surf simulation (SwashStepCS), what the shore waves bring it this frame: the bed, how far the
-// simulation takes the train's waves here and gives up its own (PBRWater::SurfSharesAt), the train's level, the
-// direction its waves travel in and the white water they carry.
-//
-// Output: Stage (x foam coverage, yz the waves' direction of travel, w the white water they carry) and Prep (x bed (m
-// above the still water), y incoming share, z outgoing share, w the train's level (m above the still water)).
-// SwashOutCS copies the foam on.
+// Output: Stage (x unused, yz the waves' direction of travel, w the white water they carry) and Prep (x bed (m above
+// the still water), y incoming share, z outgoing share, w the train's level (m above the still water)), and SpraySource.
 // ============================================================================
 
 #include "PBRWater/PBRWater.hlsli"
@@ -38,7 +22,6 @@ cbuffer ShoreFoamCB : register(b0)
 	float Pad0;
 };
 
-Texture2D<float4> PreviousFoam : register(t0);
 RWTexture2D<float4> Foam : register(u0);
 RWTexture2D<float4> Prep : register(u1);
 /// Where the breakers throw spray (SprayEmitCS), at the surface drawn over the texel: x a plunging breaker's splash-up, y a
@@ -51,48 +34,9 @@ static const float SwashDepthCap = 6.0;
 /// No ground: a wall (m).
 static const float SwashWall = 1000.0;
 
-float4 LoadFoam(int2 p)
-{
-	if (any(p < 0) || any(p >= (int)GridSize))
-		return 0.0;
-	return PreviousFoam.Load(int3(p, 0));
-}
-
-/// Catmull-Rom weights of the four taps around fraction `f`.
-float4 CatmullRom(float f)
-{
-	float f2 = f * f;
-	float f3 = f2 * f;
-	return float4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0, -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
-}
-
-/**
- * Last frame's foam at fractional texel `q` (texel centres at integers), Catmull-Rom, held within the four texels around
- * q. A bilinear read every frame blurred the foam: resampled 60 times a second over its lifetime it spread into smears.
- * The clamp keeps the cubic from ringing (Selle et al. 2008 limit their MacCormack step the same way).
- */
-float SampleFoam(float2 q)
-{
-	float2 base = floor(q);
-	float2 f = q - base;
-	int2 i = int2(base);
-	float4 wx = CatmullRom(f.x);
-	float4 wy = CatmullRom(f.y);
-	// The 4 x 4 texels around q, offsets -1..2: each row whole (component writes read as maybe uninitialised, X4000).
-	float4 rows[4];
-	[unroll] for (int y = 0; y < 4; y++)
-		rows[y] = float4(LoadFoam(i + int2(-1, y - 1)).x, LoadFoam(i + int2(0, y - 1)).x, LoadFoam(i + int2(1, y - 1)).x, LoadFoam(i + int2(2, y - 1)).x);
-	float result = dot(wy, float4(dot(wx, rows[0]), dot(wx, rows[1]), dot(wx, rows[2]), dot(wx, rows[3])));
-	// The four texels around q: the middle of the block.
-	float2 lo = min(rows[1].yz, rows[2].yz);
-	float2 hi = max(rows[1].yz, rows[2].yz);
-	return clamp(result, min(lo.x, lo.y), max(hi.x, hi.y));
-}
-
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	if (any(id.xy >= GridSize))
 		return;
-	int2 p = int2(id.xy) + Shift;
 	float2 absXY = Origin + (float2(id.xy) + 0.5) * TexelSize;
 
 	float level = PBRWater::ShoreLevel(absXY);
@@ -115,27 +59,19 @@ float SampleFoam(float2 q)
 		return;
 	}
 
-	float dt = max(Dt, 0.0);
 	PBRWater::SurfShares shares = PBRWater::SurfSharesAt(ctx);
-	float2 velocity = 0.0;  // units/s, in the rest frame
-	float source = 0.0;
 	float trainLevel = 0.0;
 	float trainFoam = 0.0;
 	float4 spray = 0.0;
 	[branch] if (ctx.train > 0.0)
 	{
-		// The shore waves here and as they were last frame: their white water is the source, their displacement's rate
-		// is the part of the water's motion the drawn surface already carries.
-		PBRWater::ShoreTrain train = PBRWater::ShoreWaves(positionWS, ctx, TexelSize, dt > 0.0, true);
-		source = train.foam;
-		// What the surf simulation takes: the train's surface where it is drawn over this texel, and the white water its
-		// breakers carry there (the profile's line of it: with the whole churned roller, the inner surf stayed white all
-		// over). The simulation is a height field on the ground, the train a surface displaced from its rest position: the
-		// water drawn over this texel rests behind it by the crest's forward lean, x + D(x) = X, solved by fixed-point
-		// steps x = X - D(x). Read at the texel's own rest position instead, the simulation's bore ran a lean behind the
-		// train's crest, and the crest stepped back as the draws passed from the train to the simulation. (A breaker's lip
-		// is drawn over the simulation's water and stays out.) One step: the lean changes slowly along the wave, and a
-		// second step only refined it, for another evaluation of the train per cell.
+		// Only its displacement is wanted (the lean below): no foam profile.
+		PBRWater::ShoreTrain train = PBRWater::ShoreWaves(positionWS, ctx, TexelSize, false, false);
+		// What the surf simulation takes: the train's surface and breaker foam where it is drawn over this texel. The
+		// simulation is a height field on the ground and the train a surface displaced from its rest position: the
+		// water drawn over this texel rests behind it by the crest's forward lean, x + D(x) = X, solved by one
+		// fixed-point step x = X - D(x) (the lean changes slowly along the wave). A breaker's lip is drawn over the
+		// simulation's water and stays out.
 		PBRWater::ShoreTrain drawnHere = train;
 		[branch] if (any(abs(train.displacement.xy) > 0.01 * PBRWater::UnitsPerMetre))
 			drawnHere = PBRWater::ShoreWaves(float3(positionWS.xy - train.displacement.xy, positionWS.z), ctx, TexelSize, false, true);
@@ -148,14 +84,6 @@ float SampleFoam(float2 q)
 		bool wet = ctx.elevation < 0.0;
 		spray = float4(wet ? drawnHere.aeration * (1.0 - drawnHere.bore) : 0.0, wet ? drawnHere.aeration * drawnHere.bore : 0.0,
 			drawnHere.displacement.z, crestMetres);
-
-		// Shallow water: the water under a wave moves with it at u = c eta / (h + eta) along the travel.
-		float depth = max(ctx.depth, 0.05 * PBRWater::UnitsPerMetre);
-		float celerity = sqrt(PBRWater::GravityMetres * depth * PBRWater::MetresPerUnit) * PBRWater::UnitsPerMetre;
-		float eta = train.displacement.z;
-		velocity = dir * clamp(celerity * eta / max(depth + eta, 0.05 * PBRWater::UnitsPerMetre), -celerity, celerity);
-		if (dt > 0.0)
-			velocity -= (train.displacement.xy - train.previousDisplacement.xy) / dt;
 	}
 
 	// Each wave comes in a little turned of its own (its crests bend with the bed and the swell's spread), so neighbouring
@@ -165,25 +93,10 @@ float SampleFoam(float2 q)
 	float turn = 0.35 * (frac(sin(floor(cycles) * 12.9898 + dot(floor(coast / 2048.0), float2(4.1, 7.3))) * 43758.5453) - 0.5);
 	float2 travel = float2(dir.x * cos(turn) - dir.y * sin(turn), dir.x * sin(turn) + dir.y * cos(turn));
 
-	// Semi-Lagrangian: the water here came from upstream, and its foam with it. Up the beach there is none of this foam:
-	// the simulation carries its own.
-	float foam = 0.0;
-	[branch] if (ctx.elevation <= 0.0)
-	{
-		float2 upstream = float2(p) - velocity * (dt / TexelSize);
-		float carried = any(upstream != float2(p)) ? SampleFoam(upstream) : LoadFoam(p).x;
-		foam = carried * exp(-dt / max(PBRWater::Tune5.w, 0.1));
-	}
-
-	// The breakers make foam; what they leave behind is a share of it (Tune3.w).
-	foam = max(foam, source * PBRWater::Tune3.w);
-
 	// A non-finite value would spread over the grid: zeroed.
-	if (!(abs(foam) < 1e30))
-		foam = 0.0;
 	if (!(abs(trainLevel) < 1e30))
 		trainLevel = 0.0;
-	Foam[id.xy] = float4(saturate(foam), travel, trainFoam);
+	Foam[id.xy] = float4(0.0, travel, trainFoam);
 	Prep[id.xy] = float4(bed, shares.incoming, shares.outgoing, trainLevel);
 	SpraySource[id.xy] = all(abs(spray) < 1e30) ? spray : 0.0;
 }

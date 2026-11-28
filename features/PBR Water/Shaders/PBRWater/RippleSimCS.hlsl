@@ -1,31 +1,23 @@
-// ============================================================================
-// PBR Water - interactive ripple simulation.
+// ============================================================================ PBR Water - interactive ripple
+// simulation.
 //
 // A camera-centred heightfield integrated with the 2D wave equation (explicit leapfrog):
 //     h(t+1) = 2 h(t) - h(t-1) + C^2 * laplacian(h(t)) + nu * (laplacian(h(t)) - laplacian(h(t-1)))
-// with C = c dt / dx (stable for C^2 <= 0.5). The nu term is a viscous (Kelvin-Voigt) damping that grows
-// with k^2: it leaves the visible ripples alone but removes the grid-scale checkerboard noise that a
-// leapfrog scheme never dissipates by itself and that shows up as blocky "pixelated" ripples.
-// Bodies in the water (actor limbs, loose Havok objects) act as moving constraints that hold
-// the surface down under their footprint, which produces bow waves, wakes and rings without any
-// hand-authored ripple shapes.
+// with C = c dt / dx (stable for C^2 <= 0.5). The nu term is a viscous (Kelvin-Voigt) damping that grows with k^2: it
+// leaves the visible ripples alone and removes the grid-scale checkerboard a leapfrog scheme never dissipates. Bodies
+// in the water (actor limbs, loose Havok objects) hold the surface down under their footprint, which makes bow waves,
+// wakes and rings.
 //
-// The grid lives in the water's rest (Lagrangian) coordinates: sources are placed where the water under
-// a body rests and the shaders sample at undisplaced positions, so the rings ride the waves with
-// the water instead of sliding across them.
+// The grid lives in the water's rest (Lagrangian) coordinates, so the rings ride the waves with the water. It scrolls
+// with the camera in whole texels; `Shift` re-addresses the previous state so the simulation stays fixed in the world.
 //
-// The grid scrolls with the camera in whole texels; `Shift` re-addresses the previous state so the
-// simulation stays fixed in world space.
+// Ported from Crest 4 (wave-harmonic/crest, MIT) UpdateDynWaves.compute: - Terrain awareness: the water depth per texel
+// is the cell's still water level (CellLevels) minus the terrain height
+//    (t82). Dry texels hold 0 and shallow water damps the waves (depthMul).
+// - Non-finite results are zeroed, so one bad value can never spread through the grid.
 //
-// Ported from Crest 4 (wave-harmonic/crest, MIT) UpdateDynWaves.compute:
-//  - Terrain awareness: the water depth per texel is the still water level of the cell (CellLevels) minus the
-//    terrain height (PBR terrain texture t82). Dry texels hold 0 and shallow water damps the waves
-//    (depthMul), so ripples no longer propagate under beaches.
-//  - Non-finite results are zeroed, so one bad value can never spread through the whole grid.
-//
-// A channel carries silt: feet dragging over the bed in shallow water kick sediment up into a
-// cloud that spreads slowly (diffusion) and settles out over tens of seconds. The water shaders add it
-// to the turbidity near the bottom.
+// A channel carries silt: feet dragging over the bed in shallow water kick up a cloud that spreads slowly and settles
+// out over tens of seconds. The water shaders add it to the turbidity near the bottom.
 //
 // Output: x height, y previous height, w silt.
 // ============================================================================
@@ -52,11 +44,11 @@ cbuffer RippleSimCB : register(b0)
 	float TexelSize;      // units
 	float StepTime;       // s
 	float Pad0;
-	int2 OriginTexel;     // grid corner in absolute texels (the grid being written)
-	int2 CellBase;        // absolute cell of CellLevels entry 0
-	float4 Terrain0;      // xy terrain uv scale, zw offset (PBRWater::Terrain0)
-	float4 Terrain1;      // x terrain z at texel value 0, y at 1, z enabled (water levels and terrain known), w unused
-	float4 CellLevels[7]; // still water level (absolute z) of the 5 x 5 cells around the eye, at i + 5 j; < -1e8: no water
+	int2 OriginTexel;      // grid corner in absolute texels (the grid being written)
+	int2 CellBase;         // absolute cell of CellLevels entry 0
+	float4 Terrain0;       // xy terrain uv scale, zw offset (PBRWater::Terrain0)
+	float4 Terrain1;       // x terrain z at texel value 0, y at 1, z enabled (water levels and terrain known), w unused
+	float4 CellLevels[7];  // still water level (absolute z) of the 5 x 5 cells around the eye, at i + 5 j; < -1e8: no water
 };
 
 Texture2D<float4> PreviousState : register(t0);
@@ -88,9 +80,9 @@ float WaterDepth(float2 absXY)
 	if (any(cell < 0) || any(cell >= 5))
 		return 1e6;
 	int index = cell.x + 5 * cell.y;
-	// A cell without cell water can still hold placed water (rivers, streams are often separate water meshes): unknown,
-	// so deep. The level is also never taken below the water at the eye (entry 12, the eye's own cell, from the water
-	// the eye is at): placed water above a cell's own level would otherwise read as dry land and lose its ripples.
+	// A cell without cell water can still hold placed water (rivers and streams are often separate meshes): unknown, so
+	// deep. The level is never taken below the water at the eye (entry 12, the eye's own cell), so placed water above a
+	// cell's own level keeps its ripples.
 	float level = CellLevels[index >> 2][index & 3];
 	float eyeLevel = CellLevels[3].x;
 	if (level < -1e8 && eyeLevel < -1e8)

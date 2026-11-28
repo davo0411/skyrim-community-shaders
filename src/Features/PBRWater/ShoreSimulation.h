@@ -3,14 +3,13 @@
 #include "Buffer.h"
 
 /**
- * @brief The shore's camera-centred simulations (GPU): the surf and swash, the foam the surf leaves on the water, and
- * how wet the shore is.
+ * @brief The shore's camera-centred simulations (GPU): the surf and swash, and how wet the shore is.
  *
  * The shore waves come in as an analytic train (PBRWater.hlsli ShoreWaves). In the inner surf each broken wave is handed
  * to a shallow water simulation (SwashStepCS.hlsl), which carries it on as a bore and runs its water up the beach and
  * back; the draws pass from the train's surface to the simulation's over a fixed band of depths (PBRWater::ComposeSurf).
- * ShoreFoamCS.hlsl lays out what the waves bring each frame and carries the foam they leave on the water; SwashOutCS.hlsl
- * packs both for the draws. A coarser grid (ShoreSimCS.hlsl) keeps how far up the shore it is still wet, which the lit
+ * ShoreFoamCS.hlsl lays out what the waves bring each frame (and where they throw spray); SwashOutCS.hlsl packs the
+ * simulation for the draws. A coarser grid (ShoreSimCS.hlsl) keeps how far up the shore it is still wet, which the lit
  * terrain and objects read (t104 through SharedData's SwashGrid). All grids scroll with the camera in whole texels, so
  * no state is ever resampled.
  */
@@ -19,12 +18,8 @@ class ShoreSimulation
 public:
 	static constexpr uint32_t GridSize = 512;
 	/// The surf simulation and the surf's foam: a finer grid around the camera, 175 m across at every quality.
-	static constexpr float FoamExtent = 12288.0f;    ///< units
+	static constexpr float FoamExtent = 12288.0f;      ///< units
 	static constexpr uint32_t MaxFoamGridSize = 1024;  ///< High: 17 cm cells
-	/// Surf simulation quality: 0 Low (512 cells of 34 cm), 1 High (1024 cells of 17 cm). The step's time scales with the
-	/// cell, so Low runs half the steps on a quarter of the cells.
-	static constexpr uint32_t QualityCount = 2;
-
 	struct Settings
 	{
 		float extent = 32768.0f;  ///< world units covered by the grid
@@ -36,8 +31,9 @@ public:
 	void Reset();
 
 	/**
-	 * @brief Render thread: the surf simulation's resolution (QualityCount). A change recreates its grids, which start
-	 * over at rest.
+	 * @brief Render thread: the surf simulation's resolution, 0 Low (512 cells of 34 cm) or 1 High (1024 cells of 17 cm;
+	 * the step's time scales with the cell, so Low runs half the steps on a quarter of the cells). A change recreates its
+	 * grids, which start over at rest.
 	 */
 	void SetQuality(uint32_t quality);
 	/** @brief Cells across the surf simulation's grid at the current quality. */
@@ -53,7 +49,7 @@ public:
 	void Update(float cameraX, float cameraY, float dt, const Settings& settings);
 
 	/**
-	 * @brief Render thread: steps the surf's foam (made by the breakers, carried by the water, decaying) and the surf
+	 * @brief Render thread: lays out what the waves bring (ShoreFoamCS) and steps the surf
 	 * simulation (SwashStepCS: the shallow water equations through the inner surf and up the beach, fed by the train's
 	 * waves). Bindings as for Update; run before it, which reads the simulation.
 	 */
@@ -70,7 +66,7 @@ public:
 	float GetExtent() const { return texelSize * GridSize; }
 	bool IsReady() const { return ready && hasOrigin; }
 
-	/** @brief x the surf's foam, y the surf simulation's surface (units above the still water), z its depth (units), w its foam. */
+	/** @brief x unused, y the surf simulation's surface (units above the still water), z its depth (units), w its foam. */
 	ID3D11ShaderResourceView* GetFoamSRV() const { return foamReady ? foamPair->srv.get() : nullptr; }
 	/**
 	 * @brief The draws' blend of the two output slices (PBRWater::SurfSample): newest slice * 2 + its weight (0.5 or 1; the
@@ -124,8 +120,7 @@ private:
 	bool hasOrigin = false;
 	bool ready = false;
 
-	std::unique_ptr<Texture2D> foamPair;     ///< two slices, ping-pong, read by the draws (layout owned by SwashOutCS)
-	winrt::com_ptr<ID3D11ShaderResourceView> foamSliceSRV[2];
+	std::unique_ptr<Texture2D> foamPair;  ///< two slices, ping-pong, read by the draws (layout owned by SwashOutCS)
 	winrt::com_ptr<ID3D11UnorderedAccessView> foamSliceUAV[2];
 	/** @brief Render thread: (re)creates foamPair and its slice views at foamGridSize. */
 	void CreateFoamPair();
@@ -133,7 +128,7 @@ private:
 	float foamPendingDt = 0.0f;  ///< time since the last update (s)
 	float foamBlend = 1.0f;      ///< weight of the newest slice
 	int32_t foamShiftX = 0, foamShiftY = 0;
-	std::unique_ptr<Texture2D> stage;        ///< ShoreFoamCS: its foam, the waves' direction and the white water they carry
+	std::unique_ptr<Texture2D> stage;        ///< ShoreFoamCS: the waves' direction and the white water they carry
 	std::unique_ptr<Texture2D> prep;         ///< ShoreFoamCS: the bed, the hand-over's shares and the train's level
 	std::unique_ptr<Texture2D> surf;         ///< the surf simulation's state (layout owned by SwashStepCS)
 	std::unique_ptr<Texture2D> surfMoved;    ///< the state between a step's two passes: new velocities, old depths

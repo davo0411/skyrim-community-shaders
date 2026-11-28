@@ -18,9 +18,8 @@ namespace
 	/// Within this of a level a mesh or a cell stands at it (units).
 	constexpr float LevelTolerance = 4.0f;
 	constexpr float CellUnits = 4096.0f;
-	constexpr UINT VertexStride = 72;  ///< PBRWaterTess::Vertex
-	/// Patch vertices: (Subdivision + 1)^2 a patch.
-	constexpr UINT PatchVertexCount = (ProjectedGrid::Subdivision + 1) * (ProjectedGrid::Subdivision + 1);
+	constexpr UINT VertexStride = 72;   ///< PBRWaterTess::Vertex
+	constexpr UINT SeaLevelsSlot = 28;  ///< PBRWater.hlsli SeaLevels
 	/// The args buffer: per level the patches' draw arguments (16 bytes), then per level their dispatch arguments (12 bytes).
 	constexpr UINT ArgsBytes = ProjectedGrid::MaxLevels * 16 + ProjectedGrid::MaxLevels * 12;
 
@@ -29,6 +28,7 @@ namespace
 	{
 		float clipToWorld[4][4];
 		uint32_t pass[4];
+		float4 cells;
 	};
 
 	void Transform(const float m[4][4], const float v[4], float out[4])
@@ -76,12 +76,12 @@ namespace
 		return buffer;
 	}
 
-	bool CreateRaw(UINT bytes, UINT misc, const char* name, winrt::com_ptr<ID3D11Buffer>& buffer, winrt::com_ptr<ID3D11UnorderedAccessView>& uav)
+	bool CreateRaw(UINT bytes, UINT misc, const char* name, winrt::com_ptr<ID3D11Buffer>& buffer, winrt::com_ptr<ID3D11UnorderedAccessView>& uav, UINT bind = 0)
 	{
 		D3D11_BUFFER_DESC desc{};
 		desc.ByteWidth = bytes;
 		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | bind;
 		desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS | misc;
 		auto device = globals::d3d::device;
 		if (FAILED(device->CreateBuffer(&desc, nullptr, buffer.put())))
@@ -151,9 +151,11 @@ void ProjectedGrid::CreateBuffers()
 	vertices = CreateStructured(VertexStride, MaxVertices, true, "PBRWater::ProjectedGridVertices");
 	flags = CreateStructured(sizeof(uint32_t), MaxVertices, false, "PBRWater::ProjectedGridFlags");
 	patches = CreateStructured(sizeof(uint32_t), MaxPatches, false, "PBRWater::ProjectedGridPatches");
-	patchVertices = CreateStructured(VertexStride, MaxPatches * PatchVertexCount, true, "PBRWater::ProjectedGridPatchVertices");
+	patchVertices = CreateStructured(VertexStride, MaxPatchVertices, true, "PBRWater::ProjectedGridPatchVertices");
 	bool ok = CreateRaw(MaxLevels * 4, 0, "PBRWater::ProjectedGridCounters", counters, countersUAV);
 	ok = ok && CreateRaw(ArgsBytes, D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS, "PBRWater::ProjectedGridArgs", args, argsUAV);
+	// The cells' index buffer, six indices a cell (FlagCS): the vertex shader runs about twice per vertex, not six times.
+	ok = ok && CreateRaw(MaxVertices * 6 * sizeof(uint32_t), 0, "PBRWater::ProjectedGridCellIndices", cellIndices, cellIndicesUAV, D3D11_BIND_INDEX_BUFFER);
 
 	if (!ok) {
 		gridCS = nullptr;
@@ -412,7 +414,16 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 	std::array<GpuLevel, MaxLevels> gpu{};
 	uint32_t vertexCursor = 0;
 	uint32_t cellCursor = 0;
-	const uint32_t patchesEach = MaxPatches / static_cast<uint32_t>(layouts.size());
+	// A patch's cells never smaller than 2 pixels (one pixel quad a vertex): finer than that, every quad along a triangle
+	// edge is shaded once more for each triangle it touches. Cells too small to split once take no patches. The patches
+	// are packed at their own size (PBRWaterGrid::PatchVertex), so coarser ones fit more of them.
+	const uint32_t subdivision = static_cast<uint32_t>(std::clamp(std::floor(cell * scale / 2.0f), 1.0f, static_cast<float>(Subdivision)));
+	// The sea's breakers take the patches; each lake keeps an eighth of them.
+	const uint32_t patchCapacity = std::min(MaxPatches, MaxPatchVertices / ((subdivision + 1) * (subdivision + 1)));
+	const uint32_t lakeShare = patchCapacity / 8;
+	const uint32_t lakeLevels = static_cast<uint32_t>(std::count_if(layouts.begin(), layouts.end(), [&](const Layout& l) { return l.levelIndex != seaIndex; }));
+	const uint32_t seaShare = patchCapacity - std::min(lakeLevels, 7u) * lakeShare;
+	uint32_t patchCursor = 0;
 	for (const auto& layout : layouts) {
 		const uint32_t columns = static_cast<uint32_t>(std::clamp(std::floor(layout.columns / scale), 1.0f, 4096.0f));
 		const uint32_t rows = static_cast<uint32_t>(std::clamp(std::floor(layout.rows / scale), 1.0f, 4096.0f));
@@ -421,16 +432,14 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 			break;
 		const auto& level = levels[layout.levelIndex];
 		const uint32_t slot = static_cast<uint32_t>(built.size());
-		// A patch's cells never smaller than 2 pixels (one pixel quad a vertex): finer than that, every quad along a triangle
-		// edge is shaded once more for each triangle it touches. Cells too small to split once take no patches.
-		const uint32_t subdivision = static_cast<uint32_t>(std::clamp(std::floor(cell * scale / 2.0f), 1.0f, static_cast<float>(Subdivision)));
 		BuiltLevel b;
 		b.z = level.z;
 		b.columns = columns;
 		b.rows = rows;
 		b.firstVertex = vertexCursor;
 		b.firstCell = cellCursor;
-		b.firstPatch = slot * patchesEach;
+		const uint32_t patchesEach = layout.levelIndex == seaIndex ? seaShare : lakeShare;
+		b.firstPatch = patchCursor;
 		b.subdivision = subdivision;
 		built.push_back(b);
 
@@ -449,6 +458,7 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 		g.texCoordV = level.texCoordV;
 		vertexCursor += count;
 		cellCursor += columns * rows;
+		patchCursor += patchesEach;
 	}
 	if (built.empty())
 		return;
@@ -461,10 +471,14 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 	GridCB data{};
 	std::memcpy(data.clipToWorld, inverse, sizeof(inverse));
 	data.pass[1] = static_cast<uint32_t>(built.size());
+	data.cells = cellsMapping;
 	ID3D11Buffer* cb = constants->CB();
 	context->CSSetConstantBuffers(0, 1, &cb);
 	ID3D11ShaderResourceView* levelsView = levelsBuffer->srv.get();
 	context->CSSetShaderResources(0, 1, &levelsView);
+	// The cells, for which grid cells any water shows in (FlagCS).
+	ID3D11ShaderResourceView* cellsView = cellsSRV.get();
+	context->CSSetShaderResources(SeaLevelsSlot, 1, &cellsView);
 	ID3D11UnorderedAccessView* uavs[5] = { vertices->uav.get(), flags->uav.get(), patches->uav.get(), countersUAV.get(), patchVertices->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
 
@@ -477,11 +491,15 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 		pass(slot);
 		context->Dispatch((built[slot].columns + 1 + 7) / 8, (built[slot].rows + 1 + 7) / 8, 1);
 	}
+	ID3D11UnorderedAccessView* indicesView = cellIndicesUAV.get();
+	context->CSSetUnorderedAccessViews(6, 1, &indicesView, nullptr);
 	context->CSSetShader(flagCS.get(), nullptr, 0);
 	for (uint32_t slot = 0; slot < built.size(); ++slot) {
 		pass(slot);
 		context->Dispatch((built[slot].columns + 7) / 8, (built[slot].rows + 7) / 8, 1);
 	}
+	ID3D11UnorderedAccessView* noIndices = nullptr;
+	context->CSSetUnorderedAccessViews(6, 1, &noIndices, nullptr);
 	// The patch counts into the arguments, then the arguments off the compute stage: the patches' dispatches read them.
 	ID3D11UnorderedAccessView* argsView = argsUAV.get();
 	context->CSSetUnorderedAccessViews(5, 1, &argsView, nullptr);
@@ -499,13 +517,14 @@ void ProjectedGrid::Build(const FrameParams& p, uint32_t frame)
 	context->CSSetUnorderedAccessViews(0, 5, nullUavs, nullptr);
 	ID3D11ShaderResourceView* nullSrv = nullptr;
 	context->CSSetShaderResources(0, 1, &nullSrv);
+	context->CSSetShaderResources(SeaLevelsSlot, 1, &nullSrv);
 	ID3D11Buffer* nullCb = nullptr;
 	context->CSSetConstantBuffers(0, 1, &nullCb);
 	context->CSSetShader(nullptr, nullptr, 0);
 	builtFrame = frame;
 }
 
-void ProjectedGrid::Draw(uint32_t vertexCount, const ID3D11ShaderResourceView* vertexView, uint32_t argsOffset) const
+void ProjectedGrid::Draw(uint32_t count, uint32_t firstIndex, const ID3D11ShaderResourceView* vertexView, uint32_t argsOffset) const
 {
 	auto context = globals::d3d::context;
 	// In the tessellator's vertex slot (Water.hlsl TessellatedVertices): the grid's vertices are the same struct.
@@ -530,10 +549,17 @@ void ProjectedGrid::Draw(uint32_t vertexCount, const ID3D11ShaderResourceView* v
 	if (state)
 		context->RSSetState(state.get());
 
-	if (vertexCount)
-		context->Draw(vertexCount, 0);
-	else
+	if (count) {
+		winrt::com_ptr<ID3D11Buffer> engineIndices;
+		DXGI_FORMAT engineFormat = DXGI_FORMAT_UNKNOWN;
+		UINT engineOffset = 0;
+		context->IAGetIndexBuffer(engineIndices.put(), &engineFormat, &engineOffset);
+		context->IASetIndexBuffer(cellIndices.get(), DXGI_FORMAT_R32_UINT, 0);
+		context->DrawIndexed(count, firstIndex, 0);
+		context->IASetIndexBuffer(engineIndices.get(), engineFormat, engineOffset);
+	} else {
 		context->DrawInstancedIndirect(args.get(), argsOffset);
+	}
 
 	context->RSSetState(engineState.get());
 	context->IASetPrimitiveTopology(topology);
@@ -544,11 +570,11 @@ void ProjectedGrid::Draw(uint32_t vertexCount, const ID3D11ShaderResourceView* v
 void ProjectedGrid::DrawCells(uint32_t slot) const
 {
 	if (slot < built.size())
-		Draw(built[slot].columns * built[slot].rows * 6, vertices->srv.get(), 0);
+		Draw(built[slot].columns * built[slot].rows * 6, built[slot].firstCell * 6, vertices->srv.get(), 0);
 }
 
 void ProjectedGrid::DrawPatches(uint32_t slot) const
 {
 	if (slot < built.size())
-		Draw(0, patchVertices->srv.get(), slot * 16);
+		Draw(0, 0, patchVertices->srv.get(), slot * 16);
 }

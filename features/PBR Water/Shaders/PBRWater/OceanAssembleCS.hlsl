@@ -1,5 +1,5 @@
-// ============================================================================
-// PBR Water - FFT ocean, step 3: unpack the transforms into the textures the water shaders sample.
+// ============================================================================ PBR Water - FFT ocean, step 3: unpack
+// the transforms into the textures the water shaders sample.
 //
 //   Displacement : xyz Lagrangian displacement (units), w dDx/dy
 //   Derivatives  : xy height slopes dDz/dx, dDz/dy; zw compression dDx/dx, dDy/dy
@@ -7,18 +7,14 @@
 //                  away)
 //
 //   Foam         : one persistent value per cascade texel, accumulated from the Jacobian of the cascade's own horizontal
-//                  displacement. A direct port of CS_AssembleMaps' foam in GarrettGunnell/Water (Acerola,
+//                  displacement. A port of CS_AssembleMaps' foam in GarrettGunnell/Water (Acerola,
 //                  https://github.com/GarrettGunnell/Water, MIT License, Copyright (c) 2023 Garrett Gunnell):
 //                      foam *= exp(-decay); foam = saturate(foam);
 //                      biased = max(0, -(jacobian - bias)); if (biased > threshold) foam += add * biased;
-//                  The rates are per 1/60 s there (one step per frame); here they scale by the frame time, so 60 fps is
-//                  identical and a paused game (frame time 0) neither grows nor decays the foam.
-//                  It drifts: the wind drags the surface water along at a few percent of its speed, and the foam with it
-//                  while the crests that made it run on. The field slides over the cascade by whole texels as the drift
-//                  adds up (FoamShift): world texel id holds foam texel id - floor(shift), so each thread still owns one
-//                  texel and nothing is resampled (no blur), only moved. The foam the pixels read (Surface.w) is then taken
-//                  between texels at the drift's fraction (FOAM_DRIFT, a second dispatch once the field is updated): the
-//                  longest cascade's texels are metres wide, and whole-texel steps were seen as jumps.
+//                  The rates are per 1/60 s and scale by the frame time, so a paused game neither grows nor decays it.
+//                  It drifts with the wind-driven surface water: the field slides over the cascade by whole texels as the
+//                  drift adds up (FoamShift), so nothing is resampled, and the foam the pixels read (Surface.w) is taken
+//                  between texels at the drift's fraction (FOAM_DRIFT, a second dispatch).
 // ============================================================================
 
 #include "PBRWater/OceanSpectrum.hlsli"
@@ -27,7 +23,7 @@ Texture2DArray<float4> Spatial : register(t0);  // after the inverse FFT, two sl
 
 RWTexture2DArray<float4> Displacement : register(u0);
 RWTexture2DArray<float4> Derivatives : register(u1);
-RWTexture2DArray<float4> Surface : register(u2);  // x height (units), y shear dDx/dy, z |slope|^2 (LEAN), w foam: the pixels' one read
+RWTexture2DArray<float4> Surface : register(u2);   // x height (units), y shear dDx/dy, z |slope|^2 (LEAN), w foam: the pixels' one read
 RWTexture2DArray<float> FoamField : register(u3);  // persistent: read, decayed and added to in place
 
 #if !defined(FOAM_DRIFT)

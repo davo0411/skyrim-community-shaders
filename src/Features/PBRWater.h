@@ -1,13 +1,13 @@
 #pragma once
 
 #include "Feature.h"
-#include "PBRWater/BisectionTessellator.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
 #include "PBRWater/KelvinWake.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/ProjectedGrid.h"
 #include "PBRWater/RippleSimulation.h"
+#include "PBRWater/RiverLattice.h"
 #include "PBRWater/ShoreSimulation.h"
 #include "PBRWater/SprayParticles.h"
 #include "PBRWater/WaterEnvironment.h"
@@ -49,8 +49,9 @@ struct PBRWater : Feature
 
 	/**
 	 * @brief User settings. Physics (gravity, the index of refraction, JONSWAP, Miche and McCowan limits, the foam's
-	 * measured albedo...) stays in the code; everything here is a guess, an artistic scale or a quality knob. Lengths
-	 * are metres unless the comment says units (1 m = 70 units). The defaults are what the water always looked like.
+	 *   measured
+	 * albedo...) stays in the code; everything here is a guess, an artistic scale or a quality knob. Lengths are metres
+	 * unless the comment says units (1 m = 70 units).
 	 */
 	struct Settings
 	{
@@ -76,12 +77,9 @@ struct PBRWater : Feature
 		float ShoreLongestPeriod = 3.5f;
 		float ShoreTrainCycles = 7.0f;    ///< how many waves out from the shore the train reaches
 		float ShoreWaveVariation = 1.0f;  ///< how much one wave's height varies from the next (0 all alike, 1 as random waves do)
-		float ShoreResidualFoam = 0.5f;   ///< share of the breakers' white water they leave behind on the water (ShoreFoamCS)
-		float ShoreFoamLifetime = 12.0f;  ///< s: how long the foam the surf leaves on the water takes to fade (e-folding)
 		float ShoreCrestWobble = 0.35f;   ///< how far the crests bend and drift along the coast (waves)
 		float ShoreBoreWhelps = 0.6f;     ///< height of the trailing crests (whelps) of weak bores, relative to the bore
 		float ShoreCurl = 1.0f;           ///< how far plunging breakers curl over (0: lip only)
-		float ShoreCurlDetail = 2.0f;     ///< tessellation multiplier where shore waves can curl
 		float SwashLinger = 2.0f;         ///< backwash duration over the uprush's
 		float SwashChurnHeight = 0.05f;   ///< m: the tallest the swash's churning lumps stand
 		float SwashChurnDepth = 0.35f;    ///< the lumps' height as a share of the water's depth
@@ -127,23 +125,13 @@ struct PBRWater : Feature
 		float ScatteringAnisotropy = 0.6f;    ///< Henyey-Greenstein g of the particles in the water
 		float DownwellingAttenuation = 1.0f;  ///< scales how fast light fades on its way down
 
-		// Foam
-		bool EnableFoam = true;         ///< white water: the sea's, the breakers' and the surf's, in the pixel shader and the foam mips
-		float FoamAmount = 1.0f;        ///< multiplier on the foam the open sea's crests add (FoamAdd), and on the shore's foam coverages (Foam1.z)
-		float FoamBias = 0.85f;         ///< the Jacobian below which a texel foams; also moves the breakers' fold and scales the shore's foam (Foam1.z)
-		float FoamThreshold = 0.0f;     ///< foam is added only above this biased Jacobian
-		float FoamAdd = 0.1f;           ///< foam added per 1/60 s per unit of biased Jacobian
-		float FoamDecayRate = 0.0175f;  ///< foam decays by exp(-rate) per 1/60 s
-		float FoamOffset0 = 0.04f;      ///< foam offset of each cascade, longest waves first
-		float FoamOffset1 = -0.04f;
-		float FoamOffset2 = -0.46f;
-		float FoamOffset3 = -0.38f;
-		float FoamCascadeWeightFull = 1.0f;  ///< a cascade counts fully in the foam from this share of its amplitude
-		float FoamDepthFalloff = 1.0f;       ///< exponent of the foam's fade with distance
-		float FoamFadeDistance = 1000.0f;    ///< m: distance at which all foam has faded out
-		float FoamRoughnessModifier = 0.0f;  ///< roughness added per unit of foam
-		float FoamFeather = 0.12f;           ///< how soft the edge of the foam pattern is
-		float FoamBubbleSize = 0.03f;        ///< m: the bubbles of the foam pattern (surf foam is a microfoam of centimetre bubbles)
+		// Foam: one coverage (the open sea's whitecaps, the breakers' white water, the surf simulation's) drawn with one pattern
+		bool EnableFoam = true;            ///< white water: the sea's, the breakers' and the surf's, in the pixel shader and the foam mips
+		float FoamAmount = 1.0f;           ///< multiplier on the foam the open sea's crests add, and on the shore's foam coverages (Foam1.z)
+		float FoamBias = 0.85f;            ///< the Jacobian below which the open sea foams; also scales the shore's foam (Foam1.z)
+		float FoamDecayRate = 0.0175f;     ///< the open sea's foam decays by exp(-rate) per 1/60 s
+		float FoamFadeDistance = 1000.0f;  ///< m: distance at which all foam has faded out
+		float FoamBubbleSize = 0.03f;      ///< m: the bubbles of the foam pattern (surf foam is a microfoam of centimetre bubbles)
 
 		// Spray (SprayParticles)
 		bool EnableSpray = true;
@@ -154,14 +142,14 @@ struct PBRWater : Feature
 
 		// Ripples
 		bool EnableRipples = true;
-		bool EnableWakes = true;     ///< Kelvin wakes behind the actors moving through the water (PBRWater/KelvinWake.h)
-		bool UnderwaterVolume = true;  ///< the water around the camera under the surface absorbs and scatters as the surface's does, in place of the game's fog
-		int LightShaftSamples = 12;    ///< steps of the underwater light shafts' march (0: no shafts)
+		bool EnableWakes = true;         ///< Kelvin wakes behind the actors moving through the water (PBRWater/KelvinWake.h)
+		bool UnderwaterVolume = true;    ///< the water around the camera under the surface absorbs and scatters as the surface's does, in place of the game's fog
+		int LightShaftSamples = 12;      ///< steps of the underwater light shafts' march (0: no shafts)
 		bool PhysicalBodyColour = true;  ///< the deep water's colour from its absorption and scattering (Optics.hlsli DeepReflectance), not the water form's
-		float LightShaftFocus = 1.0f;  ///< how strongly the waves focus the shafts (caustic streaks)
-		float WakeStrength = 1.0f;   ///< scales their height
-		float RippleExtent = 64.0f;  ///< m covered around the camera
-		float RippleHeight = 0.12f;  ///< m
+		float LightShaftFocus = 1.0f;    ///< how strongly the waves focus the shafts (caustic streaks)
+		float WakeStrength = 1.0f;       ///< scales their height
+		float RippleExtent = 64.0f;      ///< m covered around the camera
+		float RippleHeight = 0.12f;      ///< m
 		float RippleNormalStrength = 1.0f;
 		float RippleHalfLife = 1.5f;       ///< s
 		float RippleHorizDisplace = 3.0f;  ///< horizontal displacement strength (Crest 3)
@@ -178,23 +166,16 @@ struct PBRWater : Feature
 		float FloatingResponse = 1.0f;  ///< scales how much the hulls move
 
 		// Performance
-		bool EnableTessellation = true;
-		bool DeferredSurface = true;             ///< shade the tessellated water once per pixel (PBRWater/Deferred.hlsli)
+		bool EnableTessellation = true;          ///< draw the sea and the lakes as projected grids (PBRWater/ProjectedGrid.h); off: the engine's meshes
+		bool DeferredSurface = true;             ///< shade the grids once per pixel (PBRWater/Deferred.hlsli)
 		bool DistantHalfRate = true;             ///< shade the deferred surface's distant tiles at a quarter of the pixels (DeferredFar.hlsl)
 		float DistantHalfRateDistance = 60.0f;   ///< metres: where the distant tiles start
-		float TessellationTriangleSize = 12.0f;  ///< target triangle edge on screen (pixels)
-		bool ProjectedGrid = true;               ///< draw the sea as one grid cast from the screen onto its plane (PBRWater/ProjectedGrid.h)
 		float GridCellSize = 8.0f;               ///< the projected grid's cell on screen (pixels)
-		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
-		bool AdaptiveTessellation = true;        ///< coarsen the open water's mesh where the waves leave little to resolve (PBRWater::AdaptiveCoarsening)
-		float TessellationErrorPixels = 0.5f;    ///< the height error the adaptive tessellation allows (pixels)
-		float TessellationMaxCoarsening = 8.0f;  ///< the most it coarsens the open water's mesh
-		float DisplacementFadeStart = 16384.0f;  ///< units
+		float DisplacementFadeStart = 16384.0f;  ///< units: the waves on the engine's meshes (rivers, interiors) fade out from here
 		float DisplacementFadeEnd = 32768.0f;
 		int WaveResolution = 1;           ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
 		bool CheapOffscreenWater = true;  ///< reflections, cubemaps and the map draw the water without shore waves, foam, clarity or lights
 		int EngineReflections = 1;        ///< the engine's water reflection cubemap: 0 full scene, 1 sky only, 2 off (needs Dynamic Cubemaps, no Cloud Shadows)
-		float TriangleBudget = 1000.0f;   ///< thousands of tessellated triangles a frame before the target size grows (0: none)
 		bool LongWaveHalfRate = false;    ///< the two longest cascades' FFTs alternate frames
 
 		// Debug
@@ -258,7 +239,7 @@ struct PBRWater : Feature
 		float4 Terrain0;
 		float4 Terrain1;
 		float4 Shore0;  // x shore waves on (field ready), y blend from the previous shore field (0) to the current one (1), w largest run-up (units)
-		float4 Shore1;  // x crest wobble (waves), y curl tessellation multiplier, z swell Hs (units), w open-sea wind sea Hs (units)
+		float4 Shore1;  // x crest wobble (waves), y unused, z swell Hs (units), w open-sea wind sea Hs (units)
 		float4 Ripple0;
 		float4 Ripple1;
 		float4 Ripple2;
@@ -280,11 +261,9 @@ struct PBRWater : Feature
 		float4 Shore6;                                // xy previous shore field corner (absolute units), zw 1 / its extent (units)
 		float4 Grid0;                                 // xy loaded cell grid min corner, zw max corner (absolute units); z <= x: none
 		float4 Noise0;                                // xy surface noise grid corner (absolute units), z 1 / extent (units), w baked this frame
-		float4 Tune1;                                 // foam offset of each cascade
-		float4 Tune2;                                 // x foam cascade weight, y foam distance falloff exponent, z foam fade distance (m), w foam roughness modifier
-		float4 Tune3;                                 // x ripple horizontal displacement, y its clamp (texels), z shore train reach (waves), w surf residual foam
+		float4 Tune3;                                 // x ripple horizontal displacement, y its clamp (texels), z shore train reach (waves), w unused
 		float4 Tune4;                                 // x shore wave height variation, y mean crest length (deep wavelengths), z detail normal strength calm, w gale
-		float4 Tune5;                                 // x point light emitter radius (units), y foam feather, z foam bubble size (m), w shore foam lifetime (s)
+		float4 Tune5;                                 // x point light emitter radius (units), y unused, z foam bubble size (m), w unused
 		float4 Foam2;                                 // xy shore foam grid corner (absolute units), z 1 / extent, w enabled
 		float4 SunMap0;                               // xy wave heightfield centre (absolute units), z 1 / extent, w drawn this frame
 		float4 SunMap1;                               // x its reference level (absolute z), y height range either side (units), zw unused
@@ -292,7 +271,6 @@ struct PBRWater : Feature
 		float4 Proj0;                                 // a projected grid's draw: x columns, y its level (absolute z), z cells listed, w its first vertex
 		float4 Proj1;                                 // the cells (SeaLevels): xy first cell, zw cells across
 		float4 Proj2;                                 // x its first cell, y its first patch, z a patch's cells across, w unused
-		float4 Proj3;                                 // unused
 		float4 WakeInfo;                              // x Kelvin wakes this frame
 		float4 Wake0[PBRWaterWake::MaxSources];       // per wake: xy absolute position (units), z k0 = g / U^2 (1/unit), w peak height (units)
 		float4 Wake1[PBRWaterWake::MaxSources];       // xy heading, zw unused
@@ -366,7 +344,7 @@ struct PBRWater : Feature
 	/**
 	 * The engine's "camera under water" setter. Besides TESWaterSystem::playerUnderwater it writes a global copy, from
 	 * which every water shader property takes its kUnderwater flag (the underwater technique). The engine also calls it
-	 * from the player: touching the water with the camera above drew the surface as seen from below, a mirror.
+	 * from the player, so the camera's own position against the displaced surface decides (UpdateCameraWater).
 	 */
 	/** @brief Trims or skips the engine's water reflection cubemap render (Settings::EngineReflections). */
 	struct TESWaterReflections_UpdateActor
@@ -426,7 +404,15 @@ private:
 	uint32_t WaveResolutionSize() const;
 	/** @brief Render thread: the SRVs of slots t80-t96. */
 	void GatherWaterSRVs(const GpuData& d, ID3D11ShaderResourceView* (&srvs)[WaterSRVCount]) const;
-	/// False for a water tile wholly outside the waves' reach: flat, so it needs no tessellation.
+	/** @brief Render thread: `d` into gpuBuffer (b7 of the compute passes and the wave grids), unless it holds it already. */
+	void UploadWaterConstants(const GpuData& d);
+	/** @brief Render thread: a compute pass that evaluates the waves gets `constants` (b7), the frame's (b12), `srvs` (t80-t97) and the samplers. */
+	void BindWaterCompute(ID3D11Buffer* constants, ID3D11ShaderResourceView* const* srvs);
+	/** @brief Render thread: takes them off the compute stage again. */
+	void UnbindWaterCompute();
+	GpuData uploadedWaterData{};  ///< what gpuBuffer holds (UploadWaterConstants)
+	bool uploadedWaterValid = false;
+	/// False for a water tile wholly outside the waves' reach: flat, so it needs no wave program.
 	bool WavesReach(const RE::NiAVObject& geometry) const;
 	/** @brief One shore field on the GPU. */
 	struct ShoreTextures
@@ -442,7 +428,7 @@ private:
 	/** @brief Main thread: a new shore field takes over from the current one over a few seconds. */
 	void UpdateShoreField(float dt, bool enabled);
 	/** @brief The settings that change the shore waves' timing or shape, in a fixed order (see UpdateShoreReset). */
-	std::array<float, 24> ShoreSignature() const;
+	std::array<float, 21> ShoreSignature() const;
 	/**
 	 * @brief Main thread: after a shore or sea-state setting changes and then holds still for a moment, restarts the shore
 	 * train from the new settings: true when this frame resets it.
@@ -471,18 +457,16 @@ private:
 	void UpdateSurfaceNoise();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
-	std::unique_ptr<ConstantBuffer> drawBuffer;           ///< this frame's constants for the tessellated mesh (Tess0.x = 1: BisectionTessellator)
-	std::unique_ptr<ConstantBuffer> flatDrawBuffer;       ///< for the untessellated draws (Tess0.x = 0)
-	std::unique_ptr<ConstantBuffer> offscreenDrawBuffer;  ///< for the untessellated draws of other views (reflections, cubemaps, the map) with CheapOffscreenWater: Tess0.x = 0 and the costly gates off
-	std::unique_ptr<ConstantBuffer> spacingDrawBuffer;    ///< untessellated draws filtered to their vertex spacing (Draw0.x)
-	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;    ///< for the engine's own draw of a mesh the tessellator draws instead (Tess0.x = 2: culled)
+	std::unique_ptr<ConstantBuffer> flatDrawBuffer;                                          ///< for the engine's meshes (Tess0.x = 0)
+	std::unique_ptr<ConstantBuffer> offscreenDrawBuffer;                                     ///< for the draws of other views (reflections, cubemaps, the map) with CheapOffscreenWater: Tess0.x = 0 and the costly gates off
+	std::unique_ptr<ConstantBuffer> spacingDrawBuffer;                                       ///< the engine's meshes filtered to their vertex spacing (Draw0.x)
+	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;                                       ///< for the engine's own draw of a mesh the grid draws instead (Tess0.x = 2: culled)
 	std::array<std::unique_ptr<ConstantBuffer>, ProjectedGrid::MaxLevels> gridDrawBuffers;   ///< per projected grid: its cells (Tess0.x = 6)
 	std::array<std::unique_ptr<ConstantBuffer>, ProjectedGrid::MaxLevels> patchDrawBuffers;  ///< and its breakers' patches (Tess0.x = 7)
-	std::unique_ptr<ConstantBuffer> riverDrawBuffer[2];   ///< b8 of the vertex stage: the untessellated draws' river bit (Water.hlsl PBRWRiver), off and on
-	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;   ///< for the deferred surface's rectangle around a tessellated mesh (Tess0.x = 3)
+	std::unique_ptr<ConstantBuffer> deferredDrawBuffer;                                      ///< for the deferred surface's tiles of a grid (Tess0.x = 3)
 
-	// The deferred surface (PBRWater/Deferred.hlsli): the stencil pass records each pixel of the tessellated water, and the
-	// surface and point light passes shade those pixels once each instead of drawing the mesh's small triangles again.
+	// The deferred surface (PBRWater/Deferred.hlsli): the stencil pass records each pixel of the grids' water, and the
+	// surface and point light passes shade those pixels once each instead of drawing the grids' small triangles again.
 	/// Mirrors DeferredCommon.hlsli: the tiles' size (pixels) and the most meshes recorded a frame (one bit each per tile).
 	static constexpr uint32_t DeferredTile = 8;
 	static constexpr uint32_t DeferredMeshes = 32;
@@ -493,19 +477,15 @@ private:
 	static constexpr uint32_t DeferredHalf = 1;
 	struct alignas(16) DeferredDrawCB
 	{
-		uint32_t tag[4] = {};  ///< x the mesh's tag (1..DeferredMeshes), y the tile list's room per list, z texture coordinates recorded
+		uint32_t tag[4] = {};  ///< x the grid's tag (1..DeferredMeshes), y the tile list's room per list, z unused, w the shore train is baked
 		float4 viewport{};     ///< xy the viewport's size (pixels)
-		float4 uvMapU{};       ///< the mesh's texture coordinates over its model-space xy (WaterMeshes::AffineTexCoords)
-		float4 uvMapV{};
+		float4 unused[2]{};
 		uint32_t mode[4] = {};  ///< x the tile list drawn, y DeferredFull or DeferredHalf, z the half-rate pass's sample rotation
 	};
-	/// A tessellated mesh the stencil pass recorded this frame.
+	/// A grid the stencil pass recorded this frame.
 	struct DeferredMesh
 	{
-		uint32_t startIndex = 0;  ///< its mesh slot (BisectionTessellator::Lookup)
-		bool texCoords = false;   ///< its texture coordinates are recorded (not one plane over the mesh)
-		float4 uvMapU{};
-		float4 uvMapV{};
+		uint32_t startIndex = 0;  ///< its key (GridMeshStart - its slot)
 	};
 	// The stencil pass's record (Deferred.hlsli): SV_Target2-5 there, t38-t41 of the surface.
 	std::unique_ptr<Texture2D> deferredTags;              ///< R32_UINT: tag, vertex alpha, 16 bits of the depth
@@ -556,18 +536,18 @@ private:
 	void BakeDeferredShore(ID3D11ShaderResourceView* depthSRV);
 	/** @brief Render thread: (re)creates the stencil pass's records at the depth buffer's size; false when there is none. */
 	bool EnsureDeferredRecords();
-	/** @brief Render thread, RestoreDraw: draws the cached mesh in the stencil pass, recording its pixels. */
+	/** @brief Render thread, RestoreDraw: draws the current grid in the stencil pass, recording its pixels. */
 	void DrawRecordedStencil();
 	/** @brief Render thread: sorts the screen's tiles by the meshes the stencil pass recorded (DeferredTilesCS). */
 	void ClassifyDeferredTiles();
-	/** @brief Render thread, RestoreDraw: shades the pixels the stencil pass recorded for the cached mesh; false to draw it forward. */
+	/** @brief Render thread, RestoreDraw: shades the pixels the stencil pass recorded for the current grid; false to draw it forward. */
 	bool DrawDeferredSurface();
 	/// The deferred surface's state, bound once for a batch of water draws instead of around every draw.
 	struct DeferredBatchState
 	{
 		bool recording = false;                        ///< the stencil batch: the record's targets and blend state are bound
 		bool shading = false;                          ///< a surface or point light batch: the read-only depth and the record are bound
-		UINT recordTargets = 0;                        ///< targets bound while recording: 5, or 6 with texture coordinates
+		UINT recordTargets = 0;                        ///< targets bound while recording (5: the engine's two and the record's three)
 		ID3D11BlendState* recordBlend = nullptr;       ///< the blend state bound while recording (one of recordBlendStates)
 		winrt::com_ptr<ID3D11BlendState> engineBlend;  ///< the engine's, put back at the batch's end
 		float blendFactor[4] = {};
@@ -579,26 +559,21 @@ private:
 	std::unique_ptr<ConstantBuffer> deferredZeroCB;  ///< b13 between the recorded draws: tag 0, no record
 	/** @brief Render thread, EndDrawBatch: puts back the engine's state. */
 	void EndDeferredBatch();
-	/// The water meshes the tessellated draws drew, for the tessellator to subdivide.
-	WaterMeshes waterMeshes;
-	BisectionTessellator bisection;
-
 	// The projected grids (PBRWater/ProjectedGrid.h): drawn in place of every water mesh at the sea's level and the lakes'.
 	ProjectedGrid projectedGrid;
-	std::shared_ptr<const CellLevels> gridCells;                   ///< the worldspace cells the grids were given
-	std::unordered_map<uint32_t, uint32_t> gridPassFrame;          ///< technique * 8 + grid slot -> the frame its pass last drew the grid
-	static constexpr uint32_t GridMeshStart = 0xFFFFFFFFu;         ///< cachedDrawStart of grid slot 0 (minus the slot: the deferred surface's mesh key)
-	static constexpr UINT SeaLevelsSlot = 28;                      ///< pixel stage view of the grids' cells (PBRWater.hlsli SeaLevels)
-	static constexpr float GridMaxDistance = 1000000.0f;           ///< the farthest a grid is cast (units)
-	static bool IsGridKey(uint32_t start) { return start > GridMeshStart - ProjectedGrid::MaxLevels; }
+	RiverLattice riverLattice;                              ///< the river meshes' vertices near the camera (b8 of the vertex stage, Water.hlsl PBRWRiver)
+	std::shared_ptr<const CellLevels> gridCells;            ///< the worldspace cells the grids were given
+	std::unordered_map<uint32_t, uint32_t> gridPassFrame;   ///< technique * 8 + grid slot -> the frame its pass last drew the grid
+	static constexpr uint32_t GridMeshStart = 0xFFFFFFFFu;  ///< cachedDrawStart of grid slot 0 (minus the slot: the deferred surface's mesh key)
+	static constexpr UINT SeaLevelsSlot = 28;               ///< pixel stage view of the grids' cells (PBRWater.hlsli SeaLevels)
+	static constexpr float GridMaxDistance = 1000000.0f;    ///< the farthest a grid is cast (units)
 	/** @brief The slot of the projected grid that draws `geometry` this frame (a water mesh at its level, not a river's), or -1. */
 	int GridSlotOf(RE::BSGeometry& geometry) const;
+	/// A river's mesh at the sea's level: the sea's grid draws it (its flowmap is dropped), so the sea meets it without a seam.
+	bool IsRiverMouth(RE::BSGeometry& geometry) const;
 	/** @brief Projected grid `slot` in the current draw's state: its cells, then its breakers' patches (Water.hlsl). */
 	void DrawGrid(uint32_t slot);
-	float budgetCoarsening = 1.0f;  ///< render thread: the target size's growth that holds the tessellated triangles to TriangleBudget (Draw0.w)
-	/** @brief Render thread, RestoreDraw: draws the current draw's tessellated mesh. */
-	void DrawCachedMesh();
-	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */
+	/** @brief Render thread (Prepass): lays out and evaluates this frame's projected grids, for every pass to draw. */
 	void UpdateTessellation();
 	GpuData frameData{};
 	uint32_t frameDataFrame = UINT32_MAX;
@@ -618,9 +593,9 @@ private:
 		double originX = 0.0, originY = 0.0;
 		float offset = 0.0f;
 	};
-	std::unordered_map<const void*, SourceTrack> lastSources;          ///< main thread: ripple source motion relative to the water
+	std::unordered_map<const void*, SourceTrack> lastSources;                           ///< main thread: ripple source motion relative to the water
 	std::atomic<std::shared_ptr<const std::vector<PBRWaterWake::Source>>> wakeSources;  ///< main thread -> render thread: this frame's wakes
-	winrt::com_ptr<ID3D11ShaderResourceView> kelvinPattern;             ///< the Kelvin wake pattern (t91)
+	winrt::com_ptr<ID3D11ShaderResourceView> kelvinPattern;                             ///< the Kelvin wake pattern (t91)
 
 	// The water around the camera under the surface (UnderwaterVolume.hlsl), in place of the game's underwater fog.
 	winrt::com_ptr<ID3D11VertexShader> underwaterVS;
@@ -631,10 +606,10 @@ private:
 	// The light shafts at half resolution (UnderwaterShaftsCS.hlsl): the march, its denoising, two histories.
 	winrt::com_ptr<ID3D11PixelShader> underwaterMarchPS;
 	winrt::com_ptr<ID3D11ComputeShader> underwaterTemporalCS;
-	std::array<winrt::com_ptr<ID3D11ComputeShader>, 2> underwaterBlurCS;          ///< horizontal, vertical
-	std::array<std::unique_ptr<Texture2D>, 4> underwaterShaftTargets;              ///< march (and the result), history 0, history 1, blur middle
-	uint32_t underwaterHistoryFrame = UINT32_MAX;                                   ///< the frame the last history was written
-	std::unordered_map<RE::TESWaterForm*, float> originalUnderwaterFog;  ///< main thread: each water form's fog amount before it was zeroed
+	std::array<winrt::com_ptr<ID3D11ComputeShader>, 2> underwaterBlurCS;  ///< horizontal, vertical
+	std::array<std::unique_ptr<Texture2D>, 4> underwaterShaftTargets;     ///< march (and the result), history 0, history 1, blur middle
+	uint32_t underwaterHistoryFrame = UINT32_MAX;                         ///< the frame the last history was written
+	std::unordered_map<RE::TESWaterForm*, float> originalUnderwaterFog;   ///< main thread: each water form's fog amount before it was zeroed
 	/** @brief Main thread: zeroes every water form's underwater fog amount while the volume replaces it, restores it otherwise. */
 	void ApplyUnderwaterFogOverride();
 	/** @brief The water between the camera and what each pixel shows, while the camera is under water (before the water's passes). */
@@ -707,7 +682,7 @@ private:
 	std::shared_ptr<const PBRWaterModel::ShoreField> currentShore;   ///< the shore field the waves follow
 	std::shared_ptr<const PBRWaterModel::ShoreField> previousShore;  ///< the one it is taking over from
 	float shoreBlend = 1.0f;                                         ///< 0..1 from previousShore's travel times to currentShore's
-	std::array<float, 24> shoreSignature{};                          ///< the settings the shore train's timing follows (ShoreSignature)
+	std::array<float, 21> shoreSignature{};                          ///< the settings the shore train's timing follows (ShoreSignature)
 	bool hasShoreSignature = false;
 	float shoreResetDelay = -1.0f;                  ///< s until the shore train resets after a settings change (< 0: none pending)
 	bool shoreHardSwap = false;                     ///< the next shore field replaces the current one at once instead of blending in
@@ -734,24 +709,26 @@ private:
 
 	// Per-draw state (render thread)
 	bool geometryShaderBound = false;
-	/// The tessellated mesh for the current draw (its slot), issued in RestoreDraw once the engine's state is bound.
+	/// The grid for the current draw (its key), issued in RestoreDraw once the engine's state is bound.
 	bool cachedDrawPending = false;
 	uint32_t cachedDrawStart = 0;
 	uint32_t cachedDrawTechnique = 0;
 	RE::BSGeometry* cachedDrawGeometry = nullptr;
-	bool cachedDrawRiver = false;  ///< the current draw's mesh is a river's: never taken by the deferred surface
+	/// The current draw is a river's lattice (RiverLattice::Choose), issued in RestoreDraw like the grid.
+	bool riverLatticePending = false;
+	bool riverLatticeRiver = false;
 	/// The water draws of one frame, for the Debug section.
 	struct DrawStats
 	{
 		uint32_t draws = 0;
-		uint32_t computeDraws = 0;             ///< draws of the tessellated mesh
+		uint32_t computeDraws = 0;             ///< draws of the projected grids
 		uint32_t byTechnique[6] = {};          ///< draws per technique (DrawPassIndex)
 		uint32_t deferredRecorded = 0;         ///< meshes the stencil pass recorded for the deferred surface
 		uint32_t deferredShaded = 0;           ///< surface and point light draws shaded from the record
-		uint32_t deferredForward = 0;          ///< tessellated draws that fell back to drawing their triangles
+		uint32_t deferredForward = 0;          ///< grid draws that fell back to drawing their triangles
 		const char* deferredReason = nullptr;  ///< why the last of those did
 	};
-	/** @brief Render thread: a tessellated draw the deferred surface could not take, and why (Debug section). */
+	/** @brief Render thread: a grid draw the deferred surface could not take, and why (Debug section). */
 	void DeferredFallback(const char* reason);
 	/// The stencil pass's blend state with the record's targets (2-5) written whole and unblended, by the engine's state.
 	std::unordered_map<ID3D11BlendState*, winrt::com_ptr<ID3D11BlendState>> recordBlendStates;
@@ -787,6 +764,11 @@ private:
 	 * @return true when the tile was taken and the engine must not draw it
 	 */
 	bool CollectStencilTile(RE::BSRenderPass* pass, uint32_t technique);
+	/**
+	 * @brief A main-view draw of a mesh at a projected grid's level once that grid has been drawn in this technique this
+	 * frame: it would rasterise nothing (Tess0.x = 2), so the engine need not draw it at all.
+	 */
+	bool SkipGridPass(const RE::BSRenderPass* pass) const;
 	/** @brief After the engine drew a pass: whether its state can draw the collected tiles (one far Unified Water tile in the stencil batch). */
 	void AfterEnginePass(RE::BSRenderPass* pass, uint32_t technique);
 	/** @brief Draws the collected stencil tiles in one instanced draw with the state of the last tile the engine drew. */

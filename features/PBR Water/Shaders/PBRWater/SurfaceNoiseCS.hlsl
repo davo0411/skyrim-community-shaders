@@ -1,10 +1,9 @@
-// ============================================================================
-// PBR Water - the low-frequency surface noise around the camera, baked once per frame.
+// ============================================================================ PBR Water - the low-frequency surface
+// noise around the camera, baked once per frame.
 //
-// Drifting sediment patches are tens of metres across, but their noise (TurbidityPatches: some twenty value-noise
-// evaluations) was evaluated by every vertex, which with tessellation is every vertex the tessellator
-// generates, in every pass. Here each texel of a camera-centred grid evaluates it once; the vertices read it back with
-// one bilinear lookup (PBRWater::SurfaceNoise), and beyond the grid evaluate it themselves.
+// Drifting sediment patches are tens of metres across: each texel of a camera-centred grid evaluates their noise
+// (TurbidityPatches, some twenty value-noise evaluations) once, and the vertices and pixels read it back with one
+// bilinear lookup (PBRWater::SurfaceNoise).
 //
 // Output: Noise (x TurbidityPatches, y unused).
 // ============================================================================

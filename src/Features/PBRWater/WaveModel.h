@@ -167,20 +167,6 @@ namespace PBRWaterModel
 	inline constexpr float ShoreWindPlunge = 0.3f;
 
 	/**
-	 * @brief The deepest water (m, the depth under a crest: ShoreField::crestDepth) a shore wave can curl in. The curl
-	 * starts at stage 0.4 (PBRWater::ShoreCurlWindow), where a wave still short of breaking is 2/3 of the breaker limit
-	 * (index times depth): for a large wave of a set (1.5 times the sea's height), shoaled by up to 1.2, under a breaker
-	 * index an onshore wind has lowered. Further out no wave curls, and the mesh needs no curl detail. Mirrored by
-	 * PBRWater::ShoreCurlDepth.
-	 * @param significantHeightMetres the open sea's significant height (the larger of the swell and the wind sea)
-	 */
-	inline float ShoreCurlDepth(float significantHeightMetres)
-	{
-		const float height = ShoreHeightRatio * significantHeightMetres * 1.5f * 1.2f;
-		return height / ((2.0f / 3.0f) * ShoreBreakerLimit * (1.0f - ShoreWindBreaking));
-	}
-
-	/**
 	 * @brief Mean breaking-crest length in deep wavelengths for a directional spread 0..1 (Wind Turbulence): crests get
 	 * shorter as the sea gets more multidirectional (Baker et al. 2023; Nuss et al. 2023), from 20 wavelengths in a
 	 * unidirectional swell to 2 in a confused sea.

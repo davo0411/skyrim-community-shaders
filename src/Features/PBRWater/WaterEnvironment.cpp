@@ -110,24 +110,18 @@ std::shared_ptr<PBRWaterModel::FetchField> WaterEnvironment::BakeFetch(const Wat
 						break;
 					travelled += StepCells;
 				}
-				// The open water the ray crossed, so the fetch grows with the distance from the upwind shore all the way
-				// out. A ray that got to the open sea used to count as unlimited (OpenSeaKm): through the log mean below,
-				// the one radial that escaped turned a cell from a bay's fetch into the open ocean's, a cliff from green
-				// to red in the Fetch view, with no fetch-limited sea in between. Half a cell of open water exists even
-				// in a single water cell.
+				// The open water the ray crossed, so the fetch grows with the distance from the upwind shore all the
+				// way out. Half a cell of open water exists even in a single water cell.
 				slice[static_cast<size_t>(y) * coverage.width + x] = std::max(travelled, 0.5f) * kmPerCell;
 			}
 		}
 	}
 
 	// A single upwind ray is far too sensitive: one headland or an offshore wind zeroes the sea. Waves arrive from a
-	// spread of directions around the wind: the Shore Protection Manual's effective fetch (USACE 1984, eq. 3-36),
-	// F = sum(x_i cos^2 a_i) / sum(cos a_i) over the radials within 45 degrees of upwind. The fetch then grows with
-	// how much open water the whole upwind sector holds, so it rises steadily away from a lee shore and stays short
-	// beside a coast or among islands. A log-space mean was used while an escaped ray counted as unlimited, to keep that
-	// one radial from lifting a harbour to the open sea; it let the shortest radials (the shores beside a channel) hold
-	// the fetch down across most of the sea. The radials are now bounded by the march (MaxFetchCells), so the SPM's
-	// own mean is safe.
+	// spread of directions around the wind: the Shore Protection Manual's effective fetch (USACE 1984, eq. 3-36), F =
+	// sum(x_i cos^2 a_i) / sum(cos a_i) over the radials within 45 degrees of upwind, each bounded by the march
+	// (MaxFetchCells). The fetch then grows with how much open water the whole upwind sector holds, rising steadily
+	// away from a lee shore and staying short beside a coast or among islands.
 	constexpr int SpreadSteps = 2;  // 2 x 22.5 degrees each side
 	const float stepAngle = static_cast<float>(PBRWaterModel::TwoPi) / FetchField::Directions;
 	for (size_t c = 0; c < cells; ++c) {

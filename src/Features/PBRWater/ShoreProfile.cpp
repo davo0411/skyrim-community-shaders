@@ -26,18 +26,17 @@ namespace
 	};
 
 	/**
-	 * The wave at phase x and stage v: one hump throughout its life, whose crest, faces and height change with the stage
-	 * (the same family as PBRWater::ShoreShapeAt and ShoreHump, which the breaker's curl is drawn over).
-	 *  - shoaling (to 0.5): a sinusoid narrows into a peaked crest over long flat troughs, the crest moving towards the
-	 *    front of the wave as its front face steepens (cnoidal, then solitary, as Ursell's number grows);
-	 *  - breaking (0.5 to 0.72): the crest runs ahead of the wave, to where a plunger's lip comes down and the splash-up
+	 * The wave at phase x and stage v: one hump throughout its life, whose crest, faces and height change with the
+	 * stage (the same family as PBRWater::ShoreShapeAt and ShoreHump, which the breaker's curl is drawn over). -
+	 * shoaling (to 0.5): a sinusoid narrows into a peaked crest over long flat troughs, the crest moving towards the
+	 * front
+	 *    of the wave as its front face steepens (cnoidal, then solitary, as Ursell's number grows);
+	 * - breaking (0.5 to 0.72): the crest runs ahead of the wave, to where a plunger's lip comes down and the splash-up
 	 *    rises (Galvin 1969; Peregrine 1983), and loses height;
-	 *  - the bore (from 0.58, formed by 0.80): the hump turns into a turbulent front with a long sloping back (Svendsen
+	 * - the bore (from 0.58, formed by 0.80): the hump turns into a turbulent front with a long sloping back (Svendsen
 	 *    1984's roller, about a wave height long), a good deal lower than the wave that broke.
-	 * The crest only ever moves forward. (The bore used to be a second hump faded in ahead of the sinking crest, while the
-	 * forward displacement that had carried the crest towards it was taken back: the crest stood still, sank, and a new
-	 * one rose 0.16 of a wavelength ahead.) The overturning lip itself is no part of the table: a surface drawn from a
-	 * vertex every metre cannot hold it. Where the mesh can, the shaders turn the crest over (PBRWater::ShoreCurlLip).
+	 * The crest only ever moves forward. The overturning lip is no part of the table; where the mesh can carry it, the
+	 * shaders turn the crest over (PBRWater::ShoreCurlLip).
 	 */
 	Shape Evaluate(float x, float v)
 	{

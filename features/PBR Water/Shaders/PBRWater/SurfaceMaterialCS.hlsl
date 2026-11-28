@@ -1,21 +1,16 @@
-// ============================================================================
-// PBR Water - the deferred surface's material (PBRWater::BakeSurfaceMaterial).
+// ============================================================================ PBR Water - the deferred surface's
+// material (PBRWater::BakeSurfaceMaterial).
 //
-// The surface and point light passes used to evaluate the waves, the shore train and the foam coverage in the same pixel
-// program that lights the water, and the registers that took capped the pass's occupancy (about a quarter of the warps the
-// GPU could keep). After the stencil pass and DeferredShoreCS this pass evaluates them once for every pixel the stencil pass
-// recorded (PBRWater::EvaluateSurface), from its record exactly as PBRWaterDeferred::Resolve rebuilds it, and writes the
-// material (Material.hlsli: 24 bytes a pixel in two textures). The lighting pixel shader (Water.hlsl, PBRW_MATERIAL) reads
-// it back and holds none of that code.
+// After the stencil pass and DeferredShoreCS this pass evaluates the waves, shore train and foam coverage once for
+// every recorded pixel (PBRWater::EvaluateSurface), rebuilding each from its record as PBRWaterDeferred::Resolve does,
+// and writes the material (Material.hlsli). The lighting pixel shader (Water.hlsl, PBRW_MATERIAL) reads it back and
+// holds none of that code, which keeps its register pressure and occupancy in check.
 //
-// A compute shader has no screen derivatives. The pixel program took two from its quad: the footprint of the pixel on the
-// water, and how the cascades' texture coordinates change over it. Both are worked out here from the rays through the
-// neighbouring pixels met with the horizontal plane of the undisplaced point (as DeferredShoreCS does the footprint), which
-// is the derivative of the undisplaced position on a still sea and follows it on a wavy one to within the waves' own slope.
-// ============================================================================
+// A compute shader has no screen derivatives: the pixel's footprint on the water and the cascades' texture-coordinate
+// derivatives come from the rays through the neighbouring pixels met with the horizontal plane of the undisplaced point
+// (as DeferredShoreCS does the footprint). ============================================================================
 
 #define PBRW_MATERIAL_CS
-
 
 #include "Common/ColorManagement.hlsli"
 #include "Common/FrameBuffer.hlsli"
@@ -45,6 +40,7 @@ cbuffer SurfaceMaterialCB : register(b0)
 	uint2 Size;         // the record's size (pixels)
 	uint ShoreBaked;    // the shore train is baked this frame (DeferredShoreCS)
 	float FarDistance;  // camera distance beyond which a tile is shaded at half rate (units; DeferredTilesCS); 0: none is
+	uint4 TileList;     // x where DeferredTilesCS's list of every tile with water starts in WaterTiles
 };
 
 groupshared uint Nearest;  // asuint of the nearest recorded water's distance in the tile (positive floats order as uints)
@@ -52,33 +48,23 @@ groupshared uint Nearest;  // asuint of the nearest recorded water's distance in
 Texture2D<uint> Tags : register(t0);
 Texture2D<float4> Waves : register(t1);
 Texture2D<float> SceneDepth : register(t2);
+StructuredBuffer<uint> WaterTiles : register(t3);  // DeferredTilesCS: x | y << 16 of each tile, one group each
 RWTexture2D<uint4> OutA : register(u0);
 RWTexture2D<uint2> OutB : register(u1);
 
-uint DepthBits(float depth)
-{
-	return (uint)round(saturate(depth) * 16777215.0) & 0xFFFF;
-}
-
-/// Whether the stencil pass's tessellated water is still the nearest at `px` (PBRWaterDeferred::Read).
+/// Whether the stencil pass's grid water is still the nearest at `px` (PBRWaterDeferred::Read).
 bool RecordedWater(int2 px, out float depth)
 {
 	uint tag = Tags.Load(int3(px, 0));
 	depth = SceneDepth.Load(int3(px, 0));
-	uint bits = (DepthBits(depth) - (tag >> 16) + 1) & 0xFFFF;
-	return (tag & 0xFF) != 0 && bits <= 2;
+	return (tag & 0xFF) != 0 && PBRWaterRecordHolds(tag, depth);
 }
 
-/// Camera-relative position on the screen at pixel centre `pixel` and depth `depth` (as Resolve finds it).
-float3 Unproject(float2 pixel, float depth)
-{
-	float2 uv = pixel * FrameBuffer::DynamicResolutionParams2.xy / float2(Size);
-	float4 world = mul(FrameBuffer::CameraViewProjInverse, float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0));
-	return world.xyz / world.w;
-}
-
-[numthreads(PBRWATER_DEFERRED_TILE, PBRWATER_DEFERRED_TILE, 1)] void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint gi : SV_GroupIndex) {
-	// A group is one of DeferredTilesCS's tiles: the nearest water in it decides whether the tile is a distant one.
+[numthreads(PBRWATER_DEFERRED_TILE, PBRWATER_DEFERRED_TILE, 1)] void main(uint3 local : SV_GroupThreadID, uint3 listed : SV_GroupID, uint gi : SV_GroupIndex) {
+	// A group is one of DeferredTilesCS's tiles with water: the nearest water in it decides whether the tile is a distant one.
+	uint packed = WaterTiles[TileList.x + listed.x];
+	uint2 group = uint2(packed & 0xFFFF, packed >> 16);
+	uint2 id = group * PBRWATER_DEFERRED_TILE + local.xy;
 	if (gi == 0)
 		Nearest = 0x7F7FFFFF;
 	// Its baked shore blocks: the pixels' bilinear blend reaches one block past the tile's own on each side.
@@ -98,7 +84,7 @@ float3 Unproject(float2 pixel, float depth)
 	bool water = all(id.xy < Size) && RecordedWater(px, depth);
 	float3 displaced = 0.0;
 	if (water) {
-		displaced = Unproject(px + 0.5, depth);
+		displaced = PBRWaterUnproject(px + 0.5, depth, float2(Size));
 		if (FarDistance > 0.0)
 			InterlockedMin(Nearest, asuint(length(displaced)));
 	}
@@ -114,9 +100,9 @@ float3 Unproject(float2 pixel, float depth)
 
 	// How the undisplaced position changes to the next pixel right and down: the rays through them met with the plane of
 	// this point; the pixel's footprint is the longer of the two.
-	float3 ray = normalize(Unproject(centre, 1.0));
-	float3 rayX = normalize(Unproject(centre + float2(span, 0.0), 1.0));
-	float3 rayY = normalize(Unproject(centre + float2(0.0, span), 1.0));
+	float3 ray = normalize(PBRWaterUnproject(centre, 1.0, float2(Size)));
+	float3 rayX = normalize(PBRWaterUnproject(centre + float2(span, 0.0), 1.0, float2(Size)));
+	float3 rayY = normalize(PBRWaterUnproject(centre + float2(0.0, span), 1.0, float2(Size)));
 	float3 dx, dy;
 	float footprint;
 	[branch] if (undisplaced.z * ray.z > 0.0 && abs(ray.z) > 0.02)
@@ -126,7 +112,8 @@ float3 Unproject(float2 pixel, float depth)
 		dy = rayY * (undisplaced.z / (abs(rayY.z) > 1e-3 ? rayY.z : ray.z)) - onPlane;
 		footprint = max(length(dx.xy), length(dy.xy));
 	}
-	else {
+	else
+	{
 		float scale = length(displaced) / max(abs(ray.z), 0.02);
 		dx = (rayX - ray) * scale;
 		dy = (rayY - ray) * scale;

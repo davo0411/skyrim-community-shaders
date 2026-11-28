@@ -1,9 +1,9 @@
 // ============================================================================
 // PBR Water - hands the surf simulation to the draws.
 //
-// Packs the foam the surf left on the water (ShoreFoamCS) and the surf simulation (SwashStepCS) into the one texture
-// the water reads (ShoreFoamTexture, t97): x the surf's foam, y the simulation's surface (units above the still water:
-// the bed where it is dry, so the surface is continuous across the water's edge), z its depth (units), w its foam.
+// Packs the surf simulation (SwashStepCS) into the texture the water reads (ShoreFoamTexture, t97): x unused, y the
+// simulation's surface (units above the still water: the bed where it is dry, so the surface is continuous across the
+// water's edge), z its depth (units), w its foam.
 // Where the draws show it is theirs to decide (PBRWater::ComposeSurf).
 // ============================================================================
 
@@ -20,15 +20,15 @@ cbuffer SwashOutCB : register(b0)
 	float4 Pad1;
 };
 
-Texture2D<float4> Stage : register(t0);
+Texture2D<float4> Stage : register(t0);  // ShoreFoamCS (not read: bound with the simulation's inputs)
 Texture2D<float4> Swash : register(t1);
 Texture2D<float4> Prep : register(t2);
 RWTexture2D<float4> Output : register(u0);
 
 // Holes: where an uprush and a backwash meet or part, the simulation's cells drain to nothing for a moment between
-// them, and the ground showed through the middle of the swash. Real water there stays one sheet. A dry cell with water
-// on both sides of it along any of four directions, within HoleReach cells, is drawn as a film at its neighbours'
-// level where that stands above its bed. The water's own edge, wet on one side only, stays where the simulation puts it.
+// them. A dry cell with water on both sides along any of four directions, within HoleReach cells, is drawn as a film at
+// its neighbours' level where that stands above its bed. The water's own edge, wet on one side only, stays as
+// simulated.
 static const int HoleReach = 6;  // cells (about a metre)
 static const float Wet = 0.005;  // m
 static const int Group = 8;
@@ -56,7 +56,6 @@ groupshared uint AnyWet;
 	if (any(id.xy >= GridSize))
 		return;
 	int3 c = int3(id.xy, 0);
-	float4 stage = Stage.Load(c);
 	float4 swash = Swash.Load(c);
 	int2 local = int2(gtid.xy) + HoleReach;
 	float bed = Cells[local.y * Apron + local.x].y;  // Prep.x
@@ -93,5 +92,5 @@ groupshared uint AnyWet;
 	float surface = wall ? 0.0 : bed * PBRWater::UnitsPerMetre + depth;
 	// The foam per area thins with the sheet: the last millimetres of a front or a draining film carry little of it.
 	float foam = swash.w * smoothstep(0.003, 0.03, swash.x);
-	Output[id.xy] = float4(stage.x, surface, depth, foam);
+	Output[id.xy] = float4(0.0, surface, depth, foam);
 }

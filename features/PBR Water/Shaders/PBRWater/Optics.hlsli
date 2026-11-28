@@ -5,23 +5,18 @@
 #include "PBRWater/Noise.hlsli"
 #include "PBRWater/PBRWater.hlsli"
 
-// ============================================================================
-// PBR Water - optical properties of the water body, used by the surface shading.
+// ============================================================================ PBR Water - optical properties of the
+// water body, used by the surface shading.
 //
-//   Clarity    : water is rarely uniformly clear. Suspended sediment ("turbidity") varies in drifting
-//                patches, is stirred up from the bottom by the waves' orbital motion in the shallows
-//                and surf zone, is carried by river currents and storms, and is kicked up by anything
-//                wading through shallow water. It adds extinction and tints the water towards the
-//                sediment colour.
-//   Extinction : split into absorption and scattering. The water form's shallow colour and visibility
-//                give the total extinction; scattering is spectrally flat (particles), so the colour of
-//                the water comes from absorption. Sediment adds its own scattering and absorption.
-//   Downwelling: sunlight reaching depth z is attenuated by the diffuse attenuation coefficient
-//                K_d ~ a + b_b (Gordon 1989), not by the full extinction: particles scatter mostly
-//                forwards, so murky water still lets light down while blurring the view.
+//   Clarity    : suspended sediment ("turbidity") in drifting patches, stirred up by the waves' orbital motion in the
+//                shallows and surf, carried by storms and kicked up by waders. It adds extinction and tints the water
+//                towards the sediment colour.
+//   Extinction : absorption plus scattering. The water form's shallow colour and visibility give the total; particle
+//                scattering is spectrally flat, so the water's colour comes from absorption.
+//   Downwelling: sunlight reaching depth z is attenuated by K_d ~ a + b_b (Gordon 1989), not the full extinction:
+//                particles scatter mostly forwards, so murky water still lets light down while blurring the view.
 //   Scattering : Henyey-Greenstein phase function (forward peaked, like ocean particles; Petzold 1972).
-//   Waves      : sunlight transmitted through thin wave crests, coloured by what survives the path
-//                through the crest, replaces the purely artistic subsurface term.
+//   Waves      : sunlight transmitted through thin wave crests, coloured by what survives the path through them.
 // ============================================================================
 
 namespace PBRWater
@@ -49,10 +44,9 @@ namespace PBRWater
 	/// makes the clearest water blue.
 	static const float3 PureWaterScattering = float3(0.0010, 0.0019, 0.0045);
 
-	/// Per-channel extinction (1/unit). The vanilla shallow colour is read as the tint light picks up
-	/// over the water form's visibility distance; at that distance 5% of the light remains. Never below pure water's own
-	/// absorption: a white or grey form colour with a long visibility left every channel equal, and deep clear water grey
-	/// instead of blue-green.
+	/// Per-channel extinction (1/unit). The vanilla shallow colour is read as the tint light picks up over the water
+	/// form's visibility distance, where 5% of the light remains. Never below pure water's own absorption, so deep
+	/// clear water stays blue-green whatever the form's colour.
 	float3 Extinction(float3 shallowColorLinear, float visibilityUnits)
 	{
 		float3 tint = saturate(shallowColorLinear / max(max(shallowColorLinear.r, max(shallowColorLinear.g, shallowColorLinear.b)), 1e-4));
@@ -230,12 +224,11 @@ namespace PBRWater
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Sunlight transmitted through the water. Light refracts into the far face of the wave,
-	 * scatters once towards the viewer and refracts out of the near face. Its colour is what survives
-	 * the path through the water: clear sea water glows green-blue, murky water dimly in its sediment
-	 * colour. Multiply by the sun irradiance.
+	 * Sunlight transmitted through the water: refracted into the far face of the wave, scattered once towards the
+	 * viewer and refracted out of the near face, coloured by what survives the path (clear sea water glows green-blue,
+	 * murky water dimly in its sediment colour). Multiply by the sun irradiance.
 	 * @param thickness wave thickness scale (units)
-	 * @param sunPath   water the sunlight crosses to reach the point (units; SunPathThroughWaves), < 0: estimated from
+	 * @param sunPath water the sunlight crosses to reach the point (units; SunPathThroughWaves), < 0: estimated from
 	 *                  half the thickness
 	 */
 	float3 WaveTranslucency(float3 N, float3 toEye, float3 toLight, WaterOptics o, float thickness, float sunPath)
